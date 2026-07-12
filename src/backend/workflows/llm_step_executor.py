@@ -37,6 +37,10 @@ from ..services.required_tool_obligation_service import (
     build_required_tool_obligation_ledger,
     classify_required_tool_operation,
 )
+from ..services.required_tool_identity_service import (
+    canonical_required_tool_key,
+    canonical_required_tool_keys,
+)
 from ..services.tool_target_contract_validation import (
     target_contract_state_from_context,
 )
@@ -563,21 +567,29 @@ def _filter_tool_names_to_allowed_set(
             for tool_name in tool_names
             if isinstance(tool_name, str) and str(tool_name).strip()
         ]
-    allowed = {
-        str(tool_name).strip().lower()
+    allowed_names = [
+        str(tool_name).strip()
         for tool_name in allowed_tools
         if isinstance(tool_name, str) and str(tool_name).strip()
-    }
+    ]
+    known_names = [*allowed_names, *tool_names]
+    allowed = canonical_required_tool_keys(
+        allowed_names,
+        known_tool_names=known_names,
+    )
     filtered: list[str] = []
     seen: set[str] = set()
     for raw_tool_name in tool_names:
         if not isinstance(raw_tool_name, str):
             continue
         tool_name = raw_tool_name.strip()
-        lowered = tool_name.lower()
-        if not tool_name or lowered in seen or lowered not in allowed:
+        canonical_key = canonical_required_tool_key(
+            tool_name,
+            known_tool_names=known_names,
+        )
+        if not tool_name or not canonical_key or canonical_key in seen or canonical_key not in allowed:
             continue
-        seen.add(lowered)
+        seen.add(canonical_key)
         filtered.append(tool_name)
     return filtered
 
@@ -589,10 +601,10 @@ def _merge_required_prompt_tools(
     seen: set[str] = set()
     for tool_set in tool_sets:
         for tool_name in _coerce_tool_name_list(tool_set):
-            lowered = tool_name.lower()
-            if lowered in seen:
+            canonical_key = canonical_required_tool_key(tool_name)
+            if not canonical_key or canonical_key in seen:
                 continue
-            seen.add(lowered)
+            seen.add(canonical_key)
             merged.append(tool_name)
     return merged
 

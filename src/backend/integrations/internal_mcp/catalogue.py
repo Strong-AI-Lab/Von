@@ -10354,7 +10354,12 @@ def _build_turn_execution_replay_case(
             },
             "tool_invocation_summary": tool_invocation_summary,
             "terminal_outcome_receipt_projection": (
-                dict(item.get("terminal_outcome_receipt_projection"))
+                dict(
+                    cast(
+                        Mapping[str, Any],
+                        item.get("terminal_outcome_receipt_projection"),
+                    )
+                )
                 if isinstance(
                     item.get("terminal_outcome_receipt_projection"), Mapping
                 )
@@ -12819,8 +12824,138 @@ def _turn_execution_build_dashboard(**kwargs):
     if include_completed is None:
         include_completed = True
 
+    operational_certification: dict[str, Any] = {}
+    effective_operational_namespace: str | None = None
+    effective_operational_user_id: str | None = None
+    effective_operational_org_id: str | None = None
+    operational_run_id = _clean_optional_string(
+        kwargs.get("operational_certification_run_id")
+    )
+    if operational_run_id:
+        from ...services.experiment_run_service import get_experiment_run_state
+        from ...services.operational_certification_runner_service import (
+            validate_campaign_experiment_observation,
+        )
+
+        operational_run = get_experiment_run_state(operational_run_id)
+        if not isinstance(operational_run, Mapping):
+            return make_error_response(
+                "operational_certification_run_not_found",
+                "The requested operational certification experiment run was not found.",
+                details={"run_id": operational_run_id},
+            )
+        requested_namespace = _clean_optional_string(kwargs.get("namespace"))
+        requested_user_id = _clean_optional_string(kwargs.get("user_concept_id"))
+        requested_org_id = _clean_optional_string(
+            kwargs.get("organisation_concept_id")
+        )
+        if not requested_namespace or not requested_user_id or not requested_org_id:
+            return make_error_response(
+                "operational_certification_scope_required",
+                "Certification dashboard read-back requires explicit caller namespace, user, and organisation scope.",
+                details={
+                    "run_id": operational_run_id,
+                    "missing": [
+                        field_name
+                        for field_name, field_value in (
+                            ("namespace", requested_namespace),
+                            ("user_concept_id", requested_user_id),
+                            ("organisation_concept_id", requested_org_id),
+                        )
+                        if not field_value
+                    ],
+                },
+            )
+        run_namespace = _clean_optional_string(operational_run.get("namespace"))
+        run_user_id = _clean_optional_string(operational_run.get("user_id"))
+        run_org_id = _clean_optional_string(operational_run.get("org_id"))
+        run_scope_mismatches = [
+            field_name
+            for field_name, requested, observed in (
+                ("namespace", requested_namespace, run_namespace),
+                ("user_id", requested_user_id, run_user_id),
+                ("org_id", requested_org_id, run_org_id),
+            )
+            if requested != observed
+        ]
+        if run_scope_mismatches:
+            return make_error_response(
+                "operational_certification_scope_mismatch",
+                "The certification run belongs to a different caller scope.",
+                details={
+                    "run_id": operational_run_id,
+                    "requested_namespace": requested_namespace,
+                    "run_namespace": run_namespace,
+                    "mismatches": run_scope_mismatches,
+                },
+            )
+        effective_operational_namespace = requested_namespace
+        effective_operational_user_id = requested_user_id
+        effective_operational_org_id = requested_org_id
+        observations = operational_run.get("observations")
+        for observation in reversed(
+            observations if isinstance(observations, list) else []
+        ):
+            if not isinstance(observation, Mapping):
+                continue
+            evidence = observation.get("evidence")
+            campaign = (
+                evidence.get("operational_certification_campaign_result")
+                if isinstance(evidence, Mapping)
+                else None
+            )
+            if not isinstance(campaign, Mapping):
+                continue
+            integrity_errors = validate_campaign_experiment_observation(observation)
+            if integrity_errors:
+                return make_error_response(
+                    "operational_certification_integrity_mismatch",
+                    "The certification campaign observation is internally inconsistent.",
+                    details={
+                        "run_id": operational_run_id,
+                        "integrity_errors": integrity_errors,
+                    },
+                )
+            provenance = observation.get("execution_provenance")
+            if not isinstance(provenance, Mapping):
+                return make_error_response(
+                    "operational_certification_provenance_missing",
+                    "The persisted certification campaign has no execution provenance.",
+                    details={"run_id": operational_run_id},
+                )
+            provenance_mismatches = [
+                field_name
+                for field_name, expected in (
+                    ("effective_namespace", effective_operational_namespace),
+                    ("effective_user_id", effective_operational_user_id),
+                    ("effective_org_id", effective_operational_org_id),
+                )
+                if _clean_optional_string(provenance.get(field_name)) != expected
+            ]
+            if provenance_mismatches:
+                return make_error_response(
+                    "operational_certification_provenance_scope_mismatch",
+                    "The persisted certification provenance belongs to a different caller scope.",
+                    details={
+                        "run_id": operational_run_id,
+                        "mismatches": provenance_mismatches,
+                    },
+                )
+            operational_certification = dict(campaign)
+            break
+        if not operational_certification:
+            return make_error_response(
+                "operational_certification_campaign_missing",
+                "The experiment run has no strict operational certification campaign result.",
+                details={"run_id": operational_run_id},
+            )
+
     turn_execution_kwargs = {
-        "namespace": kwargs.get("namespace"),
+        "namespace": (
+            effective_operational_namespace
+            if operational_run_id
+            else kwargs.get("namespace")
+        ),
         "limit": kwargs.get("limit"),
         "offset": kwargs.get("offset"),
         "decision": kwargs.get("decision"),
@@ -12919,6 +13054,28 @@ def _turn_execution_build_dashboard(**kwargs):
             if not isinstance(raw_signal, Mapping):
                 continue
             combined_signals.append({**raw_signal, "source_surface": source_surface})
+
+    if operational_certification:
+        operational_certified = operational_certification.get("certified") is True
+        combined_signals.append(
+            {
+                "signal_id": "operational_certification_campaign",
+                "dimension": "operational_certification",
+                "title": "Represented operational certification campaign",
+                "status": "pass" if operational_certified else "fail",
+                "passed": operational_certified,
+                "details": {
+                    "run_id": operational_run_id,
+                    "report_sha256": operational_certification.get("report_sha256"),
+                    "failed_certification_gate_ids": operational_certification.get(
+                        "failed_certification_gate_ids"
+                    )
+                    or [],
+                    "pass_rates": operational_certification.get("pass_rates") or {},
+                },
+                "source_surface": "operational_certification",
+            }
+        )
 
     if bool(latency_regression_assessment.get("baseline_provided")):
         combined_signals.append(
@@ -13040,6 +13197,30 @@ def _turn_execution_build_dashboard(**kwargs):
                 "status": imposition_assessment.get("status"),
                 "dimension_counts": imposition_assessment.get("dimension_counts") or {},
             },
+            "operational_certification": (
+                {
+                    "run_id": operational_run_id,
+                    "certified": operational_certification.get("certified"),
+                    "report_sha256": operational_certification.get("report_sha256"),
+                    "pass_rates": operational_certification.get("pass_rates") or {},
+                    "family_pass_rates": {
+                        family_id: (
+                            family.get("pass_rates")
+                            if isinstance(family, Mapping)
+                            else {}
+                        )
+                        for family_id, family in (
+                            operational_certification.get("families") or {}
+                        ).items()
+                    },
+                    "failed_certification_gate_ids": operational_certification.get(
+                        "failed_certification_gate_ids"
+                    )
+                    or [],
+                }
+                if operational_certification
+                else {}
+            ),
         },
         "summary_cards": summary_cards,
         "regression_views": {
@@ -13083,9 +13264,25 @@ def _turn_execution_build_dashboard(**kwargs):
                 "benchmark_fingerprint": selector_report.get("benchmark_fingerprint"),
                 "corpus": selector_report.get("corpus") or {},
             },
+            "operational_certification": (
+                {
+                    "run_id": operational_run_id,
+                    "report_sha256": operational_certification.get("report_sha256"),
+                    "contract_sha256": operational_certification.get(
+                        "contract_sha256"
+                    ),
+                    "source": "experiment_run.operational_certification_campaign",
+                }
+                if operational_certification
+                else {}
+            ),
         },
         "success": True,
     }
+    if operational_certification:
+        payload["effective_namespace"] = effective_operational_namespace
+        payload["user_id"] = effective_operational_user_id
+        payload["org_id"] = effective_operational_org_id
     return _with_rag_provenance(
         payload=payload,
         item_kind="turn_execution_dashboard_report",
@@ -14223,8 +14420,21 @@ def _build_degraded_search_knowledge_base_fallback(
     elapsed_ms: int,
     ns_report: Mapping[str, Any],
     fallback_reason: str,
+    retrieval_status: str = "degraded",
 ) -> dict[str, Any]:
+    from ...services.rag_service import build_rag_retrieval_state
+
     namespace = ns_report.get("namespace")
+    retrieval_state = build_rag_retrieval_state(
+        retrieval_status,
+        result_count=0,
+        cause=fallback_reason,
+        detail=(
+            "The configured RAG retrieval surface was unavailable for this attempt."
+            if retrieval_status == "unavailable"
+            else "The configured RAG retrieval surface degraded during this attempt."
+        ),
+    )
     return {
         "results": [],
         "count": 0,
@@ -14232,11 +14442,13 @@ def _build_degraded_search_knowledge_base_fallback(
         "effective_namespace": namespace,
         "effective_namespace_source": ns_report.get("namespace_source"),
         "fallback_used": True,
-        "fallback_mode": "degraded_empty_results",
+        "fallback_mode": "typed_retrieval_state",
         "fallback_reason": fallback_reason,
+        "retrieval_state": retrieval_state,
         "query": query_text,
         **ns_report,
-        "success": True,
+        "error": retrieval_state["status"],
+        "success": False,
     }
 
 
@@ -14500,7 +14712,11 @@ def _build_related_concepts_graph_fallback(
 
 
 def _search_knowledge_base(**kwargs):
-    from ...services.rag_service import get_rag_service, RAGBackendUnavailable
+    from ...services.rag_service import (
+        RAGBackendUnavailable,
+        build_rag_retrieval_state,
+        get_rag_service,
+    )
 
     import time
 
@@ -14609,6 +14825,56 @@ def _search_knowledge_base(**kwargs):
         )
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
+        raw_retrieval_state = getattr(results, "retrieval_state", None)
+        if not isinstance(raw_retrieval_state, Mapping):
+            get_last_retrieval_state = getattr(
+                service,
+                "get_last_retrieval_state",
+                None,
+            )
+            if callable(get_last_retrieval_state):
+                try:
+                    candidate_state = get_last_retrieval_state(ns)
+                    if isinstance(candidate_state, Mapping):
+                        raw_retrieval_state = candidate_state
+                except Exception:
+                    raw_retrieval_state = None
+
+        result_count = len(results) if isinstance(results, list) else 0
+        if isinstance(raw_retrieval_state, Mapping):
+            retrieval_state = build_rag_retrieval_state(
+                str(raw_retrieval_state.get("status") or "degraded"),
+                result_count=result_count,
+                cause=(
+                    str(raw_retrieval_state.get("cause") or "").strip() or None
+                ),
+                detail=(
+                    str(raw_retrieval_state.get("detail") or "").strip() or None
+                ),
+                candidate_count=raw_retrieval_state.get("candidate_count"),
+                filtered_candidate_count=raw_retrieval_state.get(
+                    "filtered_candidate_count"
+                ),
+                candidate_limit=raw_retrieval_state.get("candidate_limit"),
+                candidate_limit_reached=raw_retrieval_state.get(
+                    "candidate_limit_reached"
+                ),
+            )
+        else:
+            # A legacy backend may still provide positive rows, but an untyped
+            # empty result cannot establish that a usable compatible index was
+            # searched.  Preserve it as degraded rather than fabricating an
+            # authoritative empty corpus.
+            retrieval_state = build_rag_retrieval_state(
+                "results_available" if result_count else "degraded",
+                result_count=result_count,
+                cause=(
+                    "query_completed_without_backend_state"
+                    if result_count
+                    else "empty_result_missing_typed_retrieval_state"
+                ),
+            )
+
         # Provenance-first: stamp RAG retrieval results so downstream consumers cannot
         # mistake them for chat history or KA sessions.
         stamped_results = []
@@ -14631,21 +14897,27 @@ def _search_knowledge_base(**kwargs):
         else:
             stamped_results = results
 
-        return {
+        response = {
             "results": stamped_results,
             "count": len(stamped_results) if isinstance(stamped_results, list) else 0,
             "elapsed_ms": elapsed_ms,
+            "query": query_text,
             "effective_namespace": ns,
             "effective_namespace_source": ns_report.get("namespace_source"),
+            "retrieval_state": retrieval_state,
             **ns_report,
-            "success": True,
+            "success": bool(retrieval_state.get("usable", False)),
         }
+        if not response["success"]:
+            response["error"] = retrieval_state["status"]
+        return response
     except RAGBackendUnavailable as e:
         return _build_degraded_search_knowledge_base_fallback(
             query_text=query_text,
             elapsed_ms=int((time.perf_counter() - start) * 1000),
             ns_report=ns_report,
             fallback_reason=f"rag_service_unavailable:{type(e).__name__}",
+            retrieval_status="unavailable",
         )
     except Exception as e:
         if _looks_like_rag_degraded_exception(e):
@@ -14655,11 +14927,32 @@ def _search_knowledge_base(**kwargs):
                 ns_report=ns_report,
                 fallback_reason=f"rag_query_degraded:{type(e).__name__}",
             )
-        return make_error_response(
+        error_response = make_error_response(
             "exception",
             f"Unexpected error: {e}",
             details={"exception_type": type(e).__name__},
         )
+        error_response.update(
+            {
+                "results": [],
+                "count": 0,
+                "elapsed_ms": int((time.perf_counter() - start) * 1000),
+                "query": query_text,
+                "effective_namespace": ns,
+                "effective_namespace_source": ns_report.get("namespace_source"),
+                "retrieval_state": build_rag_retrieval_state(
+                    "degraded",
+                    result_count=0,
+                    cause=f"rag_query_exception:{type(e).__name__}",
+                    detail=(
+                        "The retrieval attempt ended with an unexpected backend "
+                        "or integration error."
+                    ),
+                ),
+                **ns_report,
+            }
+        )
+        return error_response
 
 
 def _search_knowledge_base_input_schema() -> Schema:
@@ -14687,9 +14980,14 @@ def _search_knowledge_base_output_schema() -> Schema:
             "count": (int, type(None)),
             "error": (str, type(None)),
             "success": (bool, type(None)),
+            "retrieval_state": (dict, type(None)),
         },
         allow_unknown=True,
-        description="search_knowledge_base output: results (list of {id, score, text, metadata}), count (int), or error (str)",
+        description=(
+            "search_knowledge_base output: results (list of {id, score, text, "
+            "metadata}), count (int), retrieval_state (rag_retrieval_state.v1), "
+            "and success/error"
+        ),
     )
 
 
@@ -28180,6 +28478,576 @@ def _shared_conversation_respond_invite(**kwargs):
     }
 
 
+def _operational_learning_release_error_response(exc: Exception) -> dict[str, Any]:
+    from ...services.operational_learning_release_service import (
+        LearningReleaseValidationError,
+    )
+    from ...services.operational_learning_release_vontology_service import (
+        LearningReleasePersistenceError,
+    )
+
+    if isinstance(exc, (LearningReleaseValidationError, LearningReleasePersistenceError)):
+        projection = exc.to_dict()
+        recovery_affordances = projection.get("recovery_affordances") or []
+        suggestions = [
+            str(item.get("action_type"))
+            for item in recovery_affordances
+            if isinstance(item, Mapping) and item.get("action_type")
+        ]
+        return make_error_response(
+            str(projection.get("error_code") or "operational_learning_release_failed"),
+            str(exc),
+            details=projection,
+            suggestions=suggestions or None,
+        )
+    logger.exception("Operational learning-release MCP operation failed", exc_info=exc)
+    return make_error_response(
+        "operational_learning_release_internal_error",
+        "Operational learning-release persistence failed.",
+        details={"exception_type": type(exc).__name__},
+    )
+
+
+def _operational_learning_build_failure_evidence_packets(**kwargs):
+    from ...services.operational_learning_release_service import (
+        build_failure_evidence_packets,
+    )
+
+    try:
+        packets = build_failure_evidence_packets(
+            cast(Sequence[Mapping[str, Any]], kwargs["failure_evidence"])
+        )
+        return {"success": True, "failure_evidence_packets": packets}
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_build_experiment_evidence(**kwargs):
+    from ...services.operational_learning_release_service import (
+        build_learning_release_experiment_evidence,
+    )
+
+    try:
+        return {
+            "success": True,
+            "experiment_evidence": build_learning_release_experiment_evidence(
+                candidate=kwargs["candidate"],
+                experiment_run=kwargs["experiment_run"],
+            ),
+        }
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_build_certification_evidence(**kwargs):
+    from ...services.operational_learning_release_service import (
+        build_learning_release_certification_evidence,
+    )
+
+    try:
+        return {
+            "success": True,
+            "certification_evidence": build_learning_release_certification_evidence(
+                candidate=kwargs["candidate"],
+                campaign_result=kwargs["campaign_result"],
+                execution_provenance=kwargs["execution_provenance"],
+            ),
+        }
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_get_state(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        load_operational_learning_release_state,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        record = load_operational_learning_release_state(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+        )
+        return {"success": True, "state_record": record}
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_register_candidate(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        register_operational_learning_release_candidate_in_vontology,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        return register_operational_learning_release_candidate_in_vontology(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+            expected_version=kwargs["expected_version"],
+            expected_state_sha256=kwargs["expected_state_sha256"],
+            candidate_id=kwargs["candidate_id"],
+            release_id=kwargs["release_id"],
+            affected_artifact=kwargs["affected_artifact"],
+            release_payload=kwargs["release_payload"],
+            failure_evidence_packets=kwargs["failure_evidence_packets"],
+            proposal_authority=kwargs["proposal_authority"],
+            risk_classes=kwargs.get("risk_classes"),
+            expires_at=kwargs["expires_at"],
+            retest_after=kwargs["retest_after"],
+            retest_requirements=kwargs["retest_requirements"],
+        )
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_register_candidate_evaluation(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        register_operational_learning_release_candidate_evaluation_in_vontology,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        return register_operational_learning_release_candidate_evaluation_in_vontology(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+            expected_version=kwargs["expected_version"],
+            expected_state_sha256=kwargs["expected_state_sha256"],
+            evaluation_id=kwargs["evaluation_id"],
+            candidate_id=kwargs["candidate_id"],
+        )
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_authenticated_actor_scope() -> dict[str, str]:
+    """Resolve approval scope only from the authenticated Flask session."""
+
+    from flask import has_request_context, session as flask_session
+    from ...services.namespace_service import derive_namespace_for_actor
+    from ...services.operational_learning_release_vontology_service import (
+        LearningReleasePersistenceError,
+    )
+
+    if not has_request_context():
+        raise LearningReleasePersistenceError(
+            "authenticated_human_approval_context_required"
+        )
+    user_id = str(flask_session.get("user_concept_id") or "").strip()
+    org_id = str(
+        flask_session.get("organisation_concept_id")
+        or flask_session.get("org_concept_id")
+        or flask_session.get("org_id")
+        or ""
+    ).strip()
+    namespace = derive_namespace_for_actor(user_id, org_id)
+    if not user_id or not org_id or not namespace:
+        raise LearningReleasePersistenceError(
+            "authenticated_human_approval_context_required"
+        )
+    return {"namespace": namespace, "user_id": user_id, "org_id": org_id}
+
+
+def _operational_learning_authorised_scope(
+    supplied: Mapping[str, Any],
+) -> dict[str, str]:
+    from .gateway import get_internal_mcp_actor_context_source
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from ...services.namespace_service import derive_namespace_for_actor
+    from ...services.operational_learning_release_vontology_service import (
+        LearningReleasePersistenceError,
+    )
+
+    if get_internal_mcp_actor_context_source() != (
+        "preexisting_authenticated_or_workflow_context"
+    ):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_authoritative_actor_context_required"
+        )
+    user_id = str(get_effective_user_concept_id() or "").strip()
+    org_id = str(get_effective_organisation_concept_id() or "").strip()
+    namespace = derive_namespace_for_actor(user_id, org_id)
+    if not user_id or not org_id or not namespace:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_authoritative_actor_context_required"
+        )
+    authenticated = {"namespace": namespace, "user_id": user_id, "org_id": org_id}
+    mismatches = [
+        field_name
+        for field_name in ("namespace", "user_id", "org_id")
+        if str(supplied.get(field_name) or "").strip()
+        != authenticated[field_name]
+    ]
+    if mismatches:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_authenticated_scope_mismatch",
+            details={"mismatches": mismatches},
+        )
+    return authenticated
+
+
+def _operational_learning_release_record_human_approval(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        record_authenticated_human_learning_release_approval,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authenticated_actor_scope()
+        return record_authenticated_human_learning_release_approval(
+            authenticated_namespace=authenticated_scope["namespace"],
+            authenticated_user_id=authenticated_scope["user_id"],
+            authenticated_org_id=authenticated_scope["org_id"],
+            expected_version=kwargs["expected_version"],
+            expected_state_sha256=kwargs["expected_state_sha256"],
+            approval_id=kwargs["approval_id"],
+            action=kwargs["action"],
+            candidate_id=kwargs["candidate_id"],
+        )
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_promote_candidate(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        promote_operational_learning_release_candidate_in_vontology,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        return promote_operational_learning_release_candidate_in_vontology(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+            expected_version=kwargs["expected_version"],
+            expected_state_sha256=kwargs["expected_state_sha256"],
+            candidate_id=kwargs["candidate_id"],
+            represented_evaluator_decision=kwargs[
+                "represented_evaluator_decision"
+            ],
+            experiment_evidence=kwargs["experiment_evidence"],
+            certification_evidence=kwargs["certification_evidence"],
+            human_approval=kwargs["human_approval"],
+        )
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_reject_candidate(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        reject_operational_learning_release_candidate_in_vontology,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        return reject_operational_learning_release_candidate_in_vontology(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+            expected_version=kwargs["expected_version"],
+            expected_state_sha256=kwargs["expected_state_sha256"],
+            candidate_id=kwargs["candidate_id"],
+            represented_evaluator_decision=kwargs[
+                "represented_evaluator_decision"
+            ],
+            experiment_evidence=kwargs["experiment_evidence"],
+            certification_evidence=kwargs["certification_evidence"],
+        )
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_rollback(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        rollback_operational_learning_release_in_vontology,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        return rollback_operational_learning_release_in_vontology(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+            expected_version=kwargs["expected_version"],
+            expected_state_sha256=kwargs["expected_state_sha256"],
+            affected_artifact=kwargs["affected_artifact"],
+            represented_evaluator_decision=kwargs[
+                "represented_evaluator_decision"
+            ],
+            experiment_evidence=kwargs["experiment_evidence"],
+            certification_evidence=kwargs["certification_evidence"],
+            human_approval=kwargs["human_approval"],
+        )
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
+    actions = ("promote", "reject", "rollback")
+    exact_scope = {"namespace": str, "user_id": str, "org_id": str}
+    optimistic = {"expected_version": int, "expected_state_sha256": str}
+    represented_evidence = {
+        "represented_evaluator_decision": dict,
+        "experiment_evidence": dict,
+        "certification_evidence": dict,
+    }
+    write_result_schema = Schema(
+        required={"success": bool},
+        optional={
+            "operation": str,
+            "result": dict,
+            "state_record": dict,
+        },
+        allow_unknown=True,
+        description="Persisted operational learning-release mutation and readback.",
+    )
+    return [
+        MethodDefinition(
+            name="operational_learning_build_failure_evidence_packets",
+            handler=_operational_learning_build_failure_evidence_packets,
+            input_schema=Schema(
+                required={"failure_evidence": list},
+                optional={},
+                allow_unknown=False,
+                description=(
+                    "Build immutable failure packets grouped only by causal stage, "
+                    "cause code, and affected artefact."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={"failure_evidence_packets": list},
+                allow_unknown=True,
+            ),
+            category="read",
+            description=(
+                "Validate and group represented failure evidence without selecting "
+                "a remedy or proposing release policy."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_release_get_state",
+            handler=_operational_learning_release_get_state,
+            input_schema=Schema(
+                required=exact_scope,
+                optional={},
+                allow_unknown=False,
+                description="Read strict exact-scope Vontology learning-release state.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={"state_record": dict},
+                allow_unknown=True,
+            ),
+            category="read",
+            description=(
+                "Read the current version/digest, immutable release state, approval "
+                "registry, and receipt-derived campaign projection."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_build_experiment_evidence",
+            handler=_operational_learning_build_experiment_evidence,
+            input_schema=Schema(
+                required={"candidate": dict, "experiment_run": dict},
+                optional={},
+                allow_unknown=False,
+                description=(
+                    "Bind a canonical experiment run projection to one immutable "
+                    "candidate/release hash."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={"experiment_evidence": dict},
+                allow_unknown=True,
+            ),
+            category="read",
+            description=(
+                "Validate and hash experiment evidence; live release still reads "
+                "the canonical run back before using it."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_build_certification_evidence",
+            handler=_operational_learning_build_certification_evidence,
+            input_schema=Schema(
+                required={
+                    "candidate": dict,
+                    "campaign_result": dict,
+                    "execution_provenance": dict,
+                },
+                optional={},
+                allow_unknown=False,
+                description=(
+                    "Bind a strict persisted operational-certification campaign "
+                    "to one exact candidate/release hash."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={"certification_evidence": dict},
+                allow_unknown=True,
+            ),
+            category="read",
+            description=(
+                "Validate and hash certification evidence; live release still "
+                "requires trusted-runner attestation and canonical readback."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_release_register_candidate",
+            handler=_operational_learning_release_register_candidate,
+            input_schema=Schema(
+                required={
+                    **exact_scope,
+                    **optimistic,
+                    "candidate_id": str,
+                    "release_id": str,
+                    "affected_artifact": str,
+                    "release_payload": dict,
+                    "failure_evidence_packets": list,
+                    "proposal_authority": dict,
+                    "expires_at": str,
+                    "retest_after": str,
+                    "retest_requirements": dict,
+                },
+                optional={"risk_classes": (list, type(None))},
+                allow_unknown=False,
+                description=(
+                    "Persist one immutable represented candidate under optimistic "
+                    "version and state-digest checking."
+                ),
+            ),
+            output_schema=write_result_schema,
+            category="write",
+            description=(
+                "Register a represented learning-release candidate; this tool does "
+                "not decide what should be proposed."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_release_record_human_approval",
+            handler=_operational_learning_release_record_human_approval,
+            input_schema=Schema(
+                required={
+                    **optimistic,
+                    "approval_id": str,
+                    "action": str,
+                    "candidate_id": str,
+                },
+                optional={},
+                allow_unknown=False,
+                enum_values={"action": list(actions)},
+                description=(
+                    "Record approval using actor and scope taken only from the "
+                    "authenticated server session."
+                ),
+            ),
+            output_schema=write_result_schema,
+            category="write",
+            description=(
+                "Persist an authenticated human approval. Caller-supplied actor and "
+                "scope fields are intentionally not accepted."
+            ),
+            write_guardrail={"authenticated_human_action_required": True},
+        ),
+        MethodDefinition(
+            name="operational_learning_release_register_candidate_evaluation",
+            handler=_operational_learning_release_register_candidate_evaluation,
+            input_schema=Schema(
+                required={
+                    **exact_scope,
+                    **optimistic,
+                    "evaluation_id": str,
+                    "candidate_id": str,
+                },
+                optional={},
+                allow_unknown=False,
+                description=(
+                    "Register the exact immutable candidate/release binding that "
+                    "an operational campaign will evaluate before any decision."
+                ),
+            ),
+            output_schema=write_result_schema,
+            category="write",
+            description=(
+                "Bridge a proposed candidate into state-derived campaign evidence; "
+                "this records no promote/reject policy decision."
+            ),
+        ),
+        *[
+            MethodDefinition(
+                name=f"operational_learning_release_{action}_candidate",
+                handler=(
+                    _operational_learning_release_promote_candidate
+                    if action == "promote"
+                    else _operational_learning_release_reject_candidate
+                ),
+                input_schema=Schema(
+                    required={
+                        **exact_scope,
+                        **optimistic,
+                        **represented_evidence,
+                        "candidate_id": str,
+                        **(
+                            {"human_approval": dict}
+                            if action == "promote"
+                            else {}
+                        ),
+                    },
+                    optional={},
+                    allow_unknown=False,
+                    description=(
+                        f"Apply a represented {action} decision with strict evidence "
+                        "and optimistic persistence checks."
+                    ),
+                ),
+                output_schema=write_result_schema,
+                category="write",
+                description=(
+                    f"Apply a represented {action} decision; semantic policy remains "
+                    "in represented evaluator/workflow authority. Promotion fails "
+                    "closed unless a canonical affected-artefact activation adapter "
+                    "applies and reads back the exact release hash."
+                ),
+            )
+            for action in ("promote", "reject")
+        ],
+        MethodDefinition(
+            name="operational_learning_release_rollback",
+            handler=_operational_learning_release_rollback,
+            input_schema=Schema(
+                required={
+                    **exact_scope,
+                    **optimistic,
+                    **represented_evidence,
+                    "affected_artifact": str,
+                    "human_approval": dict,
+                },
+                optional={},
+                allow_unknown=False,
+                description=(
+                    "Apply represented rollback evidence and restore the exact "
+                    "previous immutable release hash."
+                ),
+            ),
+            output_schema=write_result_schema,
+            category="write",
+            description=(
+                "Apply a represented rollback decision after strict evidence and "
+                "authoritative approval validation. It fails closed unless a "
+                "canonical runtime adapter restores and reads back the exact "
+                "previous release hash."
+            ),
+        ),
+    ]
+
+
 def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
     # Authority-boundary warning: catalogue entries expose reusable tool
     # surfaces and schemas. They are not a place to encode domain-specific
@@ -31321,6 +32189,8 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
                 required={},
                 optional={
                     "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
                     "limit": (int,),
                     "offset": (int,),
                     "decision": (str, type(None)),
@@ -31347,6 +32217,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
                     "baseline_pre_dispatch_p95_duration_ms": (int, float),
                     "latency_regression_tolerance_pct": (int, float),
                     "profile_concept_id": (str, type(None)),
+                    "operational_certification_run_id": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(
@@ -33126,6 +33997,7 @@ def build_default_catalogue() -> MethodCatalogue:
     catalogue = MethodCatalogue()
     definitions: List[MethodDefinition] = []
     definitions.extend(_build_default_catalogue_core_definitions())
+    definitions.extend(_build_operational_learning_release_definitions())
     definitions.extend(_build_default_catalogue_knowledge_io_definitions())
     definitions.extend(_build_default_catalogue_external_integration_definitions())
     definitions.extend(_build_default_catalogue_diagnostics_and_research_definitions())

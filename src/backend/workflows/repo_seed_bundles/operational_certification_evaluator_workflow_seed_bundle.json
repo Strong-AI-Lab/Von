@@ -1,0 +1,139 @@
+{
+  "family_id": "operational_certification_evaluator_workflow_seed_bundle",
+  "managed_by": "operational_certification_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
+  "source_tag": "JVNAUTOSCI-2577",
+  "supported_action_ids": [
+    "llm.action"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#operational_state_evidence_evaluator",
+      "display_name": "Operational State Evidence Evaluator",
+      "description": "Represented strict evaluator for one operational certification trial, reconciling final state, visible answer, path, receipts, safety audits and recovery evidence without Python-owned success policy.",
+      "content": "Strict represented operational evaluator. The prompt and scenario contract own semantic judgement; the durable runtime supplies evidence transport and JSON validation.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"evaluation\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "evaluate_trial",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "postcondition_critic",
+              "project_raw_response_to_final_response": false,
+              "tool_mode": "none",
+              "response_contract_text": "Return represented_operational_evaluator_result.v1 JSON with evaluator_id, scenario_id, trial_index, verdict, terminal_state, typed terminal/causal/recovery decisions, evidence, and safety-audit lists.",
+              "context_fields": [
+                {
+                  "context_key": "scenario_contract",
+                  "label": "Represented scenario contract"
+                },
+                {
+                  "context_key": "trial_index",
+                  "label": "Trial index"
+                },
+                {
+                  "context_key": "trial_observation",
+                  "label": "Bounded trial observation and path evidence"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": "completed",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#prompt_operational_certification_state_evaluator"
+            ],
+            "state_id": "evaluate_trial",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_certification_evaluator_validated_json_to_result",
+                "context_key": "represented_operational_evaluator_result",
+                "tool_output_field": "validated_json"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value",
+              "required_json_fields": [
+                "schema_version",
+                "evaluator_id",
+                "scenario_id",
+                "trial_index",
+                "verdict",
+                "terminal_state",
+                "typed_terminal_outcome_available",
+                "causal_stage_evidence_complete",
+                "explicitly_inconclusive",
+                "recoverable_fault_recovered",
+                "evidence",
+                "fabricated_evidence",
+                "forbidden_effects",
+                "namespace_violations",
+                "false_success_claims",
+                "reason"
+              ]
+            },
+            "writes_context_keys": [
+              "represented_operational_evaluator_result"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "completed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    }
+  ]
+}

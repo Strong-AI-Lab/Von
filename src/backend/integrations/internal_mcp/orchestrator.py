@@ -85,6 +85,10 @@ from src.backend.services.conversation_turn_memory_context_service import (
 from src.backend.services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
+from src.backend.services.required_tool_identity_service import (
+    canonical_required_tool_key,
+    canonical_required_tool_keys,
+)
 from src.backend.services.agent_test_replay_mode_service import (
     AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
     use_represented_selector_llm_for_agent_test_replay,
@@ -14358,10 +14362,7 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _tool_requirement_key(tool_name: Any) -> str:
-        cleaned = str(tool_name or "").strip().lower()
-        if cleaned in {"search_concepts", "vontology_concept_search"}:
-            return "concept_search"
-        return cleaned
+        return canonical_required_tool_key(tool_name)
 
     @classmethod
     def _required_tool_validation_failure_context(
@@ -15230,60 +15231,85 @@ class InternalMCPChatOrchestrator:
         ):
             return ()
 
-        available_tools = {
-            str(tool_name).strip().lower()
+        available_tool_names = {
+            str(tool_name).strip()
             for tool_name in (
                 method_catalogue.keys() if isinstance(method_catalogue, Mapping) else ()
             )
             if isinstance(tool_name, str) and str(tool_name).strip()
         }
-        allowed_tool_names = (
+        represented_allowed_tool_names = (
             {
-                str(tool_name).strip().lower()
+                str(tool_name).strip()
                 for tool_name in allowed_tools
                 if isinstance(tool_name, str) and str(tool_name).strip()
             }
             if allowed_tools is not None
             else None
         )
-        if allowed_tool_names is not None and activated_conditional_required_tools:
-            allowed_tool_names = {
-                *allowed_tool_names,
+        if represented_allowed_tool_names is not None and activated_conditional_required_tools:
+            represented_allowed_tool_names = {
+                *represented_allowed_tool_names,
                 *(
-                    str(tool_name).strip().lower()
+                    str(tool_name).strip()
                     for tool_name in activated_conditional_required_tools
                     if isinstance(tool_name, str) and str(tool_name).strip()
                 ),
             }
+        known_tool_names = [
+            *available_tool_names,
+            *(represented_allowed_tool_names or ()),
+            *contract_object.required_tools,
+            *activated_conditional_required_tools,
+        ]
+        available_tools = canonical_required_tool_keys(
+            available_tool_names,
+            known_tool_names=known_tool_names,
+        )
+        allowed_tool_keys = (
+            canonical_required_tool_keys(
+                represented_allowed_tool_names,
+                known_tool_names=known_tool_names,
+            )
+            if represented_allowed_tool_names is not None
+            else None
+        )
         required_tools: list[str] = []
         seen: set[str] = set()
 
         def _add_tool(tool_name: str) -> None:
             raw_tool_name = tool_name.strip()
-            lowered = raw_tool_name.lower()
-            if not lowered:
+            canonical_key = canonical_required_tool_key(
+                raw_tool_name,
+                known_tool_names=known_tool_names,
+            )
+            if not canonical_key or canonical_key in seen:
                 return
-            candidate_names = (raw_tool_name,)
-            if lowered == "vontology_concept_search":
-                candidate_names = (raw_tool_name, "search_concepts")
-            elif lowered == "search_concepts":
-                candidate_names = (raw_tool_name, "vontology_concept_search")
-
-            for candidate_tool_name in candidate_names:
-                candidate_tool_name = candidate_tool_name.strip()
-                candidate_lowered = candidate_tool_name.lower()
-                if not candidate_tool_name or candidate_lowered in seen:
-                    return
-                if available_tools and candidate_lowered not in available_tools:
-                    continue
-                if (
-                    allowed_tool_names is not None
-                    and candidate_lowered not in allowed_tool_names
-                ):
-                    continue
-                seen.add(candidate_lowered)
-                required_tools.append(candidate_tool_name)
+            if available_tools and canonical_key not in available_tools:
                 return
+            if allowed_tool_keys is not None and canonical_key not in allowed_tool_keys:
+                return
+            seen.add(canonical_key)
+            matching_surface_names = sorted(
+                (
+                    surface_name
+                    for surface_name in available_tool_names
+                    if canonical_required_tool_key(
+                        surface_name,
+                        known_tool_names=known_tool_names,
+                    )
+                    == canonical_key
+                ),
+                key=lambda surface_name: (
+                    surface_name.lower() != raw_tool_name.lower(),
+                    surface_name.lower(),
+                ),
+            )
+            required_tools.append(
+                matching_surface_names[0]
+                if matching_surface_names
+                else raw_tool_name
+            )
 
         for tool_name in (
             *contract_object.required_tools,
@@ -15291,14 +15317,14 @@ class InternalMCPChatOrchestrator:
         ):
             _add_tool(str(tool_name).strip())
 
-        required_lookup = {
-            str(tool_name).strip().lower()
-            for tool_name in required_tools
-            if isinstance(tool_name, str) and str(tool_name).strip()
-        }
+        required_lookup = canonical_required_tool_keys(
+            required_tools,
+            known_tool_names=known_tool_names,
+        )
         concept_resolution_required = bool(
             required_lookup
             & {
+                "concept_search",
                 "search_concepts",
                 "vontology_concept_search",
                 "resolve_concept_by_name",
@@ -15530,10 +15556,10 @@ class InternalMCPChatOrchestrator:
         merged_required_tools: list[str] = []
         seen_required: set[str] = set()
         for tool_name in (*evaluation.required_tools, *contract_required_tools):
-            lowered = str(tool_name).strip().lower()
-            if not lowered or lowered in seen_required:
+            canonical_key = cls._tool_requirement_key(tool_name)
+            if not canonical_key or canonical_key in seen_required:
                 continue
-            seen_required.add(lowered)
+            seen_required.add(canonical_key)
             merged_required_tools.append(str(tool_name).strip())
 
         merged_required_fetch_concept_ids: list[str] = []
@@ -15548,32 +15574,40 @@ class InternalMCPChatOrchestrator:
             seen_required_fetch.add(lowered)
             merged_required_fetch_concept_ids.append(str(concept_id).strip())
 
-        available_tools = {
-            str(tool_name).strip().lower()
+        available_tool_names = {
+            str(tool_name).strip()
             for tool_name in (
                 method_catalogue.keys() if isinstance(method_catalogue, Mapping) else ()
             )
             if isinstance(tool_name, str) and str(tool_name).strip()
         }
+        known_tool_names = [*available_tool_names, *merged_required_tools]
+        available_tools = canonical_required_tool_keys(
+            available_tool_names,
+            known_tool_names=known_tool_names,
+        )
         unavailable_required_tools: list[str] = []
         seen_unavailable: set[str] = set()
         for tool_name in (
             *evaluation.unavailable_required_tools,
             *merged_required_tools,
         ):
-            lowered = str(tool_name).strip().lower()
-            if not lowered or lowered in seen_unavailable:
+            canonical_key = canonical_required_tool_key(
+                tool_name,
+                known_tool_names=known_tool_names,
+            )
+            if not canonical_key or canonical_key in seen_unavailable:
                 continue
-            if available_tools and lowered in available_tools:
+            if available_tools and canonical_key in available_tools:
                 continue
-            if not available_tools and lowered not in {
-                str(item).strip().lower()
-                for item in evaluation.unavailable_required_tools
-                if isinstance(item, str) and str(item).strip()
-            }:
+            prior_unavailable_keys = canonical_required_tool_keys(
+                evaluation.unavailable_required_tools,
+                known_tool_names=known_tool_names,
+            )
+            if not available_tools and canonical_key not in prior_unavailable_keys:
                 continue
-            seen_unavailable.add(lowered)
-            unavailable_required_tools.append(lowered)
+            seen_unavailable.add(canonical_key)
+            unavailable_required_tools.append(str(tool_name).strip())
 
         (
             missing_tools,
@@ -23930,8 +23964,15 @@ class InternalMCPChatOrchestrator:
                 )
             )
 
+        raw_retrieval_state = payload.get("retrieval_state")
+        retrieval_state = (
+            dict(raw_retrieval_state)
+            if isinstance(raw_retrieval_state, Mapping)
+            else None
+        )
         diagnostics_note = (
-            "No retrieval results were available."
+            "No result rows were returned; retrieval_state records whether the "
+            "empty result is authoritative."
             if not results
             else (
                 "Retrieved evidence includes " + ", ".join(diagnostics_parts) + "."
@@ -23955,6 +23996,7 @@ class InternalMCPChatOrchestrator:
             "predicates": predicates[:12],
             "concept_ids": concept_ids[:12],
             "results": compact_results,
+            "retrieval_state": retrieval_state,
             "retrieval_diagnostics": {"note": diagnostics_note},
         }
         return {

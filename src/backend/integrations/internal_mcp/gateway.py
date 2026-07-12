@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional
 
@@ -19,6 +20,16 @@ from .transport import InternalMCPTransport, TransportResult
 logger = logging.getLogger(__name__)
 
 _LOG_TAG = "[mcp_gateway]"
+_ACTOR_CONTEXT_SOURCE: ContextVar[str | None] = ContextVar(
+    "internal_mcp_actor_context_source",
+    default=None,
+)
+
+
+def get_internal_mcp_actor_context_source() -> str | None:
+    """Return whether the active actor pre-existed or came from tool payload."""
+
+    return _ACTOR_CONTEXT_SOURCE.get()
 
 
 class GatewayDisabledError(RuntimeError):
@@ -270,15 +281,35 @@ class InternalMCPGateway:
 
         timeout = definition.resolved_timeout(self._transport)
         try:
-            user_id, org_id = self._resolve_access_actor_context(payload_dict)
-            with self._access_actor_context(user_id, org_id):
-                transport_result = self._transport.execute(
-                    method_name=definition.name,
-                    handler=definition.handler,
-                    payload=dict(payload_dict),
-                    timeout_sec=timeout,
-                    log_tag=self._log_tag,
-                )
+            from src.backend.security.access_control import (
+                get_effective_organisation_concept_id,
+                get_effective_user_concept_id,
+            )
+
+            existing_user_id = get_effective_user_concept_id()
+            existing_org_id = get_effective_organisation_concept_id()
+            payload_user_id, payload_org_id = self._resolve_access_actor_context(
+                payload_dict
+            )
+            user_id = existing_user_id or payload_user_id
+            org_id = existing_org_id or payload_org_id
+            actor_source = (
+                "preexisting_authenticated_or_workflow_context"
+                if existing_user_id and existing_org_id
+                else "tool_payload_fallback"
+            )
+            actor_source_token = _ACTOR_CONTEXT_SOURCE.set(actor_source)
+            try:
+                with self._access_actor_context(user_id, org_id):
+                    transport_result = self._transport.execute(
+                        method_name=definition.name,
+                        handler=definition.handler,
+                        payload=dict(payload_dict),
+                        timeout_sec=timeout,
+                        log_tag=self._log_tag,
+                    )
+            finally:
+                _ACTOR_CONTEXT_SOURCE.reset(actor_source_token)
         except Exception as exc:
             message = str(exc)
             logger.exception(

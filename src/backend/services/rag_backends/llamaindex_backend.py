@@ -26,7 +26,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Iterable, Dict, Any, Optional, List, Tuple, Mapping
 
-from ..rag_service import RAGService
+from ..rag_service import RAGQueryResults, RAGService, build_rag_retrieval_state
 from ...utils.concept_id_utils import normalise_concept_id_for_compare
 
 
@@ -255,6 +255,8 @@ class LlamaIndexRAGService(RAGService):
         # Cache of namespace -> index instance
         self._indices: Dict[str, Any] = {}
         self._namespace_runtime_state: Dict[str, Dict[str, Any]] = {}
+        self._namespace_retrieval_states: Dict[str, Dict[str, Any]] = {}
+        self._retrieval_state_lock = threading.Lock()
         self._namespace_locks: Dict[str, threading.RLock] = {}
         self._namespace_locks_guard = threading.Lock()
         self._runtime_configuration_lock = threading.RLock()
@@ -805,6 +807,48 @@ class LlamaIndexRAGService(RAGService):
             self._namespace_runtime_state[effective_namespace] = dict(state)
         return state
 
+    def _query_results_with_state(
+        self,
+        results: Iterable[Dict[str, Any]],
+        *,
+        namespace: str,
+        status: str,
+        cause: str | None = None,
+        detail: str | None = None,
+        candidate_count: int | None = None,
+        filtered_candidate_count: int | None = None,
+        candidate_limit: int | None = None,
+        candidate_limit_reached: bool | None = None,
+    ) -> RAGQueryResults:
+        materialised_results = list(results)
+        state = build_rag_retrieval_state(
+            status,
+            result_count=len(materialised_results),
+            cause=cause,
+            detail=detail,
+            candidate_count=candidate_count,
+            filtered_candidate_count=filtered_candidate_count,
+            candidate_limit=candidate_limit,
+            candidate_limit_reached=candidate_limit_reached,
+        )
+        with self._retrieval_state_lock:
+            self._namespace_retrieval_states[namespace] = dict(state)
+        return RAGQueryResults(
+            materialised_results,
+            retrieval_state=state,
+        )
+
+    def get_last_retrieval_state(
+        self,
+        namespace: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        """Return the latest state for one namespace without exposing index data."""
+
+        effective_namespace = self._resolve_effective_namespace(namespace)
+        with self._retrieval_state_lock:
+            state = self._namespace_retrieval_states.get(effective_namespace)
+            return dict(state) if isinstance(state, dict) else None
+
     def _maybe_load_index(self, namespace: str) -> Any:
         with self._get_namespace_lock(namespace):
             state = self.get_namespace_runtime_state(namespace)
@@ -986,6 +1030,8 @@ class LlamaIndexRAGService(RAGService):
         with self._get_namespace_lock(effective_namespace):
             self._indices.pop(effective_namespace, None)
             self._namespace_runtime_state.pop(effective_namespace, None)
+            with self._retrieval_state_lock:
+                self._namespace_retrieval_states.pop(effective_namespace, None)
 
             persist_dir = os.path.abspath(self._namespace_persist_dir(effective_namespace))
             namespaces_root = os.path.abspath(
@@ -1026,7 +1072,37 @@ class LlamaIndexRAGService(RAGService):
     ) -> List[Dict[str, Any]]:
         effective_namespace = self._resolve_effective_namespace(namespace)
         namespace_state = self.get_namespace_runtime_state(effective_namespace)
-        if not bool(namespace_state.get("compatible", False)):
+        namespace_status = str(namespace_state.get("status") or "").strip()
+        # An in-memory index was built under the current runtime configuration
+        # and is usable even if no persisted directory has been written yet.
+        # This is distinct from a namespace with neither an in-memory nor a
+        # persisted index, which must remain a typed ``missing_index`` state.
+        has_current_in_memory_index = effective_namespace in self._indices
+        blocked_statuses = {
+            "signature_missing": "signature_missing",
+            "embedding_signature_mismatch": "embedding_signature_mismatch",
+            "rebuild_in_progress": "rebuild_in_progress",
+            "embedder_unconfigured": "unavailable",
+        }
+        if namespace_status == "missing_index" and not has_current_in_memory_index:
+            blocked_statuses["missing_index"] = "missing_index"
+        retrieval_status = blocked_statuses.get(namespace_status)
+        if retrieval_status is not None or not bool(
+            namespace_state.get("compatible", False)
+        ):
+            if retrieval_status is None:
+                retrieval_status = "unavailable"
+            results = self._query_results_with_state(
+                [],
+                namespace=effective_namespace,
+                status=retrieval_status,
+                cause=(
+                    "namespace_lock_contended"
+                    if bool(namespace_state.get("lock_contended", False))
+                    else namespace_status or "namespace_state_unavailable"
+                ),
+                detail=namespace_state.get("detail"),
+            )
             try:
                 self._last_query_info = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1036,14 +1112,36 @@ class LlamaIndexRAGService(RAGService):
                     "returned": 0,
                     "compatibility_status": namespace_state.get("status"),
                     "compatibility_detail": namespace_state.get("detail"),
+                    "retrieval_state": dict(results.retrieval_state),
                 }
             except Exception:
                 pass
-            return []
+            return results
 
         index = self._maybe_load_index(effective_namespace)
         if not index:
-            return []
+            results = self._query_results_with_state(
+                [],
+                namespace=effective_namespace,
+                status="unavailable",
+                cause="index_load_failed",
+                detail=(
+                    "A compatible persisted index was reported but could not be "
+                    "loaded for this retrieval attempt."
+                ),
+            )
+            try:
+                self._last_query_info = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "effective_namespace": effective_namespace,
+                    "query_length": len(query_text or ""),
+                    "top_k": int(top_k),
+                    "returned": 0,
+                    "retrieval_state": dict(results.retrieval_state),
+                }
+            except Exception:
+                pass
+            return results
 
         # Note: Metadata filtering support varies by vector store implementation.
         # To ensure correctness, we do coarse retrieval first then apply filtering
@@ -1071,6 +1169,27 @@ class LlamaIndexRAGService(RAGService):
         try:
             retriever = index.as_retriever(similarity_top_k=similarity_top_k)
             nodes = retriever.retrieve(query_text)
+        except Exception as exc:
+            state = build_rag_retrieval_state(
+                "degraded",
+                result_count=0,
+                cause=f"query_failed:{type(exc).__name__}",
+                detail="The configured retrieval backend failed during query execution.",
+            )
+            with self._retrieval_state_lock:
+                self._namespace_retrieval_states[effective_namespace] = dict(state)
+            try:
+                self._last_query_info = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "effective_namespace": effective_namespace,
+                    "query_length": len(query_text or ""),
+                    "top_k": int(top_k),
+                    "returned": 0,
+                    "retrieval_state": state,
+                }
+            except Exception:
+                pass
+            raise
         finally:
             if embed_model is not None:
                 for attr, value in previous_embed_settings.items():
@@ -1154,8 +1273,10 @@ class LlamaIndexRAGService(RAGService):
             return True
 
         results = []
+        filtered_candidate_count = 0
         for node in nodes:
             if not _matches_permissions(getattr(node.node, "metadata", None)):
+                filtered_candidate_count += 1
                 continue
             results.append(
                 {
@@ -1170,6 +1291,56 @@ class LlamaIndexRAGService(RAGService):
                 break
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
+        filter_keys = {
+            "mode",
+            "type",
+            "predicate",
+            "predicates",
+            "user_id",
+            "organisation_concept_id",
+        }
+        local_filter_requested = bool(
+            isinstance(permissions_context, dict)
+            and any(permissions_context.get(key) not in (None, "", [], {}) for key in filter_keys)
+        )
+        candidate_count = len(nodes) if isinstance(nodes, list) else None
+        candidate_limit_reached = bool(
+            candidate_count is not None and candidate_count >= similarity_top_k
+        )
+        filtered_window_incomplete = bool(
+            local_filter_requested
+            and filtered_candidate_count
+            and candidate_limit_reached
+            and len(results) < max(1, int(top_k))
+        )
+        filtered_window_exhausted = bool(
+            filtered_window_incomplete and not results
+        )
+        filtered_window_partial = bool(filtered_window_incomplete and results)
+        query_results = self._query_results_with_state(
+            results,
+            namespace=effective_namespace,
+            status=(
+                "results_available"
+                if results and not filtered_window_partial
+                else "partial_results"
+                if filtered_window_partial
+                else "candidate_window_exhausted"
+                if filtered_window_exhausted
+                else "valid_empty"
+            ),
+            cause=(
+                "local_filter_candidate_window_exhausted"
+                if filtered_window_exhausted
+                else "local_filter_candidate_window_partial"
+                if filtered_window_partial
+                else "query_completed"
+            ),
+            candidate_count=candidate_count,
+            filtered_candidate_count=filtered_candidate_count,
+            candidate_limit=similarity_top_k,
+            candidate_limit_reached=candidate_limit_reached,
+        )
         try:
             self._last_query_info = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1185,12 +1356,13 @@ class LlamaIndexRAGService(RAGService):
                 "retrieved": len(nodes) if isinstance(nodes, list) else None,
                 "returned": len(results),
                 "elapsed_ms": elapsed_ms,
+                "retrieval_state": dict(query_results.retrieval_state),
             }
         except Exception:
             # Never let diagnostics interfere with retrieval.
             pass
 
-        return results
+        return query_results
 
     def embed(
         self,

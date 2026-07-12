@@ -6,6 +6,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence, cast
 
+from src.backend.services.required_tool_identity_service import (
+    canonical_required_tool_key,
+    canonical_required_tool_keys,
+    resolve_required_tool_identity,
+)
 from src.backend.workflows.execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_RESULT_ENVELOPE_KEY,
@@ -168,8 +173,8 @@ def evaluate_workflow_required_effects_tool_policy(
             "reason_code": "no_required_effect_tools",
         }
 
-    allowed_tools: set[str] = set()
-    direct_action_tools: set[str] = set()
+    allowed_tool_names: set[str] = set()
+    direct_action_tool_names: set[str] = set()
     has_unrestricted_llm_tool_step = False
     unrestricted_tool_pipeline_actions: set[str] = set()
     states = getattr(workflow_def, "states", None)
@@ -182,7 +187,7 @@ def evaluate_workflow_required_effects_tool_policy(
                 action_id = getattr(action, "action_id", None)
                 if isinstance(action_id, str) and action_id.strip():
                     cleaned_action_id = action_id.strip().lower()
-                    direct_action_tools.add(cleaned_action_id)
+                    direct_action_tool_names.add(cleaned_action_id)
                     if (
                         cleaned_action_id
                         in _REQUIRED_EFFECTS_UNRESTRICTED_TOOL_SURFACE_ACTION_IDS
@@ -198,18 +203,33 @@ def evaluate_workflow_required_effects_tool_policy(
                     llm_policy_map.get("allowed_tools")
                 )
                 if allowed:
-                    allowed_tools.update(tool.lower() for tool in allowed)
+                    allowed_tool_names.update(tool.lower() for tool in allowed)
                 else:
                     has_unrestricted_llm_tool_step = True
 
     has_unrestricted_tool_pipeline_step = bool(unrestricted_tool_pipeline_actions)
+    known_surface_names = sorted(allowed_tool_names | direct_action_tool_names)
+    allowed_tools = canonical_required_tool_keys(
+        allowed_tool_names,
+        known_tool_names=known_surface_names,
+    )
+    direct_action_tools = canonical_required_tool_keys(
+        direct_action_tool_names,
+        known_tool_names=known_surface_names,
+    )
     if has_unrestricted_llm_tool_step or has_unrestricted_tool_pipeline_step:
         unavailable_required_tools: list[str] = []
     else:
         available_lower = set(allowed_tools)
         available_lower.update(direct_action_tools)
         unavailable_required_tools = [
-            tool for tool in required_tools if tool.lower() not in available_lower
+            tool
+            for tool in required_tools
+            if canonical_required_tool_key(
+                tool,
+                known_tool_names=known_surface_names,
+            )
+            not in available_lower
         ]
 
     ok = not unavailable_required_tools
@@ -217,8 +237,17 @@ def evaluate_workflow_required_effects_tool_policy(
         "checked": True,
         "ok": ok,
         "required_tools": list(required_tools),
-        "allowed_tools": sorted(allowed_tools),
-        "direct_action_tools": sorted(direct_action_tools),
+        "required_tool_identities": [
+            resolve_required_tool_identity(
+                tool,
+                known_tool_names=known_surface_names,
+            ).to_telemetry()
+            for tool in required_tools
+        ],
+        "allowed_tools": sorted(allowed_tool_names),
+        "allowed_tool_canonical_keys": sorted(allowed_tools),
+        "direct_action_tools": sorted(direct_action_tool_names),
+        "direct_action_tool_canonical_keys": sorted(direct_action_tools),
         "unrestricted_llm_tool_step": bool(has_unrestricted_llm_tool_step),
         "unrestricted_tool_pipeline_step": has_unrestricted_tool_pipeline_step,
         "unrestricted_tool_pipeline_actions": sorted(
@@ -579,28 +608,36 @@ def filter_workflow_internal_required_effect_tools(
     policy = evaluate_workflow_required_effects_tool_policy(
         selected_workflow_definition
     )
-    direct_action_tools = {
-        str(item).strip().lower()
+    direct_action_tool_names = {
+        str(item).strip()
         for item in (policy.get("direct_action_tools") or [])
         if isinstance(item, str) and item.strip()
     }
+    known_surface_names = sorted(direct_action_tool_names)
+    direct_action_tools = canonical_required_tool_keys(
+        direct_action_tool_names,
+        known_tool_names=known_surface_names,
+    )
     if not tools or not direct_action_tools:
         return tools, {
             "policy": dict(policy),
-            "workflow_internal_action_tools": sorted(direct_action_tools),
+            "workflow_internal_action_tools": sorted(direct_action_tool_names),
             "filtered_workflow_internal_action_tools": [],
         }
 
     filtered_tools: list[str] = []
     filtered_internal_tools: list[str] = []
     for tool in tools:
-        if tool.strip().lower() in direct_action_tools:
+        if canonical_required_tool_key(
+            tool,
+            known_tool_names=known_surface_names,
+        ) in direct_action_tools:
             filtered_internal_tools.append(tool)
             continue
         filtered_tools.append(tool)
     return filtered_tools, {
         "policy": dict(policy),
-        "workflow_internal_action_tools": sorted(direct_action_tools),
+        "workflow_internal_action_tools": sorted(direct_action_tool_names),
         "filtered_workflow_internal_action_tools": filtered_internal_tools,
     }
 

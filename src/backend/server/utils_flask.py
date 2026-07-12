@@ -489,6 +489,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.benchmark_suite_vontology_service import (
             ensure_canonical_benchmark_suites_from_seed_fixtures,
         )
+        from ..services.operational_certification_vontology_service import (
+            bootstrap_operational_certification_authority,
+        )
         from ..services.ai_chat_session_source_profile_vontology_service import (
             ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture,
         )
@@ -644,6 +647,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="benchmark suites",
             bootstrap_fn=ensure_canonical_benchmark_suites_from_seed_fixtures,
         )
+        operational_certification_bootstrap_report = _run_workflow_family_bootstrap(
+            label="operational certification authority",
+            bootstrap_fn=bootstrap_operational_certification_authority,
+        )
         ai_chat_session_source_profile_bootstrap_report = _run_workflow_family_bootstrap(
             label="AI chat-session source profiles",
             bootstrap_fn=ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture,
@@ -705,6 +712,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             workflow_model_selection_bootstrap_report
         )
         result["benchmark_suite_bootstrap"] = benchmark_suite_bootstrap_report
+        result["operational_certification_bootstrap"] = (
+            operational_certification_bootstrap_report
+        )
         result["ai_chat_session_source_profile_bootstrap"] = (
             ai_chat_session_source_profile_bootstrap_report
         )
@@ -2507,7 +2517,9 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
             "state": (
                 "skipped_pytest"
                 if running_under_pytest
-                else "skipped_agent_test" if agent_test_instance else "pending"
+                else "skipped_agent_test"
+                if agent_test_instance
+                else "pending"
             ),
             "ready": False,
             "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -3455,7 +3467,13 @@ def _build_diagnostics_response(app: Flask):
         entity_counts_stats = {"error": "unavailable"}
 
     try:
-        from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
+        import hashlib
+
+        from ..db.mongo_client import (  # type: ignore
+            get_configured_database_name,
+            get_effective_mongo_uri,
+            is_using_fallback_uri,
+        )
         from ..db.mongo_uri_redaction import (
             build_safe_mongo_connection_location,
             sanitize_mongo_uri_for_display,
@@ -3470,12 +3488,16 @@ def _build_diagnostics_response(app: Flask):
         mongo_diag = {
             "effective_mongo_uri": sanitize_mongo_uri_for_display(effective_uri),
             "effective_mongo_location": connection_location,
+            "effective_database_name_sha256": hashlib.sha256(
+                get_configured_database_name().encode("utf-8")
+            ).hexdigest(),
             "using_fallback": using_fallback,
         }
     except Exception:
         mongo_diag = {
             "effective_mongo_uri": None,
             "effective_mongo_location": None,
+            "effective_database_name_sha256": None,
             "using_fallback": None,
         }
 
@@ -3877,9 +3899,7 @@ def _start_prewarm(app: Flask) -> None:
                 try:
                     _prewarm_chat_critical_workflows(app)
                 except Exception as exc:
-                    app.logger.warning(
-                        "[prewarm] Chat-workflow warm failed: %s", exc
-                    )
+                    app.logger.warning("[prewarm] Chat-workflow warm failed: %s", exc)
             finally:
                 app.logger.info("[prewarm] Completed in %.2fs", time.time() - t0)
 
@@ -3922,9 +3942,7 @@ def _register_optional_tool_progress_flusher(app: Flask) -> None:
     without making each heartbeat wait for Mongo.
     """
     if _is_agent_test_instance():
-        app.logger.info(
-            "[tool-progress] AgentTest mode: skipping progress flusher."
-        )
+        app.logger.info("[tool-progress] AgentTest mode: skipping progress flusher.")
         return
     if app.testing or "PYTEST_CURRENT_TEST" in os.environ:
         return
@@ -3940,9 +3958,13 @@ def _register_optional_tool_progress_flusher(app: Flask) -> None:
 
     raw_interval = os.environ.get("VON_TOOL_PROGRESS_FLUSHER_INTERVAL_SECONDS")
     try:
-        interval = float(raw_interval) if raw_interval else max(
-            1.0,
-            min(5.0, tool_progress_persistence_flush_interval_seconds()),
+        interval = (
+            float(raw_interval)
+            if raw_interval
+            else max(
+                1.0,
+                min(5.0, tool_progress_persistence_flush_interval_seconds()),
+            )
         )
     except (ValueError, TypeError):
         interval = 5.0
@@ -3960,9 +3982,7 @@ def _register_optional_tool_progress_flusher(app: Flask) -> None:
                         )
                 except Exception as exc:
                     try:
-                        app.logger.warning(
-                            "[tool-progress] Flusher error: %s", exc
-                        )
+                        app.logger.warning("[tool-progress] Flusher error: %s", exc)
                     except Exception:
                         pass
                 time.sleep(interval)
@@ -3978,9 +3998,7 @@ def _register_optional_tool_progress_flusher(app: Flask) -> None:
             "[tool-progress] Progress flusher started (interval=%.1fs)", interval
         )
     except Exception as exc:
-        app.logger.warning(
-            "[tool-progress] Failed to start progress flusher: %s", exc
-        )
+        app.logger.warning("[tool-progress] Failed to start progress flusher: %s", exc)
 
 
 def _register_optional_blob_spillway_migrator(app: Flask) -> None:
@@ -3991,15 +4009,16 @@ def _register_optional_blob_spillway_migrator(app: Flask) -> None:
     JVNAUTOSCI-2382.
     """
     if _is_agent_test_instance():
-        app.logger.info(
-            "[spillway] AgentTest mode: skipping blob-spillway migrator."
-        )
+        app.logger.info("[spillway] AgentTest mode: skipping blob-spillway migrator.")
         return
     if app.testing or "PYTEST_CURRENT_TEST" in os.environ:
         return
 
     try:
-        from ..services.blob_spillway import get_blob_spillway_queue, is_spillway_enabled
+        from ..services.blob_spillway import (
+            get_blob_spillway_queue,
+            is_spillway_enabled,
+        )
     except Exception as exc:
         app.logger.warning("[spillway] Could not import spillway module: %s", exc)
         return
@@ -4035,9 +4054,7 @@ def _register_optional_blob_spillway_migrator(app: Flask) -> None:
                     queue.cleanup_committed_cache()
                 except Exception as exc:
                     try:
-                        app.logger.warning(
-                            "[spillway] Migrator error: %s", exc
-                        )
+                        app.logger.warning("[spillway] Migrator error: %s", exc)
                     except Exception:
                         pass
                 time.sleep(interval)
@@ -4053,9 +4070,7 @@ def _register_optional_blob_spillway_migrator(app: Flask) -> None:
             "[spillway] Blob-spillway migrator started (interval=%.0fs)", interval
         )
     except Exception as exc:
-        app.logger.warning(
-            "[spillway] Failed to start blob-spillway migrator: %s", exc
-        )
+        app.logger.warning("[spillway] Failed to start blob-spillway migrator: %s", exc)
 
 
 _DEFAULT_SPILLWAY_MAX_PER_RUN = 50

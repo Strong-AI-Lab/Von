@@ -841,6 +841,9 @@ def project_tool_payload_for_llm(
     )
     collection_field_ids = set(contract.collection_field_ids)
     row_projected_field_ids = set(collection_projection.get("field_ids") or [])
+    collection_row_field_ids = set(
+        collection_projection.get("row_field_ids") or []
+    )
     if collection_projection.get("collection_key"):
         collection_key = str(collection_projection["collection_key"])
         projected[collection_key] = collection_projection["items"]
@@ -865,11 +868,17 @@ def project_tool_payload_for_llm(
                     "location": collection_key,
                 }
             )
+        telemetry["missing_required_fields"].extend(
+            collection_projection.get("missing_required_fields") or []
+        )
 
     for field in contract.fields:
         if (
-            field.concept_id in collection_field_ids
-            or field.concept_id in row_projected_field_ids
+            (
+                collection_projection.get("collection_field_id")
+                and field.concept_id in collection_field_ids
+            )
+            or field.concept_id in collection_row_field_ids
         ):
             continue
         if field.redacted:
@@ -1122,15 +1131,33 @@ def _project_collection_fields(
         found, value = _extract_field_value(payload, collection_field)
         if not found or not isinstance(value, list):
             continue
+        prefixes = [f"{alias}[]." for alias in collection_field.wire_aliases] + [
+            f"{path}[]." for path in collection_field.payload_paths
+        ]
         row_fields = [
             field
             for field in contract.fields
             if field.concept_id != collection_field.concept_id
+            and any(
+                path.startswith(prefix)
+                for path in field.payload_paths
+                for prefix in prefixes
+            )
         ]
         rows: list[dict[str, Any]] = []
         projected_field_ids: set[str] = set()
-        for item in value[:max_collection_items]:
+        missing_required_fields: list[dict[str, Any]] = []
+        for row_index, item in enumerate(value[:max_collection_items]):
             if not isinstance(item, Mapping):
+                missing_required_fields.append(
+                    {
+                        "field_concept_id": collection_field.concept_id,
+                        "output_key": collection_field.output_key,
+                        "location": collection_field.output_key,
+                        "row_index": row_index,
+                        "reason": "collection_item_not_object",
+                    }
+                )
                 continue
             row: dict[str, Any] = {}
             for field in row_fields:
@@ -1139,9 +1166,28 @@ def _project_collection_fields(
                     _field_for_collection_item(field, collection_field),
                 )
                 if not found_row:
+                    if field.required:
+                        missing_required_fields.append(
+                            {
+                                "field_concept_id": field.concept_id,
+                                "output_key": field.output_key,
+                                "location": collection_field.output_key,
+                                "row_index": row_index,
+                            }
+                        )
                     continue
                 compact_value = _compact_value(row_value)
                 if compact_value is None:
+                    if field.required:
+                        missing_required_fields.append(
+                            {
+                                "field_concept_id": field.concept_id,
+                                "output_key": field.output_key,
+                                "location": collection_field.output_key,
+                                "row_index": row_index,
+                                "reason": "empty_or_unserialisable_value",
+                            }
+                        )
                     continue
                 row[field.output_key] = compact_value
                 projected_field_ids.add(field.concept_id)
@@ -1154,6 +1200,8 @@ def _project_collection_fields(
             "total_count": len(value),
             "omitted_count": max(0, len(value) - len(rows)),
             "field_ids": sorted(projected_field_ids),
+            "row_field_ids": sorted(field.concept_id for field in row_fields),
+            "missing_required_fields": missing_required_fields,
         }
     return {}
 

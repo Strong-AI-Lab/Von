@@ -9,6 +9,7 @@ from src.backend.services.turn_execution_record_service import (
     build_turn_execution_correctness_summary,
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
+    _normalise_projection_field_entries,
     _summarise_tool_execution_context,
 )
 from src.backend.services.required_tool_obligation_service import (
@@ -27,6 +28,29 @@ _KR_REQUIRED_TOOLS = [
     "fetch_concept",
     "get_text_relations_summary",
 ]
+
+
+def test_projection_field_telemetry_preserves_bounded_collection_row_index() -> None:
+    entries = _normalise_projection_field_entries(
+        [
+            {
+                "field_concept_id": "#V#jira_issue_status_field",
+                "output_key": "status",
+                "location": "issues",
+                "row_index": 3,
+            },
+            {
+                "field_concept_id": "#V#jira_issue_summary_field",
+                "output_key": "summary",
+                "location": "issues",
+                "row_index": 2_000_000_000,
+            },
+        ]
+    )
+
+    assert entries[0]["row_index"] == 3
+    assert entries[1]["row_index"] == 1_000_000_000
+    assert entries[1]["row_index_clamped"] is True
 
 
 def test_turn_record_carries_decision_attribution_payload() -> None:

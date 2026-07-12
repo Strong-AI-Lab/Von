@@ -191,12 +191,27 @@ def test_search_knowledge_base_degrades_when_embedding_backend_fails(monkeypatch
 
     result = cat._search_knowledge_base(query="workflow", namespace="#V#user@org")
 
-    assert result["success"] is True
+    assert result["success"] is False
     assert result["fallback_used"] is True
-    assert result["fallback_mode"] == "degraded_empty_results"
+    assert result["fallback_mode"] == "typed_retrieval_state"
     assert result["count"] == 0
     assert result["results"] == []
     assert result["fallback_reason"] == "rag_query_degraded:RuntimeError"
+    assert result["retrieval_state"] == {
+        "schema_version": "rag_retrieval_state.v1",
+        "status": "degraded",
+        "usable": False,
+        "authoritative_empty": False,
+        "result_count": 0,
+        "retryable": True,
+        "rebuild_required": False,
+        "recovery_affordances": [
+            {"action_type": "retry"},
+            {"action_type": "inspect_runtime"},
+        ],
+        "cause": "rag_query_degraded:RuntimeError",
+        "detail": "The configured RAG retrieval surface degraded during this attempt.",
+    }
 
 
 def test_get_related_concepts_falls_back_to_graph_text_when_rag_degrades(monkeypatch):

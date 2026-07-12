@@ -39,6 +39,7 @@ from .required_tool_obligation_service import (
     build_required_tool_obligation_ledger,
     required_tool_obligation_effect,
 )
+from .required_tool_identity_service import canonical_required_tool_key
 from .tool_metadata_service import (
     is_tool_prompt_required_evidence,
     is_tool_prompt_required_mutation,
@@ -2194,8 +2195,8 @@ def _custom_workflow_workflow_get_instance_equivalent_status(
 
 
 def _append_tool_name_once(values: list[str], tool_name: str) -> None:
-    lowered = tool_name.lower()
-    if all(existing.lower() != lowered for existing in values):
+    canonical_key = _tool_requirement_key(tool_name)
+    if all(_tool_requirement_key(existing) != canonical_key for existing in values):
         values.append(tool_name)
 
 
@@ -2375,10 +2376,10 @@ def _observed_invocation_tool_names(
         )
         if not tool_name:
             continue
-        lowered = tool_name.lower()
-        if lowered in seen:
+        canonical_key = _tool_requirement_key(tool_name)
+        if canonical_key in seen:
             continue
-        seen.add(lowered)
+        seen.add(canonical_key)
         observed.append(tool_name)
     return observed
 
@@ -2642,6 +2643,11 @@ def _normalise_projection_field_entries(value: Any) -> list[dict[str, Any]]:
         }
         if "item_count" in item:
             entry["item_count"] = _safe_non_negative_int(item.get("item_count"))
+        if "row_index" in item:
+            raw_row_index = _safe_non_negative_int(item.get("row_index"))
+            entry["row_index"] = min(raw_row_index, 1_000_000_000)
+            if raw_row_index > 1_000_000_000:
+                entry["row_index_clamped"] = True
         entry = {
             key: nested for key, nested in entry.items() if nested not in (None, [], {})
         }
@@ -5569,11 +5575,7 @@ def _dedupe_string_sequence(values: Sequence[Any]) -> list[str]:
 
 
 def _tool_requirement_key(tool_name: Any) -> str:
-    cleaned = _safe_str(tool_name)
-    lowered = cleaned.lower() if cleaned else ""
-    if lowered in {"search_concepts", "vontology_concept_search"}:
-        return "concept_search"
-    return lowered
+    return canonical_required_tool_key(tool_name)
 
 
 def _extract_string_sequence_from_mapping(
@@ -7095,8 +7097,8 @@ def _summarise_required_tool_failure(
     )
 
     for tool_name in required_tools:
-        lowered = tool_name.lower()
-        if lowered not in failed_tools and lowered not in blocked_tools:
+        canonical_key = _tool_requirement_key(tool_name)
+        if canonical_key not in failed_tools and canonical_key not in blocked_tools:
             continue
         for invocation in tool_invocations or ():
             if not isinstance(invocation, Mapping):
@@ -7104,7 +7106,7 @@ def _summarise_required_tool_failure(
             invocation_tool = _safe_str(invocation.get("tool")) or _safe_str(
                 invocation.get("method")
             )
-            if (invocation_tool or "").lower() != lowered:
+            if _tool_requirement_key(invocation_tool) != canonical_key:
                 continue
             payload = _extract_tool_invocation_payload(invocation)
             status = _classify_tool_invocation_status(
@@ -7398,7 +7400,7 @@ def _collect_successful_tool_payloads(
         invocation_name = _safe_str(invocation.get("tool")) or _safe_str(
             invocation.get("method")
         )
-        if (invocation_name or "").lower() != tool_name.lower():
+        if _tool_requirement_key(invocation_name) != _tool_requirement_key(tool_name):
             continue
         payload = _extract_tool_invocation_payload(invocation)
         if (
@@ -7908,9 +7910,9 @@ def _build_tool_authored_mutation_effects(
         if metadata is None:
             continue
 
-        lowered = metadata["tool_name"].lower()
-        if lowered not in groups:
-            groups[lowered] = {
+        canonical_key = _tool_requirement_key(metadata["tool_name"])
+        if canonical_key not in groups:
+            groups[canonical_key] = {
                 "tool_name": metadata["tool_name"],
                 "targets": [],
                 "predicates": [],
@@ -7919,9 +7921,9 @@ def _build_tool_authored_mutation_effects(
                 "any_blocked": False,
                 "payloads": [],
             }
-            tool_order.append(lowered)
+            tool_order.append(canonical_key)
 
-        group = groups[lowered]
+        group = groups[canonical_key]
         for t in metadata["targets"]:
             if t not in group["targets"]:
                 group["targets"].append(t)
@@ -8846,7 +8848,11 @@ def build_turn_execution_record(
         )
     required_tool_obligation_ledger_payload = build_required_tool_obligation_ledger(
         required_tools_by_source=required_tool_sources,
-        invocations=serialised_invocations,
+        # The bounded ledger never persists raw invocation payloads, but it must
+        # validate targets against the actual arguments.  The compact TER
+        # projection intentionally omits those arguments and is therefore not a
+        # valid input to target-closure accounting.
+        invocations=tool_invocations,
         observed_equivalent_successful_tools=(
             execution_surface_successful_equivalent_tool_names
         ),

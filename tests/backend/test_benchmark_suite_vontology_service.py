@@ -74,6 +74,61 @@ def test_load_benchmark_suite_case_set_fails_closed_when_suite_missing(
     ]
 
 
+def test_live_suite_authority_rejects_duplicate_canonical_definitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = service.load_benchmark_suite_definition_from_seed_fixture(
+        _selector_fixture_path(),
+        suite_concept_id=service.SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id},
+    )
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concept",
+        lambda *_args, **_kwargs: [
+            {"text": json.dumps(definition)},
+            {"text": json.dumps(definition)},
+        ],
+    )
+
+    with pytest.raises(service.BenchmarkSuiteAuthorityMissingError) as exc_info:
+        service.load_benchmark_suite_definition(
+            service.SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID
+        )
+
+    assert str(exc_info.value) == "benchmark_suite_definition_ambiguous"
+
+
+def test_malformed_canonical_definition_cannot_fall_through_to_legacy_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id},
+    )
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concept",
+        lambda _concept_id, *, predicate, limit=10: (
+            [{"text": "{malformed"}]
+            if predicate == service.HAS_BENCHMARK_SUITE_DEFINITION_JSON
+            else [{"text": "{}"}]
+        ),
+    )
+
+    with pytest.raises(service.BenchmarkSuiteAuthorityMissingError) as exc_info:
+        service.load_benchmark_suite_definition(
+            service.SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID
+        )
+
+    assert str(exc_info.value) == "benchmark_suite_definition_malformed"
+
+
 def test_ensure_canonical_benchmark_suites_imports_without_overwriting_existing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

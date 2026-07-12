@@ -313,13 +313,15 @@ def _summarise_prediction_envelope(result: Mapping[str, Any] | None) -> dict[str
     llm_usage = envelope.get("llm_usage") if isinstance(envelope, Mapping) else {}
     total_tokens = (
         llm_usage.get("total_tokens")
-        if isinstance(llm_usage, Mapping) and isinstance(llm_usage.get("total_tokens"), Mapping)
+        if isinstance(llm_usage, Mapping)
+        and isinstance(llm_usage.get("total_tokens"), Mapping)
         else {}
     )
     sample_window = result.get("sample_window") if isinstance(result, Mapping) else {}
     data_sufficiency = (
         envelope.get("data_sufficiency")
-        if isinstance(envelope, Mapping) and isinstance(envelope.get("data_sufficiency"), Mapping)
+        if isinstance(envelope, Mapping)
+        and isinstance(envelope.get("data_sufficiency"), Mapping)
         else {}
     )
     return {
@@ -635,16 +637,22 @@ def _normalise_spec_state(
     payload = _clone_mapping(raw)
     payload["schema_version"] = EXPERIMENT_SPEC_SCHEMA_VERSION
     payload["experiment_spec_id"] = experiment_spec_id
-    payload["target_workflow_ids"] = _normalise_strings(payload.get("target_workflow_ids"))
+    payload["target_workflow_ids"] = _normalise_strings(
+        payload.get("target_workflow_ids")
+    )
     payload["target_capability_ids"] = _normalise_strings(
         payload.get("target_capability_ids")
     )
     payload["candidate_workflow_ids"] = _normalise_strings(
         payload.get("candidate_workflow_ids")
     )
-    payload["baseline_workflow_id"] = _safe_str(payload.get("baseline_workflow_id")) or None
+    payload["baseline_workflow_id"] = (
+        _safe_str(payload.get("baseline_workflow_id")) or None
+    )
     payload["expected_outcomes"] = _clone_sequence(payload.get("expected_outcomes"))
-    payload["allowed_side_effects"] = _clone_sequence(payload.get("allowed_side_effects"))
+    payload["allowed_side_effects"] = _clone_sequence(
+        payload.get("allowed_side_effects")
+    )
     payload["forbidden_side_effects"] = _clone_sequence(
         payload.get("forbidden_side_effects")
     )
@@ -679,7 +687,9 @@ def _normalise_observation(
     if explicit_verdict is not None:
         verdict = explicit_verdict
     elif isinstance(matched_expected, bool):
-        verdict = EXPERIMENT_VERDICT_PASS if matched_expected else EXPERIMENT_VERDICT_FAIL
+        verdict = (
+            EXPERIMENT_VERDICT_PASS if matched_expected else EXPERIMENT_VERDICT_FAIL
+        )
     elif "success" in raw:
         verdict = (
             EXPERIMENT_VERDICT_PASS
@@ -699,6 +709,7 @@ def _normalise_observation(
         verdict = EXPERIMENT_VERDICT_INCONCLUSIVE
 
     return {
+        "schema_version": _safe_str(raw.get("schema_version"), limit=120) or None,
         "observation_id": _safe_str(raw.get("observation_id"))
         or f"experiment_obs_{uuid.uuid4().hex[:24]}",
         "observation_type": observation_type,
@@ -719,6 +730,7 @@ def _normalise_observation(
         "repair_hints": _clone_sequence(raw.get("repair_hints")),
         "quality_signals": _clone_mapping(raw.get("quality_signals")),
         "degradation_assessment": _clone_mapping(raw.get("degradation_assessment")),
+        "execution_provenance": _clone_mapping(raw.get("execution_provenance")),
         "turn_execution_request_ids": _normalise_strings(
             raw.get("turn_execution_request_ids")
         ),
@@ -758,8 +770,12 @@ def _normalise_run_state(
     payload["candidate_workflow_ids"] = _normalise_strings(
         payload.get("candidate_workflow_ids")
     )
-    payload["target_workflow_ids"] = _normalise_strings(payload.get("target_workflow_ids"))
-    payload["baseline_workflow_id"] = _safe_str(payload.get("baseline_workflow_id")) or None
+    payload["target_workflow_ids"] = _normalise_strings(
+        payload.get("target_workflow_ids")
+    )
+    payload["baseline_workflow_id"] = (
+        _safe_str(payload.get("baseline_workflow_id")) or None
+    )
     payload["turn_execution_request_ids"] = _normalise_strings(
         payload.get("turn_execution_request_ids")
     )
@@ -780,9 +796,9 @@ def _normalise_run_state(
     payload["learning_signal"] = _clone_mapping(payload.get("learning_signal"))
     payload["replay_case"] = _clone_mapping(payload.get("replay_case"))
     payload["metadata"] = _clone_mapping(payload.get("metadata"))
-    payload["selection_experience_id"] = _safe_str(
-        payload.get("selection_experience_id")
-    ) or None
+    payload["selection_experience_id"] = (
+        _safe_str(payload.get("selection_experience_id")) or None
+    )
     payload["benchmark_tier"] = _safe_str(payload.get("benchmark_tier")) or None
     payload["verdict"] = _normalise_verdict(payload.get("verdict"))
     return payload
@@ -798,7 +814,9 @@ def _persist_experiment_spec_state(
         experiment_spec_id,
         {
             "concept_data.experiment_spec": normalised,
-            "attributes.experiment_spec.updated_at_utc": normalised.get("updated_at_utc"),
+            "attributes.experiment_spec.updated_at_utc": normalised.get(
+                "updated_at_utc"
+            ),
             "attributes.experiment_spec.target_workflow_ids": normalised.get(
                 "target_workflow_ids"
             ),
@@ -819,7 +837,9 @@ def _persist_experiment_run_state(
             "concept_data.experiment_run": normalised,
             "attributes.experiment_run.status": normalised.get("status"),
             "attributes.experiment_run.verdict": normalised.get("verdict"),
-            "attributes.experiment_run.updated_at_utc": normalised.get("updated_at_utc"),
+            "attributes.experiment_run.updated_at_utc": normalised.get(
+                "updated_at_utc"
+            ),
             "attributes.experiment_run.experiment_spec_id": normalised.get(
                 "experiment_spec_id"
             ),
@@ -1001,7 +1021,9 @@ def _record_relation(
     relations: list[dict[str, Any]] = []
     for target in _normalise_strings(targets):
         try:
-            result = add_relationship(source_id=source_id, predicate=predicate, target=target)
+            result = add_relationship(
+                source_id=source_id, predicate=predicate, target=target
+            )
         except Exception as exc:
             logger.warning(
                 "[experiment_run] could not add relation %s %s %s: %s",
@@ -1082,11 +1104,15 @@ def create_experiment_spec(
         org_id=org_id,
     )
     spec_name = _safe_str(name, limit=200) or "Testing experiment"
-    resolved_spec_id = _safe_str(experiment_spec_id) or stable_named_instance_concept_id(
+    resolved_spec_id = _safe_str(
+        experiment_spec_id
+    ) or stable_named_instance_concept_id(
         spec_name,
         prefix="experiment_spec",
     )
-    description_text = _safe_str(description, limit=1200) or f"Experiment spec for {spec_name}."
+    description_text = (
+        _safe_str(description, limit=1200) or f"Experiment spec for {spec_name}."
+    )
     now_iso = _utcnow_iso()
 
     _ensure_experiment_spec_concept(
@@ -1240,7 +1266,9 @@ def start_experiment_run(
         "namespace": resolved_namespace,
         "user_id": resolved_user_id,
         "org_id": resolved_org_id,
-        "theory_id": _safe_str(theory_id) or _safe_str(spec_state.get("theory_id")) or None,
+        "theory_id": _safe_str(theory_id)
+        or _safe_str(spec_state.get("theory_id"))
+        or None,
         "benchmark_tier": _safe_str(benchmark_tier) or "tier1",
         "benchmark_world_id": _safe_str(benchmark_world_id) or None,
         "target_workflow_ids": _normalise_strings(
@@ -1350,7 +1378,9 @@ def record_experiment_observation(
     )
     candidate_validation_results: list[dict[str, Any]] = [
         copy.deepcopy(dict(item))
-        for item in cast(Sequence[Any], evidence.get("candidate_validation_results") or [])
+        for item in cast(
+            Sequence[Any], evidence.get("candidate_validation_results") or []
+        )
         if isinstance(item, Mapping)
     ]
     trace_summaries: list[dict[str, Any]] = [
@@ -1522,7 +1552,10 @@ def _count_policy_violation_events(observations: Sequence[Mapping[str, Any]]) ->
                 minimum=0,
             )
         candidate_validation = observation.get("candidate_validation")
-        if isinstance(candidate_validation, Mapping) and candidate_validation.get("valid") is False:
+        if (
+            isinstance(candidate_validation, Mapping)
+            and candidate_validation.get("valid") is False
+        ):
             violations += 1
     return violations
 
@@ -1536,13 +1569,15 @@ def _build_degradation_assessment(
     candidate_workflow_id = _safe_str(
         next(iter(run_state.get("target_workflow_ids") or []), None)
     ) or _safe_str(next(iter(run_state.get("candidate_workflow_ids") or []), None))
-    baseline_workflow_id = _safe_str(run_state.get("baseline_workflow_id")) or _safe_str(
-        spec_state.get("baseline_workflow_id")
-    )
+    baseline_workflow_id = _safe_str(
+        run_state.get("baseline_workflow_id")
+    ) or _safe_str(spec_state.get("baseline_workflow_id"))
     namespace = _safe_str(run_state.get("namespace")) or None
     policy = _clone_mapping(
         (_clone_mapping(spec_state.get("promotion_policy"))).get("degradation_policy")
-    ) or _clone_mapping((_clone_mapping(spec_state.get("verdict_rules"))).get("degradation_policy"))
+    ) or _clone_mapping(
+        (_clone_mapping(spec_state.get("verdict_rules"))).get("degradation_policy")
+    )
     thresholds = {
         "minimum_baseline_runs": _coerce_int(
             policy.get("minimum_baseline_runs"),
@@ -1623,7 +1658,9 @@ def _build_degradation_assessment(
         baseline_summary.get("completion_rate"),
         default=0.0,
         minimum=0.0,
-    ) - _coerce_float(candidate_summary.get("completion_rate"), default=0.0, minimum=0.0)
+    ) - _coerce_float(
+        candidate_summary.get("completion_rate"), default=0.0, minimum=0.0
+    )
     failure_increase = _coerce_float(
         candidate_summary.get("failure_rate"),
         default=0.0,
@@ -1632,19 +1669,30 @@ def _build_degradation_assessment(
     candidate_p50 = candidate_summary.get("duration_p50_ms")
     baseline_p50 = baseline_summary.get("duration_p50_ms")
     duration_ratio = None
-    if isinstance(candidate_p50, (int, float)) and isinstance(baseline_p50, (int, float)) and baseline_p50 > 0:
+    if (
+        isinstance(candidate_p50, (int, float))
+        and isinstance(baseline_p50, (int, float))
+        and baseline_p50 > 0
+    ):
         duration_ratio = round(float(candidate_p50) / float(baseline_p50), 4)
     candidate_tokens = candidate_summary.get("total_tokens_p50")
     baseline_tokens = baseline_summary.get("total_tokens_p50")
     token_ratio = None
-    if isinstance(candidate_tokens, (int, float)) and isinstance(baseline_tokens, (int, float)) and baseline_tokens > 0:
+    if (
+        isinstance(candidate_tokens, (int, float))
+        and isinstance(baseline_tokens, (int, float))
+        and baseline_tokens > 0
+    ):
         token_ratio = round(float(candidate_tokens) / float(baseline_tokens), 4)
 
     if completion_drop > thresholds["max_completion_rate_drop"]:
         reasons.append("completion_rate_regressed")
     if failure_increase > thresholds["max_failure_rate_increase"]:
         reasons.append("failure_rate_regressed")
-    if duration_ratio is not None and duration_ratio > thresholds["max_p50_duration_ratio"]:
+    if (
+        duration_ratio is not None
+        and duration_ratio > thresholds["max_p50_duration_ratio"]
+    ):
         reasons.append("duration_regressed")
     if token_ratio is not None and token_ratio > thresholds["max_total_token_ratio"]:
         reasons.append("cost_regressed")
@@ -1740,7 +1788,11 @@ def compute_experiment_verdict(
         verdict = EXPERIMENT_VERDICT_FAIL
         reason = "degraded_against_baseline"
     elif fail_count == 0 and partial_count == 0 and inconclusive_count == 0:
-        if require_all_expected and expected_outcome_count > 0 and pass_count < expected_outcome_count:
+        if (
+            require_all_expected
+            and expected_outcome_count > 0
+            and pass_count < expected_outcome_count
+        ):
             verdict = EXPERIMENT_VERDICT_INCONCLUSIVE
             reason = "expected_outcomes_not_fully_observed"
         elif pass_count >= minimum_pass_count:
@@ -1833,7 +1885,9 @@ def compute_experiment_verdict(
         ),
     }
     if isinstance(degradation_assessment.get("metrics"), Mapping):
-        for key, value in cast(Mapping[str, Any], degradation_assessment.get("metrics")).items():
+        for key, value in cast(
+            Mapping[str, Any], degradation_assessment.get("metrics")
+        ).items():
             state["metrics"][str(key)] = value
     evidence: dict[str, Any] = (
         dict(cast(Mapping[str, Any], state.get("evidence")))
@@ -1987,7 +2041,9 @@ def emit_experiment_learning_signal(
         "experiment_spec_id": _safe_str(state.get("experiment_spec_id")) or None,
         "experiment_verdict": verdict,
         "completion_gate_requires_follow_up": verdict != EXPERIMENT_VERDICT_PASS,
-        "turn_execution_request_ids": replay_case["evidence"]["turn_execution_request_ids"],
+        "turn_execution_request_ids": replay_case["evidence"][
+            "turn_execution_request_ids"
+        ],
     }
     selection_update = None
     if resolved_selection_experience_id:
@@ -2075,10 +2131,9 @@ def prepare_experiment_spec_from_template(
         theory_setup["expected_observations"] = copy.deepcopy(expected_outcomes)
 
     verdict_rules = _clone_mapping(resolved_template.get("verdict_rules"))
-    if (
-        verdict_rules.get("require_all_expected_outcomes") is True
-        and not verdict_rules.get("minimum_pass_count")
-    ):
+    if verdict_rules.get(
+        "require_all_expected_outcomes"
+    ) is True and not verdict_rules.get("minimum_pass_count"):
         verdict_rules["minimum_pass_count"] = len(expected_outcomes)
 
     promotion_policy = _clone_mapping(resolved_template.get("promotion_policy"))
@@ -2093,9 +2148,10 @@ def prepare_experiment_spec_from_template(
     candidate_workflow_ids = _normalise_strings(
         resolved_template.get("candidate_workflow_ids")
     ) or _normalise_strings((template_inputs or {}).get("candidate_workflow_ids"))
-    target_workflow_ids = _normalise_strings(
-        resolved_template.get("target_workflow_ids")
-    ) or candidate_workflow_ids[:1]
+    target_workflow_ids = (
+        _normalise_strings(resolved_template.get("target_workflow_ids"))
+        or candidate_workflow_ids[:1]
+    )
     baseline_workflow_id = _safe_str(
         resolved_template.get("baseline_workflow_id")
     ) or _safe_str((template_inputs or {}).get("baseline_workflow_id"))
@@ -2231,13 +2287,21 @@ def execute_regression_suite(
                 return {"success": False, "error": "mongo_client_unavailable"}
             result = run_kb_clone_benchmark(
                 scenario=benchmark_scenario,
-                output_root=output_root or tier_output_root_default or "data/testing_workflows/benchmarks",
+                output_root=output_root
+                or tier_output_root_default
+                or "data/testing_workflows/benchmarks",
                 app=build_default_benchmark_app(),
                 mongo_client=mongo_client,
             )
         except Exception as exc:
-            logger.warning("[experiment_run] Tier 2 benchmark execution failed: %s", exc)
-            return {"success": False, "error": "benchmark_execution_failed", "details": str(exc)}
+            logger.warning(
+                "[experiment_run] Tier 2 benchmark execution failed: %s", exc
+            )
+            return {
+                "success": False,
+                "error": "benchmark_execution_failed",
+                "details": str(exc),
+            }
         aggregate = result.get("metrics", {}).get("aggregate", {})
         result = {
             "success": True,
@@ -2277,7 +2341,9 @@ def execute_regression_suite(
     pass_count = 0
     fail_count = 0
     for row in case_rows:
-        expected = _normalise_verdict(row.get("expected_verdict")) or EXPERIMENT_VERDICT_PASS
+        expected = (
+            _normalise_verdict(row.get("expected_verdict")) or EXPERIMENT_VERDICT_PASS
+        )
         observed = _normalise_verdict(row.get("observed_verdict") or row.get("verdict"))
         if observed is None:
             observed = EXPERIMENT_VERDICT_INCONCLUSIVE
@@ -2329,7 +2395,9 @@ def _maybe_record_suite_observation(
         return payload
 
     execution_tier = _safe_str(payload.get("execution_tier")) or "tier1"
-    verdict = _normalise_verdict(payload.get("verdict")) or EXPERIMENT_VERDICT_INCONCLUSIVE
+    verdict = (
+        _normalise_verdict(payload.get("verdict")) or EXPERIMENT_VERDICT_INCONCLUSIVE
+    )
     suite_result = payload.get("suite_result")
     suite_metrics: Mapping[str, Any] = {}
     if isinstance(suite_result, Mapping):

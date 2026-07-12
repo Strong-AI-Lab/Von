@@ -40,7 +40,9 @@ class _ConceptStore:
         self.docs[concept_id] = doc
         return copy.deepcopy(doc)
 
-    def update_concept(self, concept_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    def update_concept(
+        self, concept_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any]:
         doc = self.docs.setdefault(
             concept_id,
             {
@@ -70,7 +72,9 @@ class _RunCollection:
     def list_indexes(self) -> list[dict[str, Any]]:
         return [{"name": name} for name in self.index_names]
 
-    def create_index(self, _keys: list[tuple[str, int]], *, name: str, **_kwargs: Any) -> None:
+    def create_index(
+        self, _keys: list[tuple[str, int]], *, name: str, **_kwargs: Any
+    ) -> None:
         if name not in self.index_names:
             self.index_names.append(name)
 
@@ -96,14 +100,18 @@ class _RunCollection:
             upserted_id=None if existing is not None else run_id,
         )
 
-    def find_one(self, query: dict[str, Any], _projection: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    def find_one(
+        self, query: dict[str, Any], _projection: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         run_id = str(query.get("run_id") or "")
         doc = self.docs.get(run_id)
         return copy.deepcopy(doc) if isinstance(doc, dict) else None
 
 
 class _DB:
-    def __init__(self, collection: _RunCollection, *, client: Any = "mongo-client") -> None:
+    def __init__(
+        self, collection: _RunCollection, *, client: Any = "mongo-client"
+    ) -> None:
         self._collection = collection
         self.client = client
 
@@ -136,7 +144,9 @@ def _patch_runtime(monkeypatch):
     text_writes: list[dict[str, Any]] = []
     singleton_writes: list[dict[str, Any]] = []
 
-    def _add_relationship(*, source_id: str, predicate: str, target: str, **_kwargs: Any):
+    def _add_relationship(
+        *, source_id: str, predicate: str, target: str, **_kwargs: Any
+    ):
         payload = {"source_id": source_id, "predicate": predicate, "target": target}
         relations.append(payload)
         return payload
@@ -147,7 +157,10 @@ def _patch_runtime(monkeypatch):
 
     def _upsert_singleton_text_relation(**kwargs: Any) -> dict[str, Any]:
         singleton_writes.append(dict(kwargs))
-        return {"relation_id": f"singleton-{len(singleton_writes)}", "relation_created": True}
+        return {
+            "relation_id": f"singleton-{len(singleton_writes)}",
+            "relation_created": True,
+        }
 
     monkeypatch.setattr(mod, "_RUN_INDEXES_READY", False)
     monkeypatch.setattr(mod.concept_service, "create_concept", store.create_concept)
@@ -214,9 +227,7 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
     ]
     assert len(expected_outcome_writes) == 2
     assert {
-        row["target"]
-        for row in relations
-        if row["predicate"] == "#V#tests_workflow"
+        row["target"] for row in relations if row["predicate"] == "#V#tests_workflow"
     } == {"#V#wf_meeting"}
 
     started = mod.start_experiment_run(
@@ -241,6 +252,7 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
         run_id="#V#run_meeting_test",
         observations=[
             {
+                "schema_version": "strict_certification_experiment_observation.v1",
                 "label": "structured_fields",
                 "verdict": "pass",
                 "observed_outcome": "structured_fields",
@@ -264,6 +276,14 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
                 ],
                 "tool_invocations": [{"tool_name": "workflow_create_instance"}],
                 "turn_execution_request_ids": ["req-1"],
+                "execution_provenance": {
+                    "trusted_runner_attestation": {
+                        "schema_version": (
+                            "operational_certification_runner_attestation.v1"
+                        ),
+                        "signature": "signed-digest",
+                    }
+                },
             },
             {
                 "label": "promotion_gate_kept_closed",
@@ -291,9 +311,7 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
         }
     ]
     assert stored_run["evidence"]["trace_summaries"] == [{"completed_step_count": 3}]
-    assert stored_run["evidence"]["side_effect_audits"] == [
-        {"blocked_event_count": 0}
-    ]
+    assert stored_run["evidence"]["side_effect_audits"] == [{"blocked_event_count": 0}]
     assert stored_run["evidence"]["repair_hints"] == [
         {
             "scope": "workflow_contract",
@@ -305,16 +323,32 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
         "workflow_candidate_validation",
         "workflow_execution",
     ]
+    canonical_readback = mod.get_experiment_run_state("#V#run_meeting_test")
+    assert canonical_readback is not None
+    canonical_observation = canonical_readback["observations"][0]
+    assert canonical_observation["schema_version"] == (
+        "strict_certification_experiment_observation.v1"
+    )
+    assert canonical_observation["execution_provenance"] == {
+        "trusted_runner_attestation": {
+            "schema_version": "operational_certification_runner_attestation.v1",
+            "signature": "signed-digest",
+        }
+    }
 
     verdict = mod.compute_experiment_verdict(run_id="#V#run_meeting_test")
 
     assert verdict["success"] is True
     assert verdict["verdict"] == "pass"
     assert verdict["promotion_recommendation"]["recommended"] is True
-    assert verdict["promotion_recommendation"]["promotion_ready_assertion_ids"] == ["assert-1"]
+    assert verdict["promotion_recommendation"]["promotion_ready_assertion_ids"] == [
+        "assert-1"
+    ]
     assert verdict["experiment_run"]["status"] == "completed"
     verdict_writes = [
-        row for row in singleton_writes if row["predicate"] == "#V#has_experiment_verdict"
+        row
+        for row in singleton_writes
+        if row["predicate"] == "#V#has_experiment_verdict"
     ]
     assert len(verdict_writes) == 1
 
@@ -347,7 +381,9 @@ def test_compute_experiment_verdict_demotes_degraded_candidate_against_baseline(
             "prediction_envelope": {
                 "completion_rate": 0.55 if workflow_id == "#V#wf_candidate" else 0.95,
                 "failure_rate": 0.35 if workflow_id == "#V#wf_candidate" else 0.05,
-                "duration_ms": {"p50": 1500 if workflow_id == "#V#wf_candidate" else 500},
+                "duration_ms": {
+                    "p50": 1500 if workflow_id == "#V#wf_candidate" else 500
+                },
                 "llm_usage": {
                     "total_tokens": {
                         "p50": 240 if workflow_id == "#V#wf_candidate" else 120
@@ -362,12 +398,14 @@ def test_compute_experiment_verdict_demotes_degraded_candidate_against_baseline(
     monkeypatch.setattr(
         mod,
         "upsert_workflow_publication_lifecycle",
-        lambda **kwargs: demotion_calls.append(kwargs)
-        or {
-            "workflow_id": kwargs["workflow_id"],
-            "phase": kwargs["phase"],
-            "published": kwargs["published"],
-        },
+        lambda **kwargs: (
+            demotion_calls.append(kwargs)
+            or {
+                "workflow_id": kwargs["workflow_id"],
+                "phase": kwargs["phase"],
+                "published": kwargs["published"],
+            }
+        ),
     )
 
     mod.create_experiment_spec(
@@ -440,14 +478,16 @@ def test_compute_experiment_verdict_demotes_degraded_candidate_against_baseline(
 
 
 def test_compute_experiment_verdict_fails_on_forbidden_side_effect(monkeypatch):
-    mod, _store, _run_collection, _relations, _text_writes, _singleton_writes = _patch_runtime(
-        monkeypatch
+    mod, _store, _run_collection, _relations, _text_writes, _singleton_writes = (
+        _patch_runtime(monkeypatch)
     )
     diff_calls: list[str] = []
     monkeypatch.setattr(
         mod,
         "compute_testing_theory_diff",
-        lambda *, theory_id: diff_calls.append(theory_id) or {"success": True, "diff": {}},
+        lambda *, theory_id: (
+            diff_calls.append(theory_id) or {"success": True, "diff": {}}
+        ),
     )
 
     mod.create_experiment_spec(
@@ -485,7 +525,9 @@ def test_compute_experiment_verdict_fails_on_forbidden_side_effect(monkeypatch):
     assert diff_calls == []
 
 
-def test_prepare_meeting_invitation_experiment_spec_builds_gateable_fixture(monkeypatch):
+def test_prepare_meeting_invitation_experiment_spec_builds_gateable_fixture(
+    monkeypatch,
+):
     from src.backend.services import experiment_run_service as mod
 
     captured: dict[str, Any] = {}
@@ -510,7 +552,10 @@ def test_prepare_meeting_invitation_experiment_spec_builds_gateable_fixture(monk
 
     assert result["success"] is True
     assert result["theory_slice_inputs"]["experiment_spec_id"] == "#V#meeting_spec"
-    assert result["theory_slice_inputs"]["promotion_policy"]["requires_manual_gate"] is True
+    assert (
+        result["theory_slice_inputs"]["promotion_policy"]["requires_manual_gate"]
+        is True
+    )
     assert len(result["seed_claims"]) == 2
     assert captured["fixture_payload"]["invitation_text"].startswith("Please meet")
     assert captured["target_workflow_ids"] == ["#V#wf_meeting"]
@@ -680,9 +725,9 @@ def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypat
         calls["mongo_client"] = mongo_client
         return {"metrics": {"aggregate": {"all_runs_passed": True}}}
 
-    cast(Any, benchmark_module).build_default_benchmark_app = (
-        _build_default_benchmark_app
-    )
+    cast(
+        Any, benchmark_module
+    ).build_default_benchmark_app = _build_default_benchmark_app
     cast(Any, benchmark_module).run_kb_clone_benchmark = _run_kb_clone_benchmark
     monkeypatch.setitem(
         sys.modules,
@@ -693,17 +738,19 @@ def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypat
     monkeypatch.setattr(
         mod,
         "record_experiment_observation",
-        lambda *, run_id, observations, turn_execution_request_ids=(): recorded_calls.append(
-            {
-                "run_id": run_id,
-                "observations": observations,
-                "turn_execution_request_ids": turn_execution_request_ids,
+        lambda *, run_id, observations, turn_execution_request_ids=(): (
+            recorded_calls.append(
+                {
+                    "run_id": run_id,
+                    "observations": observations,
+                    "turn_execution_request_ids": turn_execution_request_ids,
+                }
+            )
+            or {
+                "success": True,
+                "recorded_observations": list(observations),
             }
-        )
-        or {
-            "success": True,
-            "recorded_observations": list(observations),
-        },
+        ),
     )
 
     result = mod.execute_regression_suite(
@@ -734,7 +781,9 @@ def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypat
                     "verdict": "pass",
                     "observed_outcome": "pass",
                     "evidence": {
-                        "suite_result": {"metrics": {"aggregate": {"all_runs_passed": True}}},
+                        "suite_result": {
+                            "metrics": {"aggregate": {"all_runs_passed": True}}
+                        },
                         "execution_tier": "tier2",
                     },
                     "metrics": {"aggregate": {"all_runs_passed": True}},

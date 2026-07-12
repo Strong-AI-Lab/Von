@@ -28,7 +28,7 @@ from bson import ObjectId
 import logging
 import os
 import uuid  # Added for GUID generation
-from datetime import datetime, timezone  # Ensure timezone is imported
+from datetime import datetime, timedelta, timezone  # Ensure timezone is imported
 import requests  # Added for requests.exceptions.ConnectionError
 from typing import Dict, Any, Optional, List, Tuple, Iterable  # Added Tuple
 from pymongo.errors import PyMongoError  # Added for DB operations
@@ -85,6 +85,93 @@ logger = logging.getLogger(__name__)
 
 # REFACTORING_NOTE: Define a type alias for MongoDB query objects for clarity
 MongoQuery = Dict[str, Any]
+
+
+def acquire_concept_mutation_lease(
+    *,
+    concept_id: str,
+    lease_name: str,
+    owner_token: str,
+    ttl_seconds: int = 30,
+) -> Dict[str, Any]:
+    """Atomically acquire/refresh a bounded single-writer lease on a concept.
+
+    This is a generic storage primitive. It does not decide which mutation is
+    allowed; callers use it only to prevent multi-process lost updates around a
+    canonical service operation that cannot itself express compare-and-swap.
+    """
+
+    resolved_name = str(lease_name or "").strip()
+    if not resolved_name or not resolved_name.replace("_", "").isalnum():
+        raise InvalidConceptDataError("lease_name must be alphanumeric/underscore")
+    resolved_owner = str(owner_token or "").strip()
+    if not resolved_owner:
+        raise InvalidConceptDataError("owner_token is required")
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+        raise InvalidConceptDataError("ttl_seconds must be an integer")
+    resolved_ttl = max(5, min(ttl_seconds, 300))
+    collection = ConceptsRepository.collection()
+    if collection is None:
+        raise ConceptServiceError("Database collection 'concepts' not available.")
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=resolved_ttl)
+    lease_path = f"attributes.mutation_leases.{resolved_name}"
+    updated = collection.find_one_and_update(
+        {
+            "concept_id": concept_id,
+            "$or": [
+                {lease_path: {"$exists": False}},
+                {f"{lease_path}.expires_at": {"$lte": now}},
+                {f"{lease_path}.owner_token": resolved_owner},
+            ],
+        },
+        {
+            "$set": {
+                lease_path: {
+                    "owner_token": resolved_owner,
+                    "acquired_at": now,
+                    "expires_at": expires_at,
+                }
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return {
+        "success": updated is not None,
+        "concept_id": concept_id,
+        "lease_name": resolved_name,
+        "expires_at": expires_at.isoformat() if updated is not None else None,
+    }
+
+
+def release_concept_mutation_lease(
+    *,
+    concept_id: str,
+    lease_name: str,
+    owner_token: str,
+) -> Dict[str, Any]:
+    """Release a concept mutation lease only when its owner token matches."""
+
+    resolved_name = str(lease_name or "").strip()
+    resolved_owner = str(owner_token or "").strip()
+    if not resolved_name or not resolved_owner:
+        raise InvalidConceptDataError("lease_name and owner_token are required")
+    collection = ConceptsRepository.collection()
+    if collection is None:
+        raise ConceptServiceError("Database collection 'concepts' not available.")
+    lease_path = f"attributes.mutation_leases.{resolved_name}"
+    result = collection.update_one(
+        {
+            "concept_id": concept_id,
+            f"{lease_path}.owner_token": resolved_owner,
+        },
+        {"$unset": {lease_path: ""}},
+    )
+    return {
+        "success": bool(getattr(result, "modified_count", 0)),
+        "concept_id": concept_id,
+        "lease_name": resolved_name,
+    }
 
 # Concept visibility scope modes used during concept creation.
 # Keep these identifiers stable because MCP payloads and diagnostics depend on them.

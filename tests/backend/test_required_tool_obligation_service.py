@@ -347,6 +347,8 @@ def test_workflow_action_execution_satisfies_matching_required_tool(
             "workflow_id": "#V#arxiv_paper_representation_workflow",
             "state_id": "fetch_arxiv_metadata",
             "action_id": "get_paper_metadata",
+            "observed_tool_name": "get_paper_metadata",
+            "canonical_tool_key": "get_paper_metadata",
         }
     ]
     assert ledger["observed_invocation_count"] == 1
@@ -411,6 +413,8 @@ def test_failed_workflow_action_execution_preserves_recovery_evidence(
             "workflow_id": "#V#arxiv_paper_representation_workflow",
             "state_id": "download_paper",
             "action_id": "import_url_file_copy",
+            "observed_tool_name": "import_url_file_copy",
+            "canonical_tool_key": "import_url_file_copy",
             "error": "Registration exceeded the phase timeout.",
             "error_code": "remote_file_copy_timeout",
             "timeout_phase": "file_copy_registration",

@@ -113,8 +113,10 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         episode_evaluation_workflow_vontology_service as episode_evaluation_workflow_bootstrap,
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
         jira_task_incremental_import_workflow_vontology_service as jira_task_incremental_import_workflow_bootstrap,
+        mongo_query_diagnostics_maintenance_workflow_vontology_service as mongo_query_diagnostics_workflow_bootstrap,
         multilingual_concept_enrichment_schedule_bootstrap_service as multilingual_schedule_bootstrap,
         multilingual_concept_enrichment_vontology_service as multilingual_workflow_bootstrap,
+        operational_certification_vontology_service as operational_certification_bootstrap,
         paper_representation_workflow_vontology_service as paper_workflow_bootstrap,
         paper_recommendation_background_schedule_bootstrap_service as paper_recommendation_schedule_bootstrap,
         paper_recommendation_workflow_vontology_service as paper_recommendation_workflow_bootstrap,
@@ -189,6 +191,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
 
     monkeypatch.setattr(durable_startup, "recover_orphaned_instances", lambda: 0)
+    monkeypatch.setattr(
+        durable_startup,
+        "release_ineligible_worker_claims",
+        lambda: 0,
+    )
 
     def _start_worker_and_scheduler(**_kwargs):
         startup_events.append("worker_started")
@@ -393,6 +400,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        mongo_query_diagnostics_workflow_bootstrap,
+        "bootstrap_canonical_mongo_query_diagnostics_maintenance_workflow",
+        lambda: {
+            "success": True,
+            "workflow_id": "#V#mongo_query_diagnostics_maintenance_workflow",
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         representation_routing_audit_workflow_bootstrap,
         "bootstrap_canonical_representation_workflow_routing_coverage_audit_workflow",
         lambda: {
@@ -446,6 +462,14 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         lambda: {"success": True, "suite_count": 1},
     )
     monkeypatch.setattr(
+        operational_certification_bootstrap,
+        "bootstrap_operational_certification_authority",
+        lambda: {
+            "success": True,
+            "evaluator_workflow_id": "#V#operational_state_evidence_evaluator",
+        },
+    )
+    monkeypatch.setattr(
         ai_chat_session_source_profile_bootstrap,
         "ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture",
         lambda: {"success": True, "profile_count": 1},
@@ -488,6 +512,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     assert result.get("startup_queue_ready") == {
         "stage": "before_canonical_bootstraps",
         "recovered_orphaned_instances": 0,
+        "released_ineligible_worker_claims": 0,
     }
     bootstrap_report = result.get("identity_resolution_schedule_bootstrap")
     assert isinstance(bootstrap_report, dict)

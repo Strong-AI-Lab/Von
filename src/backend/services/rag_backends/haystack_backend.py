@@ -6,7 +6,7 @@ It is imported lazily to avoid hard dependencies.
 """
 
 from typing import Iterable, Dict, Any, Optional, List, Tuple
-from ..rag_service import RAGService
+from ..rag_service import RAGBackendUnavailable, RAGService
 
 try:
     # Import Haystack components here
@@ -19,8 +19,10 @@ except ImportError as e:
 
 class HaystackRAGService(RAGService):
     def __init__(self):
-        # Initialize Haystack pipelines
-        pass
+        # This module is only a placeholder.  Failing during construction keeps
+        # a broken primary backend from becoming an apparently authoritative
+        # empty Haystack result through the factory fallback.
+        raise RAGBackendUnavailable("Haystack RAG backend is not implemented")
 
     def upsert_documents(
         self,
