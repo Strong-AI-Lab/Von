@@ -48,6 +48,9 @@ docs/generated/validation_reports/replay_suite_*
 # Local live-turn diagnostic evidence
 .fastpath_evidence/
 
+# Local replay and benchmark evidence (may contain private operational data)
+/artifacts/
+
 # Ignore directories and sensitive files
 ignore/
 token.*
