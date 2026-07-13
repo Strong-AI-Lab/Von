@@ -16,7 +16,10 @@ describe('conversation single-scroll layout', () => {
 
         expect(transcriptRule).toContain('overflow-y: visible');
         expect(transcriptRule).toContain('resize: none');
+        expect(transcriptRule).toContain('border: 0');
+        expect(transcriptRule).toContain('background: transparent');
         expect(transcriptRule).not.toContain('max-height');
+        expect(styles).not.toContain('.scrollable-field-shell');
     });
 
     test('uses a compact sticky composer with secondary actions disclosed separately', () => {

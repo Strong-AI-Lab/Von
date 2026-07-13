@@ -4923,11 +4923,6 @@ h1 {
     opacity: 0.6;
 }
 
-.scrollable-field-shell {
-    position: relative;
-    width: 100%;
-}
-
 .chat-scroll-to-end-btn {
     position: fixed;
     right: 28px;
@@ -9422,8 +9417,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 
 .scrollable-field {
     white-space: pre-wrap;
-    border: 1px solid #ccc;
-    padding: 10px;
+    border: 0;
+    padding: 0;
     width: 100%;
     overflow-y: visible;
     margin-bottom: 16px;
@@ -9432,7 +9427,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     flex: 0 0 auto;
     /* prevent over-expanding */
     box-sizing: border-box;
-    background-color: white;
+    background: transparent;
 }
 
 .scrollable-field.drag-over {
@@ -9451,8 +9446,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 /* Chat variant (legacy class) updated for parity */
 .chat-scrollable-field {
     white-space: pre-wrap;
-    border: 1px solid #ccc;
-    padding: 10px;
+    border: 0;
+    padding: 0;
     width: 100%;
     overflow-y: visible;
     margin-bottom: 16px;
@@ -9461,6 +9456,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     flex: 0 0 auto;
     box-sizing: border-box;
     height: auto !important;
+    background: transparent;
 }
 
 /* Ensure text input and buttons do not shrink below content */

@@ -45,6 +45,8 @@ import {
     __testOnly_setLatestUnreadBoundary,
     __testOnly_showNewSharedMessagesIndicator,
     __testOnly_appendMessage,
+    __testOnly_toggleSpeakTurn,
+    __testOnly_resetChatTtsState,
     __testOnly_updateScrollToEndButtonVisibility,
     __testOnly_reduceThinkingCardDisplayState,
     __testOnly_copyActiveThinkingDiagnostics,
@@ -9214,6 +9216,47 @@ describe('scroll to latest message affordance', () => {
         });
         expect(scrollableField.scrollTo).not.toHaveBeenCalled();
         expect(__testOnly_scrollConversationToSessionList({ smooth: false })).toBe(true);
+    });
+});
+
+describe('chat narration playback duration', () => {
+    afterEach(() => {
+        __testOnly_resetChatTtsState();
+        localStorage.clear();
+        delete global.speechSynthesis;
+        delete global.SpeechSynthesisUtterance;
+        jest.useRealTimers();
+    });
+
+    test('does not cancel an active utterance when the narration target duration elapses', () => {
+        jest.useFakeTimers();
+        localStorage.setItem('chatTtsMaxSpeakingSeconds', '10');
+
+        let utterance = null;
+        global.speechSynthesis = {
+            speaking: true,
+            paused: false,
+            cancel: jest.fn(),
+            speak: jest.fn((value) => { utterance = value; }),
+            pause: jest.fn(),
+            resume: jest.fn(),
+            getVoices: jest.fn(() => [])
+        };
+        global.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
+            this.text = text;
+        };
+
+        const button = document.createElement('button');
+        __testOnly_toggleSpeakTurn('turn-long-speech', 'This narration should continue beyond ten seconds.', button);
+        jest.advanceTimersByTime(150);
+        expect(utterance).toBeTruthy();
+        utterance.onstart?.();
+
+        const cancellationCountAfterStart = global.speechSynthesis.cancel.mock.calls.length;
+        jest.advanceTimersByTime(15000);
+
+        expect(global.speechSynthesis.cancel).toHaveBeenCalledTimes(cancellationCountAfterStart);
+        expect(button.textContent).toBe('Stop');
     });
 });
 

@@ -186,10 +186,13 @@
                                 aria-label="Text-to-speech volume"></span>
                         </div>
                         <div class="speech-settings-row">
-                            <label class="speech-settings-label" for="settingsTtsMaxSecondsInput">Max speaking
+                            <label class="speech-settings-label" for="settingsTtsMaxSecondsInput">Narration target max
                                 (s)</label>
                             <input id="settingsTtsMaxSecondsInput" class="speech-settings-input" type="number" min="10"
-                                step="5" inputmode="numeric" />
+                                step="5" inputmode="numeric"
+                                aria-describedby="settingsTtsMaxSecondsHelp" />
+                            <small id="settingsTtsMaxSecondsHelp" class="settings-note">Guides spoken-response planning and
+                                duration diagnostics; playback is not cut off at this value.</small>
                         </div>
 
                         <div class="speech-settings-row">

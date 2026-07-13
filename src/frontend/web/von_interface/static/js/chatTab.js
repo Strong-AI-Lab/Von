@@ -20237,7 +20237,6 @@ let dictationState = null;
 let activeTtsTurnId = null;
 let activeTtsButton = null;
 let activeTtsPlaybackState = null;
-let activeTtsTimeoutId = null;
 
 function safeLocalStorageGet(key) {
     try {
@@ -20311,14 +20310,6 @@ function getTtsMaxSpeakingSeconds() {
         return Math.min(Math.max(parsed, 10), 600);
     }
     return DEFAULT_TTS_MAX_SPEAKING_SECONDS;
-}
-
-function clearActiveTtsTimeout() {
-    if (!activeTtsTimeoutId) {
-        return;
-    }
-    try { clearTimeout(activeTtsTimeoutId); } catch (_) { }
-    activeTtsTimeoutId = null;
 }
 
 function estimateSpeechDurationMs(text, rate) {
@@ -20557,7 +20548,6 @@ function clearActiveTtsUi() {
     }
     activeTtsTurnId = null;
     activeTtsButton = null;
-    clearActiveTtsTimeout();
 }
 
 function toggleSpeakTurn(turnId, text, button) {
@@ -20654,18 +20644,6 @@ function toggleSpeakTurn(turnId, text, button) {
             clearActiveTtsUi();
         }
     };
-
-    const maxSeconds = getTtsMaxSpeakingSeconds();
-    if (Number.isFinite(maxSeconds) && maxSeconds >= 10) {
-        clearActiveTtsTimeout();
-        activeTtsTimeoutId = setTimeout(() => {
-            if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
-                activeTtsPlaybackState.stopRequested = true;
-            }
-            stopSpeaking();
-            finish('timeout');
-        }, Math.round(maxSeconds * 1000));
-    }
 
     try {
         utterance.onstart = () => {
@@ -25569,40 +25547,19 @@ function appendSharedTurnToTranscript(message) {
     updateScrollToEndButtonVisibility(scrollableField);
 }
 
-function ensureScrollableFieldShell(scrollableField) {
-    if (!(scrollableField instanceof HTMLElement)) {
-        return null;
-    }
-
-    const parent = scrollableField.parentElement;
-    if (parent && parent.classList.contains('scrollable-field-shell')) {
-        return parent;
-    }
-
-    if (!parent) {
-        return null;
-    }
-
-    const shell = document.createElement('div');
-    shell.className = 'scrollable-field-shell';
-    parent.insertBefore(shell, scrollableField);
-    shell.appendChild(scrollableField);
-    return shell;
-}
-
 function ensureScrollToEndButton(scrollableField = null) {
     const targetField = scrollableField || document.getElementById('scrollableField');
     if (!(targetField instanceof HTMLElement)) {
         return null;
     }
 
-    const shell = ensureScrollableFieldShell(targetField);
-    if (!(shell instanceof HTMLElement)) {
+    const controlHost = targetField.closest('.content-wrapper') || targetField.parentElement;
+    if (!(controlHost instanceof HTMLElement)) {
         return null;
     }
 
     let button = document.getElementById(CHAT_SCROLL_TO_END_BUTTON_ID);
-    if (button instanceof HTMLButtonElement && button.parentElement !== shell) {
+    if (button instanceof HTMLButtonElement && button.parentElement !== controlHost) {
         button.remove();
         button = null;
     }
@@ -25624,7 +25581,7 @@ function ensureScrollToEndButton(scrollableField = null) {
             }
             void scrollConversationToEnd(targetField, { smooth: true });
         });
-        shell.appendChild(button);
+        controlHost.appendChild(button);
     }
 
     return button;
@@ -33476,6 +33433,9 @@ export function __testOnly_scrollConversationToSessionList(options = {}) {
 }
 export function __testOnly_appendMessage(...args) {
     return appendMessage(...args);
+}
+export function __testOnly_toggleSpeakTurn(turnId, text, button) {
+    return toggleSpeakTurn(turnId, text, button);
 }
 
 // Export for testing.
