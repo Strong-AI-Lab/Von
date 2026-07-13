@@ -635,7 +635,7 @@ def test_completion_gate_rebuild_uses_workflow_method_catalogue_snapshot() -> No
     )
 
 
-def test_completion_gate_promotes_selected_workflow_response_to_response_text() -> None:
+def test_completion_gate_preserves_authored_narration_over_selected_candidate() -> None:
     progress_events: list[dict[str, Any]] = []
     data = {
         "turn_execution_record": {
@@ -675,9 +675,9 @@ def test_completion_gate_promotes_selected_workflow_response_to_response_text() 
     assert result.outputs["selected_workflow_user_response"] == (
         "Grounded selected workflow answer."
     )
-    assert result.outputs["final_response"] == "Grounded selected workflow answer."
-    assert result.outputs["response_text"] == "Grounded selected workflow answer."
-    assert result.outputs["current_response"] == "Grounded selected workflow answer."
+    assert result.outputs["final_response"] == "Generic narration answer."
+    assert result.outputs["response_text"] == "Generic narration answer."
+    assert result.outputs["current_response"] == "Generic narration answer."
     ready_events = [
         event
         for event in progress_events
@@ -685,7 +685,7 @@ def test_completion_gate_promotes_selected_workflow_response_to_response_text() 
     ]
     assert ready_events
     assert ready_events[-1]["request_id"] == "turn-completion-ready"
-    assert ready_events[-1]["response_text"] == "Grounded selected workflow answer."
+    assert ready_events[-1]["response_text"] == "Generic narration answer."
     assert ready_events[-1]["workflow_routing"] == {
         "selected_workflow_id": "#V#example_workflow"
     }

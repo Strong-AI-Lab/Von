@@ -879,15 +879,46 @@ def test_repo_seed_bundle_is_a_valid_generic_contract_fixture() -> None:
     assert contract.suite_concept_id == "#V#operational_certification_benchmark_suite"
     assert contract.topological_scenario_ids == (
         "authenticated_identity_read_only",
+        "durable_concept_profile_resume_and_idempotence",
+        "represented_workflow_concept_same_session_followup",
         "typed_missing_entity_recovery",
-        "unique_state_message_create_and_read_back",
+        "unique_state_marker_create_and_read_back",
     )
     assert contract.policy["trial_count"] == 5
-    assert all(
-        scenario.execution["adapter_id"]
-        == "#V#authenticated_von_generate_operational_adapter"
-        for scenario in contract.scenarios
+    scenarios = {scenario.scenario_id: scenario for scenario in contract.scenarios}
+    multi_turn = scenarios["represented_workflow_concept_same_session_followup"]
+    assert multi_turn.execution["adapter_id"] == (
+        "#V#authenticated_von_multi_turn_operational_adapter"
     )
+    assert len(multi_turn.execution["inputs"]["turns"]) == 3
+    assert multi_turn.reset_policy == {"mode": "new_chat_session"}
+    assert multi_turn.metadata["pilot_acceptance_eligible"] is False
+
+    durable = scenarios["durable_concept_profile_resume_and_idempotence"]
+    assert durable.execution["adapter_id"] == (
+        "#V#durable_workflow_execute_operational_adapter"
+    )
+    assert durable.execution["inputs"]["workflow_id"] == (
+        "#V#concept_search_instance_retrieval_workflow"
+    )
+    assert durable.execution["inputs"]["submission_plan"] == [
+        {"await_terminal": False, "timeout_seconds": 0.0},
+        {"await_terminal": True, "timeout_seconds": 120.0},
+    ]
+    assert durable.reset_policy == {"mode": "read_only"}
+    assert durable.permitted_effects == ()
+    assert durable.metadata["pilot_acceptance_eligible"] is False
+
+    unique_state = scenarios["unique_state_marker_create_and_read_back"]
+    absence_probe = unique_state.reset_policy["authoritative_absence_probe"]
+    assert absence_probe == {
+        "workflow_id": "#V#operational_marker_absence_probe_workflow",
+        "inputs": {"isolation_id": "{{isolation_id}}"},
+        "required_action_ids": [
+            "workflow_mcp.invoke_tool",
+            "workflow_control.context_project",
+        ],
+    }
 
 
 def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> None:
@@ -902,3 +933,5 @@ def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> Non
 
     assert definition_contract.contract_sha256 == selected_contract.contract_sha256
     assert selected_contract.source == "seed_bundle_import_fixture"
+    assert definition["seed_version"] == 3
+    assert selected_case_set["seed_version"] == 3

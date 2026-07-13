@@ -8,7 +8,7 @@ namespace propagation, and write-guardrail surface.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 
@@ -403,6 +403,14 @@ def _handle_workflow_mcp_invoke_tool(
             tool_name=resolved_tool_name,
             payload=payload,
             target_contract_state=target_contract_state_from_context(request.data),
+            prior_tool_invocations=(
+                request.data.get("invocations")
+                if isinstance(request.data.get("invocations"), Sequence)
+                and not isinstance(
+                    request.data.get("invocations"), (str, bytes, bytearray)
+                )
+                else ()
+            ),
         )
         if not target_validation.ok:
             error_code = target_validation.first_error_code()

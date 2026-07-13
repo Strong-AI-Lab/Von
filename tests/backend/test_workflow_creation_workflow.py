@@ -11,6 +11,10 @@ import pytest
 from src.backend.db.mongo_client import get_db
 from src.backend.services import concept_service
 from src.backend.services.entity_representation_workflow_vontology_service import (
+    COMPANY_REPRESENTATION_WORKFLOW_ID,
+    EVENT_REPRESENTATION_WORKFLOW_ID,
+    PERSON_REPRESENTATION_WORKFLOW_ID,
+    PLACE_REPRESENTATION_WORKFLOW_ID,
     bootstrap_canonical_entity_representation_workflows,
 )
 from src.backend.services.text_value_service import (
@@ -25,7 +29,10 @@ from src.backend.services.workflow_discovery_service import (
     discover_workflows_for_turn,
 )
 from src.backend.workflows import workflow_concept_authority_service as authority_service
-from src.backend.workflows.action_registry import WorkflowEnvironment
+from src.backend.workflows.action_registry import (
+    WorkflowActionRequest,
+    WorkflowEnvironment,
+)
 from src.backend.workflows.durable.registry_factory import build_durable_action_registry
 from src.backend.workflows.durable.workflow_creation_workflow import (
     WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
@@ -42,6 +49,8 @@ from src.backend.workflows.durable.workflow_creation_workflow import (
     WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
     WORKFLOW_CREATION_STEP_SEQUENCE,
     WORKFLOW_CREATION_WORKFLOW_ID,
+    _handle_discover_existing_workflows,
+    _handle_verify_discoverability,
 )
 from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import (
@@ -67,7 +76,11 @@ from src.backend.workflows.workflow_creation_contracts import (
     WORKFLOW_CREATION_ACTION_CONCEPT_RESOLVE_SCHOLARLY_AUTHORS,
 )
 from src.backend.workflows.workflow_template_profile_service import (
+    WORKFLOW_CREATION_COMPANY_TEMPLATE_ID,
+    WORKFLOW_CREATION_EVENT_TEMPLATE_ID,
     WORKFLOW_CREATION_PERSON_TEMPLATE_ID,
+    WORKFLOW_CREATION_PLACE_TEMPLATE_ID,
+    clear_workflow_template_bundle_cache,
 )
 from src.backend.workflows.workflow_definition_identity_service import (
     collect_workflow_action_ids,
@@ -139,6 +152,7 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
         _stub_capability_search,
     )
     authority_service.clear_workflow_type_resolution_cache()
+    clear_workflow_template_bundle_cache()
 
     from src.backend.services.workflow_discovery_service import (
         invalidate_workflow_discovery_executability_caches,
@@ -155,6 +169,7 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
     yield
     invalidate_workflow_discovery_executability_caches()
     authority_service.clear_workflow_type_resolution_cache()
+    clear_workflow_template_bundle_cache()
 
 
 def _ensure_type(concept_id: str, name: str) -> None:
@@ -166,6 +181,179 @@ def _ensure_type(concept_id: str, name: str) -> None:
         )
     except Exception:
         pass
+
+
+def test_discovery_action_projects_represented_exact_workflow_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit_workflow_id = "#V#synthetic_entity_representation_workflow"
+    unrelated_workflow_id = "#V#unrelated_discovered_workflow"
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_creation_workflow.discover_workflows",
+        lambda *_args, **_kwargs: WorkflowDiscoveryResult(
+            matches=[
+                WorkflowMatch(
+                    concept_id=unrelated_workflow_id,
+                    name="Unrelated Discovered Workflow",
+                    description="Synthetic unrelated candidate.",
+                    relevance_score=0.8,
+                    match_source="synthetic_discovery",
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_creation_workflow.load_workflow_definition_from_vontology",
+        lambda workflow_id: (
+            object() if workflow_id == explicit_workflow_id else None
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_creation_workflow.classify_workflow_concept_executability",
+        lambda workflow_id: (
+            (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+            if workflow_id == explicit_workflow_id
+            else (False, "workflow_not_found", None)
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_creation_workflow.resolve_workflow_description",
+        lambda *_args, **_kwargs: (
+            "Canonical synthetic entity representation execution workflow.",
+            "text_relation:#V#hasDescription",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_creation_workflow.resolve_workflow_routing_profile",
+        lambda _workflow_id: (
+            {"schema_version": "workflow_routing_profile.v1", "role": "execution"},
+            "text_relation:#V#hasWorkflowRoutingProfileJson",
+        ),
+    )
+
+    result = _handle_discover_existing_workflows(
+        WorkflowActionRequest(
+            action_id="workflow_authoring.discover_existing_workflows",
+            inputs={
+                "candidate_workflow_ids": [explicit_workflow_id],
+                "max_results": 8,
+            },
+            environment=WorkflowEnvironment(llm_client=None),
+            data={"prompt": "Represent a synthetic entity."},
+        )
+    )
+
+    assert result.ok is True
+    candidate_rows = result.outputs["workflow_authoring_candidate_workflows"]
+    assert [row["concept_id"] for row in candidate_rows] == [
+        explicit_workflow_id,
+        unrelated_workflow_id,
+    ]
+    assert candidate_rows[0]["is_executable"] is True
+    assert candidate_rows[0]["match_source"] == (
+        "represented_explicit_workflow_candidate"
+    )
+    assert result.outputs["workflow_authoring_discovery_result"][
+        "explicit_candidate_workflow_ids"
+    ] == [explicit_workflow_id]
+
+
+@pytest.mark.parametrize(
+    (
+        "template_id",
+        "workflow_id",
+        "prompt",
+        "entity_domain",
+        "entity_name",
+        "entity_alias",
+    ),
+    [
+        (
+            WORKFLOW_CREATION_PERSON_TEMPLATE_ID,
+            PERSON_REPRESENTATION_WORKFLOW_ID,
+            "Represent Ada Lovelace in the Vontology.",
+            "person",
+            "Ada Lovelace",
+            "Augusta Ada King",
+        ),
+        (
+            WORKFLOW_CREATION_COMPANY_TEMPLATE_ID,
+            COMPANY_REPRESENTATION_WORKFLOW_ID,
+            "Represent OpenAI in the Vontology as a company.",
+            "company",
+            "OpenAI",
+            "OpenAI, Inc.",
+        ),
+        (
+            WORKFLOW_CREATION_EVENT_TEMPLATE_ID,
+            EVENT_REPRESENTATION_WORKFLOW_ID,
+            "Represent the 2026 Neuro-Symbolic Systems Workshop as an event.",
+            "event",
+            "2026 Neuro-Symbolic Systems Workshop",
+            "NSS Workshop 2026",
+        ),
+        (
+            WORKFLOW_CREATION_PLACE_TEMPLATE_ID,
+            PLACE_REPRESENTATION_WORKFLOW_ID,
+            "Represent the Auckland Domain in the Vontology as a place.",
+            "place",
+            "Auckland Domain",
+            "Pukekawa",
+        ),
+    ],
+)
+def test_v2_entity_templates_pass_creation_runtime_verification(
+    template_id: str,
+    workflow_id: str,
+    prompt: str,
+    entity_domain: str,
+    entity_name: str,
+    entity_alias: str,
+) -> None:
+    bootstrap_report = bootstrap_canonical_entity_representation_workflows()
+    assert (bootstrap_report.get("template_publication") or {}).get(
+        "repo_seed_version"
+    ) == "3"
+    _seed_workflow_creation_synthesis_policy()
+
+    payload = {
+        "ready_to_materialise": True,
+        "needs_user_affirmation": False,
+        "entity_name": entity_name,
+        "entity_description": f"Verification description for {entity_name}.",
+        "entity_aliases": [entity_alias],
+        "entity_source_text": prompt,
+        "response_text": f"Representing {entity_name} now.",
+    }
+    result = _handle_verify_discoverability(
+        WorkflowActionRequest(
+            action_id="workflow_authoring.verify_discoverability",
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=_QueuedLLM([json.dumps(payload)]),
+                user_namespace="#V#test_user",
+            ),
+            data={
+                "prompt": prompt,
+                "target_workflow_id": workflow_id,
+                "workflow_template_id": template_id,
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert result.outputs.get("structural_validation_passed") is True
+    assert result.outputs.get("postconditions_verified") is True
+    contract_validation = result.outputs.get("contract_validation") or {}
+    assert contract_validation.get("valid") is True
+    assert contract_validation.get("unsupported_action_ids") == []
+    workflow_spec = result.outputs.get("workflow_creation_spec") or {}
+    assert (workflow_spec.get("template_resolution") or {}).get(
+        "template_id"
+    ) == template_id
+    assert workflow_spec.get("postcondition_probe", {}).get(
+        "entity_representation_domain"
+    ) == entity_domain
 
 
 def _seed_workflow_creation_graph_without_actions() -> None:

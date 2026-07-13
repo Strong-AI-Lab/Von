@@ -1184,6 +1184,66 @@ def test_conditional_required_tools_do_not_create_unconditional_mutation_blocker
     )
 
 
+def test_create_if_absent_reuse_does_not_require_duplicate_create_concepts() -> None:
+    record = _build_record(
+        prompt_text=(
+            "Represent the named entity if it is not already represented, then "
+            "read it back."
+        ),
+        response_text=(
+            "The existing represented entity was resolved and read back without "
+            "creating a duplicate."
+        ),
+        turn_expected_outcome_contract={
+            "summary": "Reuse an exact existing entity or create only when absent.",
+            "required_tools": ["fetch_concept"],
+            "conditional_required_tools": ["create_concepts"],
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#synthetic_existing_entity"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        },
+        tool_invocations=[
+            {
+                "tool": "resolve_concept_by_name",
+                "payload": {
+                    "success": True,
+                    "status": "resolved",
+                    "resolved_concept_id": "#V#synthetic_existing_entity",
+                },
+            },
+            {
+                "tool": "fetch_concept",
+                "payload": {
+                    "success": True,
+                    "concept_id": "#V#synthetic_existing_entity",
+                    "kind": "individual",
+                },
+            },
+        ],
+    )
+
+    summary = record["execution"]["summary"]
+    assert summary.get("activated_conditional_required_tools") in (None, [])
+    projection = summary["expected_outcome_obligation_carry_forward"]
+    assert projection["conditional_tools_satisfied_without_execution"] == [
+        "create_concepts"
+    ]
+    assert all(
+        effect.get("required_tools") != ["create_concepts"]
+        for effect in record.get("required_effects") or []
+        if isinstance(effect, dict)
+    )
+    assert "prompt_required_mutation_create_concepts_missing" not in (
+        (record.get("completion_gate") or {}).get("blocking_failure_codes") or []
+    )
+
+
 def test_turn_contract_search_bound_predicate_incidence_requires_searched_target() -> (
     None
 ):

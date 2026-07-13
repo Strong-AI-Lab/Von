@@ -66,6 +66,9 @@ from src.backend.services.workflow_override_policy_service import (
     assess_workflow_routing_candidate_policy,
     choose_custom_workflow_override_candidate,
 )
+from src.backend.services.workflow_discovery_service import (
+    assess_workflow_routing_authority,
+)
 from src.backend.services.minimal_imposition_runtime_profile_vontology_service import (
     load_minimal_imposition_runtime_profile,
 )
@@ -1463,15 +1466,14 @@ class _CustomWorkflowDispatchSupport:
         if not budget_exhausted:
             return False
 
-        try:
-            candidate_count = int(discovery_payload.get("candidate_count") or 0)
-        except (TypeError, ValueError):
-            candidate_count = 0
-        try:
-            match_count = int(discovery_payload.get("match_count") or 0)
-        except (TypeError, ValueError):
-            match_count = 0
-        if candidate_count > 0 or match_count > 0:
+        # `candidate_count` includes excluded/non-executable discovery noise.
+        # Only an eligible routing match supersedes timeout recovery; otherwise
+        # a capable selector must retain the opportunity to request a directly
+        # launchable represented workflow that discovery did not surface.
+        routing_match_count = self.orchestrator._workflow_discovery_routing_match_count(
+            discovery_payload
+        )
+        if routing_match_count > 0:
             return False
 
         excluded_candidate_ids = {
@@ -1485,7 +1487,65 @@ class _CustomWorkflowDispatchSupport:
             concept_id = str(raw_candidate.get("concept_id") or "").strip().lower()
             if concept_id:
                 excluded_candidate_ids.add(concept_id)
+        for candidate_key in ("candidates", "matches"):
+            for raw_candidate in discovery_payload.get(candidate_key) or ():
+                if not isinstance(raw_candidate, Mapping):
+                    continue
+                if raw_candidate.get("routing_eligible") is not False:
+                    continue
+                concept_id = str(raw_candidate.get("concept_id") or "").strip().lower()
+                if concept_id:
+                    excluded_candidate_ids.add(concept_id)
         if requested_workflow_id.lower() in excluded_candidate_ids:
+            return False
+
+        routing_authority = (
+            self.orchestrator._assess_selector_timeout_recovery_workflow_authority(
+                requested_workflow_id,
+                turn_text=self.prompt,
+            )
+        )
+        routing_authority_event = {
+            "type": "workflow_selector_recovery_authority_check",
+            "stage": "workflow_dispatch",
+            "requested_candidate_workflow_id": requested_workflow_id,
+            **dict(routing_authority),
+        }
+        self.aux_llm_calls.append(
+            annotate_python_decision_event(
+                routing_authority_event,
+                stage="workflow_dispatch",
+                component="workflow_discovery_service",
+                function="assess_workflow_routing_authority",
+                decision_class="workflow_selector_recovery_authority_check",
+                decision_source="represented_workflow_routing_authority",
+                changed_outcome=not bool(routing_authority.get("routing_eligible")),
+                reason_code=str(
+                    routing_authority.get("routing_exclusion_reason")
+                    or "routing_eligible"
+                ),
+                possible_inappropriate_python_code_use=False,
+            )
+        )
+        if not bool(routing_authority.get("routing_eligible")):
+            self.record_dispatch_prepare_note(
+                step_id="selector_unmatched_candidate_recovery_authority",
+                step_label="Verify selector-requested workflow authority",
+                status="failed",
+                result_summary=(
+                    "The selector-requested workflow is not eligible for direct "
+                    "routing under its represented publication lifecycle or "
+                    "routing profile."
+                ),
+                workflow_id=requested_workflow_id,
+                workflow_name=self.resolve_selected_workflow_name(
+                    requested_workflow_id
+                ),
+                reason_code=str(
+                    routing_authority.get("routing_exclusion_reason")
+                    or "workflow_routing_authority_ineligible"
+                ),
+            )
             return False
 
         try:
@@ -3393,6 +3453,9 @@ class InternalMCPChatOrchestrator:
     _SALIENT_PREFLIGHT_MAX_ANCESTOR_DEPTH = 2
     _SALIENT_PREFLIGHT_MAX_TYPE_EXPANSIONS = 24
     _TOOL_CALL_REPAIR_PROMPTS = ("#V#tool_call_repair_prompt",)
+    _WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPTS = (
+        "#V#workflow_step_structured_output_backfill_prompt",
+    )
     _TURN_CURRENT_REQUEST_STAGE_PROMPTS = ("#V#turn_current_request_stage_prompt",)
     _TODO_REFRESH_EXTRACT_TASKS_PROMPTS = ("#V#todo_refresh_extract_tasks_prompt",)
     _TODO_REFRESH_EXTRACT_TASKS_SYSTEM_PROMPTS = (
@@ -7803,6 +7866,7 @@ class InternalMCPChatOrchestrator:
             "tool_plan_context_lineage",
             "tool_follow_up_context_lineage",
             "tool_call_repair_decision",
+            "workflow_step_output_contract",
         ):
             value = data.get(key)
             if isinstance(value, Mapping):
@@ -10504,6 +10568,50 @@ class InternalMCPChatOrchestrator:
             }
         )
 
+    def _workflow_step_backfill_prompt(
+        self,
+        data: Mapping[str, Any],
+    ) -> tuple[str, bool, str | None]:
+        output_contract = data.get("workflow_step_output_contract")
+        if not isinstance(output_contract, Mapping):
+            return (
+                "Provide a final answer to the user now that the tool result is "
+                "available. If the tool failed, explain the error. If you need to "
+                "call another tool, you may do so.",
+                False,
+                None,
+            )
+        output_format = str(output_contract.get("output_format") or "").strip()
+        if not output_format:
+            return (
+                "Provide a final answer to the user now that the tool result is "
+                "available. If the tool failed, explain the error. If you need to "
+                "call another tool, you may do so.",
+                False,
+                None,
+            )
+
+        authored_prompt = str(data.get("prompt") or "").strip()
+        if len(authored_prompt) > 20_000:
+            authored_prompt = authored_prompt[:20_000].rstrip() + "\n[truncated]"
+        contract_summary = stable_json_dumps(output_contract, max_chars=6_000)
+        rendered_prompt = self._render_authoritative_prompt(
+            self._WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPTS,
+            variables={
+                "output_format": output_format,
+                "workflow_step_output_contract": contract_summary,
+                "original_authoritative_workflow_step_instructions": authored_prompt,
+            },
+            max_chars=32_000,
+            error_context="workflow_step_structured_output_backfill",
+            required=True,
+        )
+        if rendered_prompt is None:  # pragma: no cover - required=True raises
+            raise AuthoritativePromptUnavailableError(
+                "workflow_step_structured_output_backfill_prompt_missing_or_empty"
+            )
+        return rendered_prompt.text, True, rendered_prompt.prompt_id
+
     def _action_tool_calling_backfill(self, request: Any) -> WorkflowActionResult:
         """Summariser LLM call after tool execution; detect chained tool calls.
 
@@ -10672,11 +10780,47 @@ class InternalMCPChatOrchestrator:
             )
 
         # Summariser LLM call.
-        follow_up_prompt = (
-            "Provide a final answer to the user now that the tool result is available. "
-            "If the tool failed, explain the error. "
-            "If you need to call another tool, you may do so."
-        )
+        (
+            follow_up_prompt,
+            preserve_workflow_step_output_contract,
+            workflow_step_backfill_prompt_id,
+        ) = self._workflow_step_backfill_prompt(data)
+        if workflow_step_backfill_prompt_id and request.trace is not None:
+            request.trace.record_prompt(
+                prompt_id=workflow_step_backfill_prompt_id,
+                resolved_prompt=follow_up_prompt,
+                variables={
+                    "workflow_step_output_contract": dict(
+                        cast(Mapping[str, Any], data["workflow_step_output_contract"])
+                    ),
+                    "original_authoritative_workflow_step_instructions": str(
+                        data.get("prompt") or ""
+                    ),
+                },
+            )
+        if preserve_workflow_step_output_contract and isinstance(aux_llm_calls, list):
+            aux_llm_calls.append(
+                annotate_python_decision_event(
+                    {
+                        "type": "workflow_step_output_contract_backfill",
+                        "stage": "backfill",
+                        "prompt_id": workflow_step_backfill_prompt_id,
+                        "output_contract": dict(
+                            cast(
+                                Mapping[str, Any], data["workflow_step_output_contract"]
+                            )
+                        ),
+                    },
+                    stage="summariser",
+                    component="internal_mcp_orchestrator",
+                    function="_action_tool_calling_backfill",
+                    decision_class="workflow_step_contract_preservation",
+                    decision_source="authored_workflow_step_contract",
+                    changed_outcome=True,
+                    reason_code="structured_workflow_step_backfill",
+                    possible_inappropriate_python_code_use=False,
+                )
+            )
         follow_up_context = self._build_follow_up_llm_context(
             augmented_context,
             max_chars=self._follow_up_context_chars,
@@ -12022,10 +12166,14 @@ class InternalMCPChatOrchestrator:
                     exc,
                 )
 
-        safe_final_response = self._sanitise_user_visible_action_output(
-            current_response,
-            aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
-            source_stage="tool_calling.backfill",
+        safe_final_response = (
+            current_response
+            if preserve_workflow_step_output_contract
+            else self._sanitise_user_visible_action_output(
+                current_response,
+                aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+                source_stage="tool_calling.backfill",
+            )
         )
         return WorkflowActionResult(
             outputs={
@@ -15247,7 +15395,10 @@ class InternalMCPChatOrchestrator:
             if allowed_tools is not None
             else None
         )
-        if represented_allowed_tool_names is not None and activated_conditional_required_tools:
+        if (
+            represented_allowed_tool_names is not None
+            and activated_conditional_required_tools
+        ):
             represented_allowed_tool_names = {
                 *represented_allowed_tool_names,
                 *(
@@ -15306,9 +15457,7 @@ class InternalMCPChatOrchestrator:
                 ),
             )
             required_tools.append(
-                matching_surface_names[0]
-                if matching_surface_names
-                else raw_tool_name
+                matching_surface_names[0] if matching_surface_names else raw_tool_name
             )
 
         for tool_name in (
@@ -21520,7 +21669,9 @@ class InternalMCPChatOrchestrator:
                 tool_name=tool_name,
                 payload=payload,
                 target_contract_state=target_contract_state,
+                prior_tool_invocations=tool_invocations,
             )
+            diagnostics.extend(target_validation.resolution_evidence)
             if not target_validation.ok:
                 for diagnostic in target_validation.diagnostics:
                     message = str(diagnostic.get("message") or "").strip()
@@ -34690,6 +34841,44 @@ class InternalMCPChatOrchestrator:
                 return len(raw_candidates)
         return 0
 
+    @staticmethod
+    def _workflow_discovery_routing_match_count(
+        workflow_discovery_result: Mapping[str, Any] | None,
+    ) -> int:
+        """Return the count of candidates eligible for selector routing.
+
+        Discovery retains excluded candidates for diagnostics, so raw
+        ``candidate_count`` cannot establish that recovery has an alternative
+        route. Combine the explicit routing projection, canonical
+        ``match_count`` summary, and legacy ``matches`` payloads
+        conservatively.
+        """
+
+        if not isinstance(workflow_discovery_result, Mapping):
+            return 0
+        eligible_count = 0
+        routing_matches = workflow_discovery_result.get("routing_matches")
+        if isinstance(routing_matches, list):
+            eligible_count = max(eligible_count, len(routing_matches))
+        raw_match_count = workflow_discovery_result.get("match_count")
+        if raw_match_count is not None:
+            try:
+                eligible_count = max(eligible_count, max(0, int(raw_match_count)))
+            except (TypeError, ValueError):
+                pass
+        matches = workflow_discovery_result.get("matches")
+        if isinstance(matches, list):
+            eligible_count = max(
+                eligible_count,
+                sum(
+                    1
+                    for match in matches
+                    if not isinstance(match, Mapping)
+                    or match.get("routing_eligible") is not False
+                ),
+            )
+        return eligible_count
+
     @classmethod
     def _workflow_discovery_has_zero_candidate_operational_blocker(
         cls,
@@ -35643,23 +35832,21 @@ class InternalMCPChatOrchestrator:
                 # Evidence preservation: a refresh replaces the prefilled
                 # payload wholesale. If the prefilled attempt already ran out
                 # of discovery budget and the refresh still surfaced zero
-                # candidates, the turn's discovery remains budget-starved;
-                # dropping that signal would disable downstream budget-timeout
-                # recovery paths on evidence this same turn already produced.
+                # routing-eligible matches, the turn's discovery remains
+                # budget-starved. Excluded/non-executable candidates are useful
+                # diagnostics but are not routes and must not erase timeout
+                # evidence produced by this same turn.
                 if (
                     isinstance(raw_discovery, Mapping)
                     and bool(raw_discovery.get("budget_exhausted"))
-                    and not workflow_discovery_result.get("budget_exhausted")
-                    and not any(
-                        isinstance(workflow_discovery_result.get(candidate_key), list)
-                        and workflow_discovery_result.get(candidate_key)
-                        for candidate_key in (
-                            "candidates",
-                            "matches",
-                            "routing_matches",
-                        )
+                    and self._workflow_discovery_routing_match_count(
+                        workflow_discovery_result
                     )
+                    <= 0
                 ):
+                    workflow_discovery_result["refresh_discovery_budget_exhausted"] = (
+                        bool(workflow_discovery_result.get("budget_exhausted"))
+                    )
                     workflow_discovery_result["budget_exhausted"] = True
                     workflow_discovery_result["prior_discovery_budget_exhausted"] = True
                     prior_detail = str(
@@ -35994,7 +36181,16 @@ class InternalMCPChatOrchestrator:
         request: Any,
     ) -> WorkflowActionResult:
         data = request.data
-        aux_llm_calls = data.get("aux_llm_calls")
+        raw_aux_llm_calls = data.get("aux_llm_calls")
+        aux_llm_calls = (
+            [
+                {str(key): value for key, value in item.items() if isinstance(key, str)}
+                for item in raw_aux_llm_calls
+                if isinstance(item, Mapping)
+            ]
+            if isinstance(raw_aux_llm_calls, list)
+            else []
+        )
         emit_phase_transition_raw = data.get("emit_phase_transition")
         emit_phase_transition = (
             cast(Callable[..., Any], emit_phase_transition_raw)
@@ -36159,12 +36355,16 @@ class InternalMCPChatOrchestrator:
                     ),
                 }
             )
+            # Make selector evidence part of the action's explicit durable output
+            # contract instead of relying on a shared mutable list alias.
+            outputs["aux_llm_calls"] = list(aux_llm_calls)
 
         return WorkflowActionResult(outputs=outputs)
 
     def _action_turn_execution_route(self, request: Any) -> WorkflowActionResult:
         """Select the workflow for the current supervised turn."""
 
+        route_start = time.perf_counter()
         data = request.data
         data_mutable = cast(MutableMapping[str, Any], data)
         env = request.environment
@@ -36260,7 +36460,42 @@ class InternalMCPChatOrchestrator:
         selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
         selector_selection_metadata: dict[str, Any] = {}
         selector_context_telemetry = self._copy_string_key_mapping(
+            data.get("selector_context_lineage")
+        ) or self._copy_string_key_mapping(
             prepared_outputs.get("selector_context_lineage")
+        )
+        selector_llm_step_envelope = (
+            data.get("llm_step_envelope")
+            if isinstance(data.get("selector_raw_response"), str)
+            and str(data.get("selector_raw_response") or "").strip()
+            and isinstance(data.get("llm_step_envelope"), Mapping)
+            and str(
+                cast(Mapping[str, Any], data.get("llm_step_envelope")).get(
+                    "workflow_state_id"
+                )
+                or ""
+            ).strip()
+            == "selector_decision"
+            else None
+        )
+        selector_model_name = (
+            str(selector_llm_step_envelope.get("selected_model") or "").strip()
+            if isinstance(selector_llm_step_envelope, Mapping)
+            else ""
+        ) or None
+        selector_model_candidate = (
+            {
+                str(key): value
+                for key, value in selector_llm_step_envelope.get(
+                    "selected_model_candidate", {}
+                ).items()
+                if isinstance(key, str)
+            }
+            if isinstance(selector_llm_step_envelope, Mapping)
+            and isinstance(
+                selector_llm_step_envelope.get("selected_model_candidate"), Mapping
+            )
+            else None
         )
         selector_override_trace: dict[str, Any] | None = None
         selector_fast_path_evaluation: dict[str, Any] | None = None
@@ -36338,8 +36573,8 @@ class InternalMCPChatOrchestrator:
                         )
                         (
                             selector_response_text,
-                            _classifier_model,
-                            _selector_candidate,
+                            classifier_model,
+                            selector_candidate,
                         ) = self._run_llm_with_fallbacks(
                             stage="workflow_dispatch",
                             policy_stage="classifier",
@@ -36363,6 +36598,12 @@ class InternalMCPChatOrchestrator:
                             prefer_default_model=bool(default_model),
                             timeout_override_sec=timeout_override_sec,
                             workflow_stage_id="selector_preparation",
+                        )
+                        selector_model_name = classifier_model
+                        selector_model_candidate = (
+                            dict(selector_candidate)
+                            if isinstance(selector_candidate, Mapping)
+                            else None
                         )
                         prepared_outputs["selector_raw_response"] = (
                             selector_response_text
@@ -36390,6 +36631,101 @@ class InternalMCPChatOrchestrator:
                 if isinstance(selector_selection.selection_metadata, Mapping)
                 else {}
             )
+            selector_policy = (
+                dict(selector_prompt.policy_recommendation)
+                if isinstance(selector_prompt.policy_recommendation, Mapping)
+                else {}
+            )
+
+            def _selector_text_telemetry(value: Any) -> dict[str, Any] | None:
+                if not isinstance(value, str) or not value.strip():
+                    return None
+                text = value.strip()
+                return {"text": text, "char_count": len(text)}
+
+            selection_source = (
+                selector_selection.selection_source.strip()
+                if isinstance(selector_selection.selection_source, str)
+                and selector_selection.selection_source.strip()
+                else "selector"
+            )
+            selector_telemetry_entry = {
+                "type": "workflow_selector",
+                "stage": "selector_decision",
+                "workflow_id": selector_selection.workflow_id,
+                "verdict": selector_selection.verdict,
+                "selection_source": selection_source,
+                "prompt_id": selector_selection.prompt_id,
+                "policy_stage": "classifier",
+                "model_name": selector_model_name,
+                "candidate": selector_model_candidate,
+                "prompt": _selector_text_telemetry(selector_selection.prompt_used),
+                "prompt_provenance": (
+                    dict(selector_prompt.prompt_provenance)
+                    if isinstance(selector_prompt.prompt_provenance, Mapping)
+                    else {}
+                ),
+                "requested_prompt_ids": list(selector_prompt.requested_prompt_ids),
+                "candidate_list": _selector_text_telemetry(
+                    selector_prompt.candidate_list_text
+                ),
+                "continuation_context": _selector_text_telemetry(
+                    selector_prompt.continuation_routing_context_text
+                ),
+                "context_lineage": (
+                    dict(selector_context_telemetry)
+                    if isinstance(selector_context_telemetry, Mapping)
+                    else None
+                ),
+                "response": _selector_text_telemetry(selector_selection.raw_response),
+                "candidate_entries": [
+                    dict(item)
+                    for item in selector_prompt.candidate_entries
+                    if isinstance(item, Mapping)
+                ],
+                "discovery_candidates": [
+                    dict(item)
+                    for item in selector_candidate_matches
+                    if isinstance(item, Mapping)
+                ],
+                "discovery_excluded_candidates": [
+                    dict(item)
+                    for item in excluded_discovered_matches
+                    if isinstance(item, Mapping)
+                ],
+                "discovered_workflow_ids": list(
+                    selector_selection.discovered_workflow_ids
+                ),
+                "discovery_candidate_count": len(selector_candidate_matches),
+                "discovery_excluded_count": len(excluded_discovered_matches),
+                "routing_duration_ms": int((time.perf_counter() - route_start) * 1000),
+                "confidence_score": selector_selection.confidence_score,
+                "reasoning": selector_selection.reasoning,
+                "prompt_failure_reason": selector_selection_metadata.get(
+                    "prompt_failure_reason"
+                ),
+                "prompt_failure_detail": selector_selection_metadata.get(
+                    "prompt_failure_detail"
+                ),
+                "policy_guidance_mode": selector_policy.get("guidance_mode"),
+                "policy_snapshot_id": selector_policy.get("snapshot_id"),
+                "policy_candidate_scores": (
+                    list(selector_policy.get("candidate_scores", ()))
+                    if isinstance(selector_policy.get("candidate_scores"), list)
+                    else None
+                ),
+                "selection_rationale": _derive_workflow_selection_rationale(
+                    selected_workflow_id=selector_selection.workflow_id,
+                    selector_verdict=selector_selection.verdict,
+                    selector_source=selection_source,
+                    candidate_workflow_ids=(selector_selection.discovered_workflow_ids),
+                    explicit_reasoning=selector_selection.reasoning,
+                ),
+                "selection_metadata": selector_selection_metadata or None,
+            }
+            # Retain each routing attempt. Two attempts may legitimately return
+            # the same text after seeing different candidates or context.
+            aux_llm_calls.append(selector_telemetry_entry)
             if (
                 isinstance(selector_selection.workflow_id, str)
                 and selector_selection.workflow_id.strip()
@@ -36985,6 +37321,7 @@ class InternalMCPChatOrchestrator:
                 outputs={
                     "workflow_discovery_result": workflow_discovery_result,
                     "workflow_discovery": workflow_discovery_result,
+                    "aux_llm_calls": list(aux_llm_calls),
                 },
             )
 
@@ -36997,6 +37334,7 @@ class InternalMCPChatOrchestrator:
                 **prepared_outputs,
                 "workflow_discovery_result": workflow_discovery_result,
                 "workflow_discovery": workflow_discovery_result,
+                "aux_llm_calls": list(aux_llm_calls),
                 "workflow_routing": asdict(routing_info),
                 "selected_workflow_trace": {
                     "selected_workflow_id": selected_workflow_id,
@@ -47752,31 +48090,9 @@ class InternalMCPChatOrchestrator:
         return merged
 
     @staticmethod
-    def _selector_candidate_covers_required_tools(
+    def _selector_candidate_declared_tool_keys(
         candidate: Mapping[str, Any],
-        required_tools: Sequence[str],
-    ) -> bool:
-        required_tool_keys = {
-            str(tool_name).strip().lower()
-            for tool_name in (required_tools or ())
-            if isinstance(tool_name, str) and str(tool_name).strip()
-        }
-        if not required_tool_keys:
-            return True
-        if candidate.get("concept_id") == TOOL_CALLING_WORKFLOW_ID:
-            return True
-        if "workflow_execute" in required_tool_keys:
-            if _eligible_discovered_workflow_execute_candidates((candidate,)):
-                required_tool_keys.discard("workflow_execute")
-                if not required_tool_keys:
-                    return True
-        for flag_key in (
-            "covers_expected_tool_set",
-            "satisfies_expected_outcome_contract",
-        ):
-            if candidate.get(flag_key) is True:
-                return True
-
+    ) -> set[str]:
         candidate_tool_values: list[Any] = []
         for key in (
             "matched_required_tools",
@@ -47786,7 +48102,12 @@ class InternalMCPChatOrchestrator:
             candidate_tool_values.append(candidate.get(key))
         routing_index_metadata = candidate.get("routing_index_metadata")
         if isinstance(routing_index_metadata, Mapping):
-            candidate_tool_values.append(routing_index_metadata.get("required_tools"))
+            candidate_tool_values.extend(
+                (
+                    routing_index_metadata.get("required_tools"),
+                    routing_index_metadata.get("workflow_action_ids"),
+                )
+            )
 
         candidate_tool_keys: set[str] = set()
         for raw_value in candidate_tool_values:
@@ -47799,59 +48120,52 @@ class InternalMCPChatOrchestrator:
             for raw_item in raw_items:
                 if isinstance(raw_item, str) and raw_item.strip():
                     candidate_tool_keys.add(raw_item.strip().lower())
-        return required_tool_keys.issubset(candidate_tool_keys)
+        return candidate_tool_keys
 
     @staticmethod
-    def _selector_candidate_covers_workflow_execute_obligation(
+    def _selector_candidate_required_tool_coverage(
         candidate: Mapping[str, Any],
         required_tools: Sequence[str],
-    ) -> tuple[bool, list[str], list[str]]:
+    ) -> dict[str, Any]:
+        """Project exact represented coverage without turning it into policy.
+
+        Expected-outcome tool names are an adaptive agreement at selector time:
+        they inform the selector LLM, but they do not veto an otherwise eligible
+        represented workflow.  Exact identity still matters for deterministic
+        selector fast paths and for the downstream completion/evidence gates.
+        """
+
         required_tool_names = [
             str(tool_name).strip()
             for tool_name in (required_tools or ())
             if isinstance(tool_name, str) and str(tool_name).strip()
         ]
-        required_tool_keys = {tool_name.lower() for tool_name in required_tool_names}
-        if "workflow_execute" not in required_tool_keys:
-            return False, [], required_tool_names
-        if not _eligible_discovered_workflow_execute_candidates((candidate,)):
-            return False, [], required_tool_names
-
+        candidate_tool_keys = (
+            InternalMCPChatOrchestrator._selector_candidate_declared_tool_keys(
+                candidate
+            )
+        )
         covered = [
             tool_name
             for tool_name in required_tool_names
-            if tool_name.lower() == "workflow_execute"
+            if tool_name.lower() in candidate_tool_keys
         ]
         remaining = [
             tool_name
             for tool_name in required_tool_names
-            if tool_name.lower() != "workflow_execute"
+            if tool_name.lower() not in candidate_tool_keys
         ]
-        return True, covered, remaining
-
-    @staticmethod
-    def _selector_candidate_is_contract_named_launchable_workflow(
-        candidate: Mapping[str, Any],
-        workflow_concept_ids: Sequence[str],
-    ) -> bool:
-        concept_id = str(candidate.get("concept_id") or "").strip()
-        if not concept_id:
-            return False
-        contract_workflow_ids = {
-            str(workflow_id).strip().lower()
-            for workflow_id in (workflow_concept_ids or ())
-            if isinstance(workflow_id, str) and str(workflow_id).strip()
+        return {
+            "coverage_basis": "exact_declared_tool_identity_advisory",
+            "covered_required_tools": covered,
+            "remaining_turn_level_required_tools": remaining,
         }
-        if concept_id.lower() not in contract_workflow_ids:
-            return False
-        return bool(_eligible_discovered_workflow_execute_candidates((candidate,)))
 
     def _partition_discovered_candidates_by_required_tools(
         self,
         candidates: Sequence[Mapping[str, Any]],
         *,
         required_tools: Sequence[str],
-        contract_workflow_concept_ids: Sequence[str] = (),
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not required_tools:
             return [dict(candidate) for candidate in candidates], []
@@ -47859,54 +48173,26 @@ class InternalMCPChatOrchestrator:
         excluded: list[dict[str, Any]] = []
         for candidate in candidates:
             item = dict(candidate)
-            if self._selector_candidate_covers_required_tools(item, required_tools):
-                included.append(item)
-                continue
-            (
-                covers_workflow_execute,
-                covered_required_tools,
-                remaining_required_tools,
-            ) = self._selector_candidate_covers_workflow_execute_obligation(
+            required_tool_coverage = self._selector_candidate_required_tool_coverage(
                 item,
                 required_tools,
             )
-            if covers_workflow_execute:
-                item["required_tools"] = [
-                    str(tool_name).strip()
-                    for tool_name in required_tools
-                    if isinstance(tool_name, str) and str(tool_name).strip()
-                ]
-                item["required_tool_coverage"] = {
-                    "coverage_basis": "workflow_execute_primary_obligation",
-                    "covered_required_tools": covered_required_tools,
-                    "remaining_turn_level_required_tools": remaining_required_tools,
-                }
+            item["required_tools"] = [
+                str(tool_name).strip()
+                for tool_name in required_tools
+                if isinstance(tool_name, str) and str(tool_name).strip()
+            ]
+            item["required_tool_coverage"] = required_tool_coverage
+            if not required_tool_coverage["remaining_turn_level_required_tools"]:
                 included.append(item)
                 continue
-            if self._selector_candidate_is_contract_named_launchable_workflow(
-                item,
-                contract_workflow_concept_ids,
-            ):
-                concept_id = str(item.get("concept_id") or "").strip()
-                item["candidate_reason"] = (
-                    "contract_named_launchable_workflow_preserved"
-                )
-                item["required_tools"] = [
-                    str(tool_name).strip()
-                    for tool_name in required_tools
-                    if isinstance(tool_name, str) and str(tool_name).strip()
-                ]
-                item["required_tool_coverage"] = {
-                    "coverage_basis": "contract_named_launchable_workflow",
-                    "covered_workflow_concept_ids": [concept_id] if concept_id else [],
-                    "remaining_turn_level_required_tools": list(item["required_tools"]),
-                }
-                included.append(item)
-                continue
-            concept_id = str(item.get("concept_id") or "").strip()
-            if self._selected_workflow_prefers_direct_response(
-                selected_workflow_id=concept_id
-            ):
+            if _eligible_discovered_workflow_execute_candidates((item,)):
+                # A specialised represented workflow remains available to the
+                # selector LLM even when its declared tools do not exactly match
+                # the turn agreement.  Prevent deterministic fast-path routing;
+                # the LLM must adjudicate the visible coverage gap, and hard
+                # completion/evidence checks remain downstream.
+                item["selector_fast_path_eligible"] = False
                 included.append(item)
                 continue
             item["routing_eligible"] = False
@@ -47915,11 +48201,6 @@ class InternalMCPChatOrchestrator:
                 item.get("routing_exclusion_reason")
                 or "required_tool_contract_not_satisfied"
             )
-            item["required_tools"] = [
-                str(tool_name).strip()
-                for tool_name in required_tools
-                if isinstance(tool_name, str) and str(tool_name).strip()
-            ]
             excluded.append(item)
         return included, excluded
 
@@ -47948,16 +48229,12 @@ class InternalMCPChatOrchestrator:
         required_tools = self._selector_contract_required_tools(
             workflow_discovery_result
         )
-        contract_workflow_concept_ids = self._selector_contract_workflow_concept_ids(
-            workflow_discovery_result
-        )
         (
             local_discovered_matches,
             required_tool_excluded_matches,
         ) = self._partition_discovered_candidates_by_required_tools(
             local_discovered_matches,
             required_tools=required_tools,
-            contract_workflow_concept_ids=contract_workflow_concept_ids,
         )
         default_candidates, excluded_default_candidates = (
             self._build_selector_default_candidates(required_tools=required_tools)
@@ -48195,6 +48472,38 @@ class InternalMCPChatOrchestrator:
             "pre_action_validation": pre_action_summary,
             "required_effects_tool_policy": required_effects_tool_policy,
         }
+
+    def _assess_selector_timeout_recovery_workflow_authority(
+        self,
+        workflow_id: str,
+        *,
+        turn_text: str,
+    ) -> dict[str, Any]:
+        """Resolve canonical lifecycle/profile eligibility for timeout recovery."""
+
+        _registration, workflow_definition = (
+            self._resolve_workflow_registration_and_definition(workflow_id)
+        )
+        if workflow_definition is None:
+            return {
+                "schema_version": "workflow_routing_authority_assessment.v1",
+                "workflow_id": workflow_id,
+                "routing_eligible": False,
+                "routing_exclusion_reason": "workflow_definition_unavailable",
+                "publication_lifecycle": None,
+                "publication_lifecycle_source": None,
+                "routing_profile": None,
+                "routing_profile_source": None,
+            }
+        raw_metadata = getattr(workflow_definition, "metadata", None)
+        workflow_metadata = (
+            dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        )
+        return assess_workflow_routing_authority(
+            workflow_id,
+            workflow_metadata=workflow_metadata,
+            query=turn_text,
+        )
 
     def _probe_custom_workflow_launchability(
         self,

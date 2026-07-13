@@ -5,13 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
+from .text_value_service import upsert_singleton_text_relation
 from .workflow_prompt_authority_service import (
     DEFAULT_PROMPT_TYPE_ID,
     WorkflowPromptConceptSpec,
     ensure_prompt_concept_support,
     prompt_concept_has_content,
-    safe_str,
 )
 from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 from .synthesiser_context_framing_service import (
@@ -49,6 +48,9 @@ _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_postcondition_critic"
 )
 _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID = "#V#tool_call_repair_prompt"
+WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID = (
+    "#V#workflow_step_structured_output_backfill_prompt"
+)
 _EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -96,6 +98,12 @@ _TOOL_CALL_REPAIR_PROMPT_SEED_ASSET_PATH = (
     / "workflows"
     / "repo_seed_bundles"
     / "tool_call_repair_prompt_seed.md"
+)
+_WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "workflow_step_structured_output_backfill_prompt_seed.md"
 )
 _SYNTHESISER_CONTEXT_FRAMING_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
@@ -182,6 +190,17 @@ def _load_tool_call_repair_prompt_seed_text() -> str:
     return prompt_text
 
 
+def _load_workflow_step_structured_output_backfill_prompt_seed_text() -> str:
+    prompt_text = (
+        _WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_SEED_ASSET_PATH.read_text(
+            encoding="utf-8"
+        ).strip()
+    )
+    if not prompt_text:
+        raise ValueError("workflow_step_structured_output_backfill_prompt_seed_missing")
+    return prompt_text
+
+
 def _load_synthesiser_context_framing_prompt_seed_text() -> str:
     prompt_text = _SYNTHESISER_CONTEXT_FRAMING_PROMPT_SEED_ASSET_PATH.read_text(
         encoding="utf-8"
@@ -189,31 +208,6 @@ def _load_synthesiser_context_framing_prompt_seed_text() -> str:
     if not prompt_text:
         raise ValueError("synthesiser_context_framing_prompt_seed_missing")
     return prompt_text
-
-
-def _prompt_seed_needs_refresh(
-    prompt_concept_id: str,
-    *,
-    required_markers: tuple[str, ...],
-) -> bool:
-    try:
-        rows = get_texts_for_concept(
-            subject_concept_id=prompt_concept_id,
-            limit=16,
-        )
-    except Exception:
-        return False
-
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        predicate = safe_str(row.get("predicate"))
-        if predicate not in {"hasContent", "#V#hasContent"}:
-            continue
-        text = safe_str(row.get("text")) or ""
-        if text and any(marker not in text for marker in required_markers):
-            return True
-    return False
 
 
 def _ensure_conversation_turn_prompt_support(
@@ -313,6 +307,16 @@ def _ensure_conversation_turn_prompt_support(
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
             WorkflowPromptConceptSpec(
+                concept_id=(WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID),
+                name="Structured workflow-step output backfill prompt",
+                description=(
+                    "Canonical prompt for continuing an active structured-output "
+                    "workflow step after tool evidence has been accumulated, without "
+                    "collapsing the step into ordinary end-user narration."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
+            WorkflowPromptConceptSpec(
                 concept_id=SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
                 name="Synthesiser context framing template",
                 description=(
@@ -348,53 +352,8 @@ def _ensure_conversation_turn_prompt_support(
     report["support_bootstraps"] = support_bootstraps
 
     seeded_prompt_ids: list[str] = []
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "gmail_send_message",
-                "external-system side effect",
-                "turn_context_handoff_decision",
-                "`no_prior_context`",
-                "represented labels, categories, tags, role markers",
-                "#V#represented_artefact_creation_workflow",
-                "grounded `parent_id`",
-                "stable target handles",
-                "read-only Gmail retrieval",
-                "#V#general_mail_review_workflow",
-                "gmail_list_profiles",
-                "gmail_list_messages",
-                "gmail_get_message",
-                "read-only Jira retrieval",
-                "jira_get_issue",
-                "jira_search",
-                "Jira direct issue-key lookup example",
-                "Do not use Jira import/reconciliation workflows",
-                "#V#jira_task_full_reconciliation_workflow",
-                "task_import_jira_issues",
-                "Jira recency/list lookup example",
-                "Do not use the mail-review workflow for Gmail auth",
-                "Gmail auth, OAuth, scope, auth-config, and token-status checks",
-                "read-only authentication diagnostics",
-                "gmail_get_auth_config",
-                "confirmation doubt about a Gmail/interface access check",
-                "no manual token-refresh tool exists",
-                "Gmail access-check doubt with refresh-if-available example",
-                "predicates, relation schema, usage, incidence",
-                "must contain only exact tool IDs",
-                "Never invent capability-shaped tool names",
-                "workflow_concept_ids",
-                "`conditional_required_tools`",
-                "put `workflow_execute` in `conditional_required_tools`",
-                "Do not substitute Gmail listing, reading, or label-modification tools",
-                "#V#arxiv_paper_representation_workflow",
-                "#V#scholarly_article_metadata_representation_workflow",
-                "Distinguish prior *referents* from prior *obligations*",
-                "prior_obligation_carry_forward",
-            ),
-        )
+    if force_prompt_seed or not prompt_concept_has_content(
+        _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -405,20 +364,8 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "turn_context_handoff_decision",
-                "`no_prior_context`",
-                "`raw_recent_turns_required`",
-                "Do not answer the user",
-                "prior_obligation_carry_forward",
-                "suppressed_prior_obligations",
-            ),
-        )
+    if force_prompt_seed or not prompt_concept_has_content(
+        _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
@@ -429,21 +376,7 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _SELECTOR_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "turn_context_handoff_decision",
-                "`no_prior_context`",
-                "adjudicated prior-context handoff",
-                "Treat `required_tools` as exact-symbol evidence only",
-                "do not select a semantically similar workflow",
-                "Treat auth, OAuth, scope, auth-config, credential",
-            ),
-        )
-    ):
+    if force_prompt_seed or not prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID):
         upsert_singleton_text_relation(
             subject_concept_id=_SELECTOR_PROMPT_CONCEPT_ID,
             predicate="hasContent",
@@ -453,17 +386,8 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_SELECTOR_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_NARRATION_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _NARRATION_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "Grounding a concrete result to the right target",
-                "verified this turn",
-                "Do not collapse a multi-target request to a single concept",
-            ),
-        )
+    if force_prompt_seed or not prompt_concept_has_content(
+        _NARRATION_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_NARRATION_PROMPT_CONCEPT_ID,
@@ -474,51 +398,18 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_NARRATION_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _RECOVERY_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "Terminal Outcome Receipt",
-                "represented critic's primary semantic",
-                "Preserve committed effects from the receipt",
-                "Never invent placeholder identifiers",
-                "Recovery must not broaden the user's mutation authority",
-                "excluded candidate merely because",
-                "Recovery Retry Structurally Viable",
-                "terminal_outcome_receipt.retryability` is exactly `now`",
-            ),
-        )
-    ):
+    if force_prompt_seed or not prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID):
         upsert_singleton_text_relation(
             subject_concept_id=_RECOVERY_PROMPT_CONCEPT_ID,
             predicate="hasContent",
             text=_load_recovery_prompt_seed_text(),
             lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-1104", "source": _MANAGED_BY},
+            context={"jira": "JVNAUTOSCI-2577", "source": _MANAGED_BY},
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "gmail_send_message",
-                "external-system side effect",
-                "represented labels, categories, tags, workflow markers",
-                "Do NOT emit `create_concepts` without `parent_id`",
-                "Do NOT use `#V#thing` as the parent",
-                "read-only Gmail tools",
-                "gmail_list_profiles",
-                "gmail_list_messages",
-                "gmail_get_message",
-                "Gmail auth, token, OAuth-scope, or auth-config checks",
-                "Never invent placeholder aliases such as `user_profile_123`",
-            ),
-        )
+    if force_prompt_seed or not prompt_concept_has_content(
+        _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
@@ -529,42 +420,20 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "terminal_outcome_receipt",
-                "#V#terminal_outcome_receipt",
-                "The terminal outcome is your semantic judgement",
-                "Recovery affordances must not broaden the user's mutation authority",
-                "final-answer synthesis telemetry",
-                "final_answer_synthesis.tool_evidence_projection",
-                "operational status/ledger summary",
-            ),
-        )
+    if force_prompt_seed or not prompt_concept_has_content(
+        _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
             predicate="hasContent",
             text=_load_postcondition_critic_prompt_seed_text(),
             lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-1104", "source": _MANAGED_BY},
+            context={"jira": "JVNAUTOSCI-2577", "source": _MANAGED_BY},
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
-        or _prompt_seed_needs_refresh(
-            _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
-            required_markers=(
-                "Gmail profile-scoped requests",
-                "gmail_get_auth_config",
-                "Never emit placeholders such as `user_profile_123`",
-            ),
-        )
+    if force_prompt_seed or not prompt_concept_has_content(
+        _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
             subject_concept_id=_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
@@ -575,6 +444,22 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
+    if force_prompt_seed or not prompt_concept_has_content(
+        WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=(
+                WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
+            ),
+            predicate="hasContent",
+            text=_load_workflow_step_structured_output_backfill_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": "JVNAUTOSCI-2577", "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(
+            WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
+        )
     if force_prompt_seed or not prompt_concept_has_content(
         SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
     ):
@@ -679,6 +564,27 @@ def _ensure_conversation_turn_prompt_support(
         if _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID not in validated_prompt_ids:
             validated_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
         report["validated_prompt_ids"] = validated_prompt_ids
+    if prompt_concept_has_content(
+        WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
+    ):
+        errors_by_target.pop(
+            WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID,
+            None,
+        )
+        missing_content_prompt_ids = [
+            prompt_id
+            for prompt_id in missing_content_prompt_ids
+            if prompt_id != WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
+        ]
+        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+        if (
+            WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
+            not in validated_prompt_ids
+        ):
+            validated_prompt_ids.append(
+                WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
+            )
+        report["validated_prompt_ids"] = validated_prompt_ids
     if prompt_concept_has_content(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID):
         errors_by_target.pop(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID, None)
         missing_content_prompt_ids = [
@@ -747,4 +653,7 @@ def bootstrap_canonical_conversation_turn_workflows(
     }
 
 
-__all__ = ["bootstrap_canonical_conversation_turn_workflows"]
+__all__ = [
+    "WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID",
+    "bootstrap_canonical_conversation_turn_workflows",
+]

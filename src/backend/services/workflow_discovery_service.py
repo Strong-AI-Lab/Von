@@ -1215,8 +1215,7 @@ def _query_explicitly_names_workflow_candidate(
         _normalise_workflow_phrase(match.name),
     }
     return any(
-        bool(phrase) and f" {phrase} " in query_phrase
-        for phrase in candidate_phrases
+        bool(phrase) and f" {phrase} " in query_phrase for phrase in candidate_phrases
     )
 
 
@@ -1230,10 +1229,9 @@ def _routing_profile_exclusion_reason(
         return None
     if profile.get("routing_eligible") is False:
         return ROUTING_EXCLUSION_EXPLICITLY_DISABLED
-    if (
-        profile.get("explicit_workflow_context_required") is True
-        and not _query_explicitly_names_workflow_candidate(query, match)
-    ):
+    if profile.get(
+        "explicit_workflow_context_required"
+    ) is True and not _query_explicitly_names_workflow_candidate(query, match):
         return ROUTING_EXCLUSION_EXPLICIT_WORKFLOW_CONTEXT_REQUIRED
     return None
 
@@ -1560,6 +1558,82 @@ def _lifecycle_allows_routing(
     # Review state describes the active authoring proposal. A pending proposal
     # must not disable the currently published workflow version.
     return True, None
+
+
+def assess_workflow_routing_authority(
+    workflow_id: str,
+    *,
+    workflow_metadata: Mapping[str, Any] | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Assess represented lifecycle/profile authority for direct routing.
+
+    Exceptional routes such as selector timeout recovery do not necessarily
+    carry a discovery candidate row. This helper exposes the same canonical
+    lifecycle and routing-profile checks used by normal discovery so those
+    paths cannot bypass represented publication or eligibility state.
+    """
+
+    workflow_id_text = str(workflow_id or "").strip()
+    metadata = dict(workflow_metadata) if isinstance(workflow_metadata, Mapping) else {}
+
+    raw_lifecycle = metadata.get("publication_lifecycle")
+    if isinstance(raw_lifecycle, Mapping):
+        publication_lifecycle = dict(raw_lifecycle)
+        publication_lifecycle_source = (
+            str(metadata.get("publication_lifecycle_source") or "").strip()
+            or "workflow_definition_metadata"
+        )
+    else:
+        publication_lifecycle, publication_lifecycle_source = (
+            _resolve_workflow_publication_lifecycle_data(workflow_id_text)
+        )
+
+    raw_routing_profile = metadata.get("routing_profile")
+    if isinstance(raw_routing_profile, Mapping):
+        routing_profile = dict(raw_routing_profile)
+        routing_profile_source = (
+            str(metadata.get("routing_profile_source") or "").strip()
+            or "workflow_definition_metadata"
+        )
+    else:
+        routing_profile, routing_profile_source = (
+            _resolve_workflow_routing_profile_data(workflow_id_text)
+        )
+
+    lifecycle_allows_routing, lifecycle_exclusion_reason = _lifecycle_allows_routing(
+        publication_lifecycle
+    )
+    profile_match = WorkflowMatch(
+        concept_id=workflow_id_text,
+        name=workflow_id_text,
+        routing_profile=(
+            dict(routing_profile) if isinstance(routing_profile, Mapping) else None
+        ),
+    )
+    profile_exclusion_reason = _routing_profile_exclusion_reason(
+        profile_match,
+        query=str(query or ""),
+    )
+    exclusion_reason = lifecycle_exclusion_reason or profile_exclusion_reason
+    return {
+        "schema_version": "workflow_routing_authority_assessment.v1",
+        "workflow_id": workflow_id_text,
+        "routing_eligible": bool(
+            lifecycle_allows_routing and profile_exclusion_reason is None
+        ),
+        "routing_exclusion_reason": exclusion_reason,
+        "publication_lifecycle": (
+            dict(publication_lifecycle)
+            if isinstance(publication_lifecycle, Mapping)
+            else None
+        ),
+        "publication_lifecycle_source": publication_lifecycle_source,
+        "routing_profile": (
+            dict(routing_profile) if isinstance(routing_profile, Mapping) else None
+        ),
+        "routing_profile_source": routing_profile_source,
+    }
 
 
 def _routing_index_metadata(match: WorkflowMatch) -> Mapping[str, Any] | None:
@@ -2260,7 +2334,9 @@ def discover_workflows(
             sufficient=contract_metadata_sufficient,
             field_count=len(contract_projection.get("fields_used") or []),
             required_tool_count=len(contract_projection.get("required_tools") or []),
-            required_action_count=len(contract_projection.get("required_actions") or []),
+            required_action_count=len(
+                contract_projection.get("required_actions") or []
+            ),
             entry_source=(
                 (
                     contract_metadata_matches[0].routing_index_metadata
@@ -2498,9 +2574,9 @@ _SELECTOR_FAST_PATH_SUPPORTED_RULES = frozenset(
 )
 
 
-def _resolve_selector_fast_path_policy() -> (
-    tuple[Optional[Dict[str, Any]], Dict[str, Any]]
-):
+def _resolve_selector_fast_path_policy() -> tuple[
+    Optional[Dict[str, Any]], Dict[str, Any]
+]:
     """Resolve the represented selector fast-path policy (JVNAUTOSCI-2406).
 
     The policy is authored on the Vontology concept

@@ -83,6 +83,10 @@ _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = _get_positive_float_env(
     "VON_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS",
     45.0,
 )
+_WORKFLOW_CAPABILITY_BACKEND_RESET_LOCK_TIMEOUT_SECONDS = _get_positive_float_env(
+    "VON_WORKFLOW_CAPABILITY_BACKEND_RESET_LOCK_TIMEOUT_SECONDS",
+    2.0,
+)
 _WORKFLOW_CAPABILITY_RETRIEVAL_CANDIDATE_MULTIPLIER = 2
 _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES: tuple[str, ...] = (
     "workflow discovery capability",
@@ -108,7 +112,9 @@ _AUTO_REBUILD_REPAIRABLE_NAMESPACE_STATUSES = frozenset(
 
 _INDEX_REBUILD_LOCK = Lock()
 _INDEX_STATE_LOCK = Lock()
+_INDEX_BUILD_CONTEXT = threading.local()
 _INDEX_REBUILD_STATE: Dict[str, Any] = {
+    "generation": 0,
     "last_attempt_monotonic": 0.0,
     "last_success_monotonic": 0.0,
     "last_built_size": 0,
@@ -121,6 +127,8 @@ _INDEX_REBUILD_STATE: Dict[str, Any] = {
     "query_surface_ready": False,
     "query_surface_last_error": None,
     "query_surface_last_warm_monotonic": 0.0,
+    "backend_namespace_reset_pending": False,
+    "backend_namespace_reset_last_error": None,
     "last_manifest_status": None,
     "last_manifest_detail": None,
     "last_manifest_path": None,
@@ -560,6 +568,8 @@ def _set_workflow_capability_manifest_state(
     digest: str | None = None,
 ) -> None:
     with _INDEX_STATE_LOCK:
+        if not _workflow_capability_state_update_is_current_locked():
+            return
         _INDEX_REBUILD_STATE["last_manifest_status"] = (
             str(status).strip() if status else None
         )
@@ -1719,6 +1729,33 @@ def _workflow_definition_capability_metadata(
     action_ids = _dedupe_capability_strings(collect_workflow_action_ids(definition))
     if action_ids:
         metadata.setdefault("workflow_action_ids", action_ids)
+    declared_tools: list[Any] = []
+    existing_required_tools = metadata.get("required_tools")
+    if isinstance(existing_required_tools, Sequence) and not isinstance(
+        existing_required_tools, (str, bytes, bytearray)
+    ):
+        declared_tools.extend(existing_required_tools)
+    states = getattr(definition, "states", {})
+    if isinstance(states, Mapping):
+        for state in states.values():
+            actions = getattr(state, "actions", ())
+            if not isinstance(actions, Sequence) or isinstance(
+                actions, (str, bytes, bytearray)
+            ):
+                continue
+            for action in actions:
+                llm_policy = getattr(action, "llm_policy", None)
+                if not isinstance(llm_policy, Mapping):
+                    continue
+                for policy_key in ("allowed_tools", "required_tools"):
+                    raw_tools = llm_policy.get(policy_key)
+                    if isinstance(raw_tools, Sequence) and not isinstance(
+                        raw_tools, (str, bytes, bytearray)
+                    ):
+                        declared_tools.extend(raw_tools)
+    normalised_declared_tools = _dedupe_capability_strings(declared_tools)
+    if normalised_declared_tools:
+        metadata["required_tools"] = normalised_declared_tools
     return metadata or None
 
 
@@ -1925,6 +1962,98 @@ def build_workflow_capability_text(
 
 _global_index: Optional[WorkflowCapabilityIndex] = None
 _global_index_lock = Lock()
+_global_index_generation = 0
+
+
+def _active_workflow_capability_build_generation() -> int | None:
+    raw_generation = getattr(_INDEX_BUILD_CONTEXT, "generation", None)
+    return raw_generation if isinstance(raw_generation, int) else None
+
+
+def _workflow_capability_generation_is_current(generation: int) -> bool:
+    with _global_index_lock:
+        return generation == _global_index_generation
+
+
+def _clear_workflow_capability_build_event_for_generation(generation: int) -> bool:
+    with _global_index_lock:
+        if generation != _global_index_generation:
+            return False
+        _INDEX_REBUILD_COMPLETED.clear()
+        return True
+
+
+def _complete_workflow_capability_build_generation(
+    generation: int,
+    *,
+    mode: str | None = None,
+    clear_build_state: bool = False,
+) -> bool:
+    with _global_index_lock:
+        if generation != _global_index_generation:
+            return False
+        if clear_build_state:
+            _set_workflow_capability_rebuild_state(
+                build_in_progress=False,
+                mode=mode,
+                build_generation=generation,
+            )
+        _INDEX_REBUILD_COMPLETED.set()
+        return True
+
+
+def _workflow_capability_state_update_is_current_locked() -> bool:
+    build_generation = _active_workflow_capability_build_generation()
+    return build_generation is None or build_generation == int(
+        _INDEX_REBUILD_STATE.get("generation", 0) or 0
+    )
+
+
+def _reset_pending_workflow_capability_backend_namespace(
+    generation: int,
+) -> bool:
+    """Apply a generation-owned deferred backend reset before index build.
+
+    Callers must hold ``_INDEX_REBUILD_LOCK``. This keeps destructive namespace
+    reset ordered before any build for the same generation without making the
+    invalidation request wait indefinitely on a stuck older builder.
+    """
+
+    with _global_index_lock:
+        if generation != _global_index_generation:
+            return False
+        with _INDEX_STATE_LOCK:
+            pending = bool(
+                _INDEX_REBUILD_STATE.get("backend_namespace_reset_pending", False)
+            )
+    if not pending:
+        return True
+
+    try:
+        _reset_workflow_capability_backend_namespace(
+            _get_workflow_capability_rag_service()
+        )
+    except Exception as exc:
+        with _global_index_lock:
+            if generation == _global_index_generation:
+                with _INDEX_STATE_LOCK:
+                    _INDEX_REBUILD_STATE["backend_namespace_reset_last_error"] = str(
+                        exc
+                    )
+                    _INDEX_REBUILD_STATE["query_surface_ready"] = False
+                    _INDEX_REBUILD_STATE["query_surface_last_error"] = (
+                        "workflow_capability_backend_namespace_reset_failed:"
+                        f"{exc}"
+                    )
+        raise
+
+    with _global_index_lock:
+        if generation != _global_index_generation:
+            return False
+        with _INDEX_STATE_LOCK:
+            _INDEX_REBUILD_STATE["backend_namespace_reset_pending"] = False
+            _INDEX_REBUILD_STATE["backend_namespace_reset_last_error"] = None
+    return True
 
 
 def get_workflow_capability_index() -> WorkflowCapabilityIndex:
@@ -1934,9 +2063,26 @@ def get_workflow_capability_index() -> WorkflowCapabilityIndex:
     to populate it after the workflow registry is built.
     """
     global _global_index
-    if _global_index is not None:
-        return _global_index
+    build_generation = _active_workflow_capability_build_generation()
     with _global_index_lock:
+        if (
+            build_generation is not None
+            and build_generation != _global_index_generation
+        ):
+            detached_generation = getattr(
+                _INDEX_BUILD_CONTEXT,
+                "detached_generation",
+                None,
+            )
+            detached_index = getattr(_INDEX_BUILD_CONTEXT, "detached_index", None)
+            if (
+                detached_generation != build_generation
+                or not isinstance(detached_index, WorkflowCapabilityIndex)
+            ):
+                detached_index = WorkflowCapabilityIndex()
+                _INDEX_BUILD_CONTEXT.detached_generation = build_generation
+                _INDEX_BUILD_CONTEXT.detached_index = detached_index
+            return detached_index
         if _global_index is not None:
             return _global_index
         _global_index = WorkflowCapabilityIndex()
@@ -1968,8 +2114,20 @@ def _set_workflow_capability_rebuild_state(
     attempt_monotonic: float | None = None,
     success_monotonic: float | None = None,
     clear_invalidation: bool = False,
+    build_generation: int | None = None,
 ) -> None:
     with _INDEX_STATE_LOCK:
+        expected_generation = (
+            build_generation
+            if build_generation is not None
+            else _active_workflow_capability_build_generation()
+        )
+        if (
+            expected_generation is not None
+            and expected_generation
+            != int(_INDEX_REBUILD_STATE.get("generation", 0) or 0)
+        ):
+            return
         _INDEX_REBUILD_STATE["build_in_progress"] = bool(build_in_progress)
         if mode is not None:
             _INDEX_REBUILD_STATE["last_mode"] = mode
@@ -1992,6 +2150,8 @@ def _set_workflow_capability_query_surface_state(
     warmed_monotonic: float | None = None,
 ) -> None:
     with _INDEX_STATE_LOCK:
+        if not _workflow_capability_state_update_is_current_locked():
+            return
         _INDEX_REBUILD_STATE["query_surface_ready"] = bool(ready)
         _INDEX_REBUILD_STATE["query_surface_last_error"] = error
         if warmed_monotonic is not None:
@@ -2040,6 +2200,8 @@ def _record_workflow_capability_auto_rebuild_state(
 ) -> None:
     now_utc = _utc_now_iso()
     with _INDEX_STATE_LOCK:
+        if not _workflow_capability_state_update_is_current_locked():
+            return
         if mark_attempt:
             _INDEX_REBUILD_STATE["auto_rebuild_attempt_count"] = (
                 int(_INDEX_REBUILD_STATE.get("auto_rebuild_attempt_count", 0) or 0) + 1
@@ -2377,6 +2539,14 @@ def get_workflow_capability_index_runtime_state(
                 "query_surface_last_warm_monotonic": float(
                     _INDEX_REBUILD_STATE.get("query_surface_last_warm_monotonic", 0.0)
                 ),
+                "backend_namespace_reset_pending": bool(
+                    _INDEX_REBUILD_STATE.get(
+                        "backend_namespace_reset_pending", False
+                    )
+                ),
+                "backend_namespace_reset_last_error": _INDEX_REBUILD_STATE.get(
+                    "backend_namespace_reset_last_error"
+                ),
                 "last_manifest_status": _INDEX_REBUILD_STATE.get(
                     "last_manifest_status"
                 ),
@@ -2460,6 +2630,12 @@ def get_workflow_capability_index_runtime_state(
             ),
             "query_surface_last_warm_monotonic": float(
                 _INDEX_REBUILD_STATE.get("query_surface_last_warm_monotonic", 0.0)
+            ),
+            "backend_namespace_reset_pending": bool(
+                _INDEX_REBUILD_STATE.get("backend_namespace_reset_pending", False)
+            ),
+            "backend_namespace_reset_last_error": _INDEX_REBUILD_STATE.get(
+                "backend_namespace_reset_last_error"
             ),
             "last_manifest_status": last_manifest_status,
             "last_manifest_detail": _INDEX_REBUILD_STATE.get("last_manifest_detail"),
@@ -2730,9 +2906,61 @@ def _perform_workflow_capability_index_build(
     force_refresh: bool = False,
     mode: str,
     workflow_registry: Any | None = None,
+    build_generation: int | None = None,
 ) -> WorkflowCapabilityIndex:
+    inherited_generation = _active_workflow_capability_build_generation()
+    if build_generation is None:
+        if inherited_generation is not None:
+            build_generation = inherited_generation
+        else:
+            with _global_index_lock:
+                build_generation = _global_index_generation
+    prior_detached_generation = getattr(
+        _INDEX_BUILD_CONTEXT,
+        "detached_generation",
+        None,
+    )
+    prior_detached_index = getattr(_INDEX_BUILD_CONTEXT, "detached_index", None)
+    _INDEX_BUILD_CONTEXT.generation = build_generation
+    try:
+        return _perform_workflow_capability_index_build_for_generation(
+            force_refresh=force_refresh,
+            mode=mode,
+            workflow_registry=workflow_registry,
+            build_generation=build_generation,
+        )
+    finally:
+        if inherited_generation is None:
+            try:
+                delattr(_INDEX_BUILD_CONTEXT, "generation")
+            except AttributeError:
+                pass
+        else:
+            _INDEX_BUILD_CONTEXT.generation = inherited_generation
+        if prior_detached_generation is None:
+            for attribute_name in ("detached_generation", "detached_index"):
+                try:
+                    delattr(_INDEX_BUILD_CONTEXT, attribute_name)
+                except AttributeError:
+                    pass
+        else:
+            _INDEX_BUILD_CONTEXT.detached_generation = prior_detached_generation
+            _INDEX_BUILD_CONTEXT.detached_index = prior_detached_index
+
+
+def _perform_workflow_capability_index_build_for_generation(
+    *,
+    force_refresh: bool,
+    mode: str,
+    workflow_registry: Any | None,
+    build_generation: int,
+) -> WorkflowCapabilityIndex:
+    if not _workflow_capability_generation_is_current(build_generation):
+        return get_workflow_capability_index()
     attempt_monotonic = time.monotonic()
-    _INDEX_REBUILD_COMPLETED.clear()
+    backend_mutated = False
+    if not _clear_workflow_capability_build_event_for_generation(build_generation):
+        return get_workflow_capability_index()
     _set_workflow_capability_rebuild_state(
         build_in_progress=True,
         mode=mode,
@@ -2771,12 +2999,25 @@ def _perform_workflow_capability_index_build(
             if loaded_from_manifest:
                 count = index.size
             else:
+                backend_mutated = True
                 try:
                     count = index.index_from_registry(registry, mode=mode)
                 except TypeError:
                     count = index.index_from_registry(registry)
         if count > 0:
             _warm_workflow_capability_query_surface(index, mode=mode)
+        if not _workflow_capability_generation_is_current(build_generation):
+            if backend_mutated:
+                try:
+                    _reset_workflow_capability_backend_namespace(
+                        _get_workflow_capability_rag_service()
+                    )
+                except Exception:
+                    logger.warning(
+                        "workflow_capability_stale_build_cleanup_failed",
+                        exc_info=True,
+                    )
+            return index
         success_monotonic = time.monotonic()
         _set_workflow_capability_rebuild_state(
             build_in_progress=False,
@@ -2807,6 +3048,19 @@ def _perform_workflow_capability_index_build(
         )
         return index
     except Exception as exc:
+        if (
+            backend_mutated
+            and not _workflow_capability_generation_is_current(build_generation)
+        ):
+            try:
+                _reset_workflow_capability_backend_namespace(
+                    _get_workflow_capability_rag_service()
+                )
+            except Exception:
+                logger.warning(
+                    "workflow_capability_stale_failed_build_cleanup_failed",
+                    exc_info=True,
+                )
         _set_workflow_capability_rebuild_state(
             build_in_progress=False,
             mode=mode,
@@ -2821,7 +3075,7 @@ def _perform_workflow_capability_index_build(
             )
         raise
     finally:
-        _INDEX_REBUILD_COMPLETED.set()
+        _complete_workflow_capability_build_generation(build_generation)
 
 
 def _start_background_workflow_capability_index_build(
@@ -2833,32 +3087,59 @@ def _start_background_workflow_capability_index_build(
     """Trigger a background build if one is not already running."""
 
     now = time.monotonic()
-    with _INDEX_STATE_LOCK:
-        if bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)):
-            return False
-        last_attempt = float(_INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0))
-        if (
-            not force_refresh
-            and last_attempt > 0.0
-            and (now - last_attempt) < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
-        ):
-            return False
-        _INDEX_REBUILD_STATE["build_in_progress"] = True
-        _INDEX_REBUILD_STATE["last_mode"] = mode
-        _INDEX_REBUILD_STATE["last_error"] = None
-        _INDEX_REBUILD_STATE["last_attempt_monotonic"] = now
-        _INDEX_REBUILD_COMPLETED.clear()
+    with _global_index_lock:
+        build_generation = _global_index_generation
+        with _INDEX_STATE_LOCK:
+            if bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)):
+                return False
+            last_attempt = float(
+                _INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0)
+            )
+            if (
+                not force_refresh
+                and last_attempt > 0.0
+                and (now - last_attempt)
+                < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
+            ):
+                return False
+            _INDEX_REBUILD_STATE["generation"] = build_generation
+            _INDEX_REBUILD_STATE["build_in_progress"] = True
+            _INDEX_REBUILD_STATE["last_mode"] = mode
+            _INDEX_REBUILD_STATE["last_error"] = None
+            _INDEX_REBUILD_STATE["last_attempt_monotonic"] = now
+            _INDEX_REBUILD_COMPLETED.clear()
 
     def _worker() -> None:
+        _INDEX_BUILD_CONTEXT.generation = build_generation
         try:
             with _INDEX_REBUILD_LOCK:
+                if not _reset_pending_workflow_capability_backend_namespace(
+                    build_generation
+                ):
+                    return
                 _perform_workflow_capability_index_build(
                     force_refresh=force_refresh,
                     mode=mode,
                     workflow_registry=workflow_registry,
+                    build_generation=build_generation,
                 )
         except Exception as exc:
             logger.warning("workflow_capability_index_background_build_failed: %s", exc)
+        finally:
+            _complete_workflow_capability_build_generation(
+                build_generation,
+                mode=mode,
+                clear_build_state=True,
+            )
+            for attribute_name in (
+                "generation",
+                "detached_generation",
+                "detached_index",
+            ):
+                try:
+                    delattr(_INDEX_BUILD_CONTEXT, attribute_name)
+                except AttributeError:
+                    pass
 
     try:
         thread = threading.Thread(
@@ -2869,19 +3150,22 @@ def _start_background_workflow_capability_index_build(
         thread.start()
         return True
     except Exception as exc:
-        _set_workflow_capability_rebuild_state(
-            build_in_progress=False,
-            mode=mode,
-            error=f"thread_start_failed:{exc}",
-        )
-        if mode == "auto_rebuild":
-            _record_workflow_capability_auto_rebuild_state(
-                status="failed",
-                skipped_reason=None,
-                detail=f"thread_start_failed:{exc}",
-                mark_finished=True,
-            )
-        _INDEX_REBUILD_COMPLETED.set()
+        with _global_index_lock:
+            if build_generation == _global_index_generation:
+                _set_workflow_capability_rebuild_state(
+                    build_in_progress=False,
+                    mode=mode,
+                    error=f"thread_start_failed:{exc}",
+                    build_generation=build_generation,
+                )
+                if mode == "auto_rebuild":
+                    _record_workflow_capability_auto_rebuild_state(
+                        status="failed",
+                        skipped_reason=None,
+                        detail=f"thread_start_failed:{exc}",
+                        mark_finished=True,
+                    )
+                _INDEX_REBUILD_COMPLETED.set()
         logger.warning(
             "workflow_capability_index_background_thread_start_failed: %s", exc
         )
@@ -2950,6 +3234,19 @@ def ensure_workflow_capability_index_populated(
         return get_workflow_capability_index()
 
     with _INDEX_REBUILD_LOCK:
+        with _global_index_lock:
+            blocking_build_generation = _global_index_generation
+        try:
+            if not _reset_pending_workflow_capability_backend_namespace(
+                blocking_build_generation
+            ):
+                return get_workflow_capability_index()
+        except Exception as exc:
+            logger.warning(
+                "workflow_capability_pending_backend_reset_failed: %s",
+                exc,
+            )
+            return get_workflow_capability_index()
         index = get_workflow_capability_index()
         runtime_state = get_workflow_capability_index_runtime_state()
         if (
@@ -3117,38 +3414,90 @@ def prewarm_workflow_capability_index(
     )
 
 
-def reset_workflow_capability_index() -> None:
-    """Reset the global index.  Intended for tests."""
+def _reset_workflow_capability_index_generation(
+    *,
+    record_invalidation: bool,
+    invalidation_reason: str | None = None,
+    backend_namespace_reset_pending: bool = False,
+) -> int:
+    """Publish an empty generation and reset its state atomically."""
+
+    cleaned_reason = (
+        str(invalidation_reason).strip() if invalidation_reason else None
+    )
+    invalidated_at_utc = _utc_now_iso() if record_invalidation else None
+
     global _global_index
+    global _global_index_generation
     with _global_index_lock:
+        _global_index_generation += 1
+        current_generation = _global_index_generation
         _global_index = None
-    with _INDEX_STATE_LOCK:
-        _INDEX_REBUILD_STATE["last_attempt_monotonic"] = 0.0
-        _INDEX_REBUILD_STATE["last_success_monotonic"] = 0.0
-        _INDEX_REBUILD_STATE["last_built_size"] = 0
-        _INDEX_REBUILD_STATE["build_in_progress"] = False
-        _INDEX_REBUILD_STATE["last_error"] = None
-        _INDEX_REBUILD_STATE["last_mode"] = None
-        _INDEX_REBUILD_STATE["startup_last_report"] = None
-        _INDEX_REBUILD_STATE["last_invalidation_reason"] = None
-        _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = None
-        _INDEX_REBUILD_STATE["query_surface_ready"] = False
-        _INDEX_REBUILD_STATE["query_surface_last_error"] = None
-        _INDEX_REBUILD_STATE["query_surface_last_warm_monotonic"] = 0.0
-        _INDEX_REBUILD_STATE["last_manifest_status"] = None
-        _INDEX_REBUILD_STATE["last_manifest_detail"] = None
-        _INDEX_REBUILD_STATE["last_manifest_path"] = None
-        _INDEX_REBUILD_STATE["last_manifest_digest"] = None
-        _INDEX_REBUILD_STATE["last_manifest_checked_at_utc"] = None
-        _INDEX_REBUILD_STATE["auto_rebuild_attempt_count"] = 0
-        _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_monotonic"] = 0.0
-        _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_at_utc"] = None
-        _INDEX_REBUILD_STATE["auto_rebuild_last_started_at_utc"] = None
-        _INDEX_REBUILD_STATE["auto_rebuild_last_finished_at_utc"] = None
-        _INDEX_REBUILD_STATE["auto_rebuild_last_status"] = None
-        _INDEX_REBUILD_STATE["auto_rebuild_last_skipped_reason"] = None
-        _INDEX_REBUILD_STATE["auto_rebuild_last_detail"] = None
-    _INDEX_REBUILD_COMPLETED.set()
+        # Keep generation publication and rebuild-state invalidation atomic
+        # with the same global -> state lock ordering used by build scheduling.
+        with _INDEX_STATE_LOCK:
+            inherited_backend_reset_pending = bool(
+                _INDEX_REBUILD_STATE.get("backend_namespace_reset_pending", False)
+            )
+            inherited_backend_reset_error = _INDEX_REBUILD_STATE.get(
+                "backend_namespace_reset_last_error"
+            )
+            effective_backend_reset_pending = bool(
+                backend_namespace_reset_pending or inherited_backend_reset_pending
+            )
+            _INDEX_REBUILD_STATE["generation"] = current_generation
+            _INDEX_REBUILD_STATE["last_attempt_monotonic"] = 0.0
+            _INDEX_REBUILD_STATE["last_success_monotonic"] = 0.0
+            _INDEX_REBUILD_STATE["last_built_size"] = 0
+            _INDEX_REBUILD_STATE["build_in_progress"] = False
+            _INDEX_REBUILD_STATE["last_error"] = None
+            _INDEX_REBUILD_STATE["last_mode"] = None
+            _INDEX_REBUILD_STATE["startup_last_report"] = None
+            _INDEX_REBUILD_STATE["last_invalidation_reason"] = (
+                cleaned_reason if record_invalidation else None
+            )
+            _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = invalidated_at_utc
+            _INDEX_REBUILD_STATE["query_surface_ready"] = False
+            _INDEX_REBUILD_STATE["query_surface_last_error"] = None
+            _INDEX_REBUILD_STATE["query_surface_last_warm_monotonic"] = 0.0
+            _INDEX_REBUILD_STATE["backend_namespace_reset_pending"] = (
+                effective_backend_reset_pending
+            )
+            _INDEX_REBUILD_STATE["backend_namespace_reset_last_error"] = (
+                inherited_backend_reset_error
+                if effective_backend_reset_pending
+                else None
+            )
+            _INDEX_REBUILD_STATE["last_manifest_status"] = None
+            _INDEX_REBUILD_STATE["last_manifest_detail"] = None
+            _INDEX_REBUILD_STATE["last_manifest_path"] = None
+            _INDEX_REBUILD_STATE["last_manifest_digest"] = None
+            _INDEX_REBUILD_STATE["last_manifest_checked_at_utc"] = None
+            _INDEX_REBUILD_STATE["auto_rebuild_attempt_count"] = 0
+            _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_monotonic"] = 0.0
+            _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_at_utc"] = None
+            _INDEX_REBUILD_STATE["auto_rebuild_last_started_at_utc"] = None
+            _INDEX_REBUILD_STATE["auto_rebuild_last_finished_at_utc"] = None
+            _INDEX_REBUILD_STATE["auto_rebuild_last_status"] = None
+            _INDEX_REBUILD_STATE["auto_rebuild_last_skipped_reason"] = None
+            _INDEX_REBUILD_STATE["auto_rebuild_last_detail"] = None
+        # Publish completion before releasing the generation lock. A builder
+        # for the new generation can then clear the event only after reset has
+        # finished, so reset cannot accidentally signal that newer build.
+        _INDEX_REBUILD_COMPLETED.set()
+        return current_generation
+
+
+def reset_workflow_capability_index() -> None:
+    """Invalidate the process index without waiting for an in-flight builder.
+
+    Every builder is bound to the generation active when it starts. Reset
+    advances that generation and swaps the singleton immediately, so a delayed
+    or stuck older builder can finish only into its detached generation. This
+    keeps production invalidation bounded while preventing stale publication.
+    """
+
+    _reset_workflow_capability_index_generation(record_invalidation=False)
 
 
 def invalidate_workflow_capability_index(
@@ -3158,32 +3507,74 @@ def invalidate_workflow_capability_index(
 ) -> dict[str, Any]:
     """Drop the cached capability index so the next lookup rebuilds it."""
 
-    previous_state = get_workflow_capability_index_runtime_state(
-        latency_sensitive=not reset_backend_namespace
-    )
-    backend_namespace_reset = False
-    backend_reset_error = None
-    if reset_backend_namespace:
-        try:
-            rag_service = _get_workflow_capability_rag_service()
-            _reset_workflow_capability_backend_namespace(rag_service)
-            backend_namespace_reset = True
-        except Exception as exc:
-            backend_reset_error = str(exc)
-    reset_workflow_capability_index()
-    with _INDEX_STATE_LOCK:
-        _INDEX_REBUILD_STATE["last_invalidation_reason"] = (
-            str(reason).strip() if reason else None
+    cleaned_reason = str(reason).strip() if reason else None
+
+    def _invalidate_current_generation(
+        *,
+        perform_backend_reset: bool,
+        defer_backend_reset: bool,
+    ) -> dict[str, Any]:
+        previous_state = get_workflow_capability_index_runtime_state(
+            latency_sensitive=not reset_backend_namespace
         )
-        _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = _utc_now_iso()
-        _INDEX_REBUILD_STATE["query_surface_ready"] = False
-        _INDEX_REBUILD_STATE["query_surface_last_error"] = None
-        _INDEX_REBUILD_STATE["query_surface_last_warm_monotonic"] = 0.0
-    return {
-        "success": True,
-        "cache": "workflow_capability_index",
-        "had_cached_entries": bool(previous_state.get("size", 0)),
-        "backend_namespace_reset": backend_namespace_reset,
-        "backend_reset_error": backend_reset_error,
-        "reason": str(reason).strip() if reason else None,
-    }
+        invalidated_generation = _reset_workflow_capability_index_generation(
+            record_invalidation=True,
+            invalidation_reason=cleaned_reason,
+            backend_namespace_reset_pending=bool(
+                reset_backend_namespace and (perform_backend_reset or defer_backend_reset)
+            ),
+        )
+        backend_namespace_reset = False
+        backend_reset_error = None
+        if perform_backend_reset:
+            try:
+                backend_namespace_reset = (
+                    _reset_pending_workflow_capability_backend_namespace(
+                        invalidated_generation
+                    )
+                )
+            except Exception as exc:
+                backend_reset_error = str(exc)
+        backend_reset_deferred = bool(
+            reset_backend_namespace and defer_backend_reset
+        )
+        if backend_reset_deferred:
+            backend_reset_error = (
+                "workflow_capability_backend_namespace_reset_deferred:"
+                "index_build_in_progress"
+            )
+        return {
+            "success": True,
+            "cache": "workflow_capability_index",
+            "had_cached_entries": bool(previous_state.get("size", 0)),
+            "backend_namespace_reset": backend_namespace_reset,
+            "backend_namespace_reset_deferred": backend_reset_deferred,
+            "backend_reset_error": backend_reset_error,
+            "reason": cleaned_reason,
+        }
+
+    if reset_backend_namespace:
+        # Backend reset is a destructive namespace operation. Wait only for a
+        # bounded interval; if an older build is stuck, publish the new
+        # generation immediately and leave a generation-owned reset pending.
+        # The next builder performs that reset while holding this same lock,
+        # before it can repopulate or mark the new generation ready.
+        lock_acquired = _INDEX_REBUILD_LOCK.acquire(
+            timeout=_WORKFLOW_CAPABILITY_BACKEND_RESET_LOCK_TIMEOUT_SECONDS
+        )
+        if not lock_acquired:
+            return _invalidate_current_generation(
+                perform_backend_reset=False,
+                defer_backend_reset=True,
+            )
+        try:
+            return _invalidate_current_generation(
+                perform_backend_reset=True,
+                defer_backend_reset=False,
+            )
+        finally:
+            _INDEX_REBUILD_LOCK.release()
+    return _invalidate_current_generation(
+        perform_backend_reset=False,
+        defer_backend_reset=False,
+    )

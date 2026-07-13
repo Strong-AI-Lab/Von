@@ -9,6 +9,9 @@ Return JSON only with exactly these keys:
   - `target_workflow_id`: a workflow concept ID string or `null`
   - `response_text`: a concise truthful user-facing response or `null`
   - `tool_calls`: an array of tool-call objects or `null`
+  - `target_contracts`: an array of resolved symbolic target-contract objects
+    that this recovery action has grounded in prior successful tool evidence,
+    or an empty array
 - `reasoning`: a short explanation of why this is the best next step
 
 Rules:
@@ -62,6 +65,36 @@ Rules:
   accumulated context. Never invent placeholder identifiers or claim an
   external resource/authentication state was verified without successful
   evidence.
+- A recovery action may revise the adaptive target agreement after a successful
+  discovery or lookup has grounded an exact Vontology concept ID. Put each such
+  revision in `turn_next_action.target_contracts` with exactly these keys:
+  `kind`, `binding_kind`, `concept_ids`, `resolution_status`,
+  `matching_policy`, and `resolution_lineage`. Use `kind = "symbolic"`,
+  `resolution_status = "resolved"`, and normally
+  `matching_policy = "exact"`. `binding_kind` must be `"entity"` or `"type"`.
+  Every `resolution_lineage` item must use `source = "tool_invocation_result"`
+  and identify `tool`, optional `call_id`, and `result_path` for the exact
+  structured result value that supplied the concept ID. Python will derive and
+  validate its own evidence receipt rather than trusting this claimed lineage;
+  it will validate the claim
+  against successful accumulated tool output; an ID that only appears in the
+  user request, your reasoning, a failed tool call, or the proposed tool-call
+  arguments is not grounded and will remain blocked.
+- Use a resolved recovery target contract only when the evidence distinguishes
+  the intended target sufficiently for the current request. A search result is
+  not automatically an exact identity match merely because it is the only
+  result. Preserve ambiguity and use an empty `target_contracts` array when the
+  represented evidence is insufficient. A non-empty list is the complete target
+  agreement for this direct recovery batch, not a partial addition to the earlier
+  unresolved agreement.
+- Treat relation-summary results as discovery evidence, not relation-content
+  evidence. A summary can establish predicates, counts, languages, and relation
+  IDs, but it cannot establish what the stored text says. When identity,
+  provenance, meaning, or another ambiguity could be resolved from the full
+  relevant relation text, use the available content-bearing relation-read tool
+  before asking the user for information or returning an input-required
+  follow-up. Do not impose on the user for evidence Von can still retrieve
+  safely and read-only.
 - A previous recovery attempt does not automatically forbid another retry. When the previous attempt targeted one artefact and other unresolved targets remain, another bounded retry may still be the correct action.
 - Use `"execute_tool_batch"` only for a bounded direct batch of at most 4 tool calls. Each item in `tool_calls` must be an object with exactly these keys: `tool` and `arguments`.
 - Use `"execute_tool_batch"` only for direct tool calls. Do not use workflow-control actions, subworkflow launch actions, or free-form LLM actions in `tool_calls`.
@@ -72,9 +105,9 @@ Rules:
 - If `completion_gate_repeat_eligible` is false, do not request another automated retry.
 - If another automated attempt is unlikely to help, prefer `"respond_with_answer"` when the evidence already supports it; otherwise use `"respond_with_follow_up"`.
 - For ownership, authorship, identity, or provenance questions, prefer a route that can retrieve or verify the grounding evidence before answering directly.
-- For `"retry_execution"`, set `turn_next_action.response_text = null`, provide `turn_next_action.target_workflow_id`, and set `turn_next_action.tool_calls = null`.
-- For `"execute_tool_batch"`, set `turn_next_action.target_workflow_id = null`, set `turn_next_action.response_text = null`, and provide `turn_next_action.tool_calls`.
-- For `"respond_with_answer"` and `"respond_with_follow_up"`, set `turn_next_action.response_text` to the exact user-facing text, set `turn_next_action.tool_calls = null`, and use `turn_next_action.target_workflow_id = null` unless a non-null value is genuinely useful supporting metadata.
+- For `"retry_execution"`, set `turn_next_action.response_text = null`, provide `turn_next_action.target_workflow_id`, set `turn_next_action.tool_calls = null`, and set `turn_next_action.target_contracts = []`.
+- For `"execute_tool_batch"`, set `turn_next_action.target_workflow_id = null`, set `turn_next_action.response_text = null`, provide `turn_next_action.tool_calls`, and provide only the grounded target-contract revisions needed by those calls (otherwise `[]`).
+- For `"respond_with_answer"` and `"respond_with_follow_up"`, set `turn_next_action.response_text` to the exact user-facing text, set `turn_next_action.tool_calls = null`, set `turn_next_action.target_contracts = []`, and use `turn_next_action.target_workflow_id = null` unless a non-null value is genuinely useful supporting metadata.
 - Adapt the `response_text` style to `Thinking Card Mode`:
   - `default`: keep the response concise and user-friendly. Briefly describe what was attempted and what blocked completion. Do not dump tool traces or workflow internals.
   - `expert` or `debug`: when the turn finished with no full answer (`Current User-Facing Response` is empty), the `response_text` for `"respond_with_answer"` or `"respond_with_follow_up"` MUST include a structured partial-progress summary covering: the `Selected Workflow`, a short trace of `Tool Invocations Observed` (tool name, brief argument summary, brief outcome) and any salient `Tool Messages Observed`, the `Completion Gate Decision` and `Completion Gate Reason`, and a concise interpretation of why no full answer was produced and what the user could try next. Format as Markdown with short bullet points so the partial progress is legible. Do not invent tools or outcomes that are not in the supplied context.

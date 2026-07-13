@@ -11,7 +11,10 @@ from typing import Any, Dict, Iterable, Mapping
 from ...services import concept_search_service, concept_service
 from ...services.concept_service import ConceptNotFoundError
 from ...services.relationship_write_service import add_relationship
-from ...services.workflow_discovery_service import discover_workflows
+from ...services.workflow_discovery_service import (
+    classify_workflow_concept_executability,
+    discover_workflows,
+)
 from ...services.workflow_authoring_request_interpretation_vontology_service import (
     infer_workflow_authoring_identity,
     infer_workflow_authoring_profile,
@@ -36,7 +39,12 @@ from ..mcp_tool_bridge import (
     apply_namespace_to_mcp_payload,
     resolve_internal_mcp_tool_name,
 )
-from ..vontology_loader import discover_workflow_ids, load_workflow_definition_from_vontology
+from ..vontology_loader import (
+    discover_workflow_ids,
+    load_workflow_definition_from_vontology,
+    resolve_workflow_description,
+    resolve_workflow_routing_profile,
+)
 from ..workflow_creation_contracts import (
     WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE,
     WORKFLOW_AUTHORING_ACTION_DESIGN_REPAIR_SPEC,
@@ -77,11 +85,12 @@ from ..workflow_authoring_service import (
     build_workflow_definition_from_authoring_spec,
     serialise_workflow_definition_to_authoring_spec,
 )
+from ..workflow_mcp_tool_actions import register_workflow_mcp_tool_actions
 from ..workflow_template_profile_service import (
     resolve_workflow_spec_template,
 )
+from .control_flow_actions import register_control_flow_actions
 from .entity_representation_workflow import (
-    ENTITY_REPRESENTATION_MATERIALISE_ACTION_ID,
     register_entity_representation_actions,
 )
 from .workflow_gap_recovery_workflow import register_workflow_gap_recovery_actions
@@ -1189,6 +1198,78 @@ def _normalise_workflow_candidate_rows(
     return payload
 
 
+def _load_explicit_workflow_candidate_rows(
+    workflow_ids: Iterable[str],
+    *,
+    exclude_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Project represented exact workflow candidates for an authored preflight.
+
+    The caller owns which workflow IDs are relevant.  This support surface only
+    verifies that each represented workflow exists and exposes its current
+    executability/routing metadata; it does not infer a domain or choose a
+    workflow on the caller's behalf.
+    """
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_workflow_id in workflow_ids:
+        workflow_id = _clean_text(raw_workflow_id)
+        if not workflow_id or workflow_id in exclude_ids or workflow_id in seen:
+            continue
+        seen.add(workflow_id)
+
+        try:
+            definition = load_workflow_definition_from_vontology(workflow_id)
+        except Exception:
+            definition = None
+        if definition is None:
+            continue
+
+        is_executable, executability_reason, executability_detail = (
+            classify_workflow_concept_executability(workflow_id)
+        )
+        try:
+            description, description_source = resolve_workflow_description(
+                workflow_id,
+                workflow_source="vontology",
+                definition_purpose=getattr(definition, "purpose", None),
+            )
+        except Exception:
+            description, description_source = "", ""
+        try:
+            routing_profile, routing_profile_source = (
+                resolve_workflow_routing_profile(workflow_id)
+            )
+        except Exception:
+            routing_profile, routing_profile_source = None, ""
+        rows.append(
+            {
+                "concept_id": workflow_id,
+                "name": _titleise(workflow_id.removeprefix("#V#")),
+                "description": description or None,
+                "description_source": description_source or None,
+                "relevance_score": 1.0,
+                "confidence_score": 1.0 if is_executable else 0.0,
+                "match_source": "represented_explicit_workflow_candidate",
+                "is_executable": bool(is_executable),
+                "executability_reason": executability_reason,
+                "executability_detail": executability_detail,
+                "routing_eligible": bool(is_executable),
+                "routing_exclusion_reason": (
+                    None if is_executable else executability_reason
+                ),
+                "routing_profile": (
+                    dict(routing_profile)
+                    if isinstance(routing_profile, Mapping)
+                    else None
+                ),
+                "routing_profile_source": routing_profile_source or None,
+            }
+        )
+    return rows
+
+
 def _handle_discover_existing_workflows(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
@@ -1217,25 +1298,55 @@ def _handle_discover_existing_workflows(
         )
     )
 
+    explicit_candidate_ids = _coerce_string_sequence(
+        inputs.get("candidate_workflow_ids")
+        or request.data.get("candidate_workflow_ids")
+    )
+
     discovery_result = discover_workflows(
         request_text,
         max_results=max_results,
         allow_non_executable=True,
     )
     discovery_payload = discovery_result.to_dict()
-    candidate_rows = _normalise_workflow_candidate_rows(
+    discovered_candidate_rows = _normalise_workflow_candidate_rows(
         discovery_payload.get("candidates") or discovery_payload.get("matches"),
         exclude_ids=exclude_ids,
     )
-    routing_rows = _normalise_workflow_candidate_rows(
+    discovered_routing_rows = _normalise_workflow_candidate_rows(
         discovery_payload.get("matches"),
         exclude_ids=exclude_ids,
     )
+    explicit_candidate_rows = _load_explicit_workflow_candidate_rows(
+        explicit_candidate_ids,
+        exclude_ids=exclude_ids,
+    )
+
+    candidate_rows_by_id: dict[str, dict[str, Any]] = {
+        str(row.get("concept_id")): row
+        for row in explicit_candidate_rows
+        if isinstance(row.get("concept_id"), str)
+    }
+    for row in discovered_candidate_rows:
+        candidate_rows_by_id.setdefault(str(row.get("concept_id")), row)
+    candidate_rows = list(candidate_rows_by_id.values())
+
+    routing_rows_by_id: dict[str, dict[str, Any]] = {
+        str(row.get("concept_id")): row
+        for row in explicit_candidate_rows
+        if isinstance(row.get("concept_id"), str)
+        and bool(row.get("routing_eligible"))
+    }
+    for row in discovered_routing_rows:
+        routing_rows_by_id.setdefault(str(row.get("concept_id")), row)
+    routing_rows = list(routing_rows_by_id.values())
     discovery_payload["candidates"] = candidate_rows
     discovery_payload["matches"] = routing_rows
     discovery_payload["candidate_count"] = len(candidate_rows)
     discovery_payload["match_count"] = len(routing_rows)
     discovery_payload["excluded_workflow_ids"] = sorted(exclude_ids)
+    discovery_payload["explicit_candidate_workflow_ids"] = explicit_candidate_ids
+    discovery_payload["explicit_candidate_count"] = len(explicit_candidate_rows)
 
     outputs = {
         "workflow_authoring_request_text": request_text,
@@ -2267,6 +2378,11 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
     # the same action registry they will later execute under, or verification
     # can incorrectly reject otherwise runnable workflows.
     register_workflow_gap_recovery_actions(registry)
+    register_control_flow_actions(
+        registry,
+        definition_loader=load_workflow_definition_from_vontology,
+    )
+    register_workflow_mcp_tool_actions(registry)
     register_entity_representation_actions(registry)
     registry.register_if_absent(
         ActionSpec(
@@ -2336,22 +2452,17 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
 
 def _supported_action_ids_for_verification(
     *,
-    action_ids: Iterable[str],
+    registry: ActionRegistry,
     environment: WorkflowEnvironment,
 ) -> set[str]:
-    supported: set[str] = set()
-    local_actions = {
-        "workflow_gap.execute_candidate",
-        ENTITY_REPRESENTATION_MATERIALISE_ACTION_ID,
-        WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-        WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
-        WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
-        WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
-        WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
-    }
-    for action_id in action_ids:
-        if action_id in local_actions:
-            supported.add(action_id)
+    # Structural validation must be derived from the same executable support
+    # surface used by the verification run.  A parallel hand-maintained action
+    # allow-list drifts as soon as VWL gains another reusable primitive.
+    supported = set(registry.all_action_ids())
+
+    # ``llm.action`` is executed directly by WorkflowExecutor rather than via
+    # ActionRegistry, but remains a first-class supported workflow action.
+    supported.add("llm.action")
 
     gateway = environment.gateway
     if gateway is not None and getattr(gateway, "enabled", False):
@@ -2418,9 +2529,9 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
             outputs=outputs,
         )
 
-    action_ids = collect_workflow_action_ids(definition)
+    verification_registry = _build_verification_registry(request.environment)
     supported_actions = _supported_action_ids_for_verification(
-        action_ids=action_ids,
+        registry=verification_registry,
         environment=request.environment,
     )
     contract = validate_workflow_definition_contract(
@@ -2435,7 +2546,6 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
     postconditions_verified = False
     optional_test_instance_id: str | None = None
     if structural_validation_passed:
-        verification_registry = _build_verification_registry(request.environment)
         executor = WorkflowExecutor(registry=verification_registry, max_transitions=40)
         verification_inputs_raw = request.data.get("test_run_inputs")
         if not isinstance(verification_inputs_raw, Mapping):

@@ -104,9 +104,6 @@ _AGENT_TEST_GENERIC_SELECTOR_WORKFLOW_IDS = frozenset(
         TOOL_CALLING_WORKFLOW_ID,
     }
 )
-_PREMIUM_MODEL_PROVIDER_PREFIXES = frozenset(
-    {"openai", "anthropic", "gemini", "azure_openai"}
-)
 
 
 def _context_string(value: Any) -> str:
@@ -137,22 +134,28 @@ def _request_uses_agent_test_local_model(request: WorkflowActionRequest) -> bool
     if not _is_agent_test_instance():
         return False
     provider = _context_string(
-        request.data.get("requested_client_type")
-        or request.data.get("selected_model_provider")
+        request.data.get("selected_model_provider")
+        or request.data.get("requested_client_type")
         or request.data.get("model_provider")
     ).lower()
-    if provider == _AGENT_TEST_LOCAL_PROVIDER_NAME:
-        return True
+    if provider:
+        return provider == _AGENT_TEST_LOCAL_PROVIDER_NAME
     requested_model = _context_string(
         request.data.get("requested_model")
         or getattr(request.environment, "model", None)
     )
-    model_provider, model_name = _split_model_provider_prefix(requested_model)
+    model_provider, _model_name = _split_model_provider_prefix(requested_model)
     if model_provider:
         return model_provider == _AGENT_TEST_LOCAL_PROVIDER_NAME
-    if not model_name:
-        return False
-    return model_name.split(":", 1)[0].lower() not in _PREMIUM_MODEL_PROVIDER_PREFIXES
+    inferred_provider = _context_string(
+        infer_llm_client_provider(getattr(request.environment, "llm_client", None))
+    ).lower()
+    if inferred_provider:
+        return inferred_provider == _AGENT_TEST_LOCAL_PROVIDER_NAME
+    # A bare model ID is ambiguous: active hosted models such as
+    # ``gpt-5.6-luna`` do not carry a provider prefix. Faithful AgentTest replay
+    # must call the configured model unless locality can be resolved.
+    return False
 
 
 def _required_tools_from_contract_payload(value: Any) -> list[str]:
@@ -430,6 +433,28 @@ def _agent_test_conversation_turn_fast_path_result(
         "status": "skipped",
         "reason_code": "agent_test_explicit_local_replay_fast_path",
     }
+    prior_llm_calls = request.data.get("llm_calls")
+    llm_calls = (
+        [
+            {str(key): value for key, value in item.items() if isinstance(key, str)}
+            for item in prior_llm_calls
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(prior_llm_calls, list)
+        else []
+    )
+    llm_calls.append(llm_call)
+    prior_aux_llm_calls = request.data.get("aux_llm_calls")
+    aux_llm_calls = (
+        [
+            {str(key): value for key, value in item.items() if isinstance(key, str)}
+            for item in prior_aux_llm_calls
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(prior_aux_llm_calls, list)
+        else []
+    )
+    aux_llm_calls.append(aux_call)
     return _build_result(
         request=request,
         response_text=response_text,
@@ -442,8 +467,8 @@ def _agent_test_conversation_turn_fast_path_result(
         selected_candidate=selected_candidate,
         tool_invocations=(),
         tool_messages=(),
-        llm_calls=[llm_call],
-        aux_llm_calls=[aux_call],
+        llm_calls=llm_calls,
+        aux_llm_calls=aux_llm_calls,
         prompt_variant_selection={
             "source": "agent_test_fast_path",
             "reason": "agent_test_explicit_local_replay",
@@ -2476,6 +2501,9 @@ def _build_result(
     llm_step_envelope = {
         "execution_mode": "llm",
         "action_id": request.action_id,
+        "workflow_id": request.workflow_id,
+        "workflow_state_id": request.workflow_state_id,
+        "policy_stage": _context_string(llm_policy_map.get("policy_stage")) or None,
         "base_prompt_id": (
             prompt_variant_selection.get("base_prompt_concept_id")
             if isinstance(prompt_variant_selection, Mapping)
@@ -3438,6 +3466,26 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
     shared_data: dict[str, Any] = {
         str(key): value for key, value in request.data.items() if isinstance(key, str)
     }
+    workflow_step_output_format = _validation_output_format(validation_policy_map)
+    workflow_step_output_contract: dict[str, Any] | None = None
+    if workflow_step_output_format:
+        workflow_step_output_contract = {
+            "schema_version": "workflow_step_output_contract.v1",
+            "output_format": workflow_step_output_format,
+            "prompt_concept_id": prompt_id,
+            "workflow_id": request.workflow_id,
+            "workflow_state_id": request.workflow_state_id,
+            "response_contract_text": _context_string(
+                llm_policy_map.get("response_contract_text")
+            )
+            or None,
+            "required_json_fields": list(
+                _json_required_fields(validation_policy_map)
+            ),
+            "json_field_defaults": dict(
+                _json_field_defaults(validation_policy_map)
+            ),
+        }
     shared_data.update(
         {
             "prompt": rendered_prompt,
@@ -3571,6 +3619,8 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
             "max_tool_invocations": max_tool_invocations,
         }
     )
+    if workflow_step_output_contract is not None:
+        shared_data["workflow_step_output_contract"] = workflow_step_output_contract
 
     plan_request = WorkflowActionRequest(
         action_id=request.action_id,

@@ -14,9 +14,7 @@ from .workflow_prompt_authority_service import (
 )
 from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 
-REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID = (
-    "#V#represented_artefact_creation_workflow"
-)
+REPRESENTED_ARTEFACT_CREATION_WORKFLOW_ID = "#V#represented_artefact_creation_workflow"
 REPRESENTED_ARTEFACT_ITEM_CREATION_WORKFLOW_ID = (
     "#V#represented_artefact_item_creation_workflow"
 )
@@ -28,7 +26,7 @@ REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID = (
 )
 
 _MANAGED_BY = "represented_artefact_creation_workflow_vontology_service"
-_SOURCE_TAG = "JVNAUTOSCI-2247"
+_SOURCE_TAG = "JVNAUTOSCI-2577"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -47,21 +45,6 @@ _SET_EXTRACTION_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "prompt_represented_artefact_set_extraction_seed.md"
 )
-_PROMPT_REFRESH_MARKERS = (
-    "#V#workflow_marker",
-    "#V#workflow_label",
-    "#V#paper_suggestion_provenance_fact",
-    "current_represented_artefact_request",
-    "parent_resolution_required",
-    "Do not use `#V#thing` as the parent",
-)
-_SET_EXTRACTION_REFRESH_MARKERS = (
-    "artefact_specs",
-    "current_represented_artefact_request",
-    "set",
-    "single",
-    "Do not call tools in this step",
-)
 
 
 def _load_represented_artefact_creation_prompt_seed_text() -> str:
@@ -78,42 +61,6 @@ def _load_represented_artefact_set_extraction_prompt_seed_text() -> str:
     if not prompt_text:
         raise ValueError("represented_artefact_set_extraction_prompt_seed_missing")
     return prompt_text
-
-
-def _prompt_needs_refresh(
-    concept_id: str,
-    *,
-    markers: tuple[str, ...],
-) -> bool:
-    from .text_value_service import get_texts_for_concept
-
-    rows = get_texts_for_concept(
-        concept_id,
-        predicate="hasContent",
-        limit=5,
-    )
-    prompt_text = "\n".join(
-        str((row or {}).get("text") or "")
-        for row in rows
-        if isinstance((row or {}).get("text"), str)
-    )
-    if not prompt_text.strip():
-        return True
-    return any(marker not in prompt_text for marker in markers)
-
-
-def _represented_artefact_creation_prompt_needs_refresh() -> bool:
-    return _prompt_needs_refresh(
-        REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID,
-        markers=_PROMPT_REFRESH_MARKERS,
-    )
-
-
-def _represented_artefact_set_extraction_prompt_needs_refresh() -> bool:
-    return _prompt_needs_refresh(
-        REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID,
-        markers=_SET_EXTRACTION_REFRESH_MARKERS,
-    )
 
 
 def _ensure_represented_artefact_creation_prompt_support(
@@ -146,12 +93,8 @@ def _ensure_represented_artefact_creation_prompt_support(
     )
 
     seeded_prompt_ids: list[str] = []
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(
-            REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID
-        )
-        or _represented_artefact_creation_prompt_needs_refresh()
+    if force_prompt_seed or not prompt_concept_has_content(
+        REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
             subject_concept_id=REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID,
@@ -162,26 +105,18 @@ def _ensure_represented_artefact_creation_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(REPRESENTED_ARTEFACT_CREATION_PROMPT_CONCEPT_ID)
-    if (
-        force_prompt_seed
-        or not prompt_concept_has_content(
-            REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
-        )
-        or _represented_artefact_set_extraction_prompt_needs_refresh()
+    if force_prompt_seed or not prompt_concept_has_content(
+        REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
     ):
         upsert_singleton_text_relation(
-            subject_concept_id=(
-                REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
-            ),
+            subject_concept_id=(REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID),
             predicate="hasContent",
             text=_load_represented_artefact_set_extraction_prompt_seed_text(),
             lang="en-NZ",
             context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
             garbage_collect=True,
         )
-        seeded_prompt_ids.append(
-            REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID
-        )
+        seeded_prompt_ids.append(REPRESENTED_ARTEFACT_SET_EXTRACTION_PROMPT_CONCEPT_ID)
 
     report = dict(report)
     report["seeded_prompt_ids"] = seeded_prompt_ids

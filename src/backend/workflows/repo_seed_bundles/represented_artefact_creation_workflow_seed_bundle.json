@@ -2,8 +2,20 @@
   "family_id": "represented_artefact_creation_workflow_seed_bundle",
   "managed_by": "represented_artefact_creation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "5",
-  "source_tag": "JVNAUTOSCI-2247",
+  "seed_version": "6",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#represented_artefact_creation_workflow": {
+      "5": [
+        "2061801c8da0d8437f021ef49dd3af40d405f98fdc5388752d0b831ce689bb48"
+      ]
+    },
+    "#V#represented_artefact_item_creation_workflow": {
+      "5": [
+        "cc17479ee5df029a7baed2b1d21a1f0c098979afcda730c91a2e7acce624771e"
+      ]
+    }
+  },
+  "source_tag": "JVNAUTOSCI-2577",
   "supported_action_ids": [
     "llm.action",
     "create_concepts",
@@ -70,7 +82,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"schema_version\": \"workflow_required_effects_contract.v1\", \"contract_id\": \"represented_artefact_creation_or_set_readback\", \"required_effects\": [{\"effect_id\": \"represented_artefact_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"description\": \"A represented-artefact run must assert the resolved parent/type relationship and read back the represented artefact concept plus text relations before claiming success. Set runs satisfy this through their item workflow mutation/read-backs.\", \"required_tools\": [\"add_relationship\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\", \"missing_failure_code\": \"represented_artefact_mutation_readback_missing\", \"failed_failure_code\": \"represented_artefact_mutation_readback_failed\", \"not_executed_reason\": \"Represented artefact parent/type assertion or read-back did not run.\", \"not_satisfied_reason\": \"Represented artefact mutation/read-back did not verify durable state.\"}]}",
+          "text": "{\"schema_version\": \"workflow_required_effects_contract.v1\", \"contract_id\": \"represented_artefact_creation_or_set_readback\", \"required_effects\": [{\"effect_id\": \"represented_artefact_readback\", \"effect_type\": \"grounded_evidence\", \"description\": \"Every represented-artefact run must read back the represented concept and its text relations before claiming success.\", \"required_tools\": [\"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\", \"missing_failure_code\": \"represented_artefact_readback_missing\", \"failed_failure_code\": \"represented_artefact_readback_failed\", \"not_executed_reason\": \"Represented artefact read-back did not run.\", \"not_satisfied_reason\": \"Represented artefact read-back did not verify durable state.\"}, {\"effect_id\": \"represented_artefact_create_parent_assertion\", \"effect_type\": \"grounded_evidence\", \"description\": \"When creation runs, the create path must assert the resolved parent/type relationship before claiming success. Reuse-only runs do not activate this mutation effect.\", \"required_tools\": [\"add_relationship\"], \"required_tools_match\": \"all\", \"activation_required_tools\": [\"create_concepts\"], \"activation_required_tools_match\": \"any\", \"missing_failure_code\": \"represented_artefact_parent_assertion_missing\", \"failed_failure_code\": \"represented_artefact_parent_assertion_failed\", \"not_executed_reason\": \"Represented artefact creation ran without a parent/type assertion.\", \"not_satisfied_reason\": \"Represented artefact creation did not verify the parent/type assertion.\"}]}",
           "lang": "en-NZ"
         }
       ],
@@ -217,6 +229,7 @@
             ],
             "llm_policy": {
               "allowed_tools": [
+                "resolve_concept_by_name",
                 "search_concepts",
                 "fetch_concept"
               ],
@@ -265,7 +278,7 @@
               "max_tool_invocations": 5,
               "policy_stage": "represented_artefact_creation_plan",
               "required_tools": [
-                "search_concepts"
+                "resolve_concept_by_name"
               ],
               "response_contract_text": "Return JSON only. Resolve or fail closed before creation. A create decision must include a concrete parent_id and a one-item concepts array suitable for create_concepts. Never use #V#thing as parent. Prefer existing exact concept reuse when search verifies one. Use support types #V#workflow_marker, #V#workflow_label, #V#paper_suggestion_provenance_fact, #V#research_lab_artefact, #V#represented_artefact, or #V#predicate when grounded.",
               "tool_argument_defaults": {
@@ -352,7 +365,7 @@
             ],
             "conditional_transitions": [
               {
-                "to_state": "assert_parent_relationship",
+                "to_state": "read_back_concept",
                 "reason": "reuse_existing_verified",
                 "condition_spec": {
                   "kind": "all",
@@ -370,16 +383,6 @@
                     {
                       "kind": "context_is_null",
                       "key": "represented_artefact_concept_id",
-                      "expected": false
-                    },
-                    {
-                      "kind": "context_exists",
-                      "key": "represented_artefact_parent_id",
-                      "expected": true
-                    },
-                    {
-                      "kind": "context_is_null",
-                      "key": "represented_artefact_parent_id",
                       "expected": false
                     }
                   ]
@@ -736,7 +739,7 @@
                 "value": [
                   {
                     "key": "response_text",
-                    "template": "Represented artefact verified: {concept_id}\\nName: {name}\\nCode: {code}\\nKind: {kind}\\nParent/type: {parent_id}\\nMutation/read-back: add_relationship, fetch_concept, and get_text_relations_summary completed.",
+                    "template": "Represented artefact verified: {concept_id}\\nName: {name}\\nCode: {code}\\nKind: {kind}\\nParent/type: {parent_id}\\nDecision: {decision}. The represented concept and its text relations were read back successfully; mutation steps are confined to the create path.",
                     "variables": {
                       "code": {
                         "default": "not supplied",
@@ -744,6 +747,9 @@
                       },
                       "concept_id": {
                         "value_from_context": "represented_artefact_concept_id"
+                      },
+                      "decision": {
+                        "value_from_context": "represented_artefact_decision"
                       },
                       "kind": {
                         "default": "not supplied",
@@ -754,6 +760,7 @@
                         "value_from_context": "represented_artefact_name"
                       },
                       "parent_id": {
+                        "default": "not supplied",
                         "value_from_context_options": [
                           "represented_artefact_parent_id_used",
                           "represented_artefact_parent_id"
@@ -966,7 +973,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"contract_id\": \"represented_artefact_creation_readback\", \"required_effects\": [{\"description\": \"The workflow must assert the resolved parent/type relationship and read back the represented artefact concept plus text relations before claiming success.\", \"effect_id\": \"represented_artefact_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"represented_artefact_mutation_readback_failed\", \"missing_failure_code\": \"represented_artefact_mutation_readback_missing\", \"not_executed_reason\": \"Represented artefact parent/type assertion or read-back did not run.\", \"not_satisfied_reason\": \"Represented artefact mutation/read-back did not verify durable state.\", \"required_tools\": [\"add_relationship\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "text": "{\"contract_id\": \"represented_artefact_creation_readback\", \"required_effects\": [{\"description\": \"Every represented-artefact item run must read back the represented concept and its text relations before claiming success.\", \"effect_id\": \"represented_artefact_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"represented_artefact_readback_failed\", \"missing_failure_code\": \"represented_artefact_readback_missing\", \"not_executed_reason\": \"Represented artefact read-back did not run.\", \"not_satisfied_reason\": \"Represented artefact read-back did not verify durable state.\", \"required_tools\": [\"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}, {\"description\": \"When creation runs, the item create path must assert the resolved parent/type relationship before claiming success. Reuse-only runs do not activate this mutation effect.\", \"effect_id\": \"represented_artefact_create_parent_assertion\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"represented_artefact_parent_assertion_failed\", \"missing_failure_code\": \"represented_artefact_parent_assertion_missing\", \"not_executed_reason\": \"Represented artefact creation ran without a parent/type assertion.\", \"not_satisfied_reason\": \"Represented artefact creation did not verify the parent/type assertion.\", \"required_tools\": [\"add_relationship\"], \"required_tools_match\": \"all\", \"activation_required_tools\": [\"create_concepts\"], \"activation_required_tools_match\": \"any\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
           "lang": "en-NZ"
         }
       ],
@@ -1057,7 +1064,7 @@
             ],
             "conditional_transitions": [
               {
-                "to_state": "assert_parent_relationship",
+                "to_state": "read_back_concept",
                 "reason": "preplanned_reuse_existing_verified",
                 "condition_spec": {
                   "kind": "all",
@@ -1075,16 +1082,6 @@
                     {
                       "kind": "context_is_null",
                       "key": "represented_artefact_concept_id",
-                      "expected": false
-                    },
-                    {
-                      "kind": "context_exists",
-                      "key": "represented_artefact_parent_id",
-                      "expected": true
-                    },
-                    {
-                      "kind": "context_is_null",
-                      "key": "represented_artefact_parent_id",
                       "expected": false
                     }
                   ]
@@ -1157,6 +1154,7 @@
             ],
             "llm_policy": {
               "allowed_tools": [
+                "resolve_concept_by_name",
                 "search_concepts",
                 "fetch_concept"
               ],
@@ -1205,7 +1203,7 @@
               "max_tool_invocations": 5,
               "policy_stage": "represented_artefact_creation_plan",
               "required_tools": [
-                "search_concepts"
+                "resolve_concept_by_name"
               ],
               "response_contract_text": "Return JSON only. Resolve or fail closed before creation. A create decision must include a concrete parent_id and a one-item concepts array suitable for create_concepts. Never use #V#thing as parent. Prefer existing exact concept reuse when search verifies one. Use support types #V#workflow_marker, #V#workflow_label, #V#paper_suggestion_provenance_fact, #V#research_lab_artefact, #V#represented_artefact, or #V#predicate when grounded.",
               "tool_argument_defaults": {
@@ -1292,7 +1290,7 @@
             ],
             "conditional_transitions": [
               {
-                "to_state": "assert_parent_relationship",
+                "to_state": "read_back_concept",
                 "reason": "reuse_existing_verified",
                 "condition_spec": {
                   "kind": "all",
@@ -1310,16 +1308,6 @@
                     {
                       "kind": "context_is_null",
                       "key": "represented_artefact_concept_id",
-                      "expected": false
-                    },
-                    {
-                      "kind": "context_exists",
-                      "key": "represented_artefact_parent_id",
-                      "expected": true
-                    },
-                    {
-                      "kind": "context_is_null",
-                      "key": "represented_artefact_parent_id",
                       "expected": false
                     }
                   ]
@@ -1676,7 +1664,7 @@
                 "value": [
                   {
                     "key": "response_text",
-                    "template": "Represented artefact verified: {concept_id}\\nName: {name}\\nCode: {code}\\nKind: {kind}\\nParent/type: {parent_id}\\nMutation/read-back: add_relationship, fetch_concept, and get_text_relations_summary completed.",
+                    "template": "Represented artefact verified: {concept_id}\\nName: {name}\\nCode: {code}\\nKind: {kind}\\nParent/type: {parent_id}\\nDecision: {decision}. The represented concept and its text relations were read back successfully; mutation steps are confined to the create path.",
                     "variables": {
                       "code": {
                         "default": "not supplied",
@@ -1684,6 +1672,9 @@
                       },
                       "concept_id": {
                         "value_from_context": "represented_artefact_concept_id"
+                      },
+                      "decision": {
+                        "value_from_context": "represented_artefact_decision"
                       },
                       "kind": {
                         "default": "not supplied",
@@ -1694,6 +1685,7 @@
                         "value_from_context": "represented_artefact_name"
                       },
                       "parent_id": {
+                        "default": "not supplied",
                         "value_from_context_options": [
                           "represented_artefact_parent_id_used",
                           "represented_artefact_parent_id"

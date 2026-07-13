@@ -698,6 +698,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
         "external_surface": False,
+        "operation_category": "read",
+        "evidence_role": "search",
+        "required_tool_operation_class": "search_or_resolution_read",
         "planner_hint": (
             "Use to resolve a named person, project, organisation, or other entity "
             "to a represented concept before relation lookup."

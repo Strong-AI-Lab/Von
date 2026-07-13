@@ -584,6 +584,116 @@ def test_tool_call_preflight_applies_generic_aliases_and_batch_hints() -> None:
     ]
 
 
+def test_search_concepts_rejects_target_contract_metadata_before_invoke() -> None:
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+
+    schema = orchestrator._tool_schema_for_name(
+        "search_concepts", gateway.describe_methods()
+    )
+    assert schema is not None
+    assert schema.allow_unknown is False
+    assert {
+        "direct_instances_only",
+        "system_tags",
+        "user_tags",
+        "page",
+        "per_page",
+        "use_two_pass",
+    }.issubset(schema.optional)
+
+    preflight = orchestrator._preflight_tool_calls(
+        [
+            {
+                "action": "call_tool",
+                "tool": "search_concepts",
+                "payload": {
+                    "query": "Ada Lovelace",
+                    "matching_policy": "exact",
+                },
+            }
+        ],
+        gateway.describe_methods(),
+        allowed_tool_names=None,
+        user_namespace="#V#test_user@test_org",
+        selected_gmail_profile=None,
+    )
+
+    assert preflight.errors == [
+        "search_concepts: Unexpected field 'matching_policy'."
+    ]
+
+
+def test_tool_call_preflight_uses_prior_search_result_as_focal_resolution() -> None:
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+    tool_calls = [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#grounded_candidate"},
+        }
+    ]
+
+    preflight = orchestrator._preflight_tool_calls(
+        cast(Any, tool_calls),
+        gateway.describe_methods(),
+        allowed_tool_names=None,
+        user_namespace="#V#test_user@test_org",
+        selected_gmail_profile=None,
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "call_id": "call-search-1",
+                "effective_payload": {
+                    "results": [{"concept_id": "#V#grounded_candidate"}]
+                },
+            }
+        ],
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the entity named by the user",
+                    "resolution_status": "unresolved",
+                }
+            ]
+        },
+    )
+
+    assert preflight.errors == []
+    assert preflight.tool_calls == tool_calls
+    assert preflight.diagnostics == [
+        {
+            "schema_version": "provisional_target_resolution.v1",
+            "status": "valid",
+            "tool": "fetch_concept",
+            "resolution_scope": "verification_read_only",
+            "planned_targets": [
+                {"field": "concept_id", "value": "#V#grounded_candidate"}
+            ],
+            "evidence": [
+                {
+                    "concept_id": "#V#grounded_candidate",
+                    "tool": "search_concepts",
+                    "result_path": "effective_payload.results[0].concept_id",
+                    "call_id": "call-search-1",
+                }
+            ],
+        }
+    ]
+
+
 def test_task_contracts_expose_priority_enum_and_task_id_scalar_projection() -> None:
     gateway = InternalMCPGateway(
         catalogue=build_default_catalogue(),

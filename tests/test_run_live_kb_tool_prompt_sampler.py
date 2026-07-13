@@ -9,6 +9,59 @@ import requests
 from scripts import run_live_kb_tool_prompt_sampler as sampler
 
 
+def _input_required_debug(
+    *,
+    observed_tools: list[str],
+    validation_valid: bool = True,
+) -> dict[str, object]:
+    receipt = {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": "input_required",
+        "causal_stage": "verification",
+        "cause_code": "identity_match_ambiguous",
+        "evidence_refs": [
+            {
+                "source": "completion_report.tool_calls",
+                "locator": "get_text_relations_summary",
+                "summary": "Relation predicates and counts were discovered.",
+            }
+        ],
+        "retryability": "after_input",
+    }
+    return {
+        "completion_gate_verdict": {
+            "decision": "input_required",
+            "safe_to_claim_completion": False,
+            "requires_follow_up": True,
+        },
+        "critic_verdict": {
+            "verdict": "pass",
+            "terminal_outcome_receipt": receipt,
+        },
+        "terminal_outcome_receipt": receipt,
+        "terminal_outcome_receipt_validation": {
+            "schema_version": "terminal_outcome_receipt_validation.v1",
+            "present": True,
+            "valid": validation_valid,
+            "outcome": "input_required",
+            "decision_authority": "represented_llm",
+            "errors": [] if validation_valid else ["receipt_invalid"],
+        },
+        "turn_execution_diagnostics": {
+            "workflow_routing_diagnostics": {
+                "dispatch": {
+                    "selected_execution_mode": "custom_workflow",
+                    "dispatch_workflow_id": "#V#entity_representation_workflow",
+                }
+            },
+            "tool_history": [
+                {"tool": tool_name, "status": "ok"} for tool_name in observed_tools
+            ],
+        },
+    }
+
+
 def test_prompt_bank_payload_is_loaded_from_file() -> None:
     file_payload = json.loads(sampler.PROMPT_BANK_PATH.read_text(encoding="utf-8"))
     assert file_payload == sampler.PROMPT_BANK_PAYLOAD
@@ -308,6 +361,295 @@ def test_evaluate_user_happiness_flags_partial_completion_gate() -> None:
 
     assert evaluation["should_user_be_happy"] is False
     assert "Completion gate reported partial." in evaluation["reasons"]
+    assert (
+        "Completion gate reported safe_to_claim_completion=false."
+        in evaluation["reasons"]
+    )
+    assert "Completion gate reported requires_follow_up=true." in evaluation["reasons"]
+
+
+def test_evaluate_user_happiness_accepts_valid_typed_input_required_outcome() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "represent_named_entity_if_absent",
+            "prompt": "Represent the named entity if it is not already represented.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["search_concepts", "get_text_relations"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": (
+                "Two candidate records remain plausible after reading their stored "
+                "text. Please identify which record you intend before I make any "
+                "change."
+            )
+        },
+        llm_debug_data=_input_required_debug(
+            observed_tools=[
+                "search_concepts",
+                "get_text_relations_summary",
+                "get_text_relations",
+            ]
+        ),
+    )
+
+    assert evaluation["should_user_be_happy"] is True
+    assert evaluation["verdict"] == "input_required"
+    assert evaluation["reasons"] == []
+    assert evaluation["terminal_outcome"] == {
+        "outcome": "input_required",
+        "valid_typed_input_required": True,
+        "completion_gate_consistent": True,
+        "evidence_exhaustion": {
+            "status": "complete",
+            "missing_content_tools": [],
+            "summary_tools_relied_on": ["get_text_relations_summary"],
+        },
+        "accepted": True,
+    }
+    assert "terminal_outcome=input_required" in evaluation["positive_evidence"]
+
+
+def test_evaluate_user_happiness_accepts_verified_success_receipt_and_gate() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "read_back_existing_entity",
+            "prompt": "Read back the existing represented entity.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["fetch_concept"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": (
+                "The existing entity was read back successfully from durable "
+                "Vontology state with its canonical concept ID."
+            )
+        },
+        llm_debug_data={
+            "completion_gate_verdict": {
+                "decision": "completed",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+            },
+            "terminal_outcome_receipt": {
+                "schema_version": "terminal_outcome_receipt.v1",
+                "profile_concept_id": "#V#terminal_outcome_receipt",
+                "outcome": "verified_success",
+                "cause_code": None,
+            },
+            "terminal_outcome_receipt_validation": {
+                "present": True,
+                "valid": True,
+                "outcome": "verified_success",
+                "decision_authority": "represented_llm",
+            },
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "selected_workflow_id": "#V#entity_representation_workflow",
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                        "dispatch_workflow_id": "#V#entity_representation_workflow",
+                    },
+                },
+                "tool_history": [{"tool": "fetch_concept", "status": "ok"}],
+            },
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is True
+    assert evaluation["verdict"] == "happy"
+    assert evaluation["terminal_outcome"] == {
+        "outcome": "verified_success",
+        "valid_typed_input_required": False,
+        "completion_gate_consistent": True,
+        "evidence_exhaustion": {
+            "status": "not_applicable",
+            "missing_content_tools": [],
+            "summary_tools_relied_on": [],
+        },
+        "accepted": True,
+    }
+    assert "terminal_outcome=verified_success" in evaluation["positive_evidence"]
+
+
+def test_evaluate_user_happiness_rejects_terminal_success_without_valid_receipt() -> (
+    None
+):
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "read_back_existing_entity",
+            "prompt": "Read back the existing represented entity.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["fetch_concept"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": (
+                "The existing entity was read back successfully from durable "
+                "Vontology state with its canonical concept ID."
+            ),
+            "background_task_status": {"status": "completed"},
+        },
+        llm_debug_data={
+            "completion_gate_verdict": {
+                "decision": "completed",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+            },
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "selected_workflow_id": "#V#entity_representation_workflow",
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                        "dispatch_workflow_id": (
+                            "#V#entity_representation_workflow"
+                        ),
+                    },
+                },
+                "tool_history": [{"tool": "fetch_concept", "status": "ok"}],
+            },
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["terminal_outcome"]["accepted"] is False
+    assert any(
+        "Terminal outcome receipt was missing, invalid, or inconsistent"
+        in reason
+        for reason in evaluation["reasons"]
+    )
+
+
+def test_canonical_turn_record_terminal_state_precedes_stale_top_level_success() -> (
+    None
+):
+    canonical_debug = _input_required_debug(
+        observed_tools=["search_concepts", "get_text_relations"]
+    )
+    canonical_receipt = dict(
+        sampler._as_mapping(canonical_debug["terminal_outcome_receipt"])
+    )
+    canonical_validation = dict(
+        sampler._as_mapping(
+            canonical_debug["terminal_outcome_receipt_validation"]
+        )
+    )
+    canonical_gate = dict(
+        sampler._as_mapping(canonical_debug["completion_gate_verdict"])
+    )
+    stale_success_receipt = {
+        "schema_version": "terminal_outcome_receipt.v1",
+        "profile_concept_id": "#V#terminal_outcome_receipt",
+        "outcome": "verified_success",
+    }
+    canonical_debug["completion_gate_verdict"] = {
+        "decision": "completed",
+        "safe_to_claim_completion": True,
+        "requires_follow_up": False,
+    }
+    canonical_debug["terminal_outcome_receipt"] = stale_success_receipt
+    canonical_debug["terminal_outcome_receipt_validation"] = {
+        "present": True,
+        "valid": True,
+        "outcome": "verified_success",
+        "decision_authority": "represented_llm",
+    }
+    canonical_debug["turn_execution_record"] = {
+        "completion_gate": canonical_gate,
+        "terminal_outcome_receipt": canonical_receipt,
+        "terminal_outcome_receipt_validation": canonical_validation,
+    }
+
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "represent_named_entity_if_absent",
+            "prompt": "Represent the named entity if it is not already represented.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["search_concepts", "get_text_relations"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": (
+                "Two candidate records remain plausible after reading their stored "
+                "text. Please identify which record you intend before I make any "
+                "change."
+            ),
+            "background_task_status": {"status": "completed"},
+        },
+        llm_debug_data=canonical_debug,
+    )
+
+    assert evaluation["should_user_be_happy"] is True
+    assert evaluation["verdict"] == "input_required"
+    assert evaluation["terminal_outcome"]["outcome"] == "input_required"
+    assert evaluation["terminal_outcome"]["accepted"] is True
+
+
+def test_evaluate_user_happiness_rejects_premature_input_required_after_summary() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "represent_named_entity_if_absent",
+            "prompt": "Represent the named entity if it is not already represented.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["search_concepts", "get_text_relations"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": (
+                "One candidate record may match, but I need you to confirm its "
+                "identity before I make any change."
+            )
+        },
+        llm_debug_data=_input_required_debug(
+            observed_tools=["search_concepts", "get_text_relations_summary"]
+        ),
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert evaluation["terminal_outcome"]["accepted"] is False
+    assert evaluation["terminal_outcome"]["evidence_exhaustion"] == {
+        "status": "incomplete",
+        "missing_content_tools": ["get_text_relations"],
+        "summary_tools_relied_on": ["get_text_relations_summary"],
+    }
+    assert any(
+        "stopped at discovery-summary evidence" in reason
+        and "get_text_relations" in reason
+        for reason in evaluation["reasons"]
+    )
+    assert not any(
+        "safe_to_claim_completion=false" in reason for reason in evaluation["reasons"]
+    )
+    assert not any(
+        "requires_follow_up=true" in reason for reason in evaluation["reasons"]
+    )
+
+
+def test_evaluate_user_happiness_does_not_accept_invalid_input_required_receipt() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "clarify_missing_target",
+            "prompt": "Inspect the target and ask for clarification if needed.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["get_text_relations"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": (
+                "The target remains ambiguous after inspection. Please provide a "
+                "stable identifier so the intended record can be selected."
+            )
+        },
+        llm_debug_data=_input_required_debug(
+            observed_tools=["get_text_relations"],
+            validation_valid=False,
+        ),
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert evaluation["terminal_outcome"]["valid_typed_input_required"] is False
     assert (
         "Completion gate reported safe_to_claim_completion=false."
         in evaluation["reasons"]
@@ -1503,6 +1845,78 @@ def test_resolve_turn_debug_data_uses_partial_task_result_when_history_missing(
     )
 
 
+def test_resolve_turn_debug_data_prefers_terminal_task_telemetry_over_stale_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sampler,
+        "_find_assistant_turn_history_location",
+        lambda **kwargs: {"session_id": "session-task", "history_index": 3},
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_fetch_turn_debug",
+        lambda **kwargs: {
+            "request_id": "request-task",
+            "history_only": {"retained": True},
+            "turn_execution_diagnostics": {
+                "schema_version": "turn_execution_diagnostics.v1",
+                "workflow_routing_diagnostics": {},
+            },
+        },
+    )
+
+    history_location, llm_debug_data = sampler._resolve_turn_debug_data(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        session_id="session-task",
+        request_id="request-task",
+        response_text="Grounded response.",
+        generate_payload={
+            "response": "Grounded response.",
+            "llm_debug": {
+                "request_id": "request-task",
+                "turn_execution_diagnostics": {
+                    "schema_version": "turn_execution_diagnostics.v1",
+                    "workflow_routing_diagnostics": {
+                        "schema_version": "workflow_routing_diagnostics.v1",
+                        "selected_workflow_id": "#V#entity_representation_workflow",
+                        "selector": {
+                            "prompt_id": "#V#chat_turn_classifier_prompt",
+                            "model_name": "gpt-5.6-luna",
+                            "response": {"text": '{"workflow_id":"#V#entity_representation_workflow"}'},
+                        },
+                    },
+                },
+            },
+        },
+    )
+
+    assert history_location == {"session_id": "session-task", "history_index": 3}
+    assert llm_debug_data["history_only"] == {"retained": True}
+    routing = llm_debug_data["turn_execution_diagnostics"][
+        "workflow_routing_diagnostics"
+    ]
+    assert routing["selected_workflow_id"] == "#V#entity_representation_workflow"
+    assert routing["selector"]["model_name"] == "gpt-5.6-luna"
+    assert sampler._selector_telemetry_completeness(routing)["complete"] is True
+
+
+def test_terminal_task_debug_merge_does_not_replace_hydrated_payload_with_blob_ref(
+) -> None:
+    hydrated = {
+        "schema_version": "workflow_routing_diagnostics.v1",
+        "selected_workflow_id": "#V#entity_representation_workflow",
+    }
+    blob_ref = {
+        "schema_version": "debug_payload_blob_ref.v1",
+        "blob_ref": {"key": "debug/workflow-routing.json.gz"},
+    }
+
+    assert sampler._merge_terminal_task_debug_value(hydrated, blob_ref) == hydrated
+    assert sampler._merge_terminal_task_debug_value(blob_ref, hydrated) == hydrated
+
+
 def test_run_generate_background_cancels_task_after_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2067,7 +2481,13 @@ def test_run_local_ollama_model_probe_stops_at_first_threshold_model(
         requested_model = str(kwargs["requested_model"])
         requested_models.append(requested_model)
         if requested_model == "ollama:gemma4:e4b":
-            return {"status": "ok", "evaluation": {"should_user_be_happy": True}}
+            return {
+                "status": "ok",
+                "evaluation": {
+                    "should_user_be_happy": True,
+                    "terminal_outcome": {"accepted": True},
+                },
+            }
         return {"status": "failed", "evaluation": {"should_user_be_happy": False}}
 
     monkeypatch.setattr(
@@ -3083,6 +3503,51 @@ def test_build_repeated_replay_summary_reports_success_rate() -> None:
         "meets_minimum_success_rate": False,
     }
     assert summary["environment"]["model_policy"]["local_only_default"] is True
+
+
+def test_summary_success_threshold_requires_terminal_acceptance() -> None:
+    summary = {
+        "status": "ok",
+        "evaluation": {
+            "should_user_be_happy": True,
+            "terminal_outcome": {
+                "accepted": False,
+                "completion_gate_consistent": False,
+            },
+        },
+    }
+
+    assert sampler._summary_meets_success_threshold(summary) is False
+
+
+def test_repeated_summary_threshold_recomputes_terminally_accepted_attempts() -> None:
+    accepted_attempt = {
+        "status": "ok",
+        "evaluation": {
+            "should_user_be_happy": True,
+            "terminal_outcome": {"accepted": True},
+        },
+    }
+    unaccepted_attempt = {
+        "status": "ok",
+        "evaluation": {
+            "should_user_be_happy": True,
+            "terminal_outcome": {"accepted": False},
+        },
+    }
+    summary = {
+        "status": "ok",
+        "repeat": {
+            "attempt_count": 2,
+            "successful_attempt_count": 2,
+            "success_rate": 1.0,
+            "minimum_success_rate": 1.0,
+            "meets_minimum_success_rate": True,
+        },
+        "attempts": [accepted_attempt, unaccepted_attempt],
+    }
+
+    assert sampler._summary_meets_success_threshold(summary) is False
 
 
 def test_build_replay_arm_plan_adds_prompt_variant_arms() -> None:

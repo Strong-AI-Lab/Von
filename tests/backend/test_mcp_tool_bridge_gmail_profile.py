@@ -14,6 +14,7 @@ from __future__ import annotations
 from src.backend.workflows.mcp_tool_bridge import (
     apply_runtime_defaults_to_mcp_payload,
 )
+from src.backend.integrations.internal_mcp.schemas import Schema
 
 _AUTH = "vonwitbrock-gmail"
 
@@ -82,3 +83,26 @@ def test_non_gmail_tool_profile_is_untouched() -> None:
         default_gmail_profile=_AUTH,
     )
     assert payload["profile"] == "zhan-gmail"  # enforcement is gmail-only
+
+
+def test_tolerant_schema_keeps_unknown_fields_without_explicit_strip_boundary() -> None:
+    payload = {"query": "synthetic target", "advisory_field": "keep me"}
+
+    bindings = apply_runtime_defaults_to_mcp_payload(
+        payload,
+        tool_name="synthetic_lookup",
+        input_schema=Schema(
+            required={"query": str},
+            optional={},
+            allow_unknown=True,
+        ),
+        user_namespace=None,
+        default_gmail_profile=None,
+        strip_unknown_fields=False,
+    )
+
+    assert payload == {
+        "query": "synthetic target",
+        "advisory_field": "keep me",
+    }
+    assert bindings == []

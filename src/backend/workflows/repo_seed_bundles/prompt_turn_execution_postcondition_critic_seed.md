@@ -59,6 +59,14 @@ Rules:
 - Distinguish missing user input, an external dependency block, a recoverable
   execution failure, and a non-recoverable terminal failure rather than calling
   all non-successes "failed".
+- Treat relation summaries as discovery evidence rather than evidence of the
+  stored relation content. Predicate names, counts, languages, and relation IDs
+  do not establish what the text says. Do not emit `input_required` for an
+  identity, provenance, meaning, or similar ambiguity while a safe available
+  content-bearing relation read could still resolve it. In that case, represent
+  the remaining retrieval obligation and a bounded `alternate_tool` or `retry`
+  affordance instead of prematurely imposing a clarification request on the
+  user.
 - For every outcome except "verified_success", always provide a non-empty
   snake_case `cause_code`; do not omit it or return null.
 - Recovery affordances are opportunities available to the represented recovery

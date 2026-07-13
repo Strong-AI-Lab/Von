@@ -790,6 +790,7 @@ def build_required_tool_obligation_ledger(
             tool_name=identity.operation_name,
             payload=_payload_from_planned_call(call),
             target_contract_state=target_contract_state,
+            prior_tool_invocations=invocations,
         )
         if target_validation.ok:
             continue
@@ -869,7 +870,8 @@ def build_required_tool_obligation_ledger(
             classify_required_tool_operation(identity.operation_name)
         )
 
-    for invocation in invocations or ():
+    ordered_invocations = tuple(invocations or ())
+    for invocation_index, invocation in enumerate(ordered_invocations):
         if not isinstance(invocation, Mapping):
             continue
         tool_name = _tool_from_invocation(invocation)
@@ -899,6 +901,7 @@ def build_required_tool_obligation_ledger(
             tool_name=identity.operation_name,
             payload=validation_payload,
             target_contract_state=target_contract_state,
+            prior_tool_invocations=ordered_invocations[:invocation_index],
         )
         if not target_validation.ok:
             _append_validation_errors(

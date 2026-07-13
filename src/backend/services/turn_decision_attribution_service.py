@@ -276,14 +276,17 @@ def _attribute_dispatch(
         if _safe_str(event.get("decision_source")) == "represented_dispatch_policy"
     ]
     if represented_policy_events and len(represented_policy_events) == len(
-        [e for e in python_events if _safe_str(e.get("decision_class"))
-         == "workflow_dispatch_turn_contract_check"]
+        [
+            e
+            for e in python_events
+            if _safe_str(e.get("decision_class"))
+            == "workflow_dispatch_turn_contract_check"
+        ]
     ):
         other_overrides = [
             event
             for event in python_events
-            if event not in represented_policy_events
-            and event.get("changed_outcome")
+            if event not in represented_policy_events and event.get("changed_outcome")
         ]
         if not other_overrides:
             return _decision(
@@ -297,9 +300,14 @@ def _attribute_dispatch(
         for event in python_events
         if event.get("changed_outcome")
         or _safe_str(event.get("reason_code"))
-        not in (None, "no_contract_requirements", "single_surface_contract",
-                "no_external_surface_requirement",
-                "selected_workflow_satisfies_contract", "non_custom_route_selected")
+        not in (
+            None,
+            "no_contract_requirements",
+            "single_surface_contract",
+            "no_external_surface_requirement",
+            "selected_workflow_satisfies_contract",
+            "non_custom_route_selected",
+        )
     ]
     if override_events:
         return _decision(
@@ -346,9 +354,7 @@ def _attribute_model_choice(
 ) -> dict[str, Any]:
     telemetry = _find_model_policy_telemetry(diagnostics)
     if telemetry is None:
-        return _decision(
-            "model_choice", AUTHORITY_UNKNOWN, python_events=python_events
-        )
+        return _decision("model_choice", AUTHORITY_UNKNOWN, python_events=python_events)
     policy_source = _safe_str(telemetry.get("policy_source"))
     policy_id = _safe_str(telemetry.get("policy_id"))
     evidence = {
@@ -398,9 +404,7 @@ def _attribute_recovery(
     selection_rationale = _safe_str(routing.get("selection_rationale"))
     marker_hit = selection_rationale in _PYTHON_RECOVERY_MARKERS
     if python_events or marker_hit:
-        evidence = (
-            {"selection_rationale": selection_rationale} if marker_hit else None
-        )
+        evidence = {"selection_rationale": selection_rationale} if marker_hit else None
         return _decision(
             "recovery",
             AUTHORITY_PYTHON_FALLBACK,
@@ -410,43 +414,215 @@ def _attribute_recovery(
     return _decision("recovery", AUTHORITY_ABSENT)
 
 
+def _completion_gate_from_container(
+    container: Mapping[str, Any] | None,
+    *,
+    source_prefix: str,
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    if container is None:
+        return None, None
+    turn_record = _safe_mapping(container.get("turn_execution_record"))
+    if turn_record is not None:
+        gate = _safe_mapping(turn_record.get("completion_gate"))
+        if gate is not None:
+            return gate, f"{source_prefix}turn_execution_record.completion_gate"
+    gate = _safe_mapping(container.get("completion_gate_verdict"))
+    if gate is not None:
+        return gate, f"{source_prefix}completion_gate_verdict"
+    gate = _safe_mapping(container.get("completion_gate"))
+    if gate is not None:
+        return gate, f"{source_prefix}completion_gate"
+    return None, None
+
+
+def _find_final_completion_gate(
+    diagnostics: Mapping[str, Any],
+) -> tuple[
+    Mapping[str, Any] | None,
+    str | None,
+    Mapping[str, Any] | None,
+]:
+    """Return the strongest recorded final-gate projection.
+
+    A persisted Turn Execution Record is canonical.  The explicit verdict
+    projection is next because it is assembled after iterative completion-gate
+    work; the raw ``completion_gate`` mapping can describe an earlier retry.
+    """
+
+    direct_record = _safe_mapping(diagnostics.get("turn_execution_record"))
+    if direct_record is not None:
+        gate = _safe_mapping(direct_record.get("completion_gate"))
+        if gate is not None:
+            return gate, "turn_execution_record.completion_gate", direct_record
+
+    llm_debug = _safe_mapping(diagnostics.get("llm_debug"))
+    debug_record = (
+        _safe_mapping(llm_debug.get("turn_execution_record"))
+        if llm_debug is not None
+        else None
+    )
+    if debug_record is not None:
+        gate = _safe_mapping(debug_record.get("completion_gate"))
+        if gate is not None:
+            return (
+                gate,
+                "llm_debug.turn_execution_record.completion_gate",
+                debug_record,
+            )
+
+    direct_verdict = _safe_mapping(diagnostics.get("completion_gate_verdict"))
+    if direct_verdict is not None:
+        return direct_verdict, "completion_gate_verdict", diagnostics
+    if llm_debug is not None:
+        debug_verdict = _safe_mapping(llm_debug.get("completion_gate_verdict"))
+        if debug_verdict is not None:
+            return debug_verdict, "llm_debug.completion_gate_verdict", llm_debug
+
+    gate, source = _completion_gate_from_container(diagnostics, source_prefix="")
+    if gate is not None:
+        return gate, source, diagnostics
+    gate, source = _completion_gate_from_container(
+        llm_debug,
+        source_prefix="llm_debug.",
+    )
+    return gate, source, llm_debug
+
+
+def _receipt_from_container(
+    container: Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    if container is None:
+        return None, None
+    receipt = _safe_mapping(container.get("terminal_outcome_receipt"))
+    validation = _safe_mapping(container.get("terminal_outcome_receipt_validation"))
+    if receipt is not None:
+        return receipt, validation
+    evidence = _safe_mapping(container.get("evidence_payload"))
+    if evidence is None:
+        return None, validation
+    return (
+        _safe_mapping(evidence.get("terminal_outcome_receipt")),
+        _safe_mapping(evidence.get("terminal_outcome_receipt_validation"))
+        or validation,
+    )
+
+
+def _find_terminal_outcome_receipt(
+    gate: Mapping[str, Any],
+    gate_container: Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    """Read receipt evidence only from the selected gate's priority container."""
+
+    receipt, validation = _receipt_from_container(gate)
+    if receipt is not None:
+        return receipt, validation
+    return _receipt_from_container(gate_container)
+
+
+def _represented_terminal_success(
+    *,
+    gate: Mapping[str, Any],
+    receipt: Mapping[str, Any] | None,
+    validation: Mapping[str, Any] | None,
+) -> bool:
+    """Check provenance and final safety facts without judging task semantics."""
+
+    if receipt is None or validation is None:
+        return False
+    provenance = _safe_mapping(receipt.get("provenance")) or {}
+    gate_decision = _safe_str(
+        gate.get("decision")
+        or gate.get("status")
+        or gate.get("verdict")
+        or gate.get("state")
+    )
+    return bool(
+        gate_decision
+        in {"complete", "completed", "pass", "passed", "success", "succeeded"}
+        and gate.get("safe_to_claim_completion") is True
+        and gate.get("requires_follow_up") is not True
+        and validation.get("present") is True
+        and validation.get("valid") is True
+        and _safe_str(validation.get("decision_authority")) == "represented_llm"
+        and _safe_str(receipt.get("outcome")) == "verified_success"
+        and _safe_str(provenance.get("decision_source")) == "represented_llm"
+    )
+
+
 def _attribute_acceptance(
     diagnostics: Mapping[str, Any],
     python_events: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    gate = _safe_mapping(diagnostics.get("completion_gate")) or _safe_mapping(
-        diagnostics.get("completion_gate_verdict")
-    )
+    gate, gate_source, gate_container = _find_final_completion_gate(diagnostics)
     if gate is None:
-        for container_key in ("turn_execution_record", "llm_debug"):
-            container = _safe_mapping(diagnostics.get(container_key))
-            if container is not None:
-                gate = _safe_mapping(
-                    container.get("completion_gate")
-                ) or _safe_mapping(container.get("completion_gate_verdict"))
-                if gate is not None:
-                    break
-    if gate is None:
-        return _decision(
-            "acceptance", AUTHORITY_ABSENT, python_events=python_events
-        )
+        return _decision("acceptance", AUTHORITY_ABSENT, python_events=python_events)
     verdict_source = _safe_str(
         gate.get("verdict_source") or gate.get("source") or gate.get("gate_source")
     )
-    evidence = {
+    evidence: dict[str, Any] = {
         "verdict_source": verdict_source,
-        "status": _safe_str(gate.get("status") or gate.get("state")),
+        "status": _safe_str(
+            gate.get("status")
+            or gate.get("state")
+            or gate.get("verdict")
+            or gate.get("decision")
+        ),
+        "completion_gate_source": gate_source,
     }
-    if any(event.get("changed_outcome") for event in python_events):
+    changed_python_events = [
+        event for event in python_events if event.get("changed_outcome")
+    ]
+    receipt, receipt_validation = _find_terminal_outcome_receipt(
+        gate,
+        gate_container,
+    )
+    if _represented_terminal_success(
+        gate=gate,
+        receipt=receipt,
+        validation=receipt_validation,
+    ):
+        assert receipt is not None
+        assert receipt_validation is not None
+        provenance = _safe_mapping(receipt.get("provenance")) or {}
+        authority_surface = (
+            _safe_str(provenance.get("workflow_id"))
+            or _safe_str(provenance.get("prompt_concept_id"))
+            or "terminal_outcome_receipt"
+        )
+        evidence.update(
+            {
+                "terminal_outcome": _safe_str(receipt.get("outcome")),
+                "terminal_outcome_decision_authority": _safe_str(
+                    receipt_validation.get("decision_authority")
+                ),
+                "superseded_python_guardrail_event_count": len(changed_python_events),
+            }
+        )
+        return _decision(
+            "acceptance",
+            AUTHORITY_REPRESENTED,
+            authority_surface=authority_surface,
+            concept_ids=[
+                concept_id
+                for concept_id in (
+                    _safe_str(provenance.get("workflow_id")),
+                    _safe_str(provenance.get("prompt_concept_id")),
+                    _safe_str(receipt.get("profile_concept_id")),
+                )
+                if concept_id
+            ],
+            evidence=evidence,
+            python_events=python_events,
+        )
+    if changed_python_events:
+        evidence["python_changed_outcome_event_count"] = len(changed_python_events)
         return _decision(
             "acceptance",
             AUTHORITY_PYTHON_FALLBACK,
             evidence=evidence,
             python_events=python_events,
         )
-    if verdict_source and (
-        "critic" in verdict_source or "contract" in verdict_source
-    ):
+    if verdict_source and ("critic" in verdict_source or "contract" in verdict_source):
         return _decision(
             "acceptance",
             AUTHORITY_REPRESENTED,
@@ -476,9 +652,7 @@ def build_turn_decision_attribution(
         _attribute_discovery(diagnostics_mapping, events_by_kind["discovery"]),
         _attribute_selection(diagnostics_mapping, events_by_kind["selection"]),
         _attribute_dispatch(diagnostics_mapping, events_by_kind["dispatch"]),
-        _attribute_model_choice(
-            diagnostics_mapping, events_by_kind["model_choice"]
-        ),
+        _attribute_model_choice(diagnostics_mapping, events_by_kind["model_choice"]),
         _attribute_recovery(diagnostics_mapping, events_by_kind["recovery"]),
         _attribute_acceptance(diagnostics_mapping, events_by_kind["acceptance"]),
     ]

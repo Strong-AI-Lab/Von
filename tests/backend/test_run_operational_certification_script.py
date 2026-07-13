@@ -15,6 +15,17 @@ from src.backend.services.operational_certification_contract_service import (
 )
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_OPERATIONAL_SEED_PATH = (
+    _REPO_ROOT
+    / "src"
+    / "backend"
+    / "workflows"
+    / "repo_seed_bundles"
+    / "operational_certification_benchmark_seed_bundle.json"
+)
+
+
 def _contract():
     return parse_operational_certification_contract(
         {
@@ -94,6 +105,32 @@ def _contract():
     )
 
 
+def _repo_seed_contract():
+    return parse_operational_certification_contract(
+        json.loads(_OPERATIONAL_SEED_PATH.read_text(encoding="utf-8"))
+    )
+
+
+def test_every_repo_unique_state_scenario_declares_executable_absence_probe() -> None:
+    contract = _repo_seed_contract()
+
+    unique_state_scenarios = [
+        scenario
+        for scenario in contract.scenarios
+        if scenario.reset_policy.get("mode") == "unique_state"
+    ]
+
+    assert unique_state_scenarios
+    for scenario in unique_state_scenarios:
+        probe = scenario.reset_policy.get("authoritative_absence_probe")
+        assert isinstance(probe, dict)
+        assert str(probe.get("workflow_id") or "").startswith("#V#")
+        assert "{{isolation_id}}" in json.dumps(probe.get("inputs") or {})
+        required_action_ids = probe.get("required_action_ids")
+        assert isinstance(required_action_ids, list) and required_action_ids
+        assert "llm.action" not in required_action_ids
+
+
 def _args(**overrides: Any) -> argparse.Namespace:
     values = {
         "base_url": "http://127.0.0.1:5001",
@@ -110,6 +147,299 @@ def _args(**overrides: Any) -> argparse.Namespace:
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def _represented_selector_diagnostics() -> dict[str, Any]:
+    return {
+        "workflow_selection": {
+            "selected_workflow_id": "#V#entity_representation_workflow",
+            "selector_verdict": "rag_selected",
+            "selector_source": "workflow_selector",
+        },
+        "workflow_routing_diagnostics": {
+            "selected_workflow_id": "#V#entity_representation_workflow",
+            "selector_verdict": "rag_selected",
+            "selector_source": "selector",
+            "selector": {
+                "prompt_id": "#V#chat_turn_classifier_prompt",
+                "prompt_provenance": {
+                    "source": "vontology_prompt_relation",
+                    "resolved_prompt_id": "#V#chat_turn_classifier_prompt",
+                    "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                },
+                "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                "model_name": "gpt-5.6-luna",
+                "selection_resolution": "candidate_label_exact_match",
+                "selection_metadata": {
+                    "selected_workflow_id": "#V#entity_representation_workflow",
+                    "requested_candidate_workflow_id": (
+                        "#V#entity_representation_workflow"
+                    ),
+                },
+                "telemetry_completeness": {
+                    "prompt_present": True,
+                    "candidate_list_present": True,
+                    "response_present": True,
+                    "candidate_entries_present": True,
+                    "context_lineage_present": True,
+                    "selector_prompt_entry_count": 1,
+                    "selector_response_entry_count": 1,
+                    "missing_fields": [],
+                },
+            }
+        },
+        "decision_attribution": {
+            "schema_version": "turn_decision_attribution.v1",
+            "decisions": [
+                {
+                    "decision_kind": "selection",
+                    "authority": "represented",
+                    "concept_ids": ["#V#entity_representation_workflow"],
+                    "evidence": {
+                        "selected_workflow_id": (
+                            "#V#entity_representation_workflow"
+                        ),
+                    },
+                }
+            ],
+        },
+    }
+
+
+def test_represented_selector_evidence_accepts_final_represented_selection() -> None:
+    evidence = certification_script._represented_selector_evidence(
+        _represented_selector_diagnostics()
+    )
+
+    assert evidence["complete"] is True
+    assert evidence["missing_fields"] == []
+    assert evidence["selector_source"] == "workflow_selector"
+    assert evidence["selector_verdict"] == "rag_selected"
+    assert evidence["selection_resolution"] == "candidate_label_exact_match"
+    assert evidence["selection_authority"] == "represented"
+    assert evidence["selector_selected_workflow_id"] == (
+        "#V#entity_representation_workflow"
+    )
+    assert evidence["final_workflow_ids"] == [
+        "#V#entity_representation_workflow"
+    ]
+    assert evidence["selection_attribution_workflow_ids"] == [
+        "#V#entity_representation_workflow"
+    ]
+
+
+def test_represented_selector_evidence_rejects_complete_python_fallback() -> None:
+    turn_record = _represented_selector_diagnostics()
+    turn_record["workflow_selection"].update(
+        {
+            "selector_source": "selector_override",
+            "selector_verdict": "rag_selected",
+        }
+    )
+    routing = turn_record["workflow_routing_diagnostics"]
+    routing["selector_source"] = "selector_override"
+    routing["selector"]["selection_resolution"] = (
+        "single_specialised_candidate_recovery_from_selector_fallback"
+    )
+    turn_record["decision_attribution"]["decisions"][0]["authority"] = (
+        "python_fallback"
+    )
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "selector_source_represented",
+        "selection_resolution_represented",
+        "selection_attribution_represented",
+    ]
+    assert evidence["field_status"]["prompt_present"] is True
+    assert evidence["field_status"]["response_present"] is True
+    assert evidence["field_status"]["model_name_present"] is True
+    assert evidence["selection_authority"] == "python_fallback"
+
+
+def test_represented_selector_evidence_fails_closed_on_missing_lineage() -> None:
+    turn_record = _represented_selector_diagnostics()
+    turn_record["workflow_routing_diagnostics"]["selector"]["telemetry_completeness"][
+        "context_lineage_present"
+    ] = False
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == ["context_lineage_present"]
+    assert evidence["requested_replay_mode"] == "represented_selector_llm"
+
+
+def test_represented_selector_evidence_requires_prompt_provenance() -> None:
+    turn_record = _represented_selector_diagnostics()
+    selector = turn_record["workflow_routing_diagnostics"]["selector"]
+    selector["prompt_id"] = None
+    selector["prompt_provenance"] = {}
+    selector["requested_prompt_ids"] = []
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "selector_prompt_id_present",
+        "selector_prompt_provenance_bound",
+        "selector_prompt_requested_id_bound",
+    ]
+
+
+def test_represented_selector_evidence_rejects_unbound_prompt_provenance() -> None:
+    turn_record = _represented_selector_diagnostics()
+    selector = turn_record["workflow_routing_diagnostics"]["selector"]
+    selector["prompt_provenance"] = {"truncated": False}
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "selector_prompt_provenance_bound",
+        "selector_prompt_requested_id_bound",
+    ]
+
+
+def test_represented_selector_evidence_binds_selected_workflow_identity() -> None:
+    turn_record = _represented_selector_diagnostics()
+    turn_record["workflow_selection"]["selected_workflow_id"] = "#V#final_workflow"
+    turn_record["workflow_routing_diagnostics"]["selected_workflow_id"] = (
+        "#V#final_workflow"
+    )
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == ["final_selection_identity_bound"]
+    assert evidence["selector_selected_workflow_id"] == (
+        "#V#entity_representation_workflow"
+    )
+    assert evidence["final_workflow_ids"] == ["#V#final_workflow"]
+
+
+def test_represented_selector_evidence_binds_attribution_identity() -> None:
+    turn_record = _represented_selector_diagnostics()
+    selection = turn_record["decision_attribution"]["decisions"][0]
+    selection["concept_ids"] = ["#V#different_workflow"]
+    selection["evidence"]["selected_workflow_id"] = "#V#different_workflow"
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "selection_attribution_identity_bound",
+        "selection_attribution_concept_identity_bound",
+        "selection_attribution_evidence_identity_bound",
+    ]
+    assert evidence["selection_attribution_workflow_ids"] == [
+        "#V#different_workflow"
+    ]
+
+
+def test_represented_selector_evidence_requires_model_selected_identity() -> None:
+    turn_record = _represented_selector_diagnostics()
+    metadata = turn_record["workflow_routing_diagnostics"]["selector"][
+        "selection_metadata"
+    ]
+    metadata.pop("selected_workflow_id")
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "selector_selected_workflow_id_present",
+        "final_selection_identity_bound",
+        "selection_attribution_identity_bound",
+        "selection_attribution_concept_identity_bound",
+        "selection_attribution_evidence_identity_bound",
+    ]
+
+
+def test_represented_selector_evidence_requires_both_final_identity_surfaces() -> None:
+    turn_record = _represented_selector_diagnostics()
+    turn_record["workflow_selection"].pop("selected_workflow_id")
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "workflow_selection_id_present",
+        "final_selection_identity_bound",
+    ]
+
+
+def test_represented_selector_evidence_rejects_contradictory_routing_source() -> None:
+    turn_record = _represented_selector_diagnostics()
+    routing = turn_record["workflow_routing_diagnostics"]
+    routing["selector_source"] = "selector_override"
+    routing["selector_verdict"] = "tool_contract_override"
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "selector_source_represented",
+        "selector_source_surfaces_bound",
+        "selector_verdict_surfaces_bound",
+    ]
+
+
+@pytest.mark.parametrize(
+    "selection_resolution",
+    ["launch_contract_override", "reasoning_candidate_override"],
+)
+def test_represented_selector_evidence_rejects_nonrepresented_selection_resolution(
+    selection_resolution: str,
+) -> None:
+    turn_record = _represented_selector_diagnostics()
+    turn_record["workflow_routing_diagnostics"]["selector"][
+        "selection_resolution"
+    ] = selection_resolution
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == ["selection_resolution_represented"]
+
+
+def test_represented_selector_evidence_requires_both_attribution_id_surfaces() -> None:
+    missing_fields_by_removed_field = {
+        "concept_ids": [
+            "selection_attribution_concept_identity_bound",
+        ],
+        "evidence": [
+            "selection_attribution_evidence_identity_bound",
+        ],
+    }
+    for removed_field, expected_missing_fields in missing_fields_by_removed_field.items():
+        turn_record = _represented_selector_diagnostics()
+        selection = turn_record["decision_attribution"]["decisions"][0]
+        selection.pop(removed_field)
+
+        evidence = certification_script._represented_selector_evidence(turn_record)
+
+        assert evidence["complete"] is False
+        assert evidence["missing_fields"] == expected_missing_fields
+
+
+def test_represented_selector_evidence_requires_distinct_events_and_model() -> None:
+    turn_record = _represented_selector_diagnostics()
+    selector = turn_record["workflow_routing_diagnostics"]["selector"]
+    selector["model_name"] = None
+    selector["telemetry_completeness"]["selector_prompt_entry_count"] = 0
+    selector["telemetry_completeness"]["selector_response_entry_count"] = 0
+
+    evidence = certification_script._represented_selector_evidence(turn_record)
+
+    assert evidence["complete"] is False
+    assert evidence["missing_fields"] == [
+        "selector_prompt_event_present",
+        "selector_response_event_present",
+        "model_name_present",
+    ]
 
 
 def _patch_live_preflight(
@@ -327,6 +657,7 @@ def test_live_trials_use_unique_sessions_and_bind_turn_records(
             },
             "terminal_outcome_receipt": {"committed_effects": []},
             "final_response": {"completion_claim_detected": False},
+            **_represented_selector_diagnostics(),
         }
 
     def execute_evaluator_workflow(**kwargs: Any) -> dict[str, Any]:
@@ -443,6 +774,10 @@ def test_live_trials_use_unique_sessions_and_bind_turn_records(
     assert [call["conversation_session_id"] for call in submissions] == (
         chat_session_ids
     )
+    assert all(
+        call["agent_test_selector_replay_mode"] == "represented_selector_llm"
+        for call in submissions
+    )
     assert fetched_records == [
         (session_id, f"request-{index}")
         for index, session_id in enumerate(chat_session_ids, start=1)
@@ -462,6 +797,10 @@ def test_live_trials_use_unique_sessions_and_bind_turn_records(
         for call in evaluator_calls
     )
     assert len(persisted_observations) == 6
+    assert all(
+        observation["path_analysis"]["selector_path_evidence"]["complete"] is True
+        for observation in execution["trial_observations"]
+    )
 
 
 def test_reused_chat_session_is_not_accepted_as_isolated_state(
@@ -586,8 +925,14 @@ def test_mutating_reset_requires_an_executable_unique_state_strategy(
     assert reset_result["reason"] == expected_reason
 
 
-def test_unique_state_reset_requires_and_preserves_authoritative_absence_readback(
+@pytest.mark.parametrize(
+    ("resolver_status", "expected_success"),
+    [("not_found", True), ("resolved", False)],
+)
+def test_unique_state_reset_requires_causal_authoritative_absence_readback(
     monkeypatch: pytest.MonkeyPatch,
+    resolver_status: str,
+    expected_success: bool,
 ) -> None:
     base_contract = _contract()
     scenario = replace(
@@ -600,9 +945,12 @@ def test_unique_state_reset_requires_and_preserves_authoritative_absence_readbac
             "mode": "unique_state",
             "isolation_binding_paths": ["/prompt"],
             "authoritative_absence_probe": {
-                "workflow_id": "#V#generic_absence_probe",
-                "inputs": {"target_marker": "{{isolation_id}}"},
-                "required_action_ids": ["vontology.read_absence"],
+                "workflow_id": "#V#operational_marker_absence_probe_workflow",
+                "inputs": {"isolation_id": "{{isolation_id}}"},
+                "required_action_ids": [
+                    "workflow_mcp.invoke_tool",
+                    "workflow_control.context_project",
+                ],
             },
         },
         permitted_effects=({"effect_type": "mutation"},),
@@ -619,12 +967,32 @@ def test_unique_state_reset_requires_and_preserves_authoritative_absence_readbac
     def _probe(**kwargs: Any) -> dict[str, Any]:
         isolation_id = kwargs["inputs"]["isolation_id"]
         assert kwargs["require_policy_identity"] is False
+        reported_resolution_lineage = {
+            "schema_version": "operational_absence_probe_resolution_lineage.v1",
+            "tool": "resolve_concept_by_name",
+            "target_name": f"Operational certification {isolation_id}",
+            "status": "not_found",
+            "resolved_concept_id": None,
+            "candidates": [],
+        }
+        action_resolution_lineage = {
+            **reported_resolution_lineage,
+            "status": resolver_status,
+            "resolved_concept_id": (
+                "#V#existing_marker" if resolver_status == "resolved" else None
+            ),
+        }
         probe_result = {
             "schema_version": "represented_operational_state_probe_result.v1",
             "isolation_id": isolation_id,
             "namespace": "unit-namespace",
             "target_absent": True,
-            "evidence": [{"kind": "canonical_readback", "ref": "none"}],
+            "evidence": [
+                {
+                    **reported_resolution_lineage,
+                    "kind": "canonical_exact_name_resolution",
+                }
+            ],
         }
         return {
             "success": True,
@@ -633,13 +1001,22 @@ def test_unique_state_reset_requires_and_preserves_authoritative_absence_readbac
             "execution_trace_id": "probe-trace",
             "workflow_definition_identity_sha256": "probe-definition-digest",
             "workflow_output_sha256": "probe-output-digest",
-            "workflow_action_evidence": [
-                {
-                    "action_id": "vontology.read_absence",
-                    "status": "success",
-                    "state_probe_result_sha256": (
-                        certification_script.stable_payload_digest(probe_result)
-                    ),
+                "workflow_action_evidence": [
+                    {
+                        "action_id": "workflow_mcp.invoke_tool",
+                        "status": "success",
+                        "resolution_lineage_sha256": (
+                            certification_script.stable_payload_digest(
+                                action_resolution_lineage
+                            )
+                        ),
+                    },
+                    {
+                        "action_id": "workflow_control.context_project",
+                        "status": "success",
+                        "state_probe_result_sha256": (
+                            certification_script.stable_payload_digest(probe_result)
+                        ),
                 }
             ],
             "workflow_output": {
@@ -671,15 +1048,22 @@ def test_unique_state_reset_requires_and_preserves_authoritative_absence_readbac
 
     certification_script._live_execution(_args(), contract)
 
-    assert reset_result["success"] is True
-    assert reset_result["state_isolation_verified"] is True
-    assert (
-        reset_result["pre_state_snapshot"]["authoritative_absence_readback_verified"]
-        is True
+    assert reset_result["success"] is expected_success
+    assert reset_result["state_isolation_verified"] is expected_success
+    absence_probe = reset_result["authoritative_absence_probe"]
+    assert absence_probe["execution_trace_id"] == "probe-trace"
+    assert absence_probe["checks"]["resolver_output_causal_lineage_exact"] is (
+        expected_success
     )
-    assert reset_result["authoritative_absence_probe"]["execution_trace_id"] == (
-        "probe-trace"
-    )
+    if expected_success:
+        assert (
+            reset_result["pre_state_snapshot"][
+                "authoritative_absence_readback_verified"
+            ]
+            is True
+        )
+    else:
+        assert reset_result["reason"] == "authoritative_absence_probe_unverified"
 
 
 def test_multi_turn_scenarios_reuse_one_isolated_session_and_preserve_each_turn(
@@ -710,6 +1094,7 @@ def test_multi_turn_scenarios_reuse_one_isolated_session_and_preserve_each_turn(
         return {"session_id": session_id}
 
     def submit(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["agent_test_selector_replay_mode"] == ("represented_selector_llm")
         submitted_turns.append(
             (kwargs["conversation_session_id"], kwargs["case"].prompt)
         )
@@ -728,6 +1113,7 @@ def test_multi_turn_scenarios_reuse_one_isolated_session_and_preserve_each_turn(
             },
             "terminal_outcome_receipt": {"committed_effects": []},
             "final_response": {"completion_claim_detected": False},
+            **_represented_selector_diagnostics(),
         }
 
     def evaluator(**kwargs: Any) -> dict[str, Any]:
@@ -809,6 +1195,45 @@ def test_multi_turn_scenarios_reuse_one_isolated_session_and_preserve_each_turn(
         and len(observation["path_analysis"]["turns"]) == 2
         for observation in execution["trial_observations"]
     )
+
+
+def test_repo_seed_breadth_scenarios_match_supported_runner_adapter_contracts() -> None:
+    contract = _repo_seed_contract()
+    scenarios = {scenario.scenario_id: scenario for scenario in contract.scenarios}
+
+    multi_turn = scenarios["represented_workflow_concept_same_session_followup"]
+    multi_inputs = multi_turn.execution["inputs"]
+    turns = multi_inputs["turns"]
+    assert multi_turn.execution["adapter_id"] == (
+        certification_script.AUTHENTICATED_MULTI_TURN_ADAPTER_ID
+    )
+    assert multi_turn.reset_policy == {"mode": "new_chat_session"}
+    assert multi_turn.metadata["read_only"] is True
+    assert multi_turn.permitted_effects == ()
+    assert len(turns) == 3
+    assert all(str(turn.get("prompt") or "").strip() for turn in turns)
+    assert [turn["role"] for turn in turns] == [
+        "task",
+        "bare_followup",
+        "explicit_continuation",
+    ]
+
+    durable = scenarios["durable_concept_profile_resume_and_idempotence"]
+    durable_inputs = durable.execution["inputs"]
+    submission_plan = durable_inputs["submission_plan"]
+    assert (
+        durable.execution["adapter_id"]
+        == certification_script.DURABLE_WORKFLOW_ADAPTER_ID
+    )
+    assert durable.reset_policy == {"mode": "read_only"}
+    assert durable.metadata["read_only"] is True
+    assert durable.permitted_effects == ()
+    assert durable_inputs["workflow_id"] == (
+        "#V#concept_search_instance_retrieval_workflow"
+    )
+    assert str(durable_inputs["workflow_inputs"]["prompt"]).strip()
+    assert [step["await_terminal"] for step in submission_plan] == [False, True]
+    assert [step["timeout_seconds"] for step in submission_plan] == [0.0, 120.0]
 
 
 def _synthetic_turn_result(
@@ -1162,6 +1587,32 @@ def test_redacted_evidence_can_be_written_to_a_safe_default_artifact(
     written = target.read_text(encoding="utf-8")
     assert "do-not-write-this" not in written
     assert json.loads(written)["evidence"] == safe_evidence
+
+
+def test_task_evidence_projection_excludes_embedded_result_and_debug_payload() -> None:
+    huge_debug_payload = {"raw_response": "private-debug" * 50_000}
+    task_evidence = {
+        "last_task_status": {
+            "status": "completed",
+            "request_id": "request-1",
+            "result": {"llm_debug_data": huge_debug_payload},
+        },
+        "task_statuses": [{"status": "running"}, {"status": "completed"}],
+        "progress_snapshots": [{"stage": "selector"}],
+        "timed_out": False,
+    }
+
+    projected = certification_script._task_evidence_projection(task_evidence)
+
+    assert projected["last_task_status"] == {
+        "status": "completed",
+        "request_id": "request-1",
+    }
+    assert projected["last_task_status_sha256"]
+    assert projected["task_status_count"] == 2
+    assert projected["progress_snapshot_count"] == 1
+    assert len(json.dumps(projected)) < 1_000
+    assert "private-debug" not in json.dumps(projected)
 
 
 def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(

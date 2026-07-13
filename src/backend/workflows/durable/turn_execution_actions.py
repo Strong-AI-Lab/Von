@@ -34,8 +34,14 @@ from .turn_execution_runtime_support import (
     run_turn_execution_critic,
 )
 from ...services.tool_target_contract_validation import (
+    successful_tool_result_concept_evidence,
     target_contract_state_from_context,
     validate_tool_target_contract,
+)
+from ..turn_target_contract import (
+    TurnTargetContract,
+    dedupe_target_contracts,
+    extract_target_contracts_from_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,6 +142,335 @@ def _normalise_tool_batch_calls(raw_value: Any) -> list[dict[str, Any]]:
             }
         )
     return calls
+
+
+_RECOVERY_TARGET_CONTRACT_VALIDATION_SCHEMA_VERSION = (
+    "recovery_target_contract_validation.v1"
+)
+_RECOVERY_TARGET_CONTRACT_EVIDENCE_MISSING = "recovery_target_contract_evidence_missing"
+
+
+def _resolved_original_target_contract_evidence(
+    data: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    receipts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for context_key in (
+        "turn_expected_outcome_contract_state",
+        "turn_expected_outcome_profile",
+        "turn_expected_outcome_contract",
+    ):
+        for contract in extract_target_contracts_from_payload(data.get(context_key)):
+            if not contract.is_symbolically_resolved():
+                continue
+            for concept_id in contract.concept_ids:
+                lowered = concept_id.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                receipts.append(
+                    {
+                        "concept_id": concept_id,
+                        "source": "resolved_original_target_contract",
+                        "context_key": context_key,
+                    }
+                )
+    return tuple(receipts)
+
+
+def _recovery_target_contract_validation_state(
+    *,
+    data: Mapping[str, Any],
+    context_key: str,
+) -> tuple[Any, dict[str, Any]]:
+    raw_contracts = data.get(context_key)
+    if raw_contracts is None:
+        return target_contract_state_from_context(data), {
+            "schema_version": _RECOVERY_TARGET_CONTRACT_VALIDATION_SCHEMA_VERSION,
+            "status": "not_provided",
+            "context_key": context_key,
+        }
+    if not isinstance(raw_contracts, Sequence) or isinstance(
+        raw_contracts, (str, bytes, bytearray)
+    ):
+        return {
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "unknown",
+                    "text": "the malformed recovery target agreement",
+                    "resolution_status": "unresolved",
+                    "source": "recovery_target_contract_validation",
+                }
+            ]
+        }, {
+            "schema_version": _RECOVERY_TARGET_CONTRACT_VALIDATION_SCHEMA_VERSION,
+            "status": "invalid",
+            "context_key": context_key,
+            "error_code": "target_contract_shape_invalid",
+            "errors": ["target_contract_shape_invalid"],
+        }
+    if not raw_contracts:
+        return target_contract_state_from_context(data), {
+            "schema_version": _RECOVERY_TARGET_CONTRACT_VALIDATION_SCHEMA_VERSION,
+            "status": "not_provided",
+            "context_key": context_key,
+        }
+
+    proposed_state = {"target_contracts": list(raw_contracts)}
+    contracts = extract_target_contracts_from_payload(proposed_state)
+    errors: list[str] = []
+    if len(contracts) != len(raw_contracts):
+        errors.append("target_contract_shape_invalid")
+    for contract in contracts:
+        if not contract.is_symbolically_resolved() or not contract.concept_ids:
+            errors.append("target_contract_not_resolved")
+        if not contract.resolution_lineage:
+            errors.append("target_contract_resolution_lineage_missing")
+
+    evidence = [
+        *successful_tool_result_concept_evidence(
+            data.get("invocations")
+            if isinstance(data.get("invocations"), Sequence)
+            and not isinstance(data.get("invocations"), (str, bytes, bytearray))
+            else ()
+        ),
+        *_resolved_original_target_contract_evidence(data),
+    ]
+    evidence_by_id: dict[str, list[dict[str, Any]]] = {}
+    for receipt in evidence:
+        concept_id = _coerce_non_empty_text(receipt.get("concept_id"))
+        if concept_id:
+            evidence_by_id.setdefault(concept_id.lower(), []).append(dict(receipt))
+
+    matched_evidence: list[dict[str, Any]] = []
+    truthful_contract_payloads: list[dict[str, Any]] = []
+    for contract in contracts:
+        contract_evidence: list[dict[str, Any]] = []
+        for concept_id in contract.concept_ids:
+            matches = evidence_by_id.get(concept_id.lower()) or []
+            if not matches:
+                errors.append(_RECOVERY_TARGET_CONTRACT_EVIDENCE_MISSING)
+                continue
+            matched_evidence.extend(matches)
+            contract_evidence.extend(matches)
+        truthful_payload = contract.to_state_payload()
+        if contract_evidence:
+            truthful_lineage: list[dict[str, Any]] = []
+            seen_lineage: set[tuple[str, str, str, str, str]] = set()
+            for receipt in contract_evidence:
+                concept_id = _coerce_non_empty_text(receipt.get("concept_id")) or ""
+                source = (
+                    _coerce_non_empty_text(receipt.get("source"))
+                    or "tool_invocation_result"
+                )
+                tool = _coerce_non_empty_text(receipt.get("tool")) or ""
+                call_id = _coerce_non_empty_text(receipt.get("call_id")) or ""
+                result_path = _coerce_non_empty_text(receipt.get("result_path")) or ""
+                context_key = _coerce_non_empty_text(receipt.get("context_key")) or ""
+                fingerprint = (
+                    source,
+                    concept_id.lower(),
+                    tool.lower(),
+                    call_id,
+                    result_path or context_key,
+                )
+                if fingerprint in seen_lineage:
+                    continue
+                seen_lineage.add(fingerprint)
+                lineage_item: dict[str, Any] = {
+                    "source": source,
+                    "concept_id": concept_id,
+                }
+                if tool:
+                    lineage_item["tool"] = tool
+                if call_id:
+                    lineage_item["call_id"] = call_id
+                if result_path:
+                    lineage_item["result_path"] = result_path
+                if context_key:
+                    lineage_item["context_key"] = context_key
+                truthful_lineage.append(lineage_item)
+            truthful_payload["resolution_lineage"] = truthful_lineage
+        truthful_contract_payloads.append(truthful_payload)
+
+    deduped_errors = list(dict.fromkeys(errors))
+    report: dict[str, Any] = {
+        "schema_version": _RECOVERY_TARGET_CONTRACT_VALIDATION_SCHEMA_VERSION,
+        "status": "invalid" if deduped_errors else "valid",
+        "context_key": context_key,
+        "proposed_contract_count": len(raw_contracts),
+        "normalised_contract_count": len(contracts),
+        "evidence": matched_evidence,
+    }
+    if deduped_errors:
+        report["error_code"] = (
+            _RECOVERY_TARGET_CONTRACT_EVIDENCE_MISSING
+            if _RECOVERY_TARGET_CONTRACT_EVIDENCE_MISSING in deduped_errors
+            else deduped_errors[0]
+        )
+        report["errors"] = deduped_errors
+        return {
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "unknown",
+                    "text": "the unverified recovery target agreement",
+                    "resolution_status": "unresolved",
+                    "source": "recovery_target_contract_validation",
+                }
+            ]
+        }, report
+
+    normalised_state = {
+        "schema_version": "turn_target_contract_context.v1",
+        "target_contracts": truthful_contract_payloads,
+    }
+    report["target_contracts"] = list(normalised_state["target_contracts"])
+    return normalised_state, report
+
+
+def _target_contract_ids(contract: TurnTargetContract) -> set[str]:
+    return {
+        concept_id.lower()
+        for concept_id in (
+            *contract.concept_ids,
+            *contract.candidate_concept_ids,
+        )
+        if concept_id
+    }
+
+
+def _merge_refined_target_contracts(
+    original_contracts: Any,
+    *,
+    target_contracts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    original = list(
+        extract_target_contracts_from_payload({"target_contracts": original_contracts})
+    )
+    refinements = list(
+        extract_target_contracts_from_payload(
+            {"target_contracts": list(target_contracts)}
+        )
+    )
+    if not refinements:
+        return [contract.to_state_payload() for contract in original]
+    if not original:
+        return [contract.to_state_payload() for contract in refinements]
+
+    merged: list[TurnTargetContract] = []
+    applied_refinement_indexes: set[int] = set()
+    for original_contract in original:
+        original_ids = _target_contract_ids(original_contract)
+        matching_indexes = [
+            index
+            for index, refinement in enumerate(refinements)
+            if index not in applied_refinement_indexes
+            and original_ids
+            and bool(original_ids & _target_contract_ids(refinement))
+        ]
+        # With one original target, the represented recovery decision has only
+        # one turn-level target agreement it can refine. For multi-target turns,
+        # require an explicit concept/candidate overlap and preserve every
+        # unrelated contract rather than silently collapsing the turn scope.
+        if not matching_indexes and len(original) == 1:
+            matching_indexes = list(range(len(refinements)))
+        if matching_indexes:
+            for index in matching_indexes:
+                merged.append(refinements[index])
+                applied_refinement_indexes.add(index)
+            continue
+        merged.append(original_contract)
+
+    merged.extend(
+        refinement
+        for index, refinement in enumerate(refinements)
+        if index not in applied_refinement_indexes
+    )
+    return [contract.to_state_payload() for contract in dedupe_target_contracts(merged)]
+
+
+def _replace_target_contracts_in_mapping(
+    value: Any,
+    *,
+    target_contracts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    updated = {str(key): item for key, item in value.items() if isinstance(key, str)}
+    raw_original_contracts = updated.get("target_contracts")
+    fields = updated.get("fields")
+    if raw_original_contracts is None and isinstance(fields, Mapping):
+        for field_name in (
+            "target_contracts",
+            "turn_expected_target_contracts",
+            "targets",
+            "turn_targets",
+        ):
+            if field_name in fields:
+                raw_original_contracts = fields.get(field_name)
+                break
+    merged_target_contracts = _merge_refined_target_contracts(
+        raw_original_contracts,
+        target_contracts=target_contracts,
+    )
+    updated["target_contracts"] = merged_target_contracts
+    if isinstance(fields, Mapping):
+        updated_fields = {
+            str(key): item for key, item in fields.items() if isinstance(key, str)
+        }
+        for field_name in (
+            "target_contracts",
+            "turn_expected_target_contracts",
+            "targets",
+            "turn_targets",
+        ):
+            if field_name in updated_fields:
+                updated_fields[field_name] = list(merged_target_contracts)
+        updated["fields"] = updated_fields
+    return updated
+
+
+def _refined_expected_target_contract_outputs(
+    *,
+    data: Mapping[str, Any],
+    validation_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    if validation_report.get("status") != "valid":
+        return {}
+    raw_contracts = validation_report.get("target_contracts")
+    if not isinstance(raw_contracts, Sequence) or isinstance(
+        raw_contracts, (str, bytes, bytearray)
+    ):
+        return {}
+    target_contracts = [
+        {str(key): item for key, item in contract.items() if isinstance(key, str)}
+        for contract in raw_contracts
+        if isinstance(contract, Mapping)
+    ]
+    if not target_contracts:
+        return {}
+
+    outputs: dict[str, Any] = {
+        "turn_expected_target_contracts": _merge_refined_target_contracts(
+            data.get("turn_expected_target_contracts"),
+            target_contracts=target_contracts,
+        ),
+        "turn_target_contract_resolution_validation": dict(validation_report),
+    }
+    for context_key in (
+        "turn_expected_outcome_contract_state",
+        "turn_expected_outcome_profile",
+        "turn_expected_outcome_contract",
+    ):
+        updated = _replace_target_contracts_in_mapping(
+            data.get(context_key),
+            target_contracts=target_contracts,
+        )
+        if updated is not None:
+            outputs[context_key] = updated
+    return outputs
 
 
 def _is_disallowed_direct_tool_batch_action(tool_name: str | None) -> bool:
@@ -1193,6 +1528,45 @@ def _build_turn_execution_execute_tool_batch_handler(
             request.inputs.get("tool_batch_cap"),
             environment_cap=request.environment.max_tool_invocations,
         )
+        target_contracts_context_key = (
+            _coerce_non_empty_text(request.inputs.get("target_contracts_context_key"))
+            or "turn_recovery_target_contracts"
+        )
+        target_contract_state, recovery_target_contract_validation = (
+            _recovery_target_contract_validation_state(
+                data=request.data,
+                context_key=target_contracts_context_key,
+            )
+        )
+        refined_target_contract_outputs = _refined_expected_target_contract_outputs(
+            data=request.data,
+            validation_report=recovery_target_contract_validation,
+        )
+        declared_target_contract_outputs: dict[str, Any] = {
+            "turn_target_contract_resolution_validation": dict(
+                recovery_target_contract_validation
+            ),
+        }
+        for context_key in (
+            "turn_expected_target_contracts",
+            "turn_expected_outcome_contract_state",
+            "turn_expected_outcome_profile",
+            "turn_expected_outcome_contract",
+        ):
+            if (
+                context_key in request.data
+                and request.data.get(context_key) is not None
+            ):
+                declared_target_contract_outputs[context_key] = request.data[
+                    context_key
+                ]
+        declared_target_contract_outputs.update(refined_target_contract_outputs)
+        prior_invocations = (
+            request.data.get("invocations")
+            if isinstance(request.data.get("invocations"), Sequence)
+            and not isinstance(request.data.get("invocations"), (str, bytes, bytearray))
+            else ()
+        )
 
         execution_records: list[dict[str, Any]] = []
         for tool_call in requested_tool_calls[:max_calls]:
@@ -1225,7 +1599,12 @@ def _build_turn_execution_execute_tool_batch_handler(
             target_validation = validate_tool_target_contract(
                 tool_name=tool_name or "",
                 payload=payload,
-                target_contract_state=target_contract_state_from_context(request.data),
+                target_contract_state=target_contract_state,
+                prior_tool_invocations=(
+                    prior_invocations
+                    if recovery_target_contract_validation.get("status") != "invalid"
+                    else ()
+                ),
             )
             if not target_validation.ok:
                 record: dict[str, Any] = {
@@ -1242,6 +1621,11 @@ def _build_turn_execution_execute_tool_batch_handler(
                 }
                 if payload_bindings:
                     record["payload_bindings"] = _bounded_snapshot(payload_bindings)
+                if recovery_target_contract_validation.get("status") == "invalid":
+                    record["recovery_target_contract_validation"] = _bounded_snapshot(
+                        recovery_target_contract_validation,
+                        max_depth=5,
+                    )
                 execution_records.append(record)
                 continue
 
@@ -1281,6 +1665,10 @@ def _build_turn_execution_execute_tool_batch_handler(
                 "payload": _bounded_snapshot(payload),
                 "status": "ok" if result.ok else "failed",
             }
+            if target_validation.resolution_evidence:
+                record["target_contract_resolution_evidence"] = [
+                    dict(item) for item in target_validation.resolution_evidence
+                ]
             if payload_bindings:
                 record["payload_bindings"] = _bounded_snapshot(payload_bindings)
             if result.duration_ms is not None:
@@ -1315,7 +1703,11 @@ def _build_turn_execution_execute_tool_batch_handler(
             ),
             selected_workflow_id=request.data.get("selected_workflow_id"),
             turn_expected_outcome_contract=(
-                request.data.get("turn_expected_outcome_contract_state")
+                refined_target_contract_outputs.get(
+                    "turn_expected_outcome_contract_state"
+                )
+                or refined_target_contract_outputs.get("turn_expected_outcome_contract")
+                or request.data.get("turn_expected_outcome_contract_state")
                 or request.data.get("turn_expected_outcome_contract")
             ),
             reasoning=_coerce_non_empty_text(
@@ -1338,8 +1730,46 @@ def _build_turn_execution_execute_tool_batch_handler(
                     request.data.get("turn_next_action_target_workflow_id")
                 )
                 or "",
+                "turn_recovery_target_contract_validation": dict(
+                    recovery_target_contract_validation
+                ),
             }
         )
+        outputs.update(declared_target_contract_outputs)
+        for context_key, empty_value in (
+            ("turn_expected_target_contracts", []),
+            ("turn_expected_outcome_contract_state", {}),
+            ("turn_expected_outcome_profile", {}),
+            ("turn_expected_outcome_contract", {}),
+        ):
+            outputs.setdefault(context_key, empty_value)
+        for output_key in (
+            "completion_report",
+            "turn_recovery_tool_batch_execution",
+        ):
+            output_payload = outputs.get(output_key)
+            if isinstance(output_payload, dict):
+                output_payload["target_contract_validation"] = dict(
+                    recovery_target_contract_validation
+                )
+        selected_trace = outputs.get("selected_workflow_trace")
+        if isinstance(selected_trace, dict):
+            selected_trace["recovery_target_contract_validation"] = dict(
+                recovery_target_contract_validation
+            )
+            if refined_target_contract_outputs:
+                refined_state = refined_target_contract_outputs.get(
+                    "turn_expected_outcome_contract_state"
+                )
+                refined_contract = refined_target_contract_outputs.get(
+                    "turn_expected_outcome_contract"
+                )
+                if isinstance(refined_state, Mapping):
+                    selected_trace["expected_outcome_contract_state"] = dict(
+                        refined_state
+                    )
+                if isinstance(refined_contract, Mapping):
+                    selected_trace["expected_outcome_contract"] = dict(refined_contract)
         return WorkflowActionResult(outputs=outputs)
 
     return _handle

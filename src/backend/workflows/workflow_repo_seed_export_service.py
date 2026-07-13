@@ -634,6 +634,11 @@ def build_repo_seed_workflow_bundle_from_authority(
             "seed_version": raw_payload.get("seed_version")
             or raw_payload.get("bundle_version")
             or raw_payload.get("version"),
+            "known_legacy_authority_payload_sha256_by_seed_version": (
+                raw_payload.get(
+                    "known_legacy_authority_payload_sha256_by_seed_version"
+                )
+            ),
             "source_tag": raw_payload.get("source_tag"),
             "supported_action_ids": ordered_supported_action_ids,
             "workflows": workflow_entries,

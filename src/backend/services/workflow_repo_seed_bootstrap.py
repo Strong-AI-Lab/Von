@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -10,7 +11,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from . import concept_service
-from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
+from .text_value_service import (
+    get_texts_for_concept,
+    upsert_singleton_text_relation,
+    upsert_text_for_concept,
+)
 from .workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
@@ -19,6 +24,7 @@ from .workflow_vontology_materialisation_helpers import (
     suspend_event_workflow_integration,
 )
 from ..workflows import workflow_concept_authority_service as authority_service
+from ..workflows import workflow_repo_seed_export_service as seed_export_service
 from ..workflows.static_input_binding_utils import stable_static_input_bindings
 from ..workflows.vontology_loader import (
     build_workflow_process_graph,
@@ -36,6 +42,13 @@ _REQUIRED_AUTHORITY_SURFACE_LAUNCH_CONTRACT = "launch_contract"
 _REQUIRED_AUTHORITY_SURFACE_LAUNCH_INPUT_CONTRACT = "launch_input_contract"
 _REPO_SEED_VERSION_TEXT_PREDICATE = "#V#hasWorkflowRepoSeedVersionJson"
 _REPO_SEED_VERSION_SCHEMA_VERSION = "workflow_repo_seed_version.v1"
+_REPO_SEED_MIGRATION_RECEIPT_SCHEMA_VERSION = "workflow_repo_seed_migration_receipt.v1"
+_SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_SCHEMA_VERSION = (
+    "workflow_support_concept_materialisation_receipt.v1"
+)
+_SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_ATTRIBUTE = (
+    "workflow_support_concept_materialisation_receipt"
+)
 _DEFAULT_REPO_SEED_VERSION_TEXT_MAX_TIME_MS = 15000
 _REPO_SEED_VERSION_TEXT_MAX_TIME_MS_ENV = "VON_WORKFLOW_POLICY_TEXT_MAX_TIME_MS"
 
@@ -88,11 +101,213 @@ def _merge_support_relationship_targets(
     return merged
 
 
+def _support_concept_target_authority_payload(spec: Mapping[str, Any]) -> dict[str, Any]:
+    relationships: dict[str, list[str]] = {}
+    raw_relationships = spec.get("relationships")
+    if isinstance(raw_relationships, Mapping):
+        for raw_predicate, raw_targets in raw_relationships.items():
+            predicate = str(raw_predicate or "").strip()
+            targets = _normalise_support_concept_targets(raw_targets)
+            if predicate and targets:
+                relationships[predicate] = sorted(dict.fromkeys(targets))
+    relation_values = _relation_spec_values(
+        tuple(
+            item
+            for item in (spec.get("text_relations") or ())
+            if isinstance(item, Mapping)
+        )
+    )
+    return {
+        "concept_id": str(spec.get("concept_id") or "").strip(),
+        "type_surface": [
+            {
+                "parent_concept_id": parent_id,
+                "relationship": (
+                    "is_an_instance_of"
+                    if bool(spec.get("create_as_instance"))
+                    else "is_a_type_of"
+                ),
+            }
+            for parent_id in sorted(
+                {
+                    str(item).strip()
+                    for item in (spec.get("parent_concept_ids") or ())
+                    if isinstance(item, str) and str(item).strip()
+                }
+            )
+        ],
+        "system_tags": sorted(
+            {
+                str(item).strip()
+                for item in (spec.get("system_tags") or ())
+                if isinstance(item, str) and str(item).strip()
+            }
+        ),
+        "attributes": copy.deepcopy(dict(spec.get("attributes") or {})),
+        "human_text_relations": _support_concept_human_text_relations(spec),
+        "relationships": relationships,
+        "text_relations": [
+            {"predicate": predicate, "lang": lang, "text": text}
+            for (predicate, lang), text in sorted(relation_values.items())
+        ],
+    }
+
+
+def _support_concept_human_text_relations(
+    spec: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    relations: list[dict[str, str]] = []
+    for field_name, predicate in (
+        ("name", "hasName"),
+        ("description", "hasDescription"),
+        ("notes", "hasNote"),
+    ):
+        text = str(spec.get(field_name) or "").strip()
+        if text:
+            relations.append(
+                {"predicate": predicate, "lang": "en-NZ", "text": text}
+            )
+    return relations
+
+
+def _support_concept_pending_receipt(
+    *,
+    concept_id: str,
+    target_authority_payload_sha256: str,
+    source_tag: str | None,
+    managed_by: str | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_SCHEMA_VERSION,
+        "status": "pending",
+        "concept_id": concept_id,
+        "target_authority_payload_sha256": target_authority_payload_sha256,
+        "source_tag": source_tag,
+        "managed_by": managed_by,
+    }
+
+
+def _support_concept_pending_receipt_is_valid(
+    value: Any,
+    *,
+    concept_id: str,
+    target_authority_payload_sha256: str,
+) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and value.get("schema_version")
+        == _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_SCHEMA_VERSION
+        and value.get("status") == "pending"
+        and str(value.get("concept_id") or "").strip() == concept_id
+        and str(value.get("target_authority_payload_sha256") or "")
+        .strip()
+        .lower()
+        == target_authority_payload_sha256
+    )
+
+
+def _support_concept_authority_status(
+    *,
+    concept_doc: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    target_payload: Mapping[str, Any],
+) -> tuple[bool, bool]:
+    """Return (exact, resumable) for the mutable scoped support authority."""
+
+    relationships = concept_doc.get("relationships")
+    relationships = relationships if isinstance(relationships, Mapping) else {}
+    static_surface_exact = True
+    for type_expectation in target_payload.get("type_surface") or ():
+        relationship = str(type_expectation.get("relationship") or "").strip()
+        parent_concept_id = str(
+            type_expectation.get("parent_concept_id") or ""
+        ).strip()
+        observed_targets = set(
+            _normalise_support_concept_targets(relationships.get(relationship))
+        )
+        if parent_concept_id not in observed_targets:
+            static_surface_exact = False
+    observed_system_tags = {
+        str(item).strip()
+        for item in (concept_doc.get("system_tags") or ())
+        if isinstance(item, str) and str(item).strip()
+    }
+    if not set(target_payload.get("system_tags") or ()).issubset(
+        observed_system_tags
+    ):
+        static_surface_exact = False
+    observed_attributes = concept_doc.get("attributes")
+    observed_attributes = (
+        observed_attributes if isinstance(observed_attributes, Mapping) else {}
+    )
+    for key, expected_value in dict(target_payload.get("attributes") or {}).items():
+        if observed_attributes.get(key) != expected_value:
+            static_surface_exact = False
+    human_text_exact = True
+    concept_id = str(
+        concept_doc.get("concept_id") or spec.get("concept_id") or ""
+    ).strip()
+    for target_relation in target_payload.get("human_text_relations") or ():
+        predicate = str(target_relation.get("predicate") or "").strip()
+        lang = str(target_relation.get("lang") or "en-NZ").strip() or "en-NZ"
+        expected = str(target_relation.get("text") or "").strip()
+        observed_values = {
+            str(row.get("text") or "").strip()
+            for row in get_texts_for_concept(
+                concept_id,
+                predicate=predicate,
+                limit=50,
+            )
+            if isinstance(row, Mapping)
+            and (str(row.get("lang") or "en-NZ").strip() or "en-NZ") == lang
+            and str(row.get("text") or "").strip()
+        }
+        if expected not in observed_values:
+            human_text_exact = False
+    relationship_exact = True
+    for predicate, targets in dict(target_payload.get("relationships") or {}).items():
+        observed_targets = set(
+            _normalise_support_concept_targets(relationships.get(predicate))
+        )
+        if not set(targets).issubset(observed_targets):
+            relationship_exact = False
+
+    text_exact = True
+    text_resumable = True
+    for target_relation in target_payload.get("text_relations") or ():
+        predicate = str(target_relation.get("predicate") or "").strip()
+        lang = str(target_relation.get("lang") or "en-NZ").strip() or "en-NZ"
+        expected = str(target_relation.get("text") or "").strip()
+        observed_values = {
+            str(row.get("text") or "").strip()
+            for row in get_texts_for_concept(
+                concept_id,
+                predicate=predicate,
+                limit=20,
+            )
+            if isinstance(row, Mapping)
+            and (str(row.get("lang") or "en-NZ").strip() or "en-NZ") == lang
+            and str(row.get("text") or "").strip()
+        }
+        if observed_values != {expected}:
+            text_exact = False
+        if observed_values - {expected}:
+            text_resumable = False
+    return (
+        static_surface_exact
+        and human_text_exact
+        and relationship_exact
+        and text_exact,
+        static_surface_exact and text_resumable,
+    )
+
+
 def _materialise_support_concepts(
     raw_specs: Any,
     *,
     source_tag: str | None,
     managed_by: str | None,
+    update_existing: bool = True,
 ) -> dict[str, Any]:
     """Materialise prerequisite non-workflow concepts declared by a seed bundle."""
 
@@ -117,15 +332,105 @@ def _materialise_support_concepts(
                 }
             )
             continue
+        target_authority_payload = _support_concept_target_authority_payload(spec)
+        target_authority_sha256 = _stable_payload_sha256(target_authority_payload)
+        pending_receipt = _support_concept_pending_receipt(
+            concept_id=concept_id,
+            target_authority_payload_sha256=target_authority_sha256,
+            source_tag=source_tag,
+            managed_by=managed_by,
+        )
         try:
             existing = concept_service.get_concept_by_concept_id_exact(concept_id)
-        except Exception:
+        except concept_service.ConceptNotFoundError:
             existing = None
+        except Exception as exc:
+            errors.append(
+                {
+                    "concept_id": concept_id,
+                    "reason_code": "support_concept_authority_read_failed",
+                    "error": str(exc),
+                }
+            )
+            continue
         concept_doc: Mapping[str, Any] | None = (
             existing if isinstance(existing, Mapping) else None
         )
         if isinstance(concept_doc, Mapping):
             existing_concept_ids.append(concept_id)
+            if not update_existing:
+                try:
+                    authority_exact, authority_resumable = (
+                        _support_concept_authority_status(
+                            concept_doc=concept_doc,
+                            spec=spec,
+                            target_payload=target_authority_payload,
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "concept_id": concept_id,
+                            "reason_code": "support_concept_authority_read_failed",
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+                attributes = concept_doc.get("attributes")
+                attributes = attributes if isinstance(attributes, Mapping) else {}
+                existing_receipt = attributes.get(
+                    _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_ATTRIBUTE
+                )
+                pending_receipt_valid = (
+                    _support_concept_pending_receipt_is_valid(
+                        existing_receipt,
+                        concept_id=concept_id,
+                        target_authority_payload_sha256=target_authority_sha256,
+                    )
+                )
+                if authority_exact:
+                    # Exact represented authority is already usable regardless
+                    # of whether it predates ownership receipts.
+                    if pending_receipt_valid and isinstance(
+                        existing_receipt, Mapping
+                    ):
+                        verified_attributes = dict(attributes)
+                        verified_attributes[
+                            _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_ATTRIBUTE
+                        ] = {**dict(existing_receipt), "status": "verified"}
+                        try:
+                            concept_doc = concept_service.update_concept(
+                                str(concept_doc.get("concept_id") or concept_id),
+                                {"attributes": verified_attributes},
+                            )
+                        except Exception as exc:
+                            errors.append(
+                                {
+                                    "concept_id": concept_id,
+                                    "reason_code": (
+                                        "support_concept_receipt_verify_failed"
+                                    ),
+                                    "error": str(exc),
+                                }
+                            )
+                    continue
+                if not pending_receipt_valid or not authority_resumable:
+                    errors.append(
+                        {
+                            "concept_id": concept_id,
+                            "reason_code": (
+                                "support_concept_existing_authority_requires_"
+                                "explicit_migration"
+                            ),
+                            "target_authority_payload_sha256": (
+                                target_authority_sha256
+                            ),
+                            "pending_materialisation_receipt_valid": (
+                                pending_receipt_valid
+                            ),
+                        }
+                    )
+                    continue
         else:
             parent_ids = [
                 str(item).strip()
@@ -137,6 +442,10 @@ def _materialise_support_concepts(
                 attributes.setdefault("repo_seed_source_tag", source_tag)
             if managed_by:
                 attributes.setdefault("repo_seed_managed_by", managed_by)
+            if not update_existing:
+                attributes[
+                    _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_ATTRIBUTE
+                ] = pending_receipt
             try:
                 concept_doc = concept_service.create_concept(
                     name=name,
@@ -183,7 +492,7 @@ def _materialise_support_concepts(
             if relationship_changed:
                 try:
                     concept_doc = concept_service.update_concept(
-                        concept_id,
+                        str((concept_doc or {}).get("concept_id") or concept_id),
                         {"relationships": relationships},
                         defer_side_effects=True,
                     )
@@ -204,10 +513,13 @@ def _materialise_support_concepts(
         ]
         if text_relation_specs:
             try:
+                persisted_concept_id = str(
+                    (concept_doc or {}).get("concept_id") or concept_id
+                )
                 authority_service.upsert_seed_bundle_text_relations(
-                    subject_concept_id=concept_id,
+                    subject_concept_id=persisted_concept_id,
                     relation_specs=tuple(text_relation_specs),
-                    workflow_id=concept_id,
+                    workflow_id=persisted_concept_id,
                     source_tag=source_tag,
                     managed_by=managed_by,
                 )
@@ -217,6 +529,68 @@ def _materialise_support_concepts(
                     {
                         "concept_id": concept_id,
                         "reason_code": "support_concept_text_relation_update_failed",
+                        "error": str(exc),
+                    }
+                )
+
+        if not update_existing:
+            try:
+                persisted_concept_id = str(
+                    (concept_doc or {}).get("concept_id") or concept_id
+                )
+                for human_relation in _support_concept_human_text_relations(spec):
+                    upsert_text_for_concept(
+                        subject_concept_id=persisted_concept_id,
+                        predicate=human_relation["predicate"],
+                        text=human_relation["text"],
+                        lang=human_relation["lang"],
+                        context=(
+                            {"name_type": "NL", "source": source_tag}
+                            if human_relation["predicate"] == "hasName"
+                            else {"source": source_tag}
+                        ),
+                    )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "concept_id": concept_id,
+                        "reason_code": "support_concept_human_text_update_failed",
+                        "error": str(exc),
+                    }
+                )
+
+        if not update_existing and isinstance(concept_doc, Mapping):
+            try:
+                refreshed = concept_service.get_concept_by_concept_id_exact(concept_id)
+                if not isinstance(refreshed, Mapping):
+                    raise RuntimeError("support_concept_missing_after_materialisation")
+                authority_exact, _authority_resumable = (
+                    _support_concept_authority_status(
+                        concept_doc=refreshed,
+                        spec=spec,
+                        target_payload=target_authority_payload,
+                    )
+                )
+                if not authority_exact:
+                    raise RuntimeError("support_concept_authority_readback_mismatch")
+                refreshed_attributes = refreshed.get("attributes")
+                verified_attributes = (
+                    dict(refreshed_attributes)
+                    if isinstance(refreshed_attributes, Mapping)
+                    else {}
+                )
+                verified_attributes[
+                    _SUPPORT_CONCEPT_MATERIALISATION_RECEIPT_ATTRIBUTE
+                ] = {**pending_receipt, "status": "verified"}
+                concept_service.update_concept(
+                    str(refreshed.get("concept_id") or concept_id),
+                    {"attributes": verified_attributes},
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "concept_id": concept_id,
+                        "reason_code": "support_concept_authority_readback_failed",
                         "error": str(exc),
                     }
                 )
@@ -353,6 +727,462 @@ def _compare_seed_versions(left: str | None, right: str | None) -> int | None:
     return 0
 
 
+def _normalise_workflow_seed_authority_payload(item: Any) -> Any:
+    if isinstance(item, Mapping):
+        output: dict[str, Any] = {}
+        for key, child in item.items():
+            key_text = str(key)
+            if (
+                key_text == "selection_policy"
+                and str(child or "").strip().lower() == "adaptive"
+            ):
+                continue
+            if key_text == "validation_policy" and child == {
+                "prompt_validation_policy": "fail"
+            }:
+                continue
+            output[key_text] = _normalise_workflow_seed_authority_payload(child)
+        return output
+    if isinstance(item, Sequence) and not isinstance(
+        item,
+        (str, bytes, bytearray),
+    ):
+        return [
+            _normalise_workflow_seed_authority_payload(child) for child in item
+        ]
+    return item
+
+
+def _stable_payload_sha256(value: Any) -> str:
+
+    payload = json.dumps(
+        _normalise_workflow_seed_authority_payload(value),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _first_payload_mismatch_path(expected: Any, observed: Any, path: str = "$") -> str:
+    if isinstance(expected, Mapping) and isinstance(observed, Mapping):
+        for key in sorted(set(expected) | set(observed), key=str):
+            if key not in expected or key not in observed:
+                return f"{path}.{key}"
+            mismatch = _first_payload_mismatch_path(
+                expected[key],
+                observed[key],
+                f"{path}.{key}",
+            )
+            if mismatch:
+                return mismatch
+        return ""
+    if (
+        isinstance(expected, Sequence)
+        and not isinstance(expected, (str, bytes, bytearray))
+        and isinstance(observed, Sequence)
+        and not isinstance(observed, (str, bytes, bytearray))
+    ):
+        if len(expected) != len(observed):
+            return f"{path}.length"
+        for index, (expected_item, observed_item) in enumerate(
+            zip(expected, observed)
+        ):
+            mismatch = _first_payload_mismatch_path(
+                expected_item,
+                observed_item,
+                f"{path}[{index}]",
+            )
+            if mismatch:
+                return mismatch
+        return ""
+    return "" if expected == observed else path
+
+
+def _payload_component_sha256_by_path(value: Any) -> dict[str, str]:
+    components: dict[str, str] = {}
+
+    def _walk(item: Any, path: str) -> None:
+        item = _normalise_workflow_seed_authority_payload(item)
+        if isinstance(item, Mapping):
+            if not item:
+                components[path] = _stable_payload_sha256(item)
+                return
+            for key, child in item.items():
+                _walk(child, f"{path}.{key}")
+            return
+        if isinstance(item, Sequence) and not isinstance(
+            item,
+            (str, bytes, bytearray),
+        ):
+            identity_keys = ("state_id", "type_id")
+            identity_key = next(
+                (
+                    key
+                    for key in identity_keys
+                    if all(
+                        isinstance(child, Mapping) and child.get(key) is not None
+                        for child in item
+                    )
+                ),
+                None,
+            )
+            if identity_key:
+                for child in item:
+                    _walk(child, f"{path}[{identity_key}={child[identity_key]}]")
+                return
+            if all(
+                isinstance(child, Mapping)
+                and child.get("predicate") is not None
+                and child.get("lang") is not None
+                for child in item
+            ):
+                for child in item:
+                    _walk(
+                        child,
+                        f"{path}[predicate={child['predicate']}|lang={child['lang']}]",
+                    )
+                return
+            if not item:
+                components[path] = _stable_payload_sha256(item)
+                return
+            for index, child in enumerate(item):
+                _walk(child, f"{path}[{index}]")
+            return
+        components[path] = _stable_payload_sha256(item)
+
+    _walk(value, "$")
+    return components
+
+
+def _authority_payload_is_source_target_partial(
+    *,
+    source_payload: Mapping[str, Any] | None,
+    target_payload: Mapping[str, Any],
+    current_payload: Mapping[str, Any],
+) -> bool:
+    missing_sha256 = _stable_payload_sha256({"missing": True})
+    source_components = (
+        _payload_component_sha256_by_path(source_payload)
+        if isinstance(source_payload, Mapping)
+        else {}
+    )
+    target_components = _payload_component_sha256_by_path(target_payload)
+    current_components = _payload_component_sha256_by_path(current_payload)
+    for path in set(source_components) | set(target_components) | set(current_components):
+        observed = current_components.get(path, missing_sha256)
+        allowed = {
+            source_components.get(path, missing_sha256),
+            target_components.get(path, missing_sha256),
+        }
+        if observed not in allowed:
+            return False
+    return True
+
+
+def _relation_spec_values(
+    relation_specs: Sequence[Mapping[str, Any]],
+) -> dict[tuple[str, str], str]:
+    values: dict[tuple[str, str], str] = {}
+    for spec in relation_specs:
+        if not isinstance(spec, Mapping):
+            continue
+        predicate = str(spec.get("predicate") or "").strip()
+        text = str(spec.get("text") or "").strip()
+        lang = str(spec.get("lang") or "en-NZ").strip() or "en-NZ"
+        if predicate and text:
+            # Publication is singleton per predicate/language, so the final
+            # represented value is the last declared value for that key.
+            values[(predicate, lang)] = text
+    return values
+
+
+def _project_relation_authority(
+    *,
+    source_specs: Sequence[Mapping[str, Any]],
+    scope_specs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    source_values = _relation_spec_values(source_specs)
+    return [
+        {
+            "predicate": predicate,
+            "lang": lang,
+            "text": source_values.get((predicate, lang)),
+        }
+        for predicate, lang in sorted(_relation_spec_values(scope_specs))
+    ]
+
+
+def _workflow_seed_authority_payload_from_bundle_surfaces(
+    *,
+    workflow_id: str,
+    publication_spec: Any,
+    source_workflow_type_ids: Sequence[str],
+    scoped_workflow_type_ids: Sequence[str],
+    source_workflow_text_relations: Sequence[Mapping[str, Any]],
+    scoped_workflow_text_relations: Sequence[Mapping[str, Any]],
+    source_launch_input_contract: Mapping[str, Any] | None,
+    source_step_text_relations: Mapping[str, Sequence[Mapping[str, Any]]],
+    scoped_step_text_relations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    definition = authority_service._build_definition_from_publication_spec(
+        workflow_id=workflow_id,
+        spec=publication_spec,
+    )
+    source_types = {
+        str(item).strip()
+        for item in source_workflow_type_ids
+        if isinstance(item, str) and str(item).strip()
+    }
+    return {
+        "workflow_id": workflow_id,
+        "publication_spec": (
+            seed_export_service._build_publication_spec_payload_from_definition(
+                workflow_id=workflow_id,
+                definition=definition,
+            )
+        ),
+        "workflow_type_surface": [
+            {
+                "type_id": type_id,
+                "is_an_instance_of": type_id in source_types,
+                "is_a_type_of": False,
+            }
+            for type_id in sorted(
+                {
+                    str(item).strip()
+                    for item in scoped_workflow_type_ids
+                    if isinstance(item, str) and str(item).strip()
+                }
+            )
+        ],
+        "workflow_text_relations": _project_relation_authority(
+            source_specs=source_workflow_text_relations,
+            scope_specs=scoped_workflow_text_relations,
+        ),
+        "launch_input_contract": (
+            copy.deepcopy(dict(source_launch_input_contract))
+            if isinstance(source_launch_input_contract, Mapping)
+            else None
+        ),
+        "step_text_relations": {
+            step_concept_id: _project_relation_authority(
+                source_specs=tuple(
+                    source_step_text_relations.get(step_concept_id) or ()
+                ),
+                scope_specs=scope_specs,
+            )
+            for step_concept_id, scope_specs in sorted(
+                scoped_step_text_relations.items()
+            )
+        },
+    }
+
+
+def _live_relation_authority(
+    *,
+    concept_id: str,
+    scope_specs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for predicate, lang in sorted(_relation_spec_values(scope_specs)):
+        text: str | None = None
+        rows = get_texts_for_concept(concept_id, predicate=predicate, limit=20)
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            row_lang = str(row.get("lang") or "en-NZ").strip() or "en-NZ"
+            row_text = str(row.get("text") or "").strip()
+            if row_lang == lang and row_text:
+                text = row_text
+                break
+        output.append({"predicate": predicate, "lang": lang, "text": text})
+    return output
+
+
+def _load_live_workflow_seed_authority_payload(
+    *,
+    workflow_id: str,
+    scoped_workflow_type_ids: Sequence[str],
+    scoped_workflow_text_relations: Sequence[Mapping[str, Any]],
+    scoped_launch_input_contract: Mapping[str, Any] | None,
+    scoped_step_text_relations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any] | None:
+    definition = load_workflow_definition_from_vontology(workflow_id)
+    if definition is None:
+        return None
+    concept_doc = concept_service.get_concept_by_concept_id(workflow_id)
+    if not isinstance(concept_doc, Mapping):
+        return None
+    relationships = concept_doc.get("relationships")
+    relationships = relationships if isinstance(relationships, Mapping) else {}
+
+    def _targets(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value.strip()} if value.strip() else set()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return set()
+        return {
+            str(item).strip()
+            for item in value
+            if isinstance(item, str) and str(item).strip()
+        }
+
+    instance_types = _targets(relationships.get("is_an_instance_of"))
+    parent_types = _targets(relationships.get("is_a_type_of"))
+    launch_input_contract, _source = resolve_workflow_launch_input_contract(
+        workflow_id
+    )
+    if not isinstance(scoped_launch_input_contract, Mapping):
+        launch_input_contract = None
+    return {
+        "workflow_id": workflow_id,
+        "publication_spec": (
+            seed_export_service._build_publication_spec_payload_from_definition(
+                workflow_id=workflow_id,
+                definition=definition,
+            )
+        ),
+        "workflow_type_surface": [
+            {
+                "type_id": type_id,
+                "is_an_instance_of": type_id in instance_types,
+                "is_a_type_of": type_id in parent_types,
+            }
+            for type_id in sorted(
+                {
+                    str(item).strip()
+                    for item in scoped_workflow_type_ids
+                    if isinstance(item, str) and str(item).strip()
+                }
+            )
+        ],
+        "workflow_text_relations": _live_relation_authority(
+            concept_id=workflow_id,
+            scope_specs=scoped_workflow_text_relations,
+        ),
+        "launch_input_contract": (
+            copy.deepcopy(dict(launch_input_contract))
+            if isinstance(launch_input_contract, Mapping)
+            else None
+        ),
+        "step_text_relations": {
+            step_concept_id: _live_relation_authority(
+                concept_id=step_concept_id,
+                scope_specs=scope_specs,
+            )
+            for step_concept_id, scope_specs in sorted(
+                scoped_step_text_relations.items()
+            )
+        },
+    }
+
+
+def _load_live_workflow_seed_partial_authority_payload(
+    *,
+    workflow_id: str,
+    scoped_workflow_type_ids: Sequence[str],
+    scoped_workflow_text_relations: Sequence[Mapping[str, Any]],
+    scoped_launch_input_contract: Mapping[str, Any] | None,
+    scoped_step_text_relations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any] | None:
+    """Read every present scoped surface even when no full definition loads."""
+
+    payload: dict[str, Any] = {}
+    definition = load_workflow_definition_from_vontology(workflow_id)
+    try:
+        concept_doc = concept_service.get_concept_by_concept_id_exact(workflow_id)
+    except concept_service.ConceptNotFoundError:
+        concept_doc = None
+    concept_doc = concept_doc if isinstance(concept_doc, Mapping) else None
+    if definition is not None or concept_doc is not None:
+        payload["workflow_id"] = workflow_id
+    if definition is not None:
+        payload["publication_spec"] = (
+            seed_export_service._build_publication_spec_payload_from_definition(
+                workflow_id=workflow_id,
+                definition=definition,
+            )
+        )
+
+    relationships = (
+        concept_doc.get("relationships")
+        if isinstance(concept_doc, Mapping)
+        else {}
+    )
+    relationships = relationships if isinstance(relationships, Mapping) else {}
+
+    def _targets(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value.strip()} if value.strip() else set()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return set()
+        return {
+            str(item).strip()
+            for item in value
+            if isinstance(item, str) and str(item).strip()
+        }
+
+    instance_types = _targets(relationships.get("is_an_instance_of"))
+    parent_types = _targets(relationships.get("is_a_type_of"))
+    type_surface = [
+        {
+            "type_id": type_id,
+            "is_an_instance_of": type_id in instance_types,
+            "is_a_type_of": type_id in parent_types,
+        }
+        for type_id in sorted(
+            {
+                str(item).strip()
+                for item in scoped_workflow_type_ids
+                if isinstance(item, str)
+                and str(item).strip()
+                and (
+                    str(item).strip() in instance_types
+                    or str(item).strip() in parent_types
+                )
+            }
+        )
+    ]
+    if type_surface:
+        payload["workflow_type_surface"] = type_surface
+
+    live_workflow_relations = _live_relation_authority(
+        concept_id=workflow_id,
+        scope_specs=scoped_workflow_text_relations,
+    )
+    present_workflow_relations = [
+        item for item in live_workflow_relations if item.get("text") is not None
+    ]
+    if present_workflow_relations:
+        payload["workflow_text_relations"] = present_workflow_relations
+
+    if isinstance(scoped_launch_input_contract, Mapping):
+        launch_input_contract, _source = resolve_workflow_launch_input_contract(
+            workflow_id
+        )
+        if isinstance(launch_input_contract, Mapping):
+            payload["launch_input_contract"] = copy.deepcopy(
+                dict(launch_input_contract)
+            )
+
+    live_step_relations: dict[str, list[dict[str, Any]]] = {}
+    for step_concept_id, scope_specs in sorted(scoped_step_text_relations.items()):
+        present_relations = [
+            item
+            for item in _live_relation_authority(
+                concept_id=step_concept_id,
+                scope_specs=scope_specs,
+            )
+            if item.get("text") is not None
+        ]
+        if present_relations:
+            live_step_relations[step_concept_id] = present_relations
+    if live_step_relations:
+        payload["step_text_relations"] = live_step_relations
+    return payload or None
+
+
 def _load_workflow_repo_seed_version_marker(
     workflow_id: str,
 ) -> dict[str, Any] | None:
@@ -375,8 +1205,19 @@ def _load_workflow_repo_seed_version_marker(
         seed_version = _normalise_seed_version(payload.get("seed_version"))
         if not seed_version:
             continue
+        raw_migration_receipt = payload.get("migration_receipt")
+        migration_receipt = (
+            {str(key): value for key, value in raw_migration_receipt.items()}
+            if isinstance(raw_migration_receipt, Mapping)
+            else None
+        )
         return {
             "seed_version": seed_version,
+            "authority_payload_sha256": str(
+                payload.get("authority_payload_sha256") or ""
+            ).strip().lower()
+            or None,
+            "migration_receipt": migration_receipt,
             "schema_version": str(payload.get("schema_version") or "").strip() or None,
             "family_id": str(payload.get("family_id") or "").strip() or None,
             "source_tag": str(payload.get("source_tag") or "").strip() or None,
@@ -508,6 +1349,7 @@ def _upsert_workflow_repo_seed_version_marker(
     source_tag: str | None,
     managed_by: str | None,
     asset_path: str,
+    authority_payload_sha256: str,
 ) -> dict[str, Any]:
     payload = {
         "schema_version": _REPO_SEED_VERSION_SCHEMA_VERSION,
@@ -516,6 +1358,7 @@ def _upsert_workflow_repo_seed_version_marker(
         "source_tag": source_tag,
         "managed_by": managed_by,
         "asset_path": asset_path,
+        "authority_payload_sha256": authority_payload_sha256,
         "recorded_at_utc": _utc_now_iso(),
     }
     return upsert_singleton_text_relation(
@@ -533,6 +1376,53 @@ def _upsert_workflow_repo_seed_version_marker(
                 "repo_seed_role": "version_marker_only",
             }.items()
             if value is not None
+        },
+        garbage_collect=True,
+    )
+
+
+def _upsert_workflow_repo_seed_pending_migration_receipt(
+    *,
+    workflow_id: str,
+    source_seed_version: str | None,
+    source_authority_payload: Mapping[str, Any],
+    source_authority_payload_sha256: str,
+    source_authority_absent: bool = False,
+    target_seed_version: str,
+    target_authority_payload_sha256: str,
+    family_id: str | None,
+    source_tag: str | None,
+    managed_by: str | None,
+    asset_path: str,
+) -> dict[str, Any]:
+    receipt = {
+        "schema_version": _REPO_SEED_MIGRATION_RECEIPT_SCHEMA_VERSION,
+        "status": "pending",
+        "source_seed_version": source_seed_version or "unversioned",
+        "source_authority_payload": copy.deepcopy(dict(source_authority_payload)),
+        "source_authority_payload_sha256": source_authority_payload_sha256,
+        "source_authority_absent": bool(source_authority_absent),
+        "target_seed_version": target_seed_version,
+        "target_authority_payload_sha256": target_authority_payload_sha256,
+    }
+    payload = {
+        "schema_version": _REPO_SEED_VERSION_SCHEMA_VERSION,
+        "seed_version": source_seed_version or "unversioned",
+        "family_id": family_id,
+        "source_tag": source_tag,
+        "managed_by": managed_by,
+        "asset_path": asset_path,
+        "migration_receipt": receipt,
+        "recorded_at_utc": _utc_now_iso(),
+    }
+    return upsert_singleton_text_relation(
+        subject_concept_id=workflow_id,
+        predicate=_REPO_SEED_VERSION_TEXT_PREDICATE,
+        text=json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        lang="en-NZ",
+        context={
+            "workflow_id": workflow_id,
+            "repo_seed_role": "pending_migration_receipt",
         },
         garbage_collect=True,
     )
@@ -1418,11 +2308,15 @@ def bootstrap_repo_seed_workflow_bundle(
     managed_by = str(bundle.get("managed_by") or "").strip() or None
     seed_version = _normalise_seed_version(bundle.get("seed_version"))
     source_tag = str(bundle.get("source_tag") or "").strip() or None
-    support_concept_report = _materialise_support_concepts(
-        bundle.get("support_concepts"),
-        source_tag=source_tag,
-        managed_by=managed_by,
-    )
+    support_concept_report: dict[str, Any] = {
+        "created_concept_ids": [],
+        "existing_concept_ids": [],
+        "relationship_updated_concept_ids": [],
+        "text_relation_updated_concept_ids": [],
+        "errors": [],
+        "skipped": True,
+        "skip_reason": "no_authorised_workflow_publication",
+    }
     publication_specs = dict(bundle.get("publication_specs") or {})
     publication_purposes = dict(bundle.get("publication_purposes") or {})
     workflow_type_ids = dict(bundle.get("workflow_type_ids") or {})
@@ -1481,11 +2375,6 @@ def bootstrap_repo_seed_workflow_bundle(
         for workflow_id, status in repo_seed_version_status_by_id.items()
         if bool(status.get("blocked")) and not force_republish
     )
-    repo_seed_version_superseded_ids = tuple(
-        workflow_id
-        for workflow_id, status in repo_seed_version_status_by_id.items()
-        if status.get("comparison") == -1 and not force_republish
-    )
     repo_seed_version_refresh_ids = tuple(
         workflow_id
         for workflow_id, status in repo_seed_version_status_by_id.items()
@@ -1500,27 +2389,366 @@ def bootstrap_repo_seed_workflow_bundle(
             workflow_launch_input_contracts=workflow_launch_input_contracts,
         )
     )
-    materialisation_preflight = (
-        _suppress_repo_seed_snapshot_drift_when_vontology_version_is_current(
-            materialisation_preflight=materialisation_preflight,
-            version_blocked_workflow_ids=repo_seed_version_superseded_ids,
-            target_workflow_ids=target_workflow_ids,
-        )
+    known_legacy_digests_by_workflow = dict(
+        bundle.get("known_legacy_authority_payload_sha256_by_seed_version") or {}
     )
-    already_current = bool(materialisation_preflight.get("already_current"))
+    target_authority_payload_sha256_by_workflow: dict[str, str] = {}
+    target_authority_payload_by_workflow: dict[str, dict[str, Any]] = {}
+    observed_authority_payload_by_workflow: dict[str, dict[str, Any] | None] = {}
+    observed_authority_payload_sha256_by_workflow: dict[str, str | None] = {}
+    authority_adjudication_by_workflow: dict[str, dict[str, Any]] = {}
+    publication_workflow_ids: list[str] = []
+    marker_only_workflow_ids: list[str] = []
+    migration_source_payload_by_workflow: dict[str, dict[str, Any]] = {}
+    migration_source_absent_workflow_ids: set[str] = set()
+    authority_blockers_by_workflow: dict[str, dict[str, Any]] = {}
+
+    def _step_relation_scope(workflow_id: str, spec: Any) -> dict[str, tuple[dict[str, Any], ...]]:
+        step_ids = set(
+            authority_service.publication_spec_step_concept_ids(
+                workflow_id=workflow_id,
+                spec=spec,
+            )
+        )
+        return {
+            step_id: tuple(step_text_relations.get(step_id) or ())
+            for step_id in sorted(step_ids)
+            if step_text_relations.get(step_id)
+        }
+
+    for workflow_id in target_workflow_ids:
+        spec = publication_specs[workflow_id]
+        scoped_types = tuple(workflow_type_ids.get(workflow_id) or ())
+        scoped_relations = tuple(workflow_text_relations.get(workflow_id) or ())
+        scoped_contract = workflow_launch_input_contracts.get(workflow_id)
+        scoped_step_relations = _step_relation_scope(workflow_id, spec)
+        target_payload = _workflow_seed_authority_payload_from_bundle_surfaces(
+            workflow_id=workflow_id,
+            publication_spec=spec,
+            source_workflow_type_ids=scoped_types,
+            scoped_workflow_type_ids=scoped_types,
+            source_workflow_text_relations=scoped_relations,
+            scoped_workflow_text_relations=scoped_relations,
+            source_launch_input_contract=(
+                scoped_contract if isinstance(scoped_contract, Mapping) else None
+            ),
+            source_step_text_relations=scoped_step_relations,
+            scoped_step_text_relations=scoped_step_relations,
+        )
+        target_sha256 = _stable_payload_sha256(target_payload)
+        target_authority_payload_by_workflow[workflow_id] = target_payload
+        target_authority_payload_sha256_by_workflow[workflow_id] = target_sha256
+        live_authority_read_error: str | None = None
+        try:
+            live_payload = _load_live_workflow_seed_authority_payload(
+                workflow_id=workflow_id,
+                scoped_workflow_type_ids=scoped_types,
+                scoped_workflow_text_relations=scoped_relations,
+                scoped_launch_input_contract=(
+                    scoped_contract if isinstance(scoped_contract, Mapping) else None
+                ),
+                scoped_step_text_relations=scoped_step_relations,
+            )
+            if live_payload is None:
+                live_payload = _load_live_workflow_seed_partial_authority_payload(
+                    workflow_id=workflow_id,
+                    scoped_workflow_type_ids=scoped_types,
+                    scoped_workflow_text_relations=scoped_relations,
+                    scoped_launch_input_contract=(
+                        scoped_contract
+                        if isinstance(scoped_contract, Mapping)
+                        else None
+                    ),
+                    scoped_step_text_relations=scoped_step_relations,
+                )
+        except Exception as exc:
+            live_payload = None
+            live_authority_read_error = str(exc)
+        live_sha256 = (
+            _stable_payload_sha256(live_payload)
+            if isinstance(live_payload, Mapping)
+            else None
+        )
+        observed_authority_payload_by_workflow[workflow_id] = (
+            dict(live_payload) if isinstance(live_payload, Mapping) else None
+        )
+        observed_authority_payload_sha256_by_workflow[workflow_id] = live_sha256
+        version_status = repo_seed_version_status_by_id.get(workflow_id) or {}
+        marker = version_status.get("marker")
+        marker = marker if isinstance(marker, Mapping) else {}
+        existing_version = _normalise_seed_version(
+            version_status.get("vontology_seed_version")
+        )
+        version_key = (existing_version or "unversioned").lower()
+        marker_sha256 = str(marker.get("authority_payload_sha256") or "").strip().lower()
+        raw_known_versions = known_legacy_digests_by_workflow.get(workflow_id)
+        known_versions = raw_known_versions if isinstance(raw_known_versions, Mapping) else {}
+        known_digests = {
+            str(item).strip().lower()
+            for item in (known_versions.get(version_key) or ())
+            if isinstance(item, str) and str(item).strip()
+        }
+        exact_reviewed_source = bool(
+            live_sha256
+            and (
+                live_sha256 == marker_sha256
+                or live_sha256 in known_digests
+            )
+        )
+        pending_receipt = marker.get("migration_receipt")
+        pending_receipt = (
+            pending_receipt if isinstance(pending_receipt, Mapping) else {}
+        )
+        pending_source_payload = pending_receipt.get("source_authority_payload")
+        pending_source_sha256 = str(
+            pending_receipt.get("source_authority_payload_sha256") or ""
+        ).strip().lower()
+        pending_source_version = str(
+            pending_receipt.get("source_seed_version") or "unversioned"
+        ).strip().lower()
+        pending_known_digests = {
+            str(item).strip().lower()
+            for item in (known_versions.get(pending_source_version) or ())
+            if isinstance(item, str) and str(item).strip()
+        }
+        pending_source_absent = pending_receipt.get("source_authority_absent") is True
+        pending_current_payload: Mapping[str, Any] | None = (
+            live_payload
+            if isinstance(live_payload, Mapping)
+            else (
+                {}
+                if live_authority_read_error is None and pending_source_absent
+                else None
+            )
+        )
+        pending_source_is_reviewed = bool(
+            isinstance(pending_source_payload, Mapping)
+            and (
+                (
+                    pending_source_absent
+                    and not pending_source_payload
+                    and pending_source_sha256 == _stable_payload_sha256({})
+                    and pending_source_version == "unversioned"
+                )
+                or (
+                    not pending_source_absent
+                    and pending_source_sha256 in pending_known_digests
+                )
+            )
+        )
+        pending_receipt_valid = bool(
+            pending_current_payload is not None
+            and isinstance(pending_source_payload, Mapping)
+            and pending_receipt.get("schema_version")
+            == _REPO_SEED_MIGRATION_RECEIPT_SCHEMA_VERSION
+            and pending_receipt.get("status") == "pending"
+            and str(pending_receipt.get("target_seed_version") or "").strip()
+            == seed_version
+            and str(
+                pending_receipt.get("target_authority_payload_sha256") or ""
+            ).strip().lower()
+            == target_sha256
+            and _stable_payload_sha256(pending_source_payload)
+            == pending_source_sha256
+            and pending_source_is_reviewed
+            and _authority_payload_is_source_target_partial(
+                source_payload=(
+                    None if pending_source_absent else pending_source_payload
+                ),
+                target_payload=target_payload,
+                current_payload=pending_current_payload,
+            )
+        )
+        comparison = version_status.get("comparison")
+        workflow_status = (
+            (materialisation_preflight.get("workflow_status_by_id") or {}).get(
+                workflow_id
+            )
+            or {}
+        )
+        reason: str
+        if force_republish:
+            publication_workflow_ids.append(workflow_id)
+            reason = "forced_republish"
+        elif live_authority_read_error is not None:
+            reason = "workflow_seed_live_authority_read_failed"
+            authority_blockers_by_workflow[workflow_id] = {
+                "error_code": reason,
+                "error": live_authority_read_error,
+                "repo_seed_version": seed_version,
+                "target_authority_payload_sha256": target_sha256,
+            }
+        elif live_sha256 == target_sha256:
+            reason = "target_authority_already_exact"
+            if comparison == 1 or existing_version is None:
+                marker_only_workflow_ids.append(workflow_id)
+        elif pending_receipt_valid and isinstance(pending_source_payload, Mapping):
+            publication_workflow_ids.append(workflow_id)
+            migration_source_payload_by_workflow[workflow_id] = {
+                str(key): value for key, value in pending_source_payload.items()
+            }
+            if pending_source_absent:
+                migration_source_absent_workflow_ids.add(workflow_id)
+            reason = "pending_reviewed_migration_resume"
+        elif live_sha256 is None and existing_version is None and str(
+            workflow_status.get("status") or ""
+        ) in {"graph_missing", "definition_missing"}:
+            publication_workflow_ids.append(workflow_id)
+            migration_source_payload_by_workflow[workflow_id] = {}
+            migration_source_absent_workflow_ids.add(workflow_id)
+            reason = "safe_first_publication"
+        elif (
+            comparison == 1
+            and exact_reviewed_source
+            and isinstance(live_payload, Mapping)
+        ):
+            publication_workflow_ids.append(workflow_id)
+            migration_source_payload_by_workflow[workflow_id] = {
+                str(key): value for key, value in live_payload.items()
+            }
+            reason = "exact_reviewed_legacy_migration"
+        elif (
+            existing_version is None
+            and exact_reviewed_source
+            and isinstance(live_payload, Mapping)
+        ):
+            publication_workflow_ids.append(workflow_id)
+            migration_source_payload_by_workflow[workflow_id] = {
+                str(key): value for key, value in live_payload.items()
+            }
+            reason = "exact_reviewed_unversioned_migration"
+        else:
+            reason = "live_authority_requires_explicit_migration"
+            authority_blockers_by_workflow[workflow_id] = {
+                "error_code": reason,
+                "observed_seed_version": existing_version,
+                "repo_seed_version": seed_version,
+                "observed_authority_payload_sha256": live_sha256,
+                "target_authority_payload_sha256": target_sha256,
+                "marker_authority_payload_sha256": marker_sha256 or None,
+                "known_legacy_authority_payload_sha256": sorted(known_digests),
+            }
+        authority_adjudication_by_workflow[workflow_id] = {
+            "workflow_id": workflow_id,
+            "reason": reason,
+            "publication_authorised": workflow_id in publication_workflow_ids,
+            "marker_only_update_authorised": workflow_id in marker_only_workflow_ids,
+            "observed_authority_payload_sha256": live_sha256,
+            "target_authority_payload_sha256": target_sha256,
+            "exact_reviewed_source": exact_reviewed_source,
+        }
+
+    for workflow_id, source_payload in migration_source_payload_by_workflow.items():
+        adjudication = authority_adjudication_by_workflow.get(workflow_id) or {}
+        if adjudication.get("reason") == "pending_reviewed_migration_resume":
+            continue
+        version_status = repo_seed_version_status_by_id.get(workflow_id) or {}
+        try:
+            _upsert_workflow_repo_seed_pending_migration_receipt(
+                workflow_id=workflow_id,
+                source_seed_version=_normalise_seed_version(
+                    version_status.get("vontology_seed_version")
+                ),
+                source_authority_payload=source_payload,
+                source_authority_payload_sha256=_stable_payload_sha256(
+                    source_payload
+                ),
+                source_authority_absent=(
+                    workflow_id in migration_source_absent_workflow_ids
+                ),
+                target_seed_version=seed_version or "",
+                target_authority_payload_sha256=(
+                    target_authority_payload_sha256_by_workflow[workflow_id]
+                ),
+                family_id=family_id,
+                source_tag=source_tag,
+                managed_by=managed_by,
+                asset_path=str(bundle.get("asset_path") or Path(asset_path)),
+            )
+        except Exception as exc:
+            publication_workflow_ids.remove(workflow_id)
+            authority_blockers_by_workflow[workflow_id] = {
+                "error_code": "workflow_seed_migration_receipt_upsert_failed",
+                "error": str(exc),
+            }
+            authority_adjudication_by_workflow[workflow_id][
+                "publication_authorised"
+            ] = False
+            authority_adjudication_by_workflow[workflow_id]["reason"] = (
+                "workflow_seed_migration_receipt_upsert_failed"
+            )
+
+    support_candidate_workflow_ids = [
+        workflow_id
+        for workflow_id in target_workflow_ids
+        if workflow_id not in authority_blockers_by_workflow
+        and (
+            force_republish
+            or (repo_seed_version_status_by_id.get(workflow_id) or {}).get(
+                "comparison"
+            )
+            != -1
+        )
+    ]
+    if support_candidate_workflow_ids:
+        support_concept_report = _materialise_support_concepts(
+            bundle.get("support_concepts"),
+            source_tag=source_tag,
+            managed_by=managed_by,
+            update_existing=False,
+        )
+        support_concept_report["skipped"] = False
+        support_concept_report["skip_reason"] = None
+        support_errors = list(support_concept_report.get("errors") or ())
+        if support_errors:
+            for workflow_id in support_candidate_workflow_ids:
+                if workflow_id in publication_workflow_ids:
+                    publication_workflow_ids.remove(workflow_id)
+                if workflow_id in marker_only_workflow_ids:
+                    marker_only_workflow_ids.remove(workflow_id)
+                authority_blockers_by_workflow[workflow_id] = {
+                    "error_code": (
+                        "workflow_seed_support_concept_materialisation_failed"
+                    ),
+                    "support_concept_errors": copy.deepcopy(support_errors),
+                }
+                authority_adjudication_by_workflow[workflow_id][
+                    "publication_authorised"
+                ] = False
+                authority_adjudication_by_workflow[workflow_id][
+                    "marker_only_update_authorised"
+                ] = False
+                authority_adjudication_by_workflow[workflow_id]["reason"] = (
+                    "workflow_seed_support_concept_materialisation_failed"
+                )
+
+    publication_workflow_ids_tuple = tuple(publication_workflow_ids)
+    publication_specs_to_apply = {
+        workflow_id: publication_specs[workflow_id]
+        for workflow_id in publication_workflow_ids_tuple
+    }
+    publication_purposes_to_apply = {
+        workflow_id: purpose
+        for workflow_id, purpose in publication_purposes.items()
+        if workflow_id in publication_specs_to_apply
+    }
     materialisation_preflight["repo_seed_version_gate"] = {
         "seed_version": seed_version,
         "version_marker_predicate": _REPO_SEED_VERSION_TEXT_PREDICATE,
         "blocked_workflow_ids": list(repo_seed_version_blocked_ids),
         "refresh_workflow_ids": list(repo_seed_version_refresh_ids),
         "status_by_workflow_id": repo_seed_version_status_by_id,
+        "authority_adjudication_by_workflow": authority_adjudication_by_workflow,
+        "authority_blockers_by_workflow": authority_blockers_by_workflow,
+        "publication_workflow_ids": list(publication_workflow_ids_tuple),
+        "marker_only_workflow_ids": list(marker_only_workflow_ids),
         "forced_republish": bool(force_republish),
     }
-    skip_publication = (
-        already_current and not force_republish and not repo_seed_version_refresh_ids
-    )
-    no_op_version_blocked_ids = (
-        repo_seed_version_blocked_ids if skip_publication else ()
+    skip_publication = not publication_workflow_ids_tuple
+    no_op_version_blocked_ids = tuple(
+        workflow_id
+        for workflow_id in repo_seed_version_blocked_ids
+        if workflow_id not in publication_workflow_ids_tuple
     )
 
     typed_workflow_ids: list[str] = []
@@ -1558,26 +2786,47 @@ def bootstrap_repo_seed_workflow_bundle(
                     "action_concepts_created": 0,
                     "mapping_concepts_created": 0,
                     "validation_failures": 0,
-                    "errors": 0,
+                    "errors": len(authority_blockers_by_workflow),
                 },
                 "published_workflow_ids": [],
-                "skipped_due_to_current_materialisation": list(target_workflow_ids),
-                "skip_reason": "existing_materialisation_valid",
+                "skipped_due_to_current_materialisation": [
+                    workflow_id
+                    for workflow_id in target_workflow_ids
+                    if workflow_id not in authority_blockers_by_workflow
+                ],
+                "errors_by_workflow_id": {
+                    workflow_id: blocker["error_code"]
+                    for workflow_id, blocker in authority_blockers_by_workflow.items()
+                },
+                "skip_reason": (
+                    "workflow_seed_authority_blocked"
+                    if authority_blockers_by_workflow
+                    else "existing_materialisation_valid"
+                ),
                 "skipped": True,
                 "forced_republish": False,
             }
         else:
             publication_report = authority_service.publish_canonical_chat_workflow_graphs(
-                target_workflow_ids=target_workflow_ids,
+                target_workflow_ids=publication_workflow_ids_tuple,
                 upsert_publication_lifecycle_metadata=True,
-                publication_specs=publication_specs,
+                publication_specs=publication_specs_to_apply,
                 publication_definitions=authority_service._build_definition_map_from_publication_specs(
-                    publication_specs
+                    publication_specs_to_apply
                 ),
-                publication_purposes=publication_purposes,
+                publication_purposes=publication_purposes_to_apply,
                 validate_after_publish=False,
             )
             publication_report["forced_republish"] = bool(force_republish)
+            publication_report.setdefault("errors_by_workflow_id", {}).update(
+                {
+                    workflow_id: blocker["error_code"]
+                    for workflow_id, blocker in authority_blockers_by_workflow.items()
+                }
+            )
+            publication_report.setdefault("counts", {})["errors"] = int(
+                (publication_report.get("counts") or {}).get("errors") or 0
+            ) + len(authority_blockers_by_workflow)
         publication_report["materialisation_status"] = (
             "current"
             if skip_publication
@@ -1632,9 +2881,9 @@ def bootstrap_repo_seed_workflow_bundle(
             no_op_version_blocked_ids
         )
 
-        should_apply_seed_bundle_mutations = not skip_publication
+        should_apply_seed_bundle_mutations = bool(publication_workflow_ids_tuple)
         if should_apply_seed_bundle_mutations:
-            for workflow_id, spec in publication_specs.items():
+            for workflow_id, spec in publication_specs_to_apply.items():
                 type_ids = tuple(workflow_type_ids.get(workflow_id) or ())
                 if type_ids and ensure_instance_typing(
                     concept_id=workflow_id,
@@ -1699,7 +2948,7 @@ def bootstrap_repo_seed_workflow_bundle(
                             ),
                         )
 
-        for workflow_id, spec in publication_specs.items():
+        for workflow_id, spec in publication_specs_to_apply.items():
             validation = validation_by_workflow_id.get(workflow_id)
             if skip_publication:
                 if not isinstance(validation, dict):
@@ -1748,11 +2997,86 @@ def bootstrap_repo_seed_workflow_bundle(
                         )
                     )
 
+        readback_failures_by_workflow: dict[str, dict[str, Any]] = {}
+        for workflow_id in publication_workflow_ids_tuple:
+            spec = publication_specs[workflow_id]
+            scoped_contract = workflow_launch_input_contracts.get(workflow_id)
+            try:
+                readback_payload = _load_live_workflow_seed_authority_payload(
+                    workflow_id=workflow_id,
+                    scoped_workflow_type_ids=tuple(
+                        workflow_type_ids.get(workflow_id) or ()
+                    ),
+                    scoped_workflow_text_relations=tuple(
+                        workflow_text_relations.get(workflow_id) or ()
+                    ),
+                    scoped_launch_input_contract=(
+                        scoped_contract
+                        if isinstance(scoped_contract, Mapping)
+                        else None
+                    ),
+                    scoped_step_text_relations=_step_relation_scope(
+                        workflow_id,
+                        spec,
+                    ),
+                )
+            except Exception:
+                readback_payload = None
+            observed_readback_sha256 = (
+                _stable_payload_sha256(readback_payload)
+                if isinstance(readback_payload, Mapping)
+                else None
+            )
+            expected_readback_sha256 = (
+                target_authority_payload_sha256_by_workflow[workflow_id]
+            )
+            if observed_readback_sha256 != expected_readback_sha256:
+                expected_payload = target_authority_payload_by_workflow[workflow_id]
+                observed_payload = (
+                    readback_payload if isinstance(readback_payload, Mapping) else {}
+                )
+                readback_failures_by_workflow[workflow_id] = {
+                    "error_code": "workflow_seed_authority_readback_mismatch",
+                    "expected_authority_payload_sha256": expected_readback_sha256,
+                    "observed_authority_payload_sha256": observed_readback_sha256,
+                    "mismatched_authority_surfaces": [
+                        key
+                        for key in expected_payload
+                        if expected_payload.get(key) != observed_payload.get(key)
+                    ],
+                    "first_mismatch_path": _first_payload_mismatch_path(
+                        _normalise_workflow_seed_authority_payload(expected_payload),
+                        _normalise_workflow_seed_authority_payload(observed_payload),
+                    ),
+                }
+        if readback_failures_by_workflow:
+            publication_report.setdefault("errors_by_workflow_id", {}).update(
+                {
+                    workflow_id: failure["error_code"]
+                    for workflow_id, failure in readback_failures_by_workflow.items()
+                }
+            )
+            publication_report.setdefault("counts", {})["errors"] = int(
+                (publication_report.get("counts") or {}).get("errors") or 0
+            ) + len(readback_failures_by_workflow)
+        publication_report["authority_readback_failures_by_workflow"] = (
+            readback_failures_by_workflow
+        )
+
         if seed_version:
-            blocked_ids = set(repo_seed_version_blocked_ids)
-            for workflow_id in target_workflow_ids:
-                if workflow_id in blocked_ids:
-                    continue
+            marker_update_workflow_ids = tuple(
+                dict.fromkeys(
+                    [
+                        *marker_only_workflow_ids,
+                        *[
+                            workflow_id
+                            for workflow_id in publication_workflow_ids_tuple
+                            if workflow_id not in readback_failures_by_workflow
+                        ],
+                    ]
+                )
+            )
+            for workflow_id in marker_update_workflow_ids:
                 update = _upsert_workflow_repo_seed_version_marker(
                     workflow_id=workflow_id,
                     seed_version=seed_version,
@@ -1760,6 +3084,9 @@ def bootstrap_repo_seed_workflow_bundle(
                     source_tag=source_tag,
                     managed_by=managed_by,
                     asset_path=str(bundle.get("asset_path") or Path(asset_path)),
+                    authority_payload_sha256=(
+                        target_authority_payload_sha256_by_workflow[workflow_id]
+                    ),
                 )
                 seed_version_marker_updates.append(
                     {

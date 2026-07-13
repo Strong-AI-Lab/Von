@@ -6975,15 +6975,26 @@ def _concept_search_input_schema() -> Schema:
             "filter_kind": (list, type(None)),
             "scope_root": (str, type(None)),
             "instance_of": (str, type(None)),
+            "direct_instances_only": (bool,),
             "namespace": (str, type(None)),
             "match_type": (str,),
             "exact_match": (bool,),  # Deprecated, use match_type instead
             "min_similarity": (float,),
             "include_description": (bool,),
+            "system_tags": (list, type(None)),
+            "user_tags": (list, type(None)),
             "include_hierarchy_path": (bool,),
             "limit": (int,),
+            "page": (int,),
+            "per_page": (int, type(None)),
+            "use_two_pass": (bool,),
         },
-        allow_unknown=True,
+        # ``_search_concepts`` forwards the payload to a concrete function
+        # signature.  Keep this schema in sync with that signature and reject
+        # orchestration metadata (for example target-contract matching policy)
+        # before invocation rather than allowing a late unexpected-keyword
+        # failure inside the handler.
+        allow_unknown=False,
         description="search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)",
     )
 

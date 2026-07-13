@@ -398,6 +398,78 @@ def test_turn_recovery_tool_batch_replaces_default_profile_and_strips_unknown_fi
     }
 
 
+def test_turn_recovery_tool_batch_strips_unknown_fields_from_tolerant_schema(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import registry_factory
+    from src.backend.workflows.durable.turn_execution_actions import (
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        register_turn_execution_actions,
+    )
+
+    tolerant_schema = Schema(
+        required={"query": str},
+        optional={"match_type": str, "namespace": (str, type(None))},
+        allow_unknown=True,
+    )
+    gateway = _SchemaAwareGateway(
+        method_name="verification_lookup",
+        category="read",
+        input_schema=tolerant_schema,
+        payload_factory=lambda _tool_name, payload: {
+            "success": True,
+            "results": [{"item_id": "item-1", "query": payload.get("query")}],
+        },
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_get_or_build_durable_mcp_gateway",
+        lambda: gateway,
+    )
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
+
+    result = registry.execute(
+        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+        inputs={
+            "tool_calls": [
+                {
+                    "tool": "verification_lookup",
+                    "payload": {
+                        "query": "synthetic target",
+                        "matching_policy": "exact",
+                    },
+                }
+            ]
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester@test_org",
+        ),
+    )
+
+    assert result.status == "success"
+    assert gateway.invocations == [
+        (
+            "verification_lookup",
+            {
+                "query": "synthetic target",
+                "namespace": "#V#tester@test_org",
+            },
+        )
+    ]
+    invocation = result.outputs["turn_recovery_tool_batch_execution"][
+        "tool_invocations"
+    ][0]
+    assert {
+        (entry.get("field"), entry.get("source"))
+        for entry in invocation["payload_bindings"]
+    } >= {("matching_policy", "removed_for_strict_tool_schema")}
+
+
 def test_turn_recovery_tool_batch_binds_predicate_target_alias_to_contract_type(
     monkeypatch,
 ):
@@ -626,6 +698,90 @@ def test_workflow_mcp_action_blocks_symbolic_target_contract_mismatch():
         "target_contract_symbolic_mismatch"
     )
     assert gateway.invocations == []
+
+
+def test_workflow_mcp_action_uses_prior_search_result_to_authorise_focal_fetch():
+    gateway = _FakeGateway(
+        definitions={"fetch_concept": "read"},
+        payload_factory=lambda _tool_name, payload: {
+            "success": True,
+            "concept_id": payload.get("concept_id"),
+        },
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+    target_contract_state = {
+        "schema_version": "turn_expected_outcome_contract.v1",
+        "target_contracts": [
+            {
+                "kind": "natural_language",
+                "binding_kind": "entity",
+                "text": "the entity named by the user",
+                "resolution_status": "unresolved",
+            }
+        ],
+    }
+
+    blocked_result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "fetch_concept",
+            "tool_arguments": {"concept_id": "#V#grounded_candidate"},
+        },
+        context={"turn_expected_outcome_contract_state": target_contract_state},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+    )
+
+    assert blocked_result.status == "failed"
+    assert blocked_result.error == (
+        "workflow_mcp_target_contract_validation_failed:"
+        "fetch_concept:target_contract_unresolved_for_symbolic_tool"
+    )
+    assert gateway.invocations == []
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "fetch_concept",
+            "tool_arguments": {"concept_id": "#V#grounded_candidate"},
+        },
+        context={
+            "turn_expected_outcome_contract_state": target_contract_state,
+            "invocations": [
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "call_id": "call-search-1",
+                    "effective_payload": {
+                        "results": [
+                            {"concept_id": "#V#grounded_candidate"},
+                        ]
+                    },
+                }
+            ],
+        },
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+        ),
+    )
+
+    assert result.status == "success"
+    assert result.error is None
+    assert gateway.invocations == [
+        (
+            "fetch_concept",
+            {
+                "concept_id": "#V#grounded_candidate",
+                "namespace": "#V#tester",
+            },
+        )
+    ]
 
 
 def test_workflow_mcp_action_invokes_gmail_send_with_represented_external_policy():

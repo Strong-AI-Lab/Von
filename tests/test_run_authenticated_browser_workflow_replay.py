@@ -186,7 +186,9 @@ def test_build_report_uses_task_status_snapshots_for_route_and_progress_evidence
     ]
 
 
-def test_submit_background_generate_sends_workflow_inputs(monkeypatch) -> None:
+def test_submit_background_generate_sends_workflow_inputs_and_selector_mode(
+    monkeypatch,
+) -> None:
     captured: dict[str, Any] = {}
 
     def _fake_request_json(*args, **kwargs):
@@ -219,6 +221,7 @@ def test_submit_background_generate_sends_workflow_inputs(monkeypatch) -> None:
         model="qwen3:8b",
         presenter_mode=False,
         thinking_card_mode="debug",
+        agent_test_selector_replay_mode="represented_selector_llm",
     )
 
     assert result == {"task_id": "task-1"}
@@ -227,6 +230,9 @@ def test_submit_background_generate_sends_workflow_inputs(monkeypatch) -> None:
         "gmail_max_results": 1,
         "base_gmail_query": "arxiv.org newer_than:365d",
     }
+    assert captured["kwargs"]["json"]["agent_test_selector_replay_mode"] == (
+        "represented_selector_llm"
+    )
 
 
 def test_gmail_arxiv_idempotence_initial_turn_sets_bounded_workflow_inputs() -> None:

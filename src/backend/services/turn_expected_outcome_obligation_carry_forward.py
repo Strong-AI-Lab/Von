@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from .required_tool_identity_service import canonical_required_tool_key
+
 TURN_OBLIGATION_CARRY_FORWARD_SCHEMA_VERSION = (
     "turn_expected_outcome_obligation_carry_forward.v1"
 )
@@ -74,6 +76,8 @@ _SUPPRESS_TOKENS = frozenset(
         "fresh",
     }
 )
+
+_CREATE_IF_ABSENT_TOOL_KEYS = frozenset({"create_concepts"})
 
 
 def _clean_text(value: Any) -> str | None:
@@ -150,6 +154,58 @@ def _candidate_targets(contract: Any) -> list[str]:
     return _dedupe_strings(candidates)
 
 
+def _resolved_entity_target_present(contract: Any) -> bool:
+    """Return whether the agreement already resolves its focal entity.
+
+    A resolved *type* can be the grounded parent for a later create operation;
+    it must not be confused with an already-existing focal entity.
+    """
+
+    for target_contract in getattr(contract, "target_contracts", ()) or ():
+        binding_kind = _clean_text(getattr(target_contract, "binding_kind", None))
+        if binding_kind != "entity":
+            continue
+        resolver = getattr(target_contract, "is_symbolically_resolved", None)
+        if callable(resolver) and resolver():
+            return True
+    return False
+
+
+def _unresolved_entity_target_present(contract: Any) -> bool:
+    """Return whether any focal entity agreement still needs materialisation."""
+
+    for target_contract in getattr(contract, "target_contracts", ()) or ():
+        binding_kind = _clean_text(getattr(target_contract, "binding_kind", None))
+        if binding_kind != "entity":
+            continue
+        resolver = getattr(target_contract, "is_symbolically_resolved", None)
+        if not callable(resolver) or not resolver():
+            return True
+    return False
+
+
+def _invoked_tool_keys(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> set[str]:
+    if not isinstance(tool_invocations, Sequence) or isinstance(
+        tool_invocations, (str, bytes, bytearray)
+    ):
+        return set()
+    keys: set[str] = set()
+    for invocation in tool_invocations:
+        if not isinstance(invocation, Mapping):
+            continue
+        name = (
+            _clean_text(invocation.get("tool_name"))
+            or _clean_text(invocation.get("tool"))
+            or _clean_text(invocation.get("name"))
+            or _clean_text(invocation.get("method"))
+        )
+        if name:
+            keys.add(canonical_required_tool_key(name))
+    return keys
+
+
 def target_resolved_by_current_turn(
     tool_invocations: Sequence[Mapping[str, Any]] | None,
 ) -> bool:
@@ -199,6 +255,22 @@ def adjudicate_conditional_required_tool_activation(
     )
     resolved_by_current_turn = target_resolved_by_current_turn(tool_invocations)
     symbolic_target = _symbolic_target_present(contract)
+    resolved_entity_target = _resolved_entity_target_present(contract)
+    unresolved_entity_target = _unresolved_entity_target_present(contract)
+    invoked_tool_keys = _invoked_tool_keys(tool_invocations)
+    satisfied_without_execution: list[str] = []
+    if resolved_entity_target and not unresolved_entity_target:
+        remaining_tools: list[str] = []
+        for tool_name in conditional_tools:
+            tool_key = canonical_required_tool_key(tool_name)
+            if (
+                tool_key in _CREATE_IF_ABSENT_TOOL_KEYS
+                and tool_key not in invoked_tool_keys
+            ):
+                satisfied_without_execution.append(tool_name)
+                continue
+            remaining_tools.append(tool_name)
+        conditional_tools = remaining_tools
 
     projection: dict[str, Any] = {
         "schema_version": TURN_OBLIGATION_CARRY_FORWARD_SCHEMA_VERSION,
@@ -220,7 +292,17 @@ def adjudicate_conditional_required_tool_activation(
         "obligation_carry_forward_permitted": obligation_carry_forward_permitted,
         "target_resolved_by_current_turn": resolved_by_current_turn,
         "symbolic_target_present": symbolic_target,
+        "resolved_entity_target_present": resolved_entity_target,
+        "unresolved_entity_target_present": unresolved_entity_target,
+        "conditional_tools_satisfied_without_execution": (
+            satisfied_without_execution
+        ),
     }
+
+    if satisfied_without_execution:
+        projection["conditional_satisfaction_reason"] = (
+            "resolved_existing_entity_satisfies_create_if_absent_branch"
+        )
 
     if not conditional_tools:
         return [], projection
