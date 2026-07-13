@@ -12,6 +12,7 @@ _REDACT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"password", re.IGNORECASE),
     re.compile(r"secret", re.IGNORECASE),
     re.compile(r"token", re.IGNORECASE),
+    re.compile(r"encrypted[_-]?content", re.IGNORECASE),
 )
 _SAFE_TOKEN_COUNT_KEYS: frozenset[str] = frozenset(
     {

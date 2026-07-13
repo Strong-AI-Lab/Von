@@ -25,7 +25,6 @@ import requests
 from ..services.llm_api_key_resolution import get_gemini_api_key
 from ..services.settings_service import get_openai_env_var, resolve_llm_setting
 from ..services.model_parameter_service import (
-    openai_chat_completions_kwargs_from_model_parameters,
     openai_responses_kwargs_from_model_parameters,
 )
 from .model_defaults import (
@@ -64,6 +63,7 @@ def _import_ollama():
 
         ollama = _ollama
     return ollama
+
 
 try:
     from google import genai  # type: ignore
@@ -194,11 +194,13 @@ _OLLAMA_AUTO_PULL_COOLDOWN_SECONDS = _float_env(
     "VON_OLLAMA_AUTO_PULL_COOLDOWN_SECONDS", 300.0
 )
 _OLLAMA_AUTO_PULL_TIMEOUT_SECONDS = _float_env(
-    "VON_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS", 600.0,
+    "VON_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS",
+    600.0,
     minimum=1.0,
 )
 _OLLAMA_AUTO_PULL_RETRY_BUDGET = _int_env(
-    "VON_OLLAMA_AUTO_PULL_RETRY_BUDGET", 1,
+    "VON_OLLAMA_AUTO_PULL_RETRY_BUDGET",
+    1,
     minimum=0,
 )
 
@@ -248,9 +250,7 @@ def get_ollama_auto_pull_state_snapshot() -> Dict[str, Any]:
                 "last_error": state.get("last_error"),
                 "last_elapsed_seconds": state.get("last_elapsed_seconds"),
                 "last_attempt_at_monotonic": state.get("last_attempt_at_monotonic"),
-                "window_started_at_monotonic": state.get(
-                    "window_started_at_monotonic"
-                ),
+                "window_started_at_monotonic": state.get("window_started_at_monotonic"),
                 "attempts_in_window": int(state.get("attempts_in_window", 0) or 0),
                 "last_waiter_count": int(state.get("last_waiter_count", 0) or 0),
             }
@@ -262,6 +262,7 @@ def get_ollama_auto_pull_state_snapshot() -> Dict[str, Any]:
         "retry_budget": int(_OLLAMA_AUTO_PULL_RETRY_BUDGET),
         "models": models,
     }
+
 
 #############################################
 # Internal message schema & adapters
@@ -849,6 +850,7 @@ class OllamaClient(LLMInterface):
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
         return LLMClientConfig(
             model=model or self.default_model,
+            provider="ollama",
             base_url=self.host,
             temperature=0.7,
         )
@@ -1046,7 +1048,7 @@ class OllamaClient(LLMInterface):
                 )
                 if ollama_resp_err_cls and isinstance(e, ollama_resp_err_cls):
                     logger.warning(
-                        f"Ollama ResponseError on attempt {attempt + 1}/{max_retries}: {e} (Status: {getattr(e,'status_code','n/a')})"
+                        f"Ollama ResponseError on attempt {attempt + 1}/{max_retries}: {e} (Status: {getattr(e, 'status_code', 'n/a')})"
                     )
                     if (
                         _is_ollama_model_not_found_error(e)
@@ -1142,10 +1144,7 @@ class OllamaClient(LLMInterface):
                 response = self.client.embeddings(model=target_model, prompt=text)
                 return response["embedding"]
             except Exception as e:
-                if (
-                    _is_ollama_model_not_found_error(e)
-                    and not auto_pull_retry_consumed
-                ):
+                if _is_ollama_model_not_found_error(e) and not auto_pull_retry_consumed:
                     auto_pull_retry_consumed = True
                     auto_pull_result = self._attempt_model_auto_pull(target_model)
                     if bool(auto_pull_result.get("succeeded")):
@@ -1194,11 +1193,7 @@ class OllamaClient(LLMInterface):
                 return cached["models"]
             return []
         cached = _MODEL_CACHE.get(cache_key)
-        if (
-            not force_refresh
-            and cached
-            and (now - cached["ts"]) < _MODEL_CACHE_TTL
-        ):
+        if not force_refresh and cached and (now - cached["ts"]) < _MODEL_CACHE_TTL:
             logger.debug(
                 "Ollama model cache hit host=%s age=%.1fs",
                 self.host,
@@ -1368,11 +1363,13 @@ class OllamaClient(LLMInterface):
             "retry_outcome": "not_attempted",
         }
         if not model_token:
-            result.update({
-                "failed": True,
-                "retry_outcome": "invalid_model",
-                "error": "missing model name",
-            })
+            result.update(
+                {
+                    "failed": True,
+                    "retry_outcome": "invalid_model",
+                    "error": "missing model name",
+                }
+            )
             return result
 
         if not _OLLAMA_AUTO_PULL_ENABLED:
@@ -1407,7 +1404,9 @@ class OllamaClient(LLMInterface):
                 state["event"] = event
 
             if in_flight:
-                state["last_waiter_count"] = int(state.get("last_waiter_count", 0) or 0) + 1
+                state["last_waiter_count"] = (
+                    int(state.get("last_waiter_count", 0) or 0) + 1
+                )
                 waiter_event = event
             else:
                 waiter_event = None
@@ -1420,7 +1419,9 @@ class OllamaClient(LLMInterface):
                 state_after_wait = _OLLAMA_AUTO_PULL_STATE.get(model_token, {})
                 status_after_wait = str(state_after_wait.get("last_status") or "")
                 last_error = state_after_wait.get("last_error")
-                last_elapsed = float(state_after_wait.get("last_elapsed_seconds") or 0.0)
+                last_elapsed = float(
+                    state_after_wait.get("last_elapsed_seconds") or 0.0
+                )
             result.update(
                 {
                     "attempted": True,
@@ -1504,7 +1505,9 @@ class OllamaClient(LLMInterface):
                 "succeeded": pull_succeeded,
                 "failed": not pull_succeeded,
                 "elapsed_seconds": pull_elapsed,
-                "retry_outcome": "retried_after_pull" if pull_succeeded else "pull_failed",
+                "retry_outcome": "retried_after_pull"
+                if pull_succeeded
+                else "pull_failed",
                 "auto_pull_attempted": True,
                 "auto_pull_succeeded": pull_succeeded,
                 "auto_pull_failed": not pull_succeeded,
@@ -1582,7 +1585,10 @@ class OpenAIClient(LLMInterface):
         )
         return LLMClientConfig(
             model=resolved_model or self.DEFAULT_MODEL,
+            provider="openai",
             api_key=self.api_key,
+            connection_id="#V#openai_provider",
+            deployment_id=resolved_model or self.DEFAULT_MODEL,
             temperature=safe_temperature,
         )
 
@@ -1782,7 +1788,11 @@ class OpenAIClient(LLMInterface):
             logger.error(msg, exc_info=True)
             raise RuntimeError(msg)
         except openai.RateLimitError as e:
-            _code = getattr(getattr(e, "body", None), "get", lambda *a: None)("code") if isinstance(getattr(e, "body", None), dict) else None
+            _code = (
+                getattr(getattr(e, "body", None), "get", lambda *a: None)("code")
+                if isinstance(getattr(e, "body", None), dict)
+                else None
+            )
             if _code == "insufficient_quota":
                 msg = f"OpenAI quota exhausted (insufficient_quota): {str(e)}"
             else:
@@ -1945,6 +1955,7 @@ class GeminiClient(LLMInterface):
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
         return LLMClientConfig(
             model=model or self.default_model,
+            provider="gemini",
             api_key=self.api_key,
             temperature=0.7,
         )
@@ -1992,7 +2003,9 @@ class GeminiClient(LLMInterface):
             generation_config = None
             if gemini_config_params:
                 try:
-                    generation_config = genai.types.GenerationConfig(**gemini_config_params)  # type: ignore[attr-defined]
+                    generation_config = genai.types.GenerationConfig(
+                        **gemini_config_params
+                    )  # type: ignore[attr-defined]
                 except Exception:
                     generation_config = None
 

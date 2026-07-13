@@ -12,6 +12,9 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     _WorkflowModelPolicyState,
 )
+from src.backend.languagemodels.structured_tool_calling import (
+    StructuredToolCapabilityRejectedError,
+)
 from src.backend.services import prompt_template_service as pts
 from src.backend.workflows import llm_step_executor as lse
 from src.backend.workflows.action_registry import (
@@ -2290,6 +2293,226 @@ def test_execute_llm_step_returns_failed_result_on_gateway_llm_timeout(
     assert envelope["completion_reason"] == "timeout"
     assert envelope["timeout_stage"] == "llm.action"
     assert "timed out after 12s" in envelope["timeout_detail"]
+
+
+def test_execute_llm_step_preserves_structured_transport_blocker_envelope(
+    monkeypatch,
+) -> None:
+    decision = {
+        "schema_version": "structured_tool_transport_decision.v1",
+        "status": "compatible",
+        "capability_class": "responses_required",
+        "effective_api_surface": "responses",
+        "capability_source": "vontology_graph",
+        "profile_concept_id": "#V#synthetic_responses_profile",
+        "advertised_alternatives": [],
+        "llm_exchange_id": "llm-exchange-synthetic",
+    }
+
+    class _StubGateway:
+        def describe_methods(self):
+            return {}
+
+    class _StubOrchestrator:
+        def _select_model_for_stage(self, **_kwargs):
+            return "synthetic-model"
+
+        def _action_tool_calling_plan(self, request):
+            request.data["llm_calls"].append(
+                {
+                    "stage": "tool_call",
+                    "status": "failed",
+                    "failure_kind": "structured_tool_capability_rejected",
+                }
+            )
+            request.data["aux_llm_calls"].append(
+                {
+                    "type": "structured_tool_transport_blocker",
+                    "transport": decision,
+                }
+            )
+            raise StructuredToolCapabilityRejectedError(
+                "The represented structured-tool surface was rejected.",
+                decision=decision,
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request, **_kwargs: (
+            _StubOrchestrator(),
+            object(),
+            {"models": []},
+            None,
+            None,
+        ),
+    )
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_StubGateway(),
+            model="synthetic-model",
+        ),
+        data={
+            "requested_client_type": "openai",
+            "context_messages": [{"role": "user", "content": "Use a tool"}],
+        },
+        workflow_id="#V#synthetic_workflow",
+        workflow_state_id="#V#synthetic_tool_step",
+        prompt_contract={"prompt_text": "Use the represented tool."},
+        llm_policy={
+            "policy_stage": "tool_call",
+            "tool_mode": "allowed",
+            "allowed_tools": ["synthetic_lookup"],
+            "context_messages_context_key": "context_messages",
+        },
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    assert result.error == (
+        "workflow_structured_tool_transport_blocked:structured_tool_capability_rejected"
+    )
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["completion_reason"] == "structured_tool_transport_blocked"
+    assert envelope["failure_kind"] == "structured_tool_capability_rejected"
+    assert envelope["retryable"] is False
+    assert envelope["fail_closed"] is True
+    assert envelope["fallback_used"] is False
+    assert envelope["tool_invocations"] == []
+    assert envelope["transport_decision"] == decision
+    assert envelope["recovery_affordances"] == {
+        "advertised_api_surface_alternatives": [],
+        "profile_concept_id": "#V#synthetic_responses_profile",
+        "capability_source": "vontology_graph",
+    }
+    assert envelope["llm_calls"][0]["failure_kind"] == (
+        "structured_tool_capability_rejected"
+    )
+    assert envelope["aux_llm_calls"][0]["type"] == ("structured_tool_transport_blocker")
+
+
+def test_structured_transport_failure_after_tool_records_side_effect_accounting(
+    monkeypatch,
+) -> None:
+    decision = {
+        "schema_version": "structured_tool_transport_decision.v1",
+        "status": "compatible",
+        "effective_api_surface": "responses",
+        "failure_kind": "structured_tool_protocol_error",
+    }
+
+    class _StubGateway:
+        def describe_methods(self):
+            return {}
+
+    class _StubOrchestrator:
+        def _select_model_for_stage(self, **_kwargs):
+            return "synthetic-model"
+
+        def _action_tool_calling_plan(self, _request):
+            return WorkflowActionResult(
+                outputs={
+                    "tool_calls_present": True,
+                    "tool_calls": [
+                        {
+                            "action": "call",
+                            "tool": "synthetic_lookup",
+                            "payload": {"query": "value"},
+                            "_call_id": "call-provider-1",
+                        }
+                    ],
+                }
+            )
+
+        def _action_tool_calling_validate(self, _request):
+            return WorkflowActionResult(
+                outputs={
+                    "tool_calls_validated": True,
+                    "tool_call_repair_required": False,
+                }
+            )
+
+        def _action_tool_calling_execute(self, request):
+            invocation = {
+                "tool": "synthetic_lookup",
+                "payload": {"query": "value"},
+                "call_id": "call-provider-1",
+                "success": True,
+                "status": "ok",
+            }
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": "call-provider-1",
+                "content": '{"success":true}',
+            }
+            request.data["invocations"].append(invocation)
+            request.data["tool_messages"].append(tool_message)
+            return WorkflowActionResult(outputs={"iteration_count": 1})
+
+        def _action_tool_calling_backfill(self, _request):
+            raise StructuredToolCapabilityRejectedError(
+                "Continuation failed after tool execution.",
+                decision=decision,
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request, **_kwargs: (
+            _StubOrchestrator(),
+            object(),
+            {"models": []},
+            None,
+            None,
+        ),
+    )
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_StubGateway(),
+            model="synthetic-model",
+        ),
+        data={
+            "requested_client_type": "openai",
+            "context_messages": [{"role": "user", "content": "Use a tool"}],
+        },
+        workflow_id="#V#synthetic_workflow",
+        workflow_state_id="#V#synthetic_tool_step",
+        prompt_contract={"prompt_text": "Use the represented tool."},
+        llm_policy={
+            "policy_stage": "tool_call",
+            "tool_mode": "allowed",
+            "allowed_tools": ["synthetic_lookup"],
+            "context_messages_context_key": "context_messages",
+        },
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["tool_invocations"] == [
+        {
+            "tool": "synthetic_lookup",
+            "payload": {"query": "value"},
+            "call_id": "call-provider-1",
+            "success": True,
+            "status": "ok",
+        }
+    ]
+    assert envelope["tool_messages"] == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-provider-1",
+            "content": '{"success":true}',
+        }
+    ]
+    assert result.outputs["tool_invocations"] == envelope["tool_invocations"]
+    assert result.outputs["tool_messages"] == envelope["tool_messages"]
 
 
 def test_execute_llm_step_bounds_blocked_context_adjudication_gateway_call(

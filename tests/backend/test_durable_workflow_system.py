@@ -1214,6 +1214,48 @@ class TestWorkflowInstanceManager:
         assert status_dict["locked_by"] == "worker-build-stamp"
         assert status_dict["claimed_by_build"]["git_short_commit"] == "abcdef123456"
 
+    def test_create_instance_stamps_configured_min_worker_build(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The cluster build gate must be atomic with pending-instance creation."""
+        monkeypatch.setenv("VON_DURABLE_MIN_WORKER_BUILD", "abcdef1")
+        monkeypatch.delenv(
+            "VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT",
+            raising=False,
+        )
+        manager = WorkflowInstanceManager()
+
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.min_worker_build == "abcdef1"
+        assert (
+            manager.find_and_claim_instance(
+                "worker-old-build",
+                worker_build_identity={
+                    "version": "vold_backend+g123456789abc",
+                    "git_short_commit": "123456789abc",
+                },
+            )
+            is None
+        )
+        claimed = manager.find_and_claim_instance(
+            "worker-current-build",
+            worker_build_identity={
+                "version": "vcurrent_backend+gabcdef123456",
+                "git_short_commit": "abcdef123456",
+            },
+        )
+        assert claimed is not None
+        assert claimed.instance_id == instance_id
+
     def test_find_and_claim_skips_unmatched_min_worker_build(
         self,
         monkeypatch: pytest.MonkeyPatch,

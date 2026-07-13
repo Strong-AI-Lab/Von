@@ -24,6 +24,14 @@ def get_llm_client(config: LLMClientConfig) -> LLMClient:
     """
 
     model_lower = config.model.lower()
+    provider = str(config.provider or "").strip().lower()
+
+    if provider == "openai":
+        return OpenAIClient(config)
+    if provider == "gemini":
+        return GeminiClient(config)
+    if provider == "ollama":
+        return OllamaClient(config)
 
     # gpt-oss models are local (Ollama) despite the "gpt-" prefix
     if "gpt-oss" in model_lower:

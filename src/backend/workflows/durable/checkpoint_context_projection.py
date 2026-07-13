@@ -38,12 +38,16 @@ _ALWAYS_COMPACT_KEYS = {
 _PROJECTION_METADATA_KEYS = {
     CHECKPOINT_CONTEXT_PROJECTION_KEY,
 }
+_LOSSLESS_OFFLOAD_KEYS = {
+    "structured_tool_continuation",
+}
 _SECRET_KEY_PARTS = (
     "authorization",
     "api_key",
     "apikey",
     "cookie",
     "credential",
+    "encrypted_content",
     "password",
     "private_key",
     "secret",
@@ -271,6 +275,13 @@ def project_workflow_context_for_checkpoint(
 
         original_size = _measure_bson_size(value)
         reason: str | None = None
+        if key in _LOSSLESS_OFFLOAD_KEYS:
+            # The instance manager immediately replaces this provider state
+            # with a namespace-scoped blob reference.  Preserve it byte-for-
+            # byte until that offload boundary; truncation/redaction here would
+            # make a resumed stateless Responses loop invalid.
+            projected[key] = _safe_copy_value(value)
+            continue
         if key in _ALWAYS_COMPACT_KEYS:
             reason = "diagnostic_payload_bounded"
         elif key and _key_contains(key, _SECRET_KEY_PARTS):
@@ -306,6 +317,7 @@ def project_workflow_context_for_checkpoint(
                 (_measure_bson_size(value), key)
                 for key, value in projected.items()
                 if key not in already_projected_keys
+                and key not in _LOSSLESS_OFFLOAD_KEYS
             ),
             reverse=True,
         )

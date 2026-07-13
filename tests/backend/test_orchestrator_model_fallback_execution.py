@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from types import SimpleNamespace
@@ -14,9 +15,13 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _WorkflowModelPolicyState,
 )
 from src.backend.languagemodels.structured_tool_calling.types import (
+    LLMContinuation,
     LLMResponse,
+    StructuredToolCapabilityRejectedError,
+    StructuredToolProtocolError,
     ToolCall,
     ToolDefinition,
+    ToolResult,
 )
 from src.backend.services.synthesiser_context_framing_service import (
     SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
@@ -102,6 +107,16 @@ class _StructuredToolClient:
             }
         )
         return self.response
+
+
+class _RejectingStructuredToolClient(_StructuredToolClient):
+    def __init__(self, error: Exception) -> None:
+        super().__init__(LLMResponse(text_response="unused"))
+        self.error = error
+
+    def generate_with_tools(self, **kwargs: Any) -> LLMResponse:
+        self.calls.append(dict(kwargs))
+        raise self.error
 
 
 def _policy_state() -> _WorkflowModelPolicyState:
@@ -478,6 +493,205 @@ def test_run_llm_with_fallbacks_passes_candidate_model_parameters(
     assert stage_summary["effective_model_parameters"] == {"reasoning_effort": "low"}
 
 
+def test_run_llm_with_tools_fallbacks_passes_default_model_parameters(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    requested_parameters = {"reasoning_effort": "none"}
+    candidate = _ModelCandidate(
+        provider="openai",
+        model="gpt-5.6-luna",
+        raw="openai:gpt-5.6-luna",
+        source="active_llm",
+        model_parameters=requested_parameters,
+    )
+    client = _StructuredToolClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="fetch_concept",
+                    payload={"concept_id": "#V#represented_workflow"},
+                    call_id="call-parameters",
+                )
+            ],
+        )
+    )
+
+    def _stage_model_candidates(**kwargs: Any) -> list[_ModelCandidate]:
+        assert kwargs["default_model_parameters"] == requested_parameters
+        return [candidate]
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        _stage_model_candidates,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (
+            client,
+            "gpt-5.6-luna",
+            {
+                "provider": "openai",
+                "model": "gpt-5.6-luna",
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "model_parameters": requested_parameters,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_probe_model_candidate_reachability", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator, "_invoke_with_llm_heartbeat", lambda *, call, **_kwargs: call()
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.resolve_structured_tool_transport",
+        lambda **_kwargs: SimpleNamespace(
+            to_telemetry=lambda: {
+                "effective_api_surface": "responses",
+                "status": "compatible",
+            }
+        ),
+    )
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, model_name, _ = orchestrator._run_llm_with_tools_fallbacks(
+        stage="tool_call",
+        prompt="Describe the represented workflow.",
+        context=[],
+        tool_definitions=[
+            ToolDefinition(
+                name="fetch_concept",
+                description="Fetch a represented concept.",
+                input_schema={"type": "object", "properties": {}},
+            )
+        ],
+        default_client=object(),
+        default_model="gpt-5.6-luna",
+        default_model_parameters=requested_parameters,
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False,
+            policy=None,
+            policy_id=None,
+            predicate_id=None,
+            errors=(),
+        ),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **_payload: None,
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+        method_catalogue={"fetch_concept": {"category": "read"}},
+    )
+
+    assert response.tool_calls[0].call_id == "call-parameters"
+    assert model_name == "gpt-5.6-luna"
+    assert client.calls[0]["kwargs"]["llm_params"] == requested_parameters
+    end_event = next(
+        event for event in progress_events if event.get("status") == "llm_call_end"
+    )
+    assert end_event["effective_model_parameters"] == requested_parameters
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["requested_model_parameters"] == requested_parameters
+    assert stage_summary["effective_model_parameters"] == requested_parameters
+
+
+def test_failed_structured_stage_retains_requested_model_parameters(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    requested_parameters = {"reasoning_effort": "none"}
+    candidate = _ModelCandidate(
+        provider="openai",
+        model="gpt-5.6-luna",
+        raw="openai:gpt-5.6-luna",
+        source="active_llm",
+        model_parameters=requested_parameters,
+    )
+    client = _RejectingStructuredToolClient(RuntimeError("provider unavailable"))
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (
+            client,
+            candidate.model,
+            {
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "model_parameters": requested_parameters,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_probe_model_candidate_reachability", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator, "_invoke_with_llm_heartbeat", lambda *, call, **_kwargs: call()
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.resolve_structured_tool_transport",
+        lambda **_kwargs: SimpleNamespace(
+            to_telemetry=lambda: {
+                "effective_api_surface": "responses",
+                "status": "compatible",
+            }
+        ),
+    )
+    aux_log: list[Mapping[str, Any]] = []
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        orchestrator._run_llm_with_tools_fallbacks(
+            stage="tool_call",
+            prompt="Describe the represented workflow.",
+            context=[],
+            tool_definitions=[
+                ToolDefinition(
+                    name="fetch_concept",
+                    description="Fetch a represented concept.",
+                    input_schema={"type": "object", "properties": {}},
+                )
+            ],
+            default_client=object(),
+            default_model=candidate.model,
+            default_model_parameters=requested_parameters,
+            policy_state=_WorkflowModelPolicyState(
+                enabled=False,
+                policy=None,
+                policy_id=None,
+                predicate_id=None,
+                errors=(),
+            ),
+            registry_snapshot=None,
+            user_concept_id=None,
+            org_concept_id=None,
+            llm_calls_log=[],
+            aux_log=aux_log,
+            record_llm_call=lambda **_payload: None,
+            method_catalogue={"fetch_concept": {"category": "read"}},
+        )
+
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["requested_model_parameters"] == requested_parameters
+
+
 def test_run_llm_with_fallbacks_tries_next_candidate_after_response_validation_failure(
     monkeypatch,
 ) -> None:
@@ -777,6 +991,452 @@ def test_run_llm_with_tools_fallbacks_retries_when_required_tool_omitted(
     assert attempts[1]["status"] == "succeeded"
     assert recorded_calls[0]["status"] == "failed"
     assert recorded_calls[0]["error"] == "required_tool_call_omitted"
+
+
+def test_run_llm_with_tools_fallbacks_stops_after_typed_transport_rejection(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    first_candidate = _ModelCandidate(
+        provider="openai",
+        model="synthetic-primary",
+        raw="openai:synthetic-primary",
+        source="active_llm",
+    )
+    second_candidate = _ModelCandidate(
+        provider="openai",
+        model="synthetic-fallback",
+        raw="openai:synthetic-fallback",
+        source="policy",
+    )
+    decision = {
+        "schema_version": "structured_tool_transport_decision.v1",
+        "status": "compatible",
+        "effective_api_surface": "chat_completions",
+        "capability_key": "synthetic-primary-chat-tools",
+    }
+    first_client = _RejectingStructuredToolClient(
+        StructuredToolCapabilityRejectedError(
+            "The provider rejected this represented surface.",
+            decision=decision,
+        )
+    )
+    second_client = _StructuredToolClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="synthetic_lookup",
+                    payload={"query": "value"},
+                    call_id="call-fallback",
+                )
+            ],
+        )
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [first_candidate, second_candidate],
+    )
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **_kwargs: Any,
+    ) -> tuple[Any, str, Mapping[str, Any]]:
+        client = first_client if candidate is first_candidate else second_client
+        return (
+            client,
+            str(candidate.model),
+            {
+                "provider": "openai",
+                "model": candidate.model,
+                "raw": candidate.raw,
+                "source": candidate.source,
+            },
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+    aux_log: list[Mapping[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+
+    with pytest.raises(StructuredToolCapabilityRejectedError):
+        orchestrator._run_llm_with_tools_fallbacks(
+            stage="tool_call",
+            prompt="Look it up.",
+            context=[],
+            tool_definitions=[
+                ToolDefinition(
+                    name="synthetic_lookup",
+                    description="Look up a synthetic value.",
+                    input_schema={"type": "object", "properties": {}},
+                )
+            ],
+            default_client=object(),
+            default_model="synthetic-primary",
+            policy_state=_policy_state(),
+            registry_snapshot=None,
+            user_concept_id=None,
+            org_concept_id=None,
+            llm_calls_log=[],
+            aux_log=aux_log,
+            record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+            method_catalogue={"synthetic_lookup": {"category": "read"}},
+        )
+
+    assert len(first_client.calls) == 1
+    assert second_client.calls == []
+    blocker = next(
+        entry
+        for entry in aux_log
+        if entry.get("type") == "structured_tool_transport_blocker"
+    )
+    assert blocker["transport"] == decision
+    assert blocker["llm_exchange_id"]
+    assert blocker["call_id"]
+    assert recorded_calls[0]["failure_kind"] == ("structured_tool_capability_rejected")
+
+
+def test_run_llm_with_tools_fallbacks_retries_native_error_with_transport_evidence(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    first_candidate = _ModelCandidate(
+        provider="openai",
+        model="synthetic-primary",
+        raw="openai:synthetic-primary",
+        source="active_llm",
+    )
+    second_candidate = _ModelCandidate(
+        provider="openai",
+        model="synthetic-fallback",
+        raw="openai:synthetic-fallback",
+        source="policy",
+    )
+    transport_decision = {
+        "schema_version": "structured_tool_transport_decision.v1",
+        "status": "compatible",
+        "effective_api_surface": "responses",
+        "capability_key": "synthetic-primary-responses-tools",
+        "alternate_failure_kind": "provider_error",
+    }
+    secret = "secret-provider-token-2583"
+    native_error = RuntimeError(
+        "transient provider timeout; Authorization: Bearer "
+        f"{secret}; token={secret}; "
+        + ("diagnostic-padding-" * 80)
+    )
+    native_error.structured_tool_transport_decision = transport_decision  # type: ignore[attr-defined]
+    first_client = _RejectingStructuredToolClient(native_error)
+    second_client = _StructuredToolClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="synthetic_lookup",
+                    payload={"query": "value"},
+                    call_id="call-fallback",
+                )
+            ],
+        )
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [first_candidate, second_candidate],
+    )
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **_kwargs: Any,
+    ) -> tuple[Any, str, Mapping[str, Any]]:
+        client = first_client if candidate is first_candidate else second_client
+        return (
+            client,
+            str(candidate.model),
+            {
+                "provider": "openai",
+                "model": candidate.model,
+                "raw": candidate.raw,
+                "source": candidate.source,
+            },
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+
+    response, model_name, telemetry = orchestrator._run_llm_with_tools_fallbacks(
+        stage="tool_call",
+        prompt="Look it up.",
+        context=[],
+        tool_definitions=[
+            ToolDefinition(
+                name="synthetic_lookup",
+                description="Look up a synthetic value.",
+                input_schema={"type": "object", "properties": {}},
+            )
+        ],
+        default_client=object(),
+        default_model="synthetic-primary",
+        policy_state=_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+        emit_progress=lambda payload: progress_events.append(dict(payload)),
+        method_catalogue={"synthetic_lookup": {"category": "read"}},
+    )
+
+    assert model_name == "synthetic-fallback"
+    assert telemetry["model"] == "synthetic-fallback"
+    assert response.tool_calls[0].call_id == "call-fallback"
+    assert len(first_client.calls) == 1
+    assert len(second_client.calls) == 1
+    first_end = next(
+        event
+        for event in progress_events
+        if event.get("status") == "llm_call_end"
+        and event.get("fallback_attempt_no") == 1
+    )
+    assert first_end["failure_kind"] == "candidate_error"
+    assert first_end["structured_tool_transport"] == transport_decision
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["errors"][0]["transport"] == transport_decision
+    assert stage_summary["fallback_attempts"][0]["transport"] == transport_decision
+    assert stage_summary["fallback_attempts"][1]["status"] == "succeeded"
+    diagnostic_payloads = [
+        first_end,
+        stage_summary["errors"][0],
+        stage_summary["fallback_attempts"][0],
+        recorded_calls[0],
+    ]
+    for payload in diagnostic_payloads:
+        persisted = json.dumps(payload, sort_keys=True)
+        assert secret not in persisted
+        error_text = payload.get("error")
+        assert isinstance(error_text, str)
+        assert len(error_text) <= 512
+
+
+def test_run_llm_with_tools_fallbacks_rejects_malformed_continuation_before_client(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    candidate = _ModelCandidate(
+        provider="openai",
+        model="synthetic-primary",
+        raw="openai:synthetic-primary",
+        source="active_llm",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("malformed continuation must fail before client creation")
+        ),
+    )
+
+    with pytest.raises(
+        StructuredToolProtocolError,
+        match="malformed continuation payload",
+    ):
+        orchestrator._run_llm_with_tools_fallbacks(
+            stage="tool_follow_up",
+            prompt="Continue.",
+            context=[],
+            tool_definitions=[
+                ToolDefinition(
+                    name="synthetic_lookup",
+                    description="Look up a synthetic value.",
+                    input_schema={"type": "object", "properties": {}},
+                )
+            ],
+            default_client=object(),
+            default_model="synthetic-primary",
+            policy_state=_policy_state(),
+            registry_snapshot=None,
+            user_concept_id=None,
+            org_concept_id=None,
+            llm_calls_log=[],
+            aux_log=[],
+            record_llm_call=lambda **_payload: None,
+            method_catalogue={"synthetic_lookup": {"category": "read"}},
+            continuation={"provider": "openai"},
+            tool_results=[
+                ToolResult(
+                    call_id="call-1",
+                    tool_name="synthetic_lookup",
+                    output="evidence",
+                )
+            ],
+        )
+
+
+def test_structured_tool_candidate_telemetry_omits_continuation_and_result_bodies(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    candidate = _ModelCandidate(
+        provider="openai",
+        model="synthetic-responses-model",
+        raw="openai:synthetic-responses-model",
+        source="active_llm",
+    )
+    client = _StructuredToolClient(
+        LLMResponse(
+            text_response="done",
+            transport_metadata={
+                "effective_api_surface": "responses",
+                "status": "compatible",
+            },
+        )
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (
+            client,
+            candidate.model,
+            {
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "raw": candidate.raw,
+                "source": candidate.source,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.resolve_structured_tool_transport",
+        lambda **_kwargs: SimpleNamespace(
+            to_telemetry=lambda: {
+                "effective_api_surface": "responses",
+                "status": "compatible",
+            }
+        ),
+    )
+    continuation = LLMContinuation(
+        provider="openai",
+        api_surface="responses",
+        model=candidate.model,
+        transport_decision={
+            "parameter_projection": {"reasoning_effort": "none"},
+        },
+        output_items=[
+            {
+                "type": "reasoning",
+                "encrypted_content": "encrypted-provider-state-must-not-persist",
+            }
+        ],
+    )
+    tool_result = ToolResult(
+        call_id="call-sensitive",
+        tool_name="synthetic_lookup",
+        output={"private": "tool-result-body-must-not-persist"},
+    )
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, _, _ = orchestrator._run_llm_with_tools_fallbacks(
+        stage="tool_follow_up",
+        prompt="Continue.",
+        context=[],
+        tool_definitions=[
+            ToolDefinition(
+                name="synthetic_lookup",
+                description="Look up a synthetic value.",
+                input_schema={"type": "object", "properties": {}},
+            )
+        ],
+        default_client=object(),
+        default_model=candidate.model,
+        default_model_parameters={"reasoning_effort": "low"},
+        policy_state=_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **_payload: None,
+        method_catalogue={"synthetic_lookup": {"category": "read"}},
+        continuation=continuation,
+        tool_results=[tool_result],
+    )
+
+    assert response.text_response == "done"
+    assert client.calls[0]["kwargs"]["continuation"] is continuation
+    assert client.calls[0]["kwargs"]["tool_results"] == [tool_result]
+    assert client.calls[0]["kwargs"]["llm_params"] == {"reasoning_effort": "none"}
+    candidate_event = next(
+        item for item in aux_log if item.get("type") == "structured_tool_candidates"
+    )
+    options = candidate_event["structured_call_options"]
+    assert options["continuation_present"] is True
+    assert options["continuation_api_surface"] == "responses"
+    assert options["continuation_output_item_count"] == 1
+    assert options["tool_result_count"] == 1
+    persisted = json.dumps(options, sort_keys=True)
+    assert "encrypted-provider-state-must-not-persist" not in persisted
+    assert "tool-result-body-must-not-persist" not in persisted
+    assert "call-sensitive" not in persisted
+    transport_event = next(
+        item
+        for item in aux_log
+        if item.get("type") == "structured_tool_transport_decision"
+    )
+    assert transport_event["llm_exchange_id"]
+    assert transport_event["call_id"]
 
 
 def test_run_llm_with_fallbacks_emits_stable_live_llm_exchange_identity(
@@ -1315,6 +1975,39 @@ def test_stage_model_candidates_try_requested_default_before_policy_fallbacks(
         ("policy", "ollama", "granite3.3:2b"),
         ("enabled_settings", "openai", "gpt-5.4-mini"),
     ]
+
+
+def test_stage_model_candidates_uses_default_client_provider_for_parameters(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_enabled_llm_settings",
+        lambda **_kwargs: [],
+    )
+
+    candidates = orchestrator._stage_model_candidates(
+        stage="tool_call",
+        default_model="gpt-5.6-luna",
+        default_model_parameters={"reasoning_effort": "none"},
+        default_provider="openai",
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False,
+            policy=None,
+            policy_id=None,
+            predicate_id=None,
+            errors=(),
+        ),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        prefer_default_model=True,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].source == "active_llm"
+    assert candidates[0].model == "gpt-5.6-luna"
+    assert candidates[0].model_parameters == {"reasoning_effort": "none"}
 
 
 def test_stage_model_candidates_dedupe_active_and_enabled_before_policy_fallback(
@@ -1906,6 +2599,217 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
     ]
 
 
+def test_tool_calling_backfill_rejects_malformed_stored_continuation(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_fallbacks",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ordinary summarisation must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_prompt_requirements",
+        lambda **_kwargs: SimpleNamespace(
+            required_tools=[],
+            required_fetch_concept_ids=[],
+            required_read_file_copy_ids=[],
+            required_scholarly_representation_file_copy_ids=[],
+            required_create_type_name=None,
+            missing_tools=[],
+            missing_fetch_concept_ids=[],
+            missing_read_file_copy_ids=[],
+            missing_scholarly_representation_file_copy_ids=[],
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_augment_prompt_requirements_with_turn_contract",
+        lambda **_kwargs: _kwargs["evaluation"],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_store_prompt_requirement_evaluation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator, "_run_missing_tool_call_recovery_workflow", lambda **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_assess_missing_tool_call",
+        lambda **_kwargs: SimpleNamespace(retry_reason=None),
+    )
+    request = SimpleNamespace(
+        data={
+            "augmented_context": [],
+            "structured_tool_continuation": {"provider": "openai"},
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": None,
+            "org_concept_id": None,
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 0,
+            "remaining_tool_calls": [],
+            "invocations": [],
+            "method_catalogue": {},
+            "prompt": "Run the follow-up step",
+            "prompt_for_requirements": "Run the follow-up step",
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(llm_client=object(), model="gpt-test"),
+    )
+
+    with pytest.raises(
+        StructuredToolProtocolError,
+        match="Stored structured continuation payload is malformed",
+    ):
+        orchestrator._action_tool_calling_backfill(request)
+
+
+def test_tool_call_repair_preserves_provider_call_id_for_continuation(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_attempt_tool_call_repair",
+        lambda **_kwargs: [
+            {
+                "action": "call",
+                "tool": "synthetic_lookup",
+                "payload": {"query": "repaired"},
+            }
+        ],
+    )
+    request = SimpleNamespace(
+        data={
+            "tool_calls": [
+                {
+                    "action": "call",
+                    "tool": "synthetic_lookup",
+                    "payload": {"query": 123},
+                    "_call_id": "call-provider-1",
+                }
+            ],
+            "structured_tool_continuation": {
+                "provider": "openai",
+                "api_surface": "responses",
+                "model": "synthetic-model",
+            },
+            "tool_call_validation_errors": ["query must be a string"],
+            "method_catalogue": {
+                "synthetic_lookup": {"category": "read"},
+            },
+            "tool_call_repair_attempts": 0,
+            "tool_call_repair_budget": 1,
+            "policy_state": _policy_state(),
+            "registry_snapshot": None,
+            "model_for_stage": lambda _stage: "synthetic-model",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "tool_call_model": "synthetic-model",
+        },
+        environment=SimpleNamespace(llm_client=object()),
+    )
+
+    result = orchestrator._action_tool_calling_repair(request)
+
+    assert result.ok
+    assert result.outputs["tool_call_repair_succeeded"] is True
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call",
+            "tool": "synthetic_lookup",
+            "payload": {"query": "repaired"},
+            "_call_id": "call-provider-1",
+        }
+    ]
+
+
+def test_tool_call_repair_rejects_reordered_provider_calls_before_execution(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_attempt_tool_call_repair",
+        lambda **_kwargs: [
+            {
+                "action": "call",
+                "tool": "synthetic_second",
+                "payload": {"query": "repaired-second"},
+            },
+            {
+                "action": "call",
+                "tool": "synthetic_first",
+                "payload": {"query": "repaired-first"},
+            },
+        ],
+    )
+    request = SimpleNamespace(
+        data={
+            "tool_calls": [
+                {
+                    "action": "call",
+                    "tool": "synthetic_first",
+                    "payload": {"query": 1},
+                    "_call_id": "call-provider-first",
+                },
+                {
+                    "action": "call",
+                    "tool": "synthetic_second",
+                    "payload": {"query": 2},
+                    "_call_id": "call-provider-second",
+                },
+            ],
+            "structured_tool_continuation": {
+                "provider": "openai",
+                "api_surface": "responses",
+                "model": "synthetic-model",
+            },
+            "tool_call_validation_errors": ["query must be a string"],
+            "method_catalogue": {
+                "synthetic_first": {"category": "read"},
+                "synthetic_second": {"category": "read"},
+            },
+            "tool_call_repair_attempts": 0,
+            "tool_call_repair_budget": 1,
+            "policy_state": _policy_state(),
+            "registry_snapshot": None,
+            "model_for_stage": lambda _stage: "synthetic-model",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "tool_call_model": "synthetic-model",
+        },
+        environment=SimpleNamespace(llm_client=object()),
+    )
+
+    result = orchestrator._action_tool_calling_repair(request)
+
+    assert not result.ok
+    assert result.error == "structured_tool_call_repair_correlation_failed"
+    assert result.outputs["tool_call_repair_outcome"] == "correlation_failed"
+    assert result.outputs["tool_call_repair_succeeded"] is False
+    assert "tool_calls" not in result.outputs
+
+
 def test_tool_calling_backfill_prompt_preserves_structured_workflow_contract(
     monkeypatch,
 ) -> None:
@@ -2167,7 +3071,12 @@ def test_tool_calling_respond_runs_synthesiser_context_prep_before_backfill(
     }
     request = SimpleNamespace(
         data=data,
-        environment=SimpleNamespace(llm_client=object(), model="gpt-test"),
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gpt-test",
+            user_concept_id=None,
+            org_concept_id=None,
+        ),
     )
     backfill_seen_messages: list[str] = []
 

@@ -21,8 +21,14 @@ Design principles:
 from .types import (
     ToolCall,
     ToolDefinition,
+    ToolResult,
+    LLMContinuation,
     LLMResponse,
     ToolCallError,
+    StructuredToolTransportError,
+    UnsupportedStructuredToolTransportError,
+    StructuredToolCapabilityRejectedError,
+    StructuredToolProtocolError,
 )
 from .client import LLMClient, LLMClientConfig
 from .factory import get_llm_client
@@ -30,8 +36,14 @@ from .factory import get_llm_client
 __all__ = [
     "ToolCall",
     "ToolDefinition",
+    "ToolResult",
+    "LLMContinuation",
     "LLMResponse",
     "ToolCallError",
+    "StructuredToolTransportError",
+    "UnsupportedStructuredToolTransportError",
+    "StructuredToolCapabilityRejectedError",
+    "StructuredToolProtocolError",
     "LLMClient",
     "LLMClientConfig",
     "get_llm_client",

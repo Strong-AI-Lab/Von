@@ -49,6 +49,14 @@ _OFFLOAD_FIELD_NAMES = {
     "workflow_tool_output_mapping_events",
 }
 
+# Provider continuation payloads can contain encrypted reasoning state, prior
+# context and exact function-call arguments.  They are required for durable
+# stateless recovery, but should never be copied inline into a general workflow
+# row merely because the payload happens to be small.
+_ALWAYS_OFFLOAD_FIELD_NAMES = {
+    "structured_tool_continuation",
+}
+
 _OFFLOAD_STRING_FIELD_NAMES = {
     "body",
     "content",
@@ -359,10 +367,14 @@ def _should_offload(
     size_bytes: int,
     threshold_bytes: int,
 ) -> bool:
-    if size_bytes <= threshold_bytes or not path:
+    if not path:
         return False
 
     key = _semantic_path_key(path)
+    if key in _ALWAYS_OFFLOAD_FIELD_NAMES and value is not None:
+        return True
+    if size_bytes <= threshold_bytes:
+        return False
     if key in _OFFLOAD_FIELD_NAMES:
         return True
     if isinstance(value, str) and key in _OFFLOAD_STRING_FIELD_NAMES:

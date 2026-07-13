@@ -26,6 +26,7 @@ from ...services.workflow_episode_service import (
 from ...services.workflow_payload_store import (
     compact_workflow_payload_for_storage,
     hydrate_workflow_payload_blob_refs,
+    is_workflow_payload_blob_ref,
 )
 from .models import (
     EventWorkflowBinding,
@@ -540,6 +541,26 @@ class WorkflowInstanceManager:
         namespace: str | None = None,
         workflow_id: str | None = None,
     ) -> Any:
+        def _contains_raw_structured_continuation(candidate: Any) -> bool:
+            if isinstance(candidate, Mapping):
+                for raw_key, raw_item in candidate.items():
+                    if str(raw_key) == "structured_tool_continuation":
+                        if raw_item is None or is_workflow_payload_blob_ref(raw_item):
+                            continue
+                        return True
+                    if _contains_raw_structured_continuation(raw_item):
+                        return True
+            elif isinstance(candidate, list):
+                return any(
+                    _contains_raw_structured_continuation(item)
+                    for item in candidate
+                )
+            return False
+
+        requires_private_continuation_offload = (
+            field == "workflow_data"
+            and _contains_raw_structured_continuation(value)
+        )
         try:
             result = compact_workflow_payload_for_storage(
                 {field: value},
@@ -550,6 +571,10 @@ class WorkflowInstanceManager:
                 fail_soft=False,
             )
         except Exception as exc:
+            if requires_private_continuation_offload:
+                raise RuntimeError(
+                    "secure_structured_tool_continuation_offload_failed"
+                ) from exc
             logger.warning(
                 "[durable_workflow] Workflow payload blob compaction skipped for %s.%s: %s",
                 instance_id,
@@ -557,21 +582,55 @@ class WorkflowInstanceManager:
                 exc,
             )
             return value
+        if requires_private_continuation_offload and result.offloaded_count <= 0:
+            raise RuntimeError(
+                "secure_structured_tool_continuation_offload_required"
+            )
         if result.offloaded_count <= 0 or not isinstance(result.payload, dict):
             return value
         return result.payload.get(field, value)
 
     @staticmethod
-    def _hydrate_instance_payloads(doc: dict[str, Any]) -> dict[str, Any]:
+    def _hydrate_instance_payloads(
+        doc: dict[str, Any],
+        *,
+        fail_soft: bool = True,
+    ) -> dict[str, Any]:
+        def _has_unhydrated_structured_continuation(candidate: Any) -> bool:
+            if isinstance(candidate, Mapping):
+                for raw_key, raw_item in candidate.items():
+                    if str(raw_key) == "structured_tool_continuation":
+                        if raw_item is None:
+                            continue
+                        if is_workflow_payload_blob_ref(raw_item):
+                            return True
+                    if _has_unhydrated_structured_continuation(raw_item):
+                        return True
+            elif isinstance(candidate, list):
+                return any(
+                    _has_unhydrated_structured_continuation(item)
+                    for item in candidate
+                )
+            return False
+
         hydrated_doc = dict(doc)
         for field in ("inputs", "workflow_data", "outputs"):
             if field not in hydrated_doc or hydrated_doc[field] is None:
                 continue
             hydrated = hydrate_workflow_payload_blob_refs(
                 hydrated_doc[field],
+                # Ordinary diagnostic/auxiliary blobs remain fail-soft even for
+                # execution.  Only provider continuation state is essential to
+                # avoid repeating tools or inventing an uncorrelated answer.
                 fail_soft=True,
             )
             hydrated_doc[field] = hydrated.payload
+            if not fail_soft and _has_unhydrated_structured_continuation(
+                hydrated.payload
+            ):
+                raise RuntimeError(
+                    "structured_tool_continuation_hydration_failed"
+                )
         return hydrated_doc
 
     @classmethod
@@ -580,11 +639,15 @@ class WorkflowInstanceManager:
         doc: dict[str, Any] | None,
         *,
         hydrate_payloads: bool = False,
+        fail_soft_hydration: bool = True,
     ) -> WorkflowInstance | None:
         if doc is None:
             return None
         if hydrate_payloads:
-            doc = cls._hydrate_instance_payloads(doc)
+            doc = cls._hydrate_instance_payloads(
+                doc,
+                fail_soft=fail_soft_hydration,
+            )
         return WorkflowInstance.from_doc(doc)
 
     def _find_one_and_update_instance(
@@ -762,6 +825,18 @@ class WorkflowInstanceManager:
         )
         if compacted_inputs is not instance.inputs:
             instance = replace(instance, inputs=compacted_inputs)
+
+        # A configured minimum worker build is a cluster execution guard, so
+        # persist it on the instance at creation time.  Checking the setting
+        # only inside a worker process is insufficient on a shared queue: a
+        # foreign or stale worker without the setting could otherwise claim
+        # the pending instance before an eligible worker sees it.
+        configured_min_worker_build = get_configured_min_worker_build()
+        if configured_min_worker_build:
+            instance = replace(
+                instance,
+                min_worker_build=configured_min_worker_build,
+            )
 
         instance_doc = instance.to_doc()
         instance_doc["auto_claim_enabled"] = bool(auto_claim_enabled)
@@ -951,11 +1026,19 @@ class WorkflowInstanceManager:
             )
             return 0
 
-    def get_instance(self, instance_id: str) -> WorkflowInstance | None:
+    def get_instance(
+        self,
+        instance_id: str,
+        *,
+        for_execution: bool = False,
+    ) -> WorkflowInstance | None:
         """Load a workflow instance by ID.
 
         Args:
             instance_id: The instance identifier.
+            for_execution: Fail closed if offloaded structured-tool
+                continuation state cannot be hydrated. Other auxiliary blob
+                failures remain visible but fail-soft.
 
         Returns:
             WorkflowInstance if found, None otherwise.
@@ -965,7 +1048,18 @@ class WorkflowInstanceManager:
             return None
 
         doc = coll.find_one({"instance_id": instance_id})
-        return self._instance_from_doc(doc, hydrate_payloads=True)
+        try:
+            return self._instance_from_doc(
+                doc,
+                hydrate_payloads=True,
+                fail_soft_hydration=not for_execution,
+            )
+        except Exception as exc:
+            if not for_execution:
+                raise
+            raise RuntimeError(
+                "durable_workflow_payload_hydration_failed"
+            ) from exc
 
     def list_instances(
         self,

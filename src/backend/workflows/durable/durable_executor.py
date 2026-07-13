@@ -223,7 +223,10 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         # Load instance
         instance = _retry_store_call(
             "get_instance",
-            lambda: self._instance_manager.get_instance(instance_id),
+            lambda: self._instance_manager.get_instance(
+                instance_id,
+                for_execution=True,
+            ),
         )
         if instance is None:
             return DurableWorkflowResult(

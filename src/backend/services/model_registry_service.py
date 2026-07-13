@@ -27,6 +27,11 @@ PRED_HAS_MODEL_PARAMETER_CONSTRAINT = "#V#has_model_parameter_constraint"
 PRED_CONSTRAINS_MODEL_PARAMETER = "#V#constrains_model_parameter"
 PRED_HAS_MODEL_ID = "#V#has_model_id"
 PRED_HAS_API_SURFACE = "#V#has_api_surface"
+PRED_HAS_STRUCTURED_TOOL_CALLING = "#V#has_structured_tool_calling_support"
+PRED_HAS_TOOL_CONTINUATION_MODE = "#V#has_tool_continuation_mode"
+PRED_HAS_RESPONSE_STORAGE_POLICY = "#V#has_response_storage_policy"
+PRED_HAS_PROVIDER_CONNECTION_ID = "#V#has_provider_connection_id"
+PRED_HAS_DEPLOYMENT_ID = "#V#has_deployment_id"
 PRED_HAS_PARAMETER_ACTION = "#V#has_parameter_action"
 PRED_HAS_FIXED_PARAMETER_VALUE = "#V#has_fixed_parameter_value"
 PRED_HAS_ALLOWED_PARAMETER_VALUE = "#V#has_allowed_parameter_value"
@@ -45,9 +50,7 @@ PARAMETER_ACTION_FIXED_VALUE = "fixed_value"
 
 _MODEL_REGISTRY_SNAPSHOT_CACHE: dict[str, dict[str, Any]] = {}
 _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK = threading.Lock()
-_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION = (
-    "model_registry_snapshot_cache.v1"
-)
+_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION = "model_registry_snapshot_cache.v1"
 _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES = frozenset(
     {"vontology_graph", "vontology_json"}
 )
@@ -80,6 +83,14 @@ def _registry_snapshot_cache_ttl_seconds() -> float:
 
 
 def _registry_snapshot_disk_cache_enabled() -> bool:
+    if (
+        os.getenv("PYTEST_CURRENT_TEST")
+        and not os.getenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH")
+    ):
+        # Tests that intentionally exercise the disk cache provide an isolated
+        # path.  All other pytest processes must not overwrite the live
+        # workspace snapshot with mocked or partial Vontology authority.
+        return False
     return _truthy_env(
         "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED",
         default="1",
@@ -428,7 +439,8 @@ def _get_related_concept_ids(concept_id: str, predicate: str) -> list[str]:
     return [
         str(row.get("text")).strip()
         for row in _get_text_rows(concept_id, predicate=predicate, limit=100)
-        if isinstance(row.get("text"), str) and str(row.get("text")).strip().startswith("#V#")
+        if isinstance(row.get("text"), str)
+        and str(row.get("text")).strip().startswith("#V#")
     ]
 
 
@@ -438,7 +450,9 @@ def _strip_provider_prefix(model_id: str, provider: str | None = None) -> str:
         return ""
 
     provider_prefixes = (
-        [provider] if isinstance(provider, str) and provider.strip() else KNOWN_PROVIDER_PREFIXES
+        [provider]
+        if isinstance(provider, str) and provider.strip()
+        else KNOWN_PROVIDER_PREFIXES
     )
     for provider_name in provider_prefixes:
         provider_token = _normalise_provider_name(provider_name)
@@ -562,7 +576,9 @@ def _resolve_model_entry_from_graph(
     )
     model_id = _get_first_text(registry_entry_id, predicate=PRED_HAS_MODEL_ID)
     if not model_id:
-        model_id = _derive_model_id_from_aliases(aliases=model_aliases, provider=provider)
+        model_id = _derive_model_id_from_aliases(
+            aliases=model_aliases, provider=provider
+        )
 
     api_profiles = []
     for profile_concept_id in _get_related_concept_ids(
@@ -576,11 +592,35 @@ def _resolve_model_entry_from_graph(
                 profile_concept_id, PRED_HAS_MODEL_PARAMETER_CONSTRAINT
             )
         ]
+        parameter_constraints = [
+            {**dict(constraint), "profile_concept_id": profile_concept_id}
+            for constraint in parameter_constraints
+        ]
         api_profiles.append(
             {
                 "profile_concept_id": profile_concept_id,
                 "api_surface": _get_first_text(
                     profile_concept_id, predicate=PRED_HAS_API_SURFACE
+                ),
+                "structured_tool_calling": _get_first_text(
+                    profile_concept_id,
+                    predicate=PRED_HAS_STRUCTURED_TOOL_CALLING,
+                ),
+                "tool_continuation_mode": _get_first_text(
+                    profile_concept_id,
+                    predicate=PRED_HAS_TOOL_CONTINUATION_MODE,
+                ),
+                "response_storage_policy": _get_first_text(
+                    profile_concept_id,
+                    predicate=PRED_HAS_RESPONSE_STORAGE_POLICY,
+                ),
+                "connection_id": _get_first_text(
+                    profile_concept_id,
+                    predicate=PRED_HAS_PROVIDER_CONNECTION_ID,
+                ),
+                "deployment_id": _get_first_text(
+                    profile_concept_id,
+                    predicate=PRED_HAS_DEPLOYMENT_ID,
                 ),
                 "parameter_constraints": parameter_constraints,
             }
@@ -716,7 +756,9 @@ def _build_registry_from_settings() -> Mapping[str, Any]:
                     "provider": provider or "unknown",
                     "locality": locality,
                     "source": "settings",
-                    "scope": active.get("scope") if isinstance(active, Mapping) else None,
+                    "scope": active.get("scope")
+                    if isinstance(active, Mapping)
+                    else None,
                 }
             )
 
@@ -781,9 +823,7 @@ def get_model_registry_snapshot(
         return snapshot
 
     json_started_at = time.time()
-    registry = _load_registry_from_vontology_json(
-        preferred_language=preferred_language
-    )
+    registry = _load_registry_from_vontology_json(preferred_language=preferred_language)
     json_duration_ms = int((time.time() - json_started_at) * 1000)
     if registry is not None:
         snapshot = {
@@ -873,6 +913,60 @@ def _entry_matches_model(
     return False
 
 
+def _entry_model_match_score(
+    entry: Mapping[str, Any],
+    *,
+    model: str,
+    provider: str | None = None,
+) -> tuple[int, int]:
+    """Prefer exact model/deployment IDs, then the longest family match."""
+
+    if not _entry_matches_model(entry, model=model, provider=provider):
+        return (-1, -1)
+    provider_key = _normalise_provider_name(provider)
+    requested = _normalise_lookup_token(model)
+    bare_requested = _normalise_lookup_token(
+        _strip_provider_prefix(requested, provider_key or None)
+    )
+    candidates = {
+        _normalise_lookup_token(entry.get("model_id")),
+    }
+    aliases = entry.get("model_aliases")
+    if isinstance(aliases, Sequence) and not isinstance(aliases, str):
+        candidates.update(
+            _normalise_lookup_token(alias)
+            for alias in aliases
+            if isinstance(alias, str)
+        )
+    entry_provider = _normalise_provider_name(entry.get("provider"))
+    candidates.update(
+        _normalise_lookup_token(
+            _strip_provider_prefix(candidate, entry_provider or provider_key or None)
+        )
+        for candidate in tuple(candidates)
+        if candidate
+    )
+    candidates.discard("")
+    exact_lengths = [
+        len(candidate)
+        for candidate in candidates
+        if candidate in {requested, bare_requested}
+    ]
+    if exact_lengths:
+        return (2, max(exact_lengths))
+    prefix_lengths = [
+        len(candidate)
+        for candidate in candidates
+        if requested.startswith(f"{candidate}-")
+        or requested.startswith(f"{candidate}.")
+        or bare_requested.startswith(f"{candidate}-")
+        or bare_requested.startswith(f"{candidate}.")
+    ]
+    if prefix_lengths:
+        return (1, max(prefix_lengths))
+    return (0, 0)
+
+
 def _iter_parameter_constraints_for_entry(
     entry: Mapping[str, Any], *, api_surface: str | None = None
 ) -> list[Mapping[str, Any]]:
@@ -926,7 +1020,9 @@ def resolve_model_parameter_policy(
     api_surface: str | None = None,
     preferred_language: str | None = None,
 ) -> Mapping[str, Any] | None:
-    registry_snapshot = get_model_registry_snapshot(preferred_language=preferred_language)
+    registry_snapshot = get_model_registry_snapshot(
+        preferred_language=preferred_language
+    )
     models = registry_snapshot.get("models")
     if not isinstance(models, Sequence) or isinstance(models, str):
         return None
@@ -968,9 +1064,66 @@ def resolve_model_parameter_policy(
     return None
 
 
-def _coerce_fixed_parameter_value(
-    fixed_value: Any, original_value: Any
-) -> Any:
+def resolve_model_api_profiles(
+    *,
+    model: str,
+    provider: str | None = None,
+    preferred_language: str | None = None,
+) -> Mapping[str, Any] | None:
+    """Resolve represented API profiles for a concrete model/deployment.
+
+    This is a provenance-preserving registry read.  It deliberately does not
+    choose an API surface: transport selection belongs to the caller that also
+    knows whether tools are present and which client/connection is in use.
+    """
+
+    registry_snapshot = get_model_registry_snapshot(
+        preferred_language=preferred_language
+    )
+    models = registry_snapshot.get("models")
+    if not isinstance(models, Sequence) or isinstance(models, str):
+        return None
+
+    matching_entries = [
+        entry
+        for entry in models
+        if isinstance(entry, Mapping)
+        and _entry_matches_model(entry, model=model, provider=provider)
+    ]
+    if not matching_entries:
+        return None
+    entry = max(
+        matching_entries,
+        key=lambda candidate: _entry_model_match_score(
+            candidate,
+            model=model,
+            provider=provider,
+        ),
+    )
+
+    raw_profiles = entry.get("api_profiles")
+    profiles = (
+        [
+            dict(profile)
+            for profile in raw_profiles or []
+            if isinstance(profile, Mapping)
+        ]
+        if isinstance(raw_profiles, Sequence) and not isinstance(raw_profiles, str)
+        else []
+    )
+    return {
+        "model_id": entry.get("model_id"),
+        "model_aliases": list(entry.get("model_aliases") or []),
+        "provider": entry.get("provider"),
+        "concept_id": entry.get("concept_id"),
+        "registry_entry_id": entry.get("registry_entry_id"),
+        "api_profiles": profiles,
+        "source": registry_snapshot.get("source"),
+        "registry_concept_id": registry_snapshot.get("registry_concept_id"),
+    }
+
+
+def _coerce_fixed_parameter_value(fixed_value: Any, original_value: Any) -> Any:
     if not isinstance(fixed_value, str) or not fixed_value.strip():
         return original_value
 
@@ -1101,9 +1254,7 @@ def assess_model_stage_certification(
     does not encode which workflow, prompt, or domain should use a model.
     """
 
-    usable_entries = [
-        entry for entry in evidence_entries if isinstance(entry, Mapping)
-    ]
+    usable_entries = [entry for entry in evidence_entries if isinstance(entry, Mapping)]
     replay_case_ids = {
         case_id
         for entry in usable_entries

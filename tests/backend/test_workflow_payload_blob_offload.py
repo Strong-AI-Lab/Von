@@ -128,6 +128,51 @@ def test_compact_workflow_payload_offloads_known_heavy_field(monkeypatch) -> Non
     assert load_workflow_payload_blob_ref(ref) == workflow_data["llm_step_envelope"]
 
 
+def test_structured_tool_continuation_is_offloaded_even_when_small(monkeypatch) -> None:
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    continuation = {
+        "provider": "openai",
+        "api_surface": "responses",
+        "model": "arbitrary-model",
+        "output_items": [
+            {
+                "type": "reasoning",
+                "encrypted_content": "opaque-provider-state",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": '{"query":"private context"}',
+            },
+        ],
+    }
+    payload = {"structured_tool_continuation": continuation}
+
+    compacted = compact_workflow_payload_for_storage(
+        payload,
+        record_family="workflow_instances.workflow_data",
+        record_id="instance-continuation",
+        namespace="#V#michael@org",
+        threshold_bytes=32 * 1024,
+        fail_soft=False,
+    )
+
+    assert compacted.offloaded_count == 1
+    ref = compacted.payload["structured_tool_continuation"]
+    assert ref["schema_version"] == "workflow_payload_blob_ref.v1"
+    assert "opaque-provider-state" not in json.dumps(compacted.payload)
+    hydrated = hydrate_workflow_payload_blob_refs(
+        compacted.payload,
+        fail_soft=False,
+    )
+    assert hydrated.payload == payload
+
+
 def test_compact_workflow_payload_can_enqueue_local_first_spillway(
     monkeypatch,
     tmp_path,
@@ -511,6 +556,142 @@ def test_instance_manager_checkpoint_preserves_payload_when_blob_store_unavailab
     instance = manager.get_instance(instance_id)
     assert instance is not None
     assert instance.workflow_data == workflow_data
+
+
+def test_instance_manager_checkpoint_fails_closed_when_continuation_offload_fails(
+    monkeypatch,
+) -> None:
+    _reset_mock_workflow_instances(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: _FailingBlobStore(),
+    )
+
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#tool_calling_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="#V#michael@org",
+    )
+    workflow_data = {
+        "structured_tool_continuation": {
+            "provider": "openai",
+            "api_surface": "responses",
+            "model": "arbitrary-model",
+            "output_items": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "must-not-persist-inline",
+                }
+            ],
+        }
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="secure_structured_tool_continuation_offload_failed",
+    ):
+        manager.checkpoint(
+            instance_id,
+            current_state="tool_calling.execute",
+            workflow_data=workflow_data,
+        )
+
+    db = get_db()
+    assert db is not None
+    raw_doc = db[instance_manager_module.WORKFLOW_INSTANCES_COLLECTION].find_one(
+        {"instance_id": instance_id}
+    )
+    assert raw_doc is not None
+    assert "must-not-persist-inline" not in json.dumps(raw_doc, default=str)
+
+
+def test_execution_load_fails_closed_when_continuation_blob_is_missing(
+    monkeypatch,
+) -> None:
+    _reset_mock_workflow_instances(monkeypatch)
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#tool_calling_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="#V#michael@org",
+    )
+    workflow_data = {
+        "structured_tool_continuation": {
+            "provider": "openai",
+            "api_surface": "responses",
+            "model": "arbitrary-model",
+            "output_items": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "opaque-state",
+                }
+            ],
+        }
+    }
+    assert manager.checkpoint(
+        instance_id,
+        current_state="tool_calling.execute",
+        workflow_data=workflow_data,
+    )
+    assert store.writes
+    store.writes.clear()
+
+    # Operator/read surfaces retain a degraded reference for diagnosis.
+    assert manager.get_instance(instance_id) is not None
+    # Execution must not reinterpret that degraded state as no continuation.
+    with pytest.raises(
+        RuntimeError,
+        match="durable_workflow_payload_hydration_failed",
+    ):
+        manager.get_instance(instance_id, for_execution=True)
+
+
+def test_execution_load_keeps_unrelated_missing_aux_blob_fail_soft(
+    monkeypatch,
+) -> None:
+    _reset_mock_workflow_instances(monkeypatch)
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    monkeypatch.setenv("VON_WORKFLOW_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#tool_calling_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="#V#michael@org",
+    )
+    assert manager.checkpoint(
+        instance_id,
+        current_state="tool_calling.execute",
+        workflow_data={
+            "prompt": "Continue safely.",
+            "aux_llm_calls": [
+                {"type": "diagnostic", "content": "x" * 4000}
+            ],
+        },
+    )
+    assert store.writes
+    store.writes.clear()
+
+    instance = manager.get_instance(instance_id, for_execution=True)
+
+    assert instance is not None
+    aux_ref = instance.workflow_data["aux_llm_calls"]
+    assert aux_ref["schema_version"] == "workflow_payload_blob_ref.v1"
+    assert aux_ref["hydration_error"]["schema_version"] == (
+        "workflow_payload_blob_hydration_error.v1"
+    )
 
 
 def test_trace_store_compacts_and_hydrates_execution_trace(monkeypatch) -> None:

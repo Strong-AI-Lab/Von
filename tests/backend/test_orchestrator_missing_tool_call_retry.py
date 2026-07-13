@@ -13,6 +13,9 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     MISSING_TOOL_CALL_WORKFLOW_ID,
     _MissingToolCallDetectorSpec,
 )
+from src.backend.languagemodels.structured_tool_calling import (
+    StructuredToolTransportError,
+)
 from src.backend.workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
     build_turn_expected_outcome_boundary_payload,
@@ -2010,6 +2013,159 @@ def test_tool_calling_plan_does_not_force_parent_guided_retry_without_explicit_m
     assert result.outputs["direct_response"] is True
     assert result.outputs["final_response"] == "I will search the KB and web now."
     assert result.outputs["missing_tool_call_recovery_outcome"] is None
+
+
+def _transport_plan_test_request(
+    orchestrator: InternalMCPChatOrchestrator,
+) -> SimpleNamespace:
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+
+    class _PromptRequirements:
+        required_tools: list[str] = []
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        missing_tools: list[str] = []
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = None
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **_kwargs: _PromptRequirements()
+    )
+    orchestrator._store_prompt_requirement_evaluation = cast(
+        Any, lambda _data, _requirements: None
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any, lambda **_kwargs: {}
+    )
+
+    class _StructuredClient:
+        @staticmethod
+        def _should_use_structured_calling() -> bool:
+            return True
+
+        def generate_with_tools(self, **_kwargs: Any):  # pragma: no cover
+            raise AssertionError("The orchestrator wrapper owns this test seam")
+
+    return SimpleNamespace(
+        data={
+            "prompt": "Use the represented context and available tools.",
+            "augmented_context": [],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#synthetic_user",
+            "org_concept_id": "#V#synthetic_org",
+            "model_for_stage": lambda _stage: "synthetic-model",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "emit_phase_transition": None,
+        },
+        environment=SimpleNamespace(
+            llm_client=_StructuredClient(),
+            model="synthetic-model",
+            max_tool_invocations=4,
+        ),
+        trace=None,
+        workflow_id="#V#synthetic_tool_workflow",
+        workflow_state_id="respond",
+        workflow_state_metadata={},
+        action_id="tool_calling.respond",
+    )
+
+
+def test_tool_calling_plan_preserves_typed_transport_blocker_without_legacy_fallback():
+    orchestrator = _build_orchestrator_stub()
+    request = _transport_plan_test_request(orchestrator)
+    decision = {
+        "schema_version": "structured_tool_transport_decision.v1",
+        "status": "unsupported",
+        "effective_api_surface": "responses",
+        "capability_key": "synthetic-capability",
+    }
+
+    def _raise_transport_blocker(**_kwargs: Any):
+        raise StructuredToolTransportError(
+            "No compatible structured-tool transport is available.",
+            decision=decision,
+        )
+
+    legacy_calls: list[Mapping[str, Any]] = []
+    orchestrator._run_llm_with_tools_fallbacks = cast(Any, _raise_transport_blocker)
+
+    def _unexpected_legacy_fallback(**kwargs: Any):
+        legacy_calls.append(dict(kwargs))
+        return "legacy response", "synthetic-model", {}
+
+    orchestrator._run_llm_with_fallbacks = cast(Any, _unexpected_legacy_fallback)
+
+    with pytest.raises(StructuredToolTransportError) as exc_info:
+        orchestrator._action_tool_calling_plan(cast(Any, request))
+
+    assert exc_info.value.decision == decision
+    assert legacy_calls == []
+
+
+def test_tool_calling_plan_passes_requested_model_parameters_to_structured_transport():
+    orchestrator = _build_orchestrator_stub()
+    request = _transport_plan_test_request(orchestrator)
+    request.data["requested_model_parameters"] = {"reasoning_effort": "none"}
+    captured: dict[str, Any] = {}
+
+    def _structured_call(**kwargs: Any):
+        captured.update(kwargs)
+        return (
+            SimpleNamespace(
+                tool_calls=[],
+                continuation=None,
+                text_response="Grounded response.",
+            ),
+            "synthetic-model",
+            {},
+        )
+
+    orchestrator._run_llm_with_tools_fallbacks = cast(Any, _structured_call)
+
+    result = orchestrator._action_tool_calling_plan(cast(Any, request))
+
+    assert result.outputs["direct_response"] is True
+    assert captured["default_model_parameters"] == {"reasoning_effort": "none"}
+
+
+def test_tool_calling_plan_retains_legacy_fallback_for_untyped_client_failure():
+    orchestrator = _build_orchestrator_stub()
+    request = _transport_plan_test_request(orchestrator)
+    request.data["requested_model_parameters"] = {"reasoning_effort": "none"}
+    orchestrator._run_llm_with_tools_fallbacks = cast(
+        Any,
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic transient client failure")
+        ),
+    )
+    legacy_calls: list[Mapping[str, Any]] = []
+
+    def _legacy_fallback(**kwargs: Any):
+        legacy_calls.append(dict(kwargs))
+        return "A grounded fallback response.", "synthetic-model", {}
+
+    orchestrator._run_llm_with_fallbacks = cast(Any, _legacy_fallback)
+
+    result = orchestrator._action_tool_calling_plan(cast(Any, request))
+
+    assert len(legacy_calls) == 1
+    assert legacy_calls[0]["default_model_parameters"] == {
+        "reasoning_effort": "none"
+    }
+    assert result.outputs["direct_response"] is True
+    assert result.outputs["final_response"] == "A grounded fallback response."
 
 
 def test_tool_calling_plan_parent_retry_uses_catalogue_defaults_for_required_tool():

@@ -59,8 +59,16 @@ from .tool_argument_resolution import (
 
 # Structured tool calling support (JVNAUTOSCI-799 Phase 3)
 from ...languagemodels.structured_tool_calling import (
+    LLMContinuation,
     LLMResponse,
+    StructuredToolProtocolError,
+    StructuredToolTransportError,
     ToolDefinition,
+    ToolResult,
+)
+from ...languagemodels.structured_tool_calling.transport import (
+    resolve_structured_tool_transport,
+    sanitise_transport_telemetry_value,
 )
 from src.backend.services.prompt_template_service import (
     PromptTemplateService,
@@ -8327,8 +8335,14 @@ class InternalMCPChatOrchestrator:
         has_valid_tool_call = False
         tool_call_parse_error: ToolCallParsingError | None = None
         interpretation = None
+        structured_tool_continuation: Mapping[str, Any] | None = None
         timeout_override_sec = _conversation_turn_llm_timeout_override_sec_from_data(
             data
+        )
+        requested_model_parameters = (
+            dict(data["requested_model_parameters"])
+            if isinstance(data.get("requested_model_parameters"), Mapping)
+            else None
         )
 
         if use_structured:
@@ -8357,6 +8371,7 @@ class InternalMCPChatOrchestrator:
                     tool_definitions=tool_definitions,
                     default_client=llm_client,
                     default_model=tool_call_model,
+                    default_model_parameters=requested_model_parameters,
                     policy_state=policy_state,
                     registry_snapshot=registry_snapshot,
                     user_concept_id=user_concept_id,
@@ -8383,6 +8398,10 @@ class InternalMCPChatOrchestrator:
                     ),
                 )
                 if llm_response.tool_calls:
+                    if llm_response.continuation is not None:
+                        structured_tool_continuation = (
+                            llm_response.continuation.to_mapping()
+                        )
                     response = llm_response.text_response or ""
                     tool_calls = [
                         {
@@ -8398,6 +8417,11 @@ class InternalMCPChatOrchestrator:
                     response = llm_response.text_response
                     tool_calls = None
                     has_valid_tool_call = False
+            except StructuredToolTransportError:
+                # A known transport mismatch is an inspectable support-layer
+                # blocker.  Dropping tools and entering the legacy planner
+                # would hide the real failure and repeat doomed work.
+                raise
             except Exception as exc:
                 self._logger.warning(
                     "[mcp_orchestrator] Structured calling failed, falling back to legacy: %s",
@@ -8413,6 +8437,7 @@ class InternalMCPChatOrchestrator:
                 context=tool_plan_context,
                 default_client=llm_client,
                 default_model=tool_call_model,
+                default_model_parameters=requested_model_parameters,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
                 user_concept_id=user_concept_id,
@@ -8719,6 +8744,7 @@ class InternalMCPChatOrchestrator:
                     "tool_calls": tool_calls,
                     "use_structured": use_structured,
                     "tool_call_model": tool_call_model,
+                    "structured_tool_continuation": structured_tool_continuation,
                     "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
                     "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                     "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
@@ -9576,6 +9602,117 @@ class InternalMCPChatOrchestrator:
             llm_calls_log=llm_calls,
             record_llm_call=record_llm_call,
         )
+        if repaired_calls and data.get("structured_tool_continuation") is not None:
+            original_calls = [
+                call if isinstance(call, Mapping) else None for call in tool_calls
+            ]
+            original_call_ids = [
+                call.get("_call_id") if isinstance(call, Mapping) else None
+                for call in original_calls
+            ]
+            original_tool_names = [
+                call.get(self._TOOL_FIELD) if isinstance(call, Mapping) else None
+                for call in original_calls
+            ]
+            repeated_original_tool_names = {
+                str(tool_name).strip()
+                for tool_name in original_tool_names
+                if isinstance(tool_name, str)
+                and str(tool_name).strip()
+                and sum(
+                    1
+                    for candidate_name in original_tool_names
+                    if isinstance(candidate_name, str)
+                    and str(candidate_name).strip() == str(tool_name).strip()
+                )
+                > 1
+            }
+            correlation_preserved = (
+                len(repaired_calls) == len(original_calls)
+                and all(
+                    isinstance(call_id, str) and call_id.strip()
+                    for call_id in original_call_ids
+                )
+                and len(set(cast(Sequence[str], original_call_ids)))
+                == len(original_call_ids)
+            )
+            if correlation_preserved:
+                for index, repaired_call in enumerate(repaired_calls):
+                    original_tool_name = original_tool_names[index]
+                    repaired_tool_name = (
+                        repaired_call.get(self._TOOL_FIELD)
+                        if isinstance(repaired_call, Mapping)
+                        else None
+                    )
+                    repaired_payload = (
+                        repaired_call.get(self._PAYLOAD_FIELD)
+                        if isinstance(repaired_call, Mapping)
+                        else None
+                    )
+                    repaired_call_id = (
+                        repaired_call.get("_call_id")
+                        if isinstance(repaired_call, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(original_tool_name, str)
+                        or not original_tool_name.strip()
+                        or not isinstance(repaired_tool_name, str)
+                        or repaired_tool_name.strip() != original_tool_name.strip()
+                        or not isinstance(repaired_payload, Mapping)
+                        or (
+                            isinstance(repaired_call_id, str)
+                            and repaired_call_id.strip()
+                            and repaired_call_id.strip()
+                            != str(original_call_ids[index]).strip()
+                        )
+                        or (
+                            original_tool_name.strip() in repeated_original_tool_names
+                            and (
+                                not isinstance(repaired_call_id, str)
+                                or repaired_call_id.strip()
+                                != str(original_call_ids[index]).strip()
+                            )
+                        )
+                    ):
+                        correlation_preserved = False
+                        break
+            if not correlation_preserved:
+                return WorkflowActionResult(
+                    status="failed",
+                    outputs={
+                        "tool_call_repair_required": False,
+                        "tool_call_repair_attempted": True,
+                        "tool_call_repair_succeeded": False,
+                        "tool_call_repair_attempts": next_attempts,
+                        "tool_call_repair_budget": repair_budget,
+                        "tool_call_repair_remaining": max(
+                            0, repair_budget - next_attempts
+                        ),
+                        "tool_call_repair_outcome": "correlation_failed",
+                        "tool_call_repair_stop_reason": (
+                            "provider_call_id_correlation_not_preserved"
+                        ),
+                        "result": False,
+                    },
+                    error="structured_tool_call_repair_correlation_failed",
+                )
+            repaired_calls = [
+                {
+                    self._ACTION_FIELD: cast(
+                        Mapping[str, Any], original_calls[index]
+                    ).get(
+                        self._ACTION_FIELD,
+                        self._CALL_ACTION,
+                    ),
+                    self._TOOL_FIELD: str(original_tool_names[index]).strip(),
+                    self._PAYLOAD_FIELD: dict(
+                        cast(Mapping[str, Any], repaired_call.get(self._PAYLOAD_FIELD))
+                    ),
+                    "_call_id": str(original_call_ids[index]),
+                }
+                for index, repaired_call in enumerate(repaired_calls)
+            ]
         succeeded = bool(repaired_calls)
         remaining = max(0, repair_budget - next_attempts)
         decision = {
@@ -9672,6 +9809,54 @@ class InternalMCPChatOrchestrator:
             data.get("write_intent_context_reused", False)
         )
 
+        def _append_tool_result_message(
+            *,
+            tool_name: str,
+            call_id: str | None,
+            content: str,
+        ) -> None:
+            message: dict[str, Any] = {"role": "tool", "content": content}
+            if isinstance(call_id, str) and call_id.strip():
+                message["tool_call_id"] = call_id.strip()
+            if isinstance(tool_name, str) and tool_name.strip():
+                message["name"] = tool_name.strip()
+            augmented_context.append(dict(message))
+            tool_messages.append(dict(message))
+
+        def _append_tool_limit_result(tool_request: Mapping[str, Any]) -> None:
+            """Record a correlated, explicitly non-executed provider tool call."""
+
+            tool_name = str(tool_request.get(self._TOOL_FIELD) or "").strip()
+            call_id = tool_request.get("_call_id")
+            bounded_result = json.dumps(
+                {
+                    "status": "not_executed",
+                    "error_code": "tool_limit_reached",
+                    "settings_key": "internal_mcp_max_tool_invocations",
+                    "tool_calls_cap": int(max_tool_invocations),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            _append_tool_result_message(
+                tool_name=tool_name,
+                call_id=call_id if isinstance(call_id, str) else None,
+                content=bounded_result,
+            )
+            if callable(emit_progress):
+                emit_progress(
+                    {
+                        "status": "tool_blocked",
+                        "stage": self.PHASE_TOOL_EXECUTE,
+                        "tool": tool_name,
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": 0,
+                        "call_id": call_id,
+                        "blocked_reason": "tool_limit_reached",
+                    }
+                )
+
         def _record_write_gate_decision(
             *,
             tool_name: str,
@@ -9721,10 +9906,15 @@ class InternalMCPChatOrchestrator:
         # Enforce invocation limit + batch cap.
         remaining = max_tool_invocations - iteration_count
         if remaining <= 0:
+            if data.get("structured_tool_continuation") is not None:
+                for tool_request in tool_calls:
+                    if isinstance(tool_request, Mapping):
+                        _append_tool_limit_result(tool_request)
             return WorkflowActionResult(
                 outputs={
                     "tool_execution_complete": True,
                     "iteration_count": iteration_count,
+                    "remaining_tool_calls": [],
                 }
             )
         allowed_count = min(remaining, batch_cap)
@@ -9953,8 +10143,11 @@ class InternalMCPChatOrchestrator:
                             progress_argument_summary
                         )
                     emit_progress(progress_payload)
-                augmented_context.append({"role": "tool", "content": tool_payload})
-                tool_messages.append({"role": "tool", "content": tool_payload})
+                _append_tool_result_message(
+                    tool_name=tool_name,
+                    call_id=call_id,
+                    content=tool_payload,
+                )
                 continue
 
             # Write-policy gate.
@@ -10205,8 +10398,11 @@ class InternalMCPChatOrchestrator:
                             progress_argument_summary
                         )
                     emit_progress(progress_payload)
-                augmented_context.append({"role": "tool", "content": tool_payload})
-                tool_messages.append({"role": "tool", "content": tool_payload})
+                _append_tool_result_message(
+                    tool_name=tool_name,
+                    call_id=call_id,
+                    content=tool_payload,
+                )
                 continue
 
             try:
@@ -10296,8 +10492,11 @@ class InternalMCPChatOrchestrator:
                                 placeholder_block["progress_payload"],
                             )
                         )
-                    augmented_context.append({"role": "tool", "content": tool_payload})
-                    tool_messages.append({"role": "tool", "content": tool_payload})
+                    _append_tool_result_message(
+                        tool_name=tool_name,
+                        call_id=call_id,
+                        content=tool_payload,
+                    )
                     continue
 
                 result = self._gateway.invoke(tool_name, payload)
@@ -10526,8 +10725,21 @@ class InternalMCPChatOrchestrator:
                     "[mcp_orchestrator] Tool %s failed: %s", tool_name, exc
                 )
 
-            augmented_context.append({"role": "tool", "content": tool_payload})
-            tool_messages.append({"role": "tool", "content": tool_payload})
+            _append_tool_result_message(
+                tool_name=tool_name,
+                call_id=call_id,
+                content=tool_payload,
+            )
+
+        if (
+            data.get("structured_tool_continuation") is not None
+            and iteration_count >= max_tool_invocations
+            and remaining_tool_calls
+        ):
+            for tool_request in remaining_tool_calls:
+                if isinstance(tool_request, Mapping):
+                    _append_tool_limit_result(tool_request)
+            remaining_tool_calls = []
 
         # Store remaining overflow tool calls for the backfill handler.
         data["allowed_write_tools"] = allowed_write_tools
@@ -11209,6 +11421,168 @@ class InternalMCPChatOrchestrator:
             ),
         )
         data["tool_follow_up_context_lineage"] = dict(follow_up_context_telemetry)
+
+        raw_structured_continuation = data.get("structured_tool_continuation")
+        structured_continuation = LLMContinuation.from_value(
+            raw_structured_continuation
+        )
+        if (
+            raw_structured_continuation is not None
+            and structured_continuation is None
+        ):
+            raise StructuredToolProtocolError(
+                "Stored structured continuation payload is malformed; refusing "
+                "an uncorrelated follow-up after tool execution."
+            )
+        if structured_continuation is not None:
+            allow_more_tool_calls = iteration_count < max_tool_invocations
+            represented_call_ids = structured_continuation.transport_decision.get(
+                "accepted_tool_call_ids"
+            )
+            if isinstance(represented_call_ids, Sequence) and not isinstance(
+                represented_call_ids, (str, bytes, bytearray)
+            ):
+                expected_call_ids = {
+                    str(call_id)
+                    for call_id in represented_call_ids
+                    if isinstance(call_id, str) and call_id.strip()
+                }
+            else:
+                expected_call_ids = {
+                    str(item.get("call_id"))
+                    for item in structured_continuation.output_items
+                    if item.get("type") == "function_call" and item.get("call_id")
+                }
+            correlated_results: dict[str, ToolResult] = {}
+            for message in data.get("tool_messages") or []:
+                if not isinstance(message, Mapping):
+                    continue
+                call_id = message.get("tool_call_id")
+                if not isinstance(call_id, str) or call_id not in expected_call_ids:
+                    continue
+                correlated_results[call_id] = ToolResult(
+                    call_id=call_id,
+                    tool_name=(
+                        str(message.get("name"))
+                        if isinstance(message.get("name"), str)
+                        else None
+                    ),
+                    output=message.get("content"),
+                    status="ok",
+                )
+
+            method_catalogue = self._resolve_method_catalogue_for_workflow_data(data)
+            continuation_tool_definitions = (
+                self._convert_mcp_tools_to_structured_definitions(
+                    method_catalogue=(
+                        method_catalogue
+                        if isinstance(method_catalogue, Mapping)
+                        else None
+                    )
+                )
+            )
+            allowed_tool_names = {
+                str(tool_name).strip().lower()
+                for tool_name in (data.get("llm_allowed_tools") or [])
+                if isinstance(tool_name, str) and str(tool_name).strip()
+            }
+            if allowed_tool_names:
+                continuation_tool_definitions = [
+                    definition
+                    for definition in continuation_tool_definitions
+                    if definition.name.strip().lower() in allowed_tool_names
+                ]
+            continuation_response, continuation_model, _ = (
+                self._run_llm_with_tools_fallbacks(
+                    stage="tool_follow_up",
+                    prompt=follow_up_prompt,
+                    context=follow_up_context,
+                    tool_definitions=continuation_tool_definitions,
+                    default_client=llm_client,
+                    default_model=structured_continuation.model,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    llm_calls_log=llm_calls,
+                    aux_log=aux_llm_calls,
+                    record_llm_call=record_llm_call,
+                    emit_progress=emit_progress_cb,
+                    workflow_action_id=request.action_id,
+                    method_catalogue=(
+                        method_catalogue
+                        if isinstance(method_catalogue, Mapping)
+                        else None
+                    ),
+                    context_telemetry=follow_up_context_telemetry,
+                    prefer_default_model=True,
+                    workflow_stage_id="screen_backfill",
+                    workflow_id=(
+                        request.workflow_id
+                        if isinstance(getattr(request, "workflow_id", None), str)
+                        else None
+                    ),
+                    continuation=structured_continuation,
+                    tool_results=list(correlated_results.values()),
+                    tool_choice_override=(None if allow_more_tool_calls else "none"),
+                )
+            )
+            if continuation_response.tool_calls:
+                if not allow_more_tool_calls:
+                    raise StructuredToolProtocolError(
+                        "Structured continuation returned another tool call after the "
+                        "configured tool invocation limit was reached.",
+                        decision=(
+                            dict(continuation_response.transport_metadata)
+                            if isinstance(
+                                continuation_response.transport_metadata, Mapping
+                            )
+                            else {}
+                        ),
+                    )
+                next_continuation = continuation_response.continuation
+                return WorkflowActionResult(
+                    outputs={
+                        "more_tool_calls": True,
+                        "tool_calls_present": True,
+                        "tool_calls_validated": False,
+                        "tool_calls": [
+                            {
+                                self._ACTION_FIELD: self._CALL_ACTION,
+                                self._TOOL_FIELD: call.tool_name,
+                                self._PAYLOAD_FIELD: call.payload,
+                                "_call_id": call.call_id,
+                            }
+                            for call in continuation_response.tool_calls
+                        ],
+                        "current_response": continuation_response.text_response,
+                        "remaining_tool_calls": [],
+                        "structured_tool_continuation": (
+                            next_continuation.to_mapping()
+                            if next_continuation is not None
+                            else None
+                        ),
+                        "tool_call_model": continuation_model,
+                        "result": True,
+                    }
+                )
+
+            safe_continuation_response = self._sanitise_user_visible_action_output(
+                continuation_response.text_response,
+                aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+                source_stage="tool_calling.structured_backfill",
+            )
+            return WorkflowActionResult(
+                outputs={
+                    "more_tool_calls": False,
+                    "tool_calls_present": False,
+                    "final_response": safe_continuation_response,
+                    "current_response": safe_continuation_response,
+                    "structured_tool_continuation": None,
+                    "tool_call_model": continuation_model,
+                    "result": False,
+                }
+            )
 
         summariser_model = model_for_stage("summariser")
         if blocked_follow_up_tool_calls:
@@ -16810,6 +17184,7 @@ class InternalMCPChatOrchestrator:
         stage: str,
         default_model: Optional[str],
         default_model_parameters: Mapping[str, Any] | None = None,
+        default_provider: str | None = None,
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None = None,
         workflow_id: Optional[str] = None,
@@ -16828,7 +17203,11 @@ class InternalMCPChatOrchestrator:
             MODEL_PARAMETERS_KEY = "model_parameters"  # type: ignore[assignment]
             normalise_model_parameters_for_storage = None  # type: ignore[assignment]
             stable_model_parameters_key = None  # type: ignore[assignment]
-        default_provider = self._infer_provider_from_model_reference(default_model)
+        default_provider = (
+            default_provider.strip().lower()
+            if isinstance(default_provider, str) and default_provider.strip()
+            else self._infer_provider_from_model_reference(default_model)
+        )
         if callable(normalise_model_parameters_for_storage):
             active_model_parameters = normalise_model_parameters_for_storage(
                 default_model_parameters,
@@ -18182,11 +18561,21 @@ class InternalMCPChatOrchestrator:
             _stage_extra["workflow_stage_id"] = workflow_stage_id.strip()
         candidate_stage = policy_stage or stage
 
+        try:
+            from src.backend.languagemodels.llm_interface import (
+                infer_llm_client_provider,
+            )
+
+            default_provider = infer_llm_client_provider(default_client)
+        except Exception:
+            default_provider = None
+
         candidate_resolution_start = time.perf_counter()
         candidates = self._stage_model_candidates(
             stage=candidate_stage,
             default_model=default_model,
             default_model_parameters=default_model_parameters,
+            default_provider=default_provider,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
             workflow_id=workflow_id,
@@ -18817,8 +19206,22 @@ class InternalMCPChatOrchestrator:
                 raise
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
-                exc_text = str(exc)
+                exc_text = str(
+                    sanitise_transport_telemetry_value(
+                        str(exc),
+                        key="provider_error_message",
+                    )
+                )
                 exc_class = type(exc).__name__
+                provider_transport_decision = getattr(
+                    exc,
+                    "structured_tool_transport_decision",
+                    None,
+                )
+                if isinstance(provider_transport_decision, Mapping):
+                    attempt_meta["structured_tool_transport"] = dict(
+                        provider_transport_decision
+                    )
                 _fk = (
                     "quota_exhausted"
                     if "insufficient_quota" in exc_text
@@ -18862,8 +19265,8 @@ class InternalMCPChatOrchestrator:
                             "model": model_name,
                             "duration_ms": int(duration_ms),
                             "success": False,
-                            "error": str(exc),
-                            "error_class": type(exc).__name__,
+                            "error": exc_text,
+                            "error_class": exc_class,
                             "failure_kind": _fk,
                             **_stage_extra,
                             **attempt_meta,
@@ -18944,8 +19347,8 @@ class InternalMCPChatOrchestrator:
                         "provider": provider,
                         "model": model_name,
                         "status": "failed",
-                        "error": str(exc),
-                        "error_class": type(exc).__name__,
+                        "error": exc_text,
+                        "error_class": exc_class,
                         "failure_kind": _fk,
                         "duration_ms": int(duration_ms),
                         "candidate": (
@@ -19401,6 +19804,7 @@ class InternalMCPChatOrchestrator:
         tool_definitions: Sequence[ToolDefinition],
         default_client: Any,
         default_model: Optional[str],
+        default_model_parameters: Mapping[str, Any] | None = None,
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None,
         user_concept_id: Optional[str],
@@ -19421,6 +19825,9 @@ class InternalMCPChatOrchestrator:
             dict[tuple[Optional[str], Optional[str], Optional[str]], dict[str, Any]]
             | None
         ) = None,
+        continuation: Mapping[str, Any] | LLMContinuation | None = None,
+        tool_results: Sequence[Mapping[str, Any] | ToolResult] = (),
+        tool_choice_override: Any = None,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
         # JVNAUTOSCI-2133: see ``_run_llm_with_fallbacks`` for the
         # rationale on ``workflow_stage_id`` vs the orchestrator-internal
@@ -19429,10 +19836,20 @@ class InternalMCPChatOrchestrator:
         if isinstance(workflow_stage_id, str) and workflow_stage_id.strip():
             _stage_extra["workflow_stage_id"] = workflow_stage_id.strip()
         candidate_stage = stage
+        try:
+            from src.backend.languagemodels.llm_interface import (
+                infer_llm_client_provider,
+            )
+
+            default_provider = infer_llm_client_provider(default_client)
+        except Exception:
+            default_provider = None
         candidate_resolution_start = time.perf_counter()
         candidates = self._stage_model_candidates(
             stage=candidate_stage,
             default_model=default_model,
+            default_model_parameters=default_model_parameters,
+            default_provider=default_provider,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
             workflow_id=workflow_id,
@@ -19440,6 +19857,29 @@ class InternalMCPChatOrchestrator:
             org_concept_id=org_concept_id,
             prefer_default_model=prefer_default_model,
         )
+        continuation_value = LLMContinuation.from_value(continuation)
+        if continuation is not None and continuation_value is None:
+            raise StructuredToolProtocolError(
+                "Structured tool fallback received a malformed continuation "
+                "payload; refusing an uncorrelated model request."
+            )
+        if continuation_value is not None:
+            continuation_parameters = continuation_value.transport_decision.get(
+                "parameter_projection"
+            )
+            candidates = [
+                _ModelCandidate(
+                    provider=continuation_value.provider,
+                    model=continuation_value.model,
+                    raw="structured_tool_continuation",
+                    source="structured_tool_continuation",
+                    model_parameters=(
+                        dict(continuation_parameters)
+                        if isinstance(continuation_parameters, Mapping)
+                        else None
+                    ),
+                )
+            ]
         self._emit_llm_request_preparation_step(
             emit_progress=emit_progress,
             stage=stage,
@@ -19674,11 +20114,60 @@ class InternalMCPChatOrchestrator:
                 structured_call_kwargs["parallel_tool_calls"] = False
                 if model_parameters:
                     structured_call_kwargs["llm_params"] = model_parameters
-                if len(required_available_tool_names) == 1:
+                if tool_choice_override is not None:
+                    structured_call_kwargs["tool_choice"] = tool_choice_override
+                elif len(required_available_tool_names) == 1:
                     structured_call_kwargs["tool_choice"] = {
                         "type": "function",
                         "function": {"name": required_available_tool_names[0]},
                     }
+                structured_config = getattr(client, "config", None)
+                config_factory = getattr(client, "_get_structured_client_config", None)
+                if structured_config is None and callable(config_factory):
+                    try:
+                        structured_config = config_factory(model_name)
+                    except Exception:
+                        structured_config = None
+                transport_preview = resolve_structured_tool_transport(
+                    provider=provider,
+                    model=str(model_name or ""),
+                    tools_present=bool(available_tool_definitions),
+                    connection_id=getattr(structured_config, "connection_id", None),
+                    deployment_id=(
+                        getattr(structured_config, "deployment_id", None)
+                        or str(model_name or "")
+                    ),
+                    parameter_projection=model_parameters,
+                )
+                transport_preview_telemetry = transport_preview.to_telemetry()
+                attempt_meta["structured_tool_transport"] = transport_preview_telemetry
+            if continuation_value is not None:
+                structured_call_kwargs["continuation"] = continuation_value
+                structured_call_kwargs["tool_results"] = list(tool_results)
+
+            # Keep wire-only provider state and tool-result bodies out of
+            # persisted auxiliary telemetry.  Continuations may contain
+            # encrypted reasoning items and tool results may contain user or
+            # integration data; only their bounded structural shape is useful
+            # for transport diagnosis.
+            structured_call_options_telemetry = {
+                str(option_name): sanitise_transport_telemetry_value(option_value)
+                for option_name, option_value in structured_call_kwargs.items()
+                if option_name not in {"continuation", "tool_results"}
+            }
+            if continuation_value is not None:
+                structured_call_options_telemetry.update(
+                    {
+                        "continuation_present": True,
+                        "continuation_api_surface": (
+                            continuation_value.api_surface
+                        ),
+                        "continuation_output_item_count": len(
+                            continuation_value.output_items
+                        ),
+                        "tool_result_count": len(tool_results),
+                    }
+                )
 
             exclusion_reason_counts: dict[str, int] = {}
             for item in tool_candidates.excluded_tools:
@@ -19728,7 +20217,7 @@ class InternalMCPChatOrchestrator:
                     ),
                     "selected_tool_contracts_truncated": len(available_tool_definitions)
                     > 20,
-                    "structured_call_options": dict(structured_call_kwargs),
+                    "structured_call_options": structured_call_options_telemetry,
                     "hinted_families": list(tool_candidates.hinted_families),
                     "write_policy_reason": tool_candidates.write_policy_reason,
                     "warnings": list(tool_candidates.warnings),
@@ -19864,6 +20353,22 @@ class InternalMCPChatOrchestrator:
                     timeout_override_sec=timeout_override_sec,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                response_transport = getattr(
+                    llm_response,
+                    "transport_metadata",
+                    None,
+                )
+                if isinstance(response_transport, Mapping) and response_transport:
+                    attempt_meta["structured_tool_transport"] = dict(response_transport)
+                    aux_log.append(
+                        {
+                            "type": "structured_tool_transport_decision",
+                            "stage": stage,
+                            "llm_exchange_id": live_llm_exchange_id,
+                            "call_id": attempt_meta.get("call_id"),
+                            **dict(response_transport),
+                        }
+                    )
                 first_output_at_utc = self._utc_now_iso()
                 if callable(emit_progress):
                     completion_tokens = None
@@ -20158,6 +20663,7 @@ class InternalMCPChatOrchestrator:
                     policy_stage=candidate_stage,
                     selected_candidate=candidate,
                     default_model=default_model,
+                    default_model_parameters=default_model_parameters,
                     policy_state=policy_state,
                     registry_snapshot=registry_snapshot,
                     workflow_id=workflow_id,
@@ -20203,11 +20709,102 @@ class InternalMCPChatOrchestrator:
                             "diagnostics": list(llm_response.tool_call_diagnostics),
                         }
                     )
-                return llm_response, model_name, telemetry
-            except Exception as exc:
+                return_telemetry = dict(telemetry)
+                if isinstance(response_transport, Mapping) and response_transport:
+                    return_telemetry["structured_tool_transport"] = dict(
+                        response_transport
+                    )
+                return llm_response, model_name, return_telemetry
+            except StructuredToolTransportError as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 exc_text = str(exc)
                 exc_class = type(exc).__name__
+                decision = dict(getattr(exc, "decision", {}) or {})
+                failure_kind = str(
+                    getattr(exc, "failure_kind", "structured_tool_transport_error")
+                )
+                attempt_meta["structured_tool_transport"] = decision
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": int(duration_ms),
+                            "success": False,
+                            "error": exc_text,
+                            "error_class": exc_class,
+                            "failure_kind": failure_kind,
+                            **_stage_extra,
+                            **attempt_meta,
+                        }
+                    )
+                record_llm_call(
+                    call_type="llm.generate_with_tools",
+                    model_name=model_name,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note="structured tool transport failed; compatible fallback candidates only",
+                    stage=stage,
+                    provider=provider,
+                    candidate=telemetry,
+                    workflow_stage_id=workflow_stage_id,
+                    status="failed",
+                    success=False,
+                    error=exc_text,
+                    error_class=exc_class,
+                    failure_kind=failure_kind,
+                )
+                failure_record = {
+                    "candidate": telemetry,
+                    "model_resolved": model_name,
+                    "error": exc_text,
+                    "error_class": exc_class,
+                    "failure_kind": failure_kind,
+                    "transport": decision,
+                    "llm_exchange_id": live_llm_exchange_id,
+                    "call_id": attempt_meta.get("call_id"),
+                }
+                errors.append(failure_record)
+                fallback_attempts.append(
+                    {
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "failed",
+                        "duration_ms": int(duration_ms),
+                        **failure_record,
+                    }
+                )
+                aux_log.append(
+                    {
+                        "type": "structured_tool_transport_blocker",
+                        "stage": stage,
+                        "retryable": bool(getattr(exc, "retryable", False)),
+                        **failure_record,
+                    }
+                )
+                last_exception = exc
+                last_failure_class = exc_class
+                raise
+            except Exception as exc:
+                duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                exc_text = str(
+                    sanitise_transport_telemetry_value(
+                        str(exc),
+                        key="provider_error_message",
+                    )
+                )
+                exc_class = type(exc).__name__
+                provider_transport_decision = getattr(
+                    exc,
+                    "structured_tool_transport_decision",
+                    None,
+                )
+                if isinstance(provider_transport_decision, Mapping):
+                    attempt_meta["structured_tool_transport"] = dict(
+                        provider_transport_decision
+                    )
                 _fk = (
                     "quota_exhausted"
                     if "insufficient_quota" in exc_text
@@ -20248,8 +20845,8 @@ class InternalMCPChatOrchestrator:
                             "model": model_name,
                             "duration_ms": int(duration_ms),
                             "success": False,
-                            "error": str(exc),
-                            "error_class": type(exc).__name__,
+                            "error": exc_text,
+                            "error_class": exc_class,
                             "failure_kind": _fk,
                             **_stage_extra,
                             **attempt_meta,
@@ -20309,9 +20906,16 @@ class InternalMCPChatOrchestrator:
                     {
                         "candidate": telemetry,
                         "model_resolved": model_name,
-                        "error": str(exc),
-                        "error_class": type(exc).__name__,
+                        "error": exc_text,
+                        "error_class": exc_class,
                         "failure_kind": _fk,
+                        **(
+                            {
+                                "transport": dict(provider_transport_decision),
+                            }
+                            if isinstance(provider_transport_decision, Mapping)
+                            else {}
+                        ),
                     }
                 )
                 last_failure_class = exc_class
@@ -20331,12 +20935,19 @@ class InternalMCPChatOrchestrator:
                         "provider": provider,
                         "model": model_name,
                         "status": "failed",
-                        "error": str(exc),
-                        "error_class": type(exc).__name__,
+                        "error": exc_text,
+                        "error_class": exc_class,
                         "failure_kind": _fk,
                         "duration_ms": int(duration_ms),
                         "candidate": (
                             dict(telemetry) if isinstance(telemetry, Mapping) else None
+                        ),
+                        **(
+                            {
+                                "transport": dict(provider_transport_decision),
+                            }
+                            if isinstance(provider_transport_decision, Mapping)
+                            else {}
                         ),
                     }
                 )
@@ -20349,6 +20960,7 @@ class InternalMCPChatOrchestrator:
                 policy_stage=candidate_stage,
                 selected_candidate=None,
                 default_model=default_model,
+                default_model_parameters=default_model_parameters,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
                 workflow_id=workflow_id,

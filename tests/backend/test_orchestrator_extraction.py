@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -8,6 +9,11 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     ToolCallParsingError,
     _MissingToolCallDetectorSpec,
 )
+from src.backend.languagemodels.structured_tool_calling import (
+    LLMContinuation,
+    ToolResult,
+)
+from src.backend.languagemodels.structured_tool_calling.providers import OpenAIClient
 from orchestrator_test_harness import build_db_independent_orchestrator
 
 
@@ -1448,6 +1454,157 @@ def test_tool_execution_blocks_placeholder_profile_before_gateway_invoke():
         "placeholder_tool_argument_unresolved"
     )
     assert request.data["tool_messages"]
+
+
+def test_tool_execution_preserves_provider_call_correlation_in_tool_messages():
+    gateway = _DummyGateway()
+    orchestrator = InternalMCPChatOrchestrator(gateway=gateway)  # type: ignore[arg-type]
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM([]),
+        action_id="tool_calling.execute",
+        data={
+            "prompt": "Inspect the synthetic target.",
+            "response": "",
+            "augmented_context": [],
+            "tool_calls": [
+                {
+                    "action": "call_tool",
+                    "tool": "test",
+                    "payload": {"target": "synthetic"},
+                    "_call_id": "call-synthetic-1",
+                }
+            ],
+            "method_catalogue": gateway.describe_methods(),
+            "tool_categories": {"test": "read"},
+            "iteration_count": 0,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+        },
+    )
+
+    result = orchestrator._action_tool_calling_execute(request)
+
+    assert result.outputs["tool_execution_complete"] is True
+    assert gateway.calls == [("test", {"target": "synthetic", "namespace": "#V#user"})]
+    expected_correlation = {
+        "role": "tool",
+        "tool_call_id": "call-synthetic-1",
+        "name": "test",
+    }
+    tool_message = request.data["tool_messages"][0]
+    assert {
+        key: tool_message[key] for key in expected_correlation
+    } == expected_correlation
+    correlated_context = request.data["augmented_context"][-1]
+    assert {
+        key: correlated_context[key] for key in expected_correlation
+    } == expected_correlation
+
+
+def test_structured_tool_cap_synthesises_correlated_overflow_without_execution():
+    gateway = _DummyGateway()
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+    continuation = {
+        "provider": "openai",
+        "api_surface": "chat_completions",
+        "model": "synthetic-model",
+        "state_mode": "stateless",
+        "input_items": [{"role": "user", "content": "Inspect both targets."}],
+        "output_items": [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-real",
+                        "type": "function",
+                        "function": {
+                            "name": "test",
+                            "arguments": '{"target":"real"}',
+                        },
+                    },
+                    {
+                        "id": "call-overflow",
+                        "type": "function",
+                        "function": {
+                            "name": "test",
+                            "arguments": '{"target":"overflow"}',
+                        },
+                    },
+                ],
+            }
+        ],
+        "transport_decision": {
+            "accepted_tool_call_ids": ["call-real", "call-overflow"]
+        },
+    }
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM([]),
+        action_id="tool_calling.execute",
+        data={
+            "prompt": "Inspect both targets.",
+            "response": "",
+            "augmented_context": [],
+            "tool_calls": [
+                {
+                    "action": "call_tool",
+                    "tool": "test",
+                    "payload": {"target": "real"},
+                    "_call_id": "call-real",
+                },
+                {
+                    "action": "call_tool",
+                    "tool": "test",
+                    "payload": {"target": "overflow"},
+                    "_call_id": "call-overflow",
+                },
+            ],
+            "structured_tool_continuation": continuation,
+            "method_catalogue": gateway.describe_methods(),
+            "tool_categories": {"test": "read"},
+            "iteration_count": 0,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+        },
+    )
+
+    result = orchestrator._action_tool_calling_execute(request)
+
+    assert result.outputs["iteration_count"] == 1
+    assert result.outputs["remaining_tool_calls"] == []
+    assert gateway.calls == [("test", {"target": "real", "namespace": "#V#user"})]
+    tool_messages = request.data["tool_messages"]
+    assert [message["tool_call_id"] for message in tool_messages] == [
+        "call-real",
+        "call-overflow",
+    ]
+    synthetic_result = json.loads(tool_messages[1]["content"])
+    assert synthetic_result == {
+        "status": "not_executed",
+        "error_code": "tool_limit_reached",
+        "settings_key": "internal_mcp_max_tool_invocations",
+        "tool_calls_cap": 1,
+    }
+    assert len(request.data["invocations"]) == 1
+    assert request.data["invocations"][0]["call_id"] == "call-real"
+    parsed_continuation = LLMContinuation.from_value(continuation)
+    assert parsed_continuation is not None
+    OpenAIClient._validate_tool_result_correlation(
+        parsed_continuation,
+        [
+            ToolResult(
+                call_id=message["tool_call_id"],
+                tool_name=message["name"],
+                output=message["content"],
+            )
+            for message in tool_messages
+        ],
+    )
 
 
 def test_missing_tool_retry_forces_auth_config_with_default_profile():

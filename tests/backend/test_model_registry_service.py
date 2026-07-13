@@ -47,13 +47,23 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
             "openai:gpt-5-mini",
             "gpt-5-mini",
         ],
-        ("#V#openai_gpt5_mini_registry_entry", mod.PRED_HAS_MODEL_ID): [
-            "gpt-5-mini"
-        ],
+        ("#V#openai_gpt5_mini_registry_entry", mod.PRED_HAS_MODEL_ID): ["gpt-5-mini"],
         (
             "#V#openai_gpt5_mini_chat_completions_profile",
             mod.PRED_HAS_API_SURFACE,
         ): ["chat_completions"],
+        (
+            "#V#openai_gpt5_mini_chat_completions_profile",
+            mod.PRED_HAS_STRUCTURED_TOOL_CALLING,
+        ): ["supported"],
+        (
+            "#V#openai_gpt5_mini_chat_completions_profile",
+            mod.PRED_HAS_TOOL_CONTINUATION_MODE,
+        ): ["stateless"],
+        (
+            "#V#openai_gpt5_mini_chat_completions_profile",
+            mod.PRED_HAS_RESPONSE_STORAGE_POLICY,
+        ): ["disabled"],
         (
             "#V#openai_gpt5_mini_temperature_omit_constraint",
             mod.PRED_HAS_PARAMETER_ACTION,
@@ -95,6 +105,9 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
 
     profile = model_entry["api_profiles"][0]
     assert profile["api_surface"] == "chat_completions"
+    assert profile["structured_tool_calling"] == "supported"
+    assert profile["tool_continuation_mode"] == "stateless"
+    assert profile["response_storage_policy"] == "disabled"
 
     constraint = profile["parameter_constraints"][0]
     assert constraint["parameter_concept_id"] == "#V#temperature_parameter"
@@ -102,6 +115,108 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
     assert constraint["action"] == "omit"
     assert constraint["fixed_value"] == "1.0"
     assert constraint["allowed_values"] == ["1.0"]
+    assert constraint["profile_concept_id"] == (
+        "#V#openai_gpt5_mini_chat_completions_profile"
+    )
+
+
+def test_resolve_model_api_profiles_preserves_provenance_and_family_match(
+    monkeypatch,
+) -> None:
+    import src.backend.services.model_registry_service as mod
+
+    snapshot = {
+        "source": "vontology_graph",
+        "registry_concept_id": "#V#default_model_registry",
+        "models": [
+            {
+                "model_id": "deployment-family",
+                "provider": "openai",
+                "concept_id": "#V#deployment_family",
+                "registry_entry_id": "#V#deployment_family_registry_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#deployment_responses_profile",
+                        "api_surface": "responses",
+                        "structured_tool_calling": "required",
+                        "tool_continuation_mode": "stateless",
+                        "response_storage_policy": "disabled",
+                        "parameter_constraints": [],
+                    }
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        mod,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: snapshot,
+    )
+
+    resolved = mod.resolve_model_api_profiles(
+        model="deployment-family-blue",
+        provider="openai",
+    )
+
+    assert resolved is not None
+    assert resolved["source"] == "vontology_graph"
+    assert resolved["registry_concept_id"] == "#V#default_model_registry"
+    assert resolved["registry_entry_id"] == "#V#deployment_family_registry_entry"
+    assert resolved["concept_id"] == "#V#deployment_family"
+    assert resolved["api_profiles"][0]["profile_concept_id"] == (
+        "#V#deployment_responses_profile"
+    )
+
+
+def test_resolve_model_api_profiles_prefers_exact_entry_over_earlier_family(
+    monkeypatch,
+) -> None:
+    import src.backend.services.model_registry_service as mod
+
+    snapshot = {
+        "source": "vontology_graph",
+        "registry_concept_id": "#V#default_model_registry",
+        "models": [
+            {
+                "model_id": "gpt-5",
+                "provider": "openai",
+                "registry_entry_id": "#V#gpt_5_family_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#gpt_5_family_chat_profile",
+                        "api_surface": "chat_completions",
+                    }
+                ],
+            },
+            {
+                "model_id": "gpt-5.6-luna",
+                "provider": "openai",
+                "registry_entry_id": "#V#gpt_5_6_luna_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#gpt_5_6_luna_responses_profile",
+                        "api_surface": "responses",
+                    }
+                ],
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        mod,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: snapshot,
+    )
+
+    resolved = mod.resolve_model_api_profiles(
+        model="gpt-5.6-luna",
+        provider="openai",
+    )
+
+    assert resolved is not None
+    assert resolved["registry_entry_id"] == "#V#gpt_5_6_luna_entry"
+    assert resolved["api_profiles"][0]["profile_concept_id"] == (
+        "#V#gpt_5_6_luna_responses_profile"
+    )
 
 
 def test_runtime_parameter_policy_uses_graph_registry_snapshot(monkeypatch) -> None:

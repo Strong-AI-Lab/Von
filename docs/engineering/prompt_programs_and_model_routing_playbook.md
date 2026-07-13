@@ -95,6 +95,21 @@ Maintain an explicit model registry or equivalent metadata covering:
 
 Routing policies should be measurable and revisable. Prefer explicit routers or decision surfaces over feature-specific model choices scattered through code.
 
+For structured tool calls, model capability is not enough on its own: the
+provider connection, deployment, model, and API surface form one transport
+capability. Represent surface-specific support on the model API profile. An
+explicit profile may mark structured tool calling as `required`, `supported`,
+or `unsupported`; absence means unknown and must preserve the client's
+conservative existing surface. In particular, do not infer Responses support
+from an OpenAI-like model name or endpoint URL.
+
+Tool-call continuation is part of that profile. Record whether provider state
+may be used or whether Von must replay ordered provider items statelessly, and
+record the response-storage policy. Runtime code should project schemas,
+parameters, call IDs, results, and telemetry for the chosen surface. It should
+not silently drop tools, repeat a known-incompatible surface, or turn a typed
+transport mismatch into a text-only planner call.
+
 ## 7. Default routing pattern
 
 A reasonable default pattern is:

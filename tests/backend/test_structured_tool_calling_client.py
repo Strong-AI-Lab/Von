@@ -7,6 +7,7 @@ import pytest
 
 from src.backend.languagemodels.structured_tool_calling import (
     LLMClientConfig,
+    StructuredToolProtocolError,
     ToolDefinition,
     get_llm_client,
 )
@@ -404,7 +405,7 @@ class TestTemperatureGuards:
         assert "reasoning_effort" not in captured_kwargs
         assert captured_kwargs["tools"]
 
-    def test_openai_provider_preserves_none_reasoning_effort_for_chat_tool_calls(
+    def test_openai_provider_preserves_none_effort_for_chat_compatible_tool_calls(
         self, monkeypatch
     ):
         """Explicit none disables the reasoning mode that conflicts with tools."""
@@ -426,7 +427,7 @@ class TestTemperatureGuards:
                     )
                 ],
                 usage=None,
-                model="gpt-5.6-luna",
+                model="gpt-5.5",
             )
 
         monkeypatch.setattr(
@@ -445,7 +446,7 @@ class TestTemperatureGuards:
         )
 
         client = OpenAIClient(
-            LLMClientConfig(model="gpt-5.6-luna", api_key="test-key")
+            LLMClientConfig(model="gpt-5.5", api_key="test-key")
         )
         tool = ToolDefinition(
             name="fetch_concept",
@@ -598,8 +599,8 @@ class TestLLMClientBaseValidation:
         assert "strict" not in function_payload
         assert function_payload["parameters"]["additionalProperties"] is False
 
-    def test_openai_parse_preserves_tool_call_diagnostics_for_invalid_calls(self):
-        """Provider parse failures should be recoverable diagnostics, not silence."""
+    def test_openai_parse_fails_closed_with_bounded_invalid_call_diagnostics(self):
+        """Invalid Chat calls surface a typed blocker with bounded diagnostics."""
         config = LLMClientConfig(model="gpt-4")
         from src.backend.languagemodels.structured_tool_calling.providers import (
             OpenAIClient,
@@ -634,19 +635,22 @@ class TestLLMClientBaseValidation:
             model="gpt-4",
         )
 
-        parsed = client._parse_response(
-            response,
-            [
-                ToolDefinition(
-                    name="lookup",
-                    description="Lookup a record.",
-                    input_schema={"type": "object", "properties": {}},
-                )
-            ],
-        )
+        with pytest.raises(StructuredToolProtocolError) as exc_info:
+            client._parse_response(
+                response,
+                [
+                    ToolDefinition(
+                        name="lookup",
+                        description="Lookup a record.",
+                        input_schema={"type": "object", "properties": {}},
+                    )
+                ],
+            )
 
-        assert parsed.tool_calls == []
-        assert [item["error_code"] for item in parsed.tool_call_diagnostics] == [
+        assert exc_info.value.decision["failure_kind"] == (
+            "chat_provider_tool_call_rejected"
+        )
+        assert exc_info.value.decision["provider_tool_call_diagnostic_codes"] == [
             "provider_tool_call_parse_error",
             "unknown_tool",
         ]

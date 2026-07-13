@@ -157,6 +157,27 @@ def _write_registry_disk_cache(
     return snapshot
 
 
+def test_pytest_does_not_use_live_registry_disk_cache_without_isolated_path(
+    tmp_path, monkeypatch
+):
+    import src.backend.services.model_registry_service as registry_service
+
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "registry cache isolation")
+    monkeypatch.setenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED", "1")
+    monkeypatch.delenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        raising=False,
+    )
+
+    assert registry_service._registry_snapshot_disk_cache_enabled() is False
+
+    monkeypatch.setenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
+        str(tmp_path / "isolated-registry-cache.json"),
+    )
+    assert registry_service._registry_snapshot_disk_cache_enabled() is True
+
+
 def test_model_registry_snapshot_uses_valid_disk_cache(tmp_path, monkeypatch):
     import src.backend.services.model_registry_service as registry_service
 

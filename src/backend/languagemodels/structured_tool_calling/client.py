@@ -44,6 +44,8 @@ def model_supports_custom_temperature(model: str) -> bool:
 def resolve_safe_temperature_for_model(
     model: str,
     temperature: Optional[float],
+    *,
+    api_surface: str = "chat_completions",
 ) -> Optional[float]:
     """Return a temperature that is safe to send for the given model.
 
@@ -59,7 +61,7 @@ def resolve_safe_temperature_for_model(
         provider="openai",
         parameter="temperature",
         value=temperature,
-        api_surface="chat_completions",
+        api_surface=api_surface,
     )
     return sanitised if isinstance(sanitised, (int, float)) else None
 
@@ -79,8 +81,12 @@ class LLMClientConfig:
     """
 
     model: str
+    provider: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    connection_id: Optional[str] = None
+    deployment_id: Optional[str] = None
+    requested_api_surface: Optional[str] = None
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = None
     enable_structured_calling: bool = True

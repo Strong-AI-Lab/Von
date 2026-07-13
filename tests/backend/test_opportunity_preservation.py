@@ -73,6 +73,9 @@ from src.backend.services.workflow_discovery_service import (
     WorkflowMatch,
     _filter_actor_accessible_workflow_matches,
 )
+from src.backend.languagemodels.structured_tool_calling import (
+    transport as structured_tool_transport,
+)
 
 
 # --- retrieval barriers remain inspectable and recoverable ------------------
@@ -131,6 +134,45 @@ def test_retrieval_incompatibility_is_not_collapsed_into_authoritative_empty() -
     assert empty["usable"] is True
     assert empty["authoritative_empty"] is True
     assert empty["rebuild_required"] is False
+
+
+def test_represented_tool_transport_preserves_compatible_surface_opportunity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        structured_tool_transport,
+        "resolve_model_api_profiles",
+        lambda **_kwargs: {
+            "source": "vontology_graph",
+            "registry_concept_id": "#V#synthetic_model_registry",
+            "registry_entry_id": "#V#synthetic_model_entry",
+            "concept_id": "#V#synthetic_model",
+            "api_profiles": [
+                {
+                    "profile_concept_id": "#V#synthetic_responses_profile",
+                    "api_surface": "responses",
+                    "structured_tool_calling": "required",
+                    "tool_continuation_mode": "stateless",
+                }
+            ],
+        },
+    )
+
+    decision = structured_tool_transport.resolve_structured_tool_transport(
+        provider="openai",
+        model="synthetic-model",
+        tools_present=True,
+        parameter_projection={"reasoning_effort": "low"},
+    )
+
+    assert decision.status == "compatible"
+    assert decision.effective_api_surface == "responses"
+    assert decision.reason == "represented_profile_required"
+    telemetry = decision.to_telemetry()
+    assert telemetry["profile_concept_id"] == "#V#synthetic_responses_profile"
+    assert telemetry["capability_source"] == "vontology_graph"
+    assert telemetry["tools_present"] is True
+    assert telemetry["capability_key"]
 
 
 def test_actor_scoped_workflow_authority_preserves_trusted_execution_opportunity(

@@ -48,6 +48,7 @@ from ..services.workflow_llm_duration_stats_service import (
     record_workflow_llm_step_duration_observation,
 )
 from ..languagemodels.llm_interface import infer_llm_client_provider
+from ..languagemodels.structured_tool_calling import StructuredToolTransportError
 from .llm_call_telemetry import stamp_llm_call_timestamps
 from .prompt_metadata_resolution import resolve_model_prompt_variant
 from .recovery_prompt_compaction import (
@@ -612,7 +613,12 @@ def _filter_tool_names_to_allowed_set(
             tool_name,
             known_tool_names=known_names,
         )
-        if not tool_name or not canonical_key or canonical_key in seen or canonical_key not in allowed:
+        if (
+            not tool_name
+            or not canonical_key
+            or canonical_key in seen
+            or canonical_key not in allowed
+        ):
             continue
         seen.add(canonical_key)
         filtered.append(tool_name)
@@ -2675,6 +2681,105 @@ def _build_timeout_failure_result(
     )
 
 
+def _build_structured_tool_transport_failure_result(
+    *,
+    request: WorkflowActionRequest,
+    stage: str,
+    prompt_id: str | None,
+    prompt_source: str | None,
+    rendered_variables: Mapping[str, Any],
+    llm_policy_map: Mapping[str, Any],
+    error: StructuredToolTransportError,
+    selected_model: str | None,
+    llm_calls: Sequence[Mapping[str, Any]],
+    aux_llm_calls: Sequence[Mapping[str, Any]],
+    tool_invocations: Sequence[Mapping[str, Any]] = (),
+    tool_messages: Sequence[Mapping[str, Any]] = (),
+    selected_candidate: Mapping[str, Any] | None = None,
+    prompt_variant_selection: Mapping[str, Any] | None = None,
+    prompt_context_diagnostics: Mapping[str, Any] | None = None,
+) -> WorkflowActionResult:
+    """Project a typed transport blocker into the durable LLM-step record."""
+
+    decision = dict(getattr(error, "decision", {}) or {})
+    failure_kind = _context_string(
+        getattr(error, "failure_kind", "structured_tool_transport_error")
+    )
+    retryable = bool(getattr(error, "retryable", False))
+    advertised_alternatives = [
+        item
+        for item in decision.get("advertised_alternatives") or []
+        if isinstance(item, str) and item.strip()
+    ]
+    llm_step_envelope = {
+        "execution_mode": "llm",
+        "action_id": request.action_id,
+        "workflow_id": request.workflow_id,
+        "workflow_state_id": request.workflow_state_id,
+        "policy_stage": stage,
+        "selected_prompt_id": prompt_id,
+        "selected_prompt_source": prompt_source,
+        "selected_model": selected_model,
+        "selected_model_candidate": (
+            dict(selected_candidate)
+            if isinstance(selected_candidate, Mapping)
+            else None
+        ),
+        "tool_invocations": [
+            dict(item) for item in tool_invocations if isinstance(item, Mapping)
+        ],
+        "tool_messages": [
+            dict(item) for item in tool_messages if isinstance(item, Mapping)
+        ],
+        "rendered_prompt_variables": dict(rendered_variables),
+        "selection_policy": _context_string(llm_policy_map.get("selection_policy"))
+        or "adaptive",
+        "allowed_tools": list(llm_policy_map.get("allowed_tools") or []),
+        "llm_calls": list(llm_calls),
+        "aux_llm_calls": list(aux_llm_calls),
+        "validation": {
+            "status": "skipped",
+            "reason": "structured_tool_transport_blocked",
+        },
+        "completion_reason": "structured_tool_transport_blocked",
+        "failure_kind": failure_kind,
+        "retryable": retryable,
+        "transport_decision": decision,
+        "recovery_affordances": {
+            "advertised_api_surface_alternatives": advertised_alternatives,
+            "profile_concept_id": decision.get("profile_concept_id"),
+            "capability_source": decision.get("capability_source"),
+        },
+        "fail_closed": True,
+        "fallback_used": False,
+        "fallback_policy": "represented_surface_only",
+    }
+    if isinstance(prompt_variant_selection, Mapping) and prompt_variant_selection:
+        llm_step_envelope["base_prompt_id"] = prompt_variant_selection.get(
+            "base_prompt_concept_id"
+        )
+        llm_step_envelope["prompt_variant_selection"] = dict(prompt_variant_selection)
+    if isinstance(prompt_context_diagnostics, Mapping) and prompt_context_diagnostics:
+        llm_step_envelope["prompt_context_diagnostics"] = dict(
+            prompt_context_diagnostics
+        )
+    outputs: dict[str, Any] = {
+        "llm_step_envelope": llm_step_envelope,
+        "llm_calls": list(llm_calls),
+        "aux_llm_calls": list(aux_llm_calls),
+        "structured_tool_transport_blocker": decision,
+        "tool_invocations": list(llm_step_envelope["tool_invocations"]),
+        "tool_messages": list(llm_step_envelope["tool_messages"]),
+    }
+    if isinstance(prompt_context_diagnostics, Mapping) and prompt_context_diagnostics:
+        outputs["prompt_context_diagnostics"] = dict(prompt_context_diagnostics)
+    return WorkflowActionResult(
+        status="failed",
+        outputs=outputs,
+        error=f"workflow_structured_tool_transport_blocked:{failure_kind}",
+    )
+
+
 def _run_direct_llm_step(
     *,
     request: WorkflowActionRequest,
@@ -2757,6 +2862,22 @@ def _run_direct_llm_step(
             aux_llm_calls=request.data.get("aux_llm_calls") or [],
             selected_candidate=selected_candidate,
             timeout_seconds=timeout_override_sec,
+            prompt_variant_selection=prompt_variant_selection,
+            prompt_context_diagnostics=prompt_context_diagnostics,
+        )
+    except StructuredToolTransportError as exc:
+        return _build_structured_tool_transport_failure_result(
+            request=request,
+            stage=stage,
+            prompt_id=prompt_id,
+            prompt_source=prompt_source,
+            rendered_variables=rendered_variables,
+            llm_policy_map=llm_policy_map,
+            error=exc,
+            selected_model=model_name,
+            llm_calls=llm_calls,
+            aux_llm_calls=request.data.get("aux_llm_calls") or [],
+            selected_candidate=selected_candidate,
             prompt_variant_selection=prompt_variant_selection,
             prompt_context_diagnostics=prompt_context_diagnostics,
         )
@@ -3479,12 +3600,8 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
                 llm_policy_map.get("response_contract_text")
             )
             or None,
-            "required_json_fields": list(
-                _json_required_fields(validation_policy_map)
-            ),
-            "json_field_defaults": dict(
-                _json_field_defaults(validation_policy_map)
-            ),
+            "required_json_fields": list(_json_required_fields(validation_policy_map)),
+            "json_field_defaults": dict(_json_field_defaults(validation_policy_map)),
         }
     shared_data.update(
         {
@@ -3688,6 +3805,32 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
             aux_llm_calls=aux_llm_calls,
             selected_candidate=timeout_selected_candidate,
             timeout_seconds=timeout_override_sec,
+            prompt_variant_selection=prompt_variant_selection,
+            prompt_context_diagnostics=prompt_context_diagnostics,
+        )
+    except StructuredToolTransportError as exc:
+        return _build_structured_tool_transport_failure_result(
+            request=request,
+            stage=stage,
+            prompt_id=prompt_id,
+            prompt_source=prompt_source,
+            rendered_variables=rendered_variables,
+            llm_policy_map=llm_policy_map,
+            error=exc,
+            selected_model=timeout_selected_model,
+            llm_calls=llm_calls,
+            aux_llm_calls=aux_llm_calls,
+            tool_invocations=[
+                item
+                for item in (shared_data.get("invocations") or [])
+                if isinstance(item, Mapping)
+            ],
+            tool_messages=[
+                item
+                for item in (shared_data.get("tool_messages") or [])
+                if isinstance(item, Mapping)
+            ],
+            selected_candidate=timeout_selected_candidate,
             prompt_variant_selection=prompt_variant_selection,
             prompt_context_diagnostics=prompt_context_diagnostics,
         )
