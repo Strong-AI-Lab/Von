@@ -3405,6 +3405,12 @@ def load_workflow_definition_from_vontology(
     if not graph:
         return None
     fatal_warning_prefixes = (
+        # A represented workflow root can remain visible while one of its
+        # required step concepts is hidden from the current actor. Executing a
+        # graph silently reduced by access filtering would both change policy
+        # and disclose that a cached definition exists, so incomplete graphs
+        # fail closed for every loader caller.
+        "missing_step_concepts:",
         "workflow_step_retry_policy_invalid:",
         "workflow_step_approval_gate_invalid:",
         "workflow_step_idempotency_policy_invalid:",

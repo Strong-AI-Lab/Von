@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Sequence
 
+from ..security.access_control import override_current_actor
 from .execution_contracts import (
     WORKFLOW_CONTROL_SIGNAL_ERROR,
     resolve_control_signal_from_outputs,
@@ -381,7 +382,18 @@ class ActionRegistry:
                     else None
                 ),
             )
-            raw_result = handler(request)
+            # Durable execution carries the authenticated actor in the workflow
+            # environment rather than a Flask request context. Bind that actor
+            # while every explicit or fallback handler runs so downstream
+            # Vontology access checks cannot inherit an unscoped worker thread.
+            if env.user_concept_id or env.org_concept_id:
+                with override_current_actor(
+                    env.user_concept_id,
+                    env.org_concept_id,
+                ):
+                    raw_result = handler(request)
+            else:
+                raw_result = handler(request)
             if isinstance(raw_result, WorkflowActionResult):
                 result = raw_result
             else:

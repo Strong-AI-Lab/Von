@@ -36,6 +36,9 @@ from ..workflows.workflow_definition_identity_service import (
     collect_workflow_action_ids,
 )
 from ..workflows.mcp_tool_bridge import candidate_internal_mcp_tool_names
+from .workflow_discovery_access_service import (
+    filter_actor_accessible_workflow_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -718,6 +721,19 @@ class WorkflowCapabilityMatch:
         }
 
 
+def _filter_actor_accessible_capability_rows(
+    rows: Sequence[Tuple[float, _CapabilityEntry, str]],
+) -> list[Tuple[float, _CapabilityEntry, str]]:
+    """Remove actor-inaccessible entries before capability metadata escapes."""
+
+    if not rows:
+        return []
+    accessible_ids = filter_actor_accessible_workflow_ids(
+        entry.workflow_id for _score, entry, _source in rows
+    )
+    return [row for row in rows if row[1].workflow_id in accessible_ids]
+
+
 class WorkflowCapabilityIndex:
     """Dedicated workflow retrieval surface backed by the RAG service."""
 
@@ -1324,15 +1340,21 @@ class WorkflowCapabilityIndex:
                 continue
             seen_ids.add(workflow_id)
             scored_rows.append(
-                (_coerce_retrieval_score(result.get("score")), entry, "capability_index")
+                (
+                    _coerce_retrieval_score(result.get("score")),
+                    entry,
+                    "capability_index",
+                )
             )
 
+        scored_rows = _filter_actor_accessible_capability_rows(scored_rows)
         if not scored_rows:
             scored_rows = _search_memory_capability_entries(
                 clean_query,
                 entries,
                 exclude_ids=exclude_ids,
             )
+            scored_rows = _filter_actor_accessible_capability_rows(scored_rows)
 
         if not scored_rows:
             return []
@@ -3356,10 +3378,13 @@ def resolve_workflow_capabilities_for_contract(
     elif not entries:
         return []
 
-    excluded = {str(item).strip() for item in (exclude_ids or set()) if str(item).strip()}
+    excluded = {
+        str(item).strip() for item in (exclude_ids or set()) if str(item).strip()
+    }
+    accessible_ids = filter_actor_accessible_workflow_ids(entries.keys())
     scored_rows: list[tuple[float, str, _CapabilityEntry, dict[str, Any]]] = []
     for workflow_id, entry in entries.items():
-        if workflow_id in excluded:
+        if workflow_id in excluded or workflow_id not in accessible_ids:
             continue
         scored = _score_contract_capability_entry(
             entry,

@@ -3128,6 +3128,26 @@ class TestFullWorkflowConversion:
 
         assert defn is None
 
+    def test_missing_referenced_step_is_a_fatal_incomplete_graph(self):
+        """A visible root must not execute after a required step is filtered out."""
+
+        graph = _make_graph(
+            initial_step="#V#visible_step",
+            steps=[_make_step("#V#visible_step")],
+        )
+        with patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+            return_value=(
+                graph,
+                ["missing_step_concepts:#V#actor_restricted_step"],
+            ),
+        ):
+            with pytest.raises(
+                ValueError,
+                match="missing_step_concepts:#V#actor_restricted_step",
+            ):
+                load_workflow_definition_from_vontology("#V#test_workflow")
+
     def test_branching_workflow(self):
         """A workflow with on_true/on_false branching and failure/unknown routes."""
         steps = [

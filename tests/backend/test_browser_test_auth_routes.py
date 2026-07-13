@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from flask import Flask, session
 import pytest
 
@@ -152,3 +154,60 @@ def test_browser_test_login_sets_browser_test_session(monkeypatch, app_client):
             "refresh_fixture": None,
         }
     ]
+
+
+def test_exchange_token_clears_scope_when_authenticated_user_changes(app_client):
+    _, client = app_client
+    token = "cross-account-token"
+    auth_routes._oauth_states[token] = {
+        "timestamp": time.time(),
+        "user": {
+            "concept_id": "#V#user_b",
+            "email": "user-b@example.test",
+            "name": "User B",
+        },
+    }
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user_a"
+        sess["user_email"] = "user-a@example.test"
+        sess["organisation_concept_id"] = "secret_org_a"
+        sess["role_in_org"] = "owner"
+        sess["namespace"] = "#V#user_a@secret_org_a"
+        sess["session_id"] = "secret_chat_a"
+
+    response = client.post(
+        "/von/api/auth/exchange-token",
+        json={"token": token},
+    )
+
+    assert response.status_code == 200
+    with client.session_transaction() as sess:
+        assert sess["user_concept_id"] == "#V#user_b"
+        assert sess["user_email"] == "user-b@example.test"
+        assert "organisation_concept_id" not in sess
+        assert "role_in_org" not in sess
+        assert "namespace" not in sess
+        assert "session_id" not in sess
+
+
+def test_logout_invalidates_owned_window_context(monkeypatch, app_client):
+    _, client = app_client
+    from src.backend.services import window_session_context_service as window_service
+
+    store = window_service.WindowSessionStore()
+    monkeypatch.setattr(window_service, "_window_session_store", store)
+    ctx = store.get_or_create("owned_window", "#V#user_a")
+    ctx.organisation_concept_id = "secret_org_a"
+    ctx.namespace = "#V#user_a@secret_org_a"
+    store.set(ctx)
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user_a"
+        sess["user_email"] = "user-a@example.test"
+
+    response = client.post(
+        "/von/api/auth/logout",
+        headers={"X-Von-Window-Session": "owned_window"},
+    )
+
+    assert response.status_code == 200
+    assert store.get("owned_window") is None

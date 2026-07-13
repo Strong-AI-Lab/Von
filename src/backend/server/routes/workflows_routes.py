@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import Blueprint, jsonify, request, session
 
 from ...db.transient_errors import is_transient_mongo_error
-from ...security.access_control import get_effective_user_concept_id
+from ...security.access_control import (
+    cache_scope_key,
+    can_access_concept,
+    get_effective_organisation_concept_id,
+    get_effective_user_concept_id,
+)
 from ...services.workflow_episode_service import (
     count_workflow_use_episodes,
     get_workflow_episode_counts_for_workflows,
@@ -20,10 +25,6 @@ from ...services.workflow_episode_service import (
 )
 from ...services.workflow_capability_service import (
     get_workflow_capability_index_readiness_report,
-)
-from ...services.namespace_service import (
-    coerce_namespace,
-    resolve_canonical_namespace,
 )
 from ...services.workflow_prediction_service import (
     build_workflow_prediction_envelope,
@@ -41,6 +42,10 @@ from ...workflows.durable import (
 from ...workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
+from ...workflows.durable.registry_factory import (
+    WorkflowDefinitionAuthorityTransientError,
+    resolve_workflow_definition_from_authority,
+)
 from ...workflows.vontology_loader import (
     build_workflow_process_graph,
     resolve_workflow_narrative_text,
@@ -48,8 +53,14 @@ from ...workflows.vontology_loader import (
 from ...workflows.workflow_definition_identity_service import (
     build_workflow_definition_identity_from_graph,
 )
-from ...workflows.workflow_listing_service import build_workflow_listing_entry
+from ...workflows.workflow_listing_service import (
+    build_workflow_listing_entry,
+    collect_workflow_introspection_projection_ids,
+    filter_workflow_ids_for_current_actor,
+    project_workflow_introspection_payload_for_current_actor,
+)
 from ...workflows.workflow_studio_service import (
+    WorkflowStudioAuthorityError,
     WorkflowStudioConflictError,
     apply_workflow_authoring_spec,
     build_workflow_catalogue_payload,
@@ -57,6 +68,7 @@ from ...workflows.workflow_studio_service import (
     build_workflow_studio_detail_payload,
     demote_workflow_routing,
     preview_workflow_authoring_spec,
+    require_workflow_studio_mutation_actor,
     review_workflow_authoring_proposal,
     rollback_workflow_authoring_promotion,
     submit_workflow_authoring_proposal,
@@ -69,11 +81,11 @@ workflows_bp = Blueprint("workflows", __name__)
 
 _WORKFLOW_DEFINITIONS_CACHE_LOCK = threading.Lock()
 _WORKFLOW_DEFINITIONS_CACHE: Dict[
-    Tuple[int, Optional[str], Optional[str], Optional[str]], Dict[str, Any]
+    Tuple[int, Optional[str], Optional[str], Optional[str], str], Dict[str, Any]
 ] = {}
 _WORKFLOW_DEFINITIONS_REFRESH_LOCKS_LOCK = threading.Lock()
 _WORKFLOW_DEFINITIONS_REFRESH_LOCKS: Dict[
-    Tuple[int, Optional[str], Optional[str], Optional[str]], threading.Lock
+    Tuple[int, Optional[str], Optional[str], Optional[str], str], threading.Lock
 ] = {}
 _WORKFLOW_DEFINITIONS_CACHE_MAX_ENTRIES = 32
 _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
@@ -235,13 +247,133 @@ def _write_cached_workflow_capability_index_status(payload: Dict[str, Any]) -> N
         )
 
 
+_PUBLIC_WORKFLOW_CAPABILITY_INDEX_STATUSES = {
+    "ready",
+    "building",
+    "rebuilding",
+    "warming",
+    "rebuild_required",
+    "not_ready",
+    "error",
+    "timeout",
+}
+
+
+def _actor_visible_workflow_count() -> int | None:
+    """Return a fail-closed actor-scoped workflow count for public status UI."""
+
+    try:
+        from ...workflows.durable.registry_factory import (
+            build_durable_workflow_registry_read_only,
+        )
+
+        registry = build_durable_workflow_registry_read_only(
+            defer_parity_work=True
+        )
+        return len(
+            filter_workflow_ids_for_current_actor(registry.all_workflow_ids())
+        )
+    except Exception:
+        logger.warning(
+            "Could not derive actor-visible workflow count for capability status",
+            exc_info=True,
+        )
+        return None
+
+
+def _build_actor_safe_workflow_capability_index_status(
+    payload: Dict[str, Any],
+    *,
+    visible_workflow_count: int | None = None,
+) -> Dict[str, Any]:
+    """Project global capability diagnostics into a bounded public readiness view.
+
+    The capability-index runtime state is process-global and contains raw build
+    errors, filesystem paths, invalidation reasons, and hidden-inclusive counts.
+    Those fields are useful to operator diagnostics but are not safe on an
+    actor-facing workflow route.  Derive all prose from a closed status set and
+    recompute the only workflow count under ambient actor authority.
+    """
+
+    ready = bool(payload.get("ready", False))
+    raw_status = str(payload.get("status") or "").strip().lower()
+    if ready:
+        status = "ready"
+    elif raw_status in _PUBLIC_WORKFLOW_CAPABILITY_INDEX_STATUSES:
+        status = raw_status
+    else:
+        status = "not_ready"
+
+    if status == "ready":
+        summary = "Workflow capability index ready."
+        detail = (
+            "Workflow discovery is available for workflows visible to the "
+            "current actor."
+        )
+    elif status in {"building", "rebuilding", "warming", "timeout"}:
+        summary = "Workflow capability index is still initialising."
+        detail = (
+            "Workflow discovery is waiting for the shared capability index to "
+            "become ready."
+        )
+    elif status == "rebuild_required":
+        summary = "Workflow capability index rebuild required."
+        detail = (
+            "Workflow discovery is unavailable until an operator rebuilds the "
+            "shared capability index."
+        )
+    elif status == "error":
+        summary = "Workflow capability index not ready."
+        detail = (
+            "Workflow discovery is unavailable. Operator diagnostics contain "
+            "the underlying failure details."
+        )
+    else:
+        summary = "Workflow capability index not ready."
+        detail = "No ready workflow capability snapshot is currently available."
+
+    if not isinstance(visible_workflow_count, int) or visible_workflow_count < 0:
+        visible_workflow_count = _actor_visible_workflow_count()
+    checked_at_utc = None
+    raw_checked_at_utc = payload.get("checked_at_utc")
+    if isinstance(raw_checked_at_utc, str) and raw_checked_at_utc.strip():
+        candidate_checked_at_utc = raw_checked_at_utc.strip()
+        try:
+            datetime.fromisoformat(candidate_checked_at_utc.replace("Z", "+00:00"))
+            checked_at_utc = candidate_checked_at_utc
+        except ValueError:
+            checked_at_utc = None
+    warning_level = (
+        "ok"
+        if ready
+        else ("error" if status in {"error", "rebuild_required"} else "warning")
+    )
+    return {
+        "schema_version": "workflow_capability_index_public_status.v1",
+        "ready": ready,
+        "status": status,
+        "warning_level": warning_level,
+        "workflow_discovery_available": ready,
+        "user_visible_blocker": not ready,
+        "user_visible_severity": "ok" if ready else "error",
+        "footer_red_flag": not ready,
+        "build_in_progress": bool(payload.get("build_in_progress", False)),
+        "summary": summary,
+        "detail": detail,
+        "visible_workflow_count": visible_workflow_count,
+        "visible_workflow_count_available": visible_workflow_count is not None,
+        "workflow_count_scope": "actor_visible",
+        "checked_at_utc": checked_at_utc,
+    }
+
+
 def _attach_workflow_capability_index_status_cache_metadata(
     payload: Dict[str, Any],
     *,
     state: str,
     age_seconds: float | None,
 ) -> Dict[str, Any]:
-    response_payload = dict(payload)
+    response_payload = _build_actor_safe_workflow_capability_index_status(payload)
     response_payload["cache"] = {
         "state": state,
         "age_seconds": (
@@ -258,7 +390,7 @@ def _attach_workflow_capability_index_status_cache_metadata(
 
 def _read_cached_workflow_definitions_entry(
     *,
-    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str], str],
     bypass_cache: bool,
 ) -> Tuple[Optional[Dict[str, Any]], bool, Optional[float]]:
     if bypass_cache:
@@ -292,7 +424,7 @@ def _read_cached_workflow_definitions_entry(
 
 def _read_cached_workflow_definitions(
     *,
-    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str], str],
     bypass_cache: bool,
 ) -> Optional[Dict[str, Any]]:
     payload, is_fresh, _age_seconds = _read_cached_workflow_definitions_entry(
@@ -334,7 +466,31 @@ def _attach_workflow_definitions_cache_metadata(
     refresh_in_progress: bool,
     retry_after_seconds: float | None = None,
 ) -> Dict[str, Any]:
-    response_payload = dict(payload)
+    cached_workflow_ids = payload.get("_introspection_workflow_ids")
+    cached_total_workflow_ids = payload.get("_introspection_total_workflow_ids")
+    response_payload = project_workflow_introspection_payload_for_current_actor(
+        payload,
+        workflow_ids=(
+            cached_workflow_ids if isinstance(cached_workflow_ids, list) else ()
+        ),
+        total_workflow_ids=(
+            cached_total_workflow_ids
+            if isinstance(cached_total_workflow_ids, list)
+            else None
+        ),
+    )
+    raw_capability_index = response_payload.get("capability_index")
+    projected_total = response_payload.get("total")
+    response_payload["capability_index"] = (
+        _build_actor_safe_workflow_capability_index_status(
+            raw_capability_index if isinstance(raw_capability_index, dict) else {},
+            visible_workflow_count=(
+                projected_total if isinstance(projected_total, int) else None
+            ),
+        )
+    )
+    response_payload.pop("_introspection_workflow_ids", None)
+    response_payload.pop("_introspection_total_workflow_ids", None)
     response_payload["cache"] = _build_workflow_definitions_cache_metadata(
         state=state,
         age_seconds=age_seconds,
@@ -345,7 +501,7 @@ def _attach_workflow_definitions_cache_metadata(
 
 
 def _get_workflow_definitions_refresh_lock(
-    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str], str],
 ) -> threading.Lock:
     with _WORKFLOW_DEFINITIONS_REFRESH_LOCKS_LOCK:
         lock = _WORKFLOW_DEFINITIONS_REFRESH_LOCKS.get(cache_key)
@@ -357,7 +513,7 @@ def _get_workflow_definitions_refresh_lock(
 
 def _write_cached_workflow_definitions(
     *,
-    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str], str],
     payload: Dict[str, Any],
 ) -> None:
     ttl_seconds = _read_workflow_definitions_cache_ttl_seconds()
@@ -413,14 +569,26 @@ def _build_workflow_definitions_payload(
     )
     if not isinstance(inventory_snapshot, dict):
         inventory_snapshot = {}
-    workflow_ids = sorted(list(registry.all_workflow_ids()))
+    all_workflow_ids = sorted(list(registry.all_workflow_ids()))
+    introspection_workflow_ids = collect_workflow_introspection_projection_ids(
+        all_workflow_ids,
+        parity_inventory=inventory_snapshot,
+    )
+    workflow_ids = filter_workflow_ids_for_current_actor(all_workflow_ids)
     selected_ids = workflow_ids[:limit]
-    usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(selected_ids)
+    usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(
+        selected_ids,
+        namespace=namespace,
+        session_id=session_id,
+        turn_id=turn_id,
+        strict_namespace_scope=True,
+    )
     episode_count_map = get_workflow_episode_counts_for_workflows(
         selected_ids,
-        namespace=namespace or None,
+        namespace=namespace,
         session_id=session_id or None,
         turn_id=turn_id or None,
+        strict_namespace_scope=True,
     )
 
     items: List[Dict[str, Any]] = []
@@ -481,7 +649,11 @@ def _build_workflow_definitions_payload(
             }
         )
 
-    return {
+    payload = {
+        # Retained only inside the cache so a response can be re-projected
+        # against ambient actor authority after an unscoped background refresh.
+        "_introspection_workflow_ids": introspection_workflow_ids,
+        "_introspection_total_workflow_ids": all_workflow_ids,
         "items": items,
         "count": len(items),
         "total": len(workflow_ids),
@@ -493,11 +665,19 @@ def _build_workflow_definitions_payload(
         "parity_inventory": inventory_snapshot,
         "capability_index": get_workflow_capability_index_readiness_report(),
     }
+    projected_payload = project_workflow_introspection_payload_for_current_actor(
+        payload,
+        workflow_ids=introspection_workflow_ids,
+        total_workflow_ids=all_workflow_ids,
+    )
+    projected_payload["_introspection_workflow_ids"] = introspection_workflow_ids
+    projected_payload["_introspection_total_workflow_ids"] = all_workflow_ids
+    return projected_payload
 
 
 def _refresh_workflow_definitions_cache_entry(
     *,
-    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str], str],
     limit: int,
     namespace: str | None,
     session_id: str | None,
@@ -523,7 +703,7 @@ def _refresh_workflow_definitions_cache_entry(
 
 def _start_workflow_definitions_background_refresh(
     *,
-    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str], str],
     limit: int,
     namespace: str | None,
     session_id: str | None,
@@ -556,6 +736,48 @@ def _start_workflow_definitions_background_refresh(
 
 @workflows_bp.get("/api/workflows/definitions/<path:workflow_id>")
 def api_get_workflow_definition(workflow_id: str):
+    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+        return (
+            jsonify(
+                {
+                    "error": "workflow_definition_not_found",
+                    "workflow_id": workflow_id,
+                }
+            ),
+            404,
+        )
+
+    # Root visibility alone is insufficient: a globally warmed process graph
+    # can reference restricted steps, prompts, actions, or mappings. Require the
+    # actor-scoped executable loader to prove the complete graph before any raw
+    # graph/narrative projection is built.
+    try:
+        authority = resolve_workflow_definition_from_authority(
+            workflow_id,
+            actor_user_id=get_effective_user_concept_id(),
+            actor_org_id=get_effective_organisation_concept_id(),
+        )
+    except WorkflowDefinitionAuthorityTransientError:
+        return (
+            jsonify(
+                {
+                    "error": "workflow_definition_temporarily_unavailable",
+                    "workflow_id": workflow_id,
+                }
+            ),
+            503,
+        )
+    if authority.definition is None:
+        return (
+            jsonify(
+                {
+                    "error": "workflow_definition_not_found",
+                    "workflow_id": workflow_id,
+                }
+            ),
+            404,
+        )
+
     definition, warnings = build_workflow_process_graph(workflow_id)
     raw, raw_source = resolve_workflow_narrative_text(workflow_id)
 
@@ -608,7 +830,31 @@ def api_list_workflow_definitions():
     except Exception:
         limit = 200
     limit = max(1, min(limit, 500))
-    namespace = request.args.get("namespace")
+    claimed_namespace = request.args.get("namespace")
+    ambient_user_id = get_effective_user_concept_id()
+    ambient_org_id = get_effective_organisation_concept_id()
+    if ambient_user_id or ambient_org_id:
+        actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+            claimed_namespace=claimed_namespace,
+        )
+        if actor_error_response is not None:
+            return actor_error_response
+        namespace = getattr(actor_scope, "namespace", None)
+    elif claimed_namespace:
+        return (
+            jsonify(
+                {
+                    "error": "workflow_actor_authority_required",
+                    "error_code": "workflow_actor_authority_required",
+                }
+            ),
+            403,
+        )
+    else:
+        # Public workflow metadata may remain visible, but metrics have no
+        # provable tenant scope and therefore resolve to zero under the strict
+        # episode query used below.
+        namespace = None
     session_id = request.args.get("session_id")
     turn_id = request.args.get("turn_id")
     bypass_cache = request.args.get("nocache", "").lower() in {
@@ -617,7 +863,13 @@ def api_list_workflow_definitions():
         "yes",
         "on",
     }
-    cache_key = (limit, namespace or None, session_id or None, turn_id or None)
+    cache_key = (
+        limit,
+        namespace or None,
+        session_id or None,
+        turn_id or None,
+        cache_scope_key(),
+    )
     refresh_lock: threading.Lock | None = None
     refresh_lock_acquired = False
     try:
@@ -804,6 +1056,16 @@ def api_workflow_studio_catalogue():
             "include_designs": include_designs,
         }
         return jsonify(payload)
+    except WorkflowStudioAuthorityError as exc:
+        return (
+            jsonify(
+                {
+                    "error": exc.error_code,
+                    "error_code": exc.error_code,
+                }
+            ),
+            403,
+        )
     except Exception as exc:
         logger.exception("Failed to build workflow studio catalogue")
         return (
@@ -817,8 +1079,61 @@ def api_workflow_studio_catalogue():
         )
 
 
+def _workflow_studio_not_found_response(workflow_id: str):
+    return (
+        jsonify(
+            {
+                "error": "workflow_definition_not_found",
+                "workflow_id": workflow_id,
+            }
+        ),
+        404,
+    )
+
+
+def _workflow_studio_target_not_found(workflow_id: str):
+    """Conceal an existing Studio target not visible to the request actor."""
+
+    if not can_access_concept(workflow_id):
+        return _workflow_studio_not_found_response(workflow_id)
+    return None
+
+
+def _workflow_studio_authority_response(
+    exc: WorkflowStudioAuthorityError,
+    workflow_id: str,
+):
+    """Return a bounded authentication denial or conceal an inaccessible graph."""
+
+    if exc.error_code == "workflow_actor_authority_required":
+        return (
+            jsonify(
+                {
+                    "error": exc.error_code,
+                    "error_code": exc.error_code,
+                    "workflow_id": workflow_id,
+                }
+            ),
+            403,
+        )
+    return _workflow_studio_not_found_response(workflow_id)
+
+
+def _resolve_workflow_studio_mutation_actor(workflow_id: str):
+    """Resolve canonical ambient authority before entering a Studio write route."""
+
+    try:
+        return require_workflow_studio_mutation_actor(), None
+    except WorkflowStudioAuthorityError as exc:
+        return None, _workflow_studio_authority_response(exc, workflow_id)
+
+
 @workflows_bp.get("/api/workflow-studio/workflows/<path:workflow_id>")
 def api_get_workflow_studio_workflow(workflow_id: str):
+    target_not_found = _workflow_studio_target_not_found(workflow_id)
+    if target_not_found is not None:
+        return target_not_found
+
     namespace = request.args.get("namespace")
     session_id = request.args.get("session_id")
     turn_id = request.args.get("turn_id")
@@ -842,6 +1157,16 @@ def api_get_workflow_studio_workflow(workflow_id: str):
                 404,
             )
         return jsonify(payload)
+    except WorkflowStudioAuthorityError:
+        return (
+            jsonify(
+                {
+                    "error": "workflow_definition_not_found",
+                    "workflow_id": workflow_id,
+                }
+            ),
+            404,
+        )
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -879,6 +1204,8 @@ def api_preview_workflow_studio_authoring(workflow_id: str):
         )
     except WorkflowStudioConflictError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except WorkflowStudioAuthorityError:
+        return _workflow_studio_not_found_response(workflow_id)
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -900,6 +1227,11 @@ def api_preview_workflow_studio_authoring(workflow_id: str):
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/authoring/apply")
 def api_apply_workflow_studio_authoring(workflow_id: str):
+    _actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
+        workflow_id
+    )
+    if actor_error_response is not None:
+        return actor_error_response
     payload = request.get_json(silent=True) or {}
     authoring_spec = payload.get("authoring_spec")
     base_definition_hash = payload.get("base_definition_hash")
@@ -930,6 +1262,8 @@ def api_apply_workflow_studio_authoring(workflow_id: str):
         return jsonify(result)
     except WorkflowStudioConflictError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except WorkflowStudioAuthorityError as exc:
+        return _workflow_studio_authority_response(exc, workflow_id)
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -948,12 +1282,17 @@ def api_apply_workflow_studio_authoring(workflow_id: str):
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/authoring")
 def api_submit_workflow_studio_authoring_proposal(workflow_id: str):
+    actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
+        workflow_id
+    )
+    if actor_error_response is not None:
+        return actor_error_response
     payload = request.get_json(silent=True) or {}
     authoring_spec = payload.get("authoring_spec")
     base_definition_hash = payload.get("base_definition_hash")
     if not isinstance(authoring_spec, dict):
         return jsonify({"error": "authoring_spec_dict_required"}), 400
-    user_concept_id, _org_concept_id = _resolve_request_llm_scope_ids()
+    user_concept_id = actor_scope.user_concept_id
     namespace = _safe_request_arg(payload.get("namespace")) or None
     try:
         result = submit_workflow_authoring_proposal(
@@ -972,6 +1311,8 @@ def api_submit_workflow_studio_authoring_proposal(workflow_id: str):
         return jsonify(result)
     except WorkflowStudioConflictError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except WorkflowStudioAuthorityError as exc:
+        return _workflow_studio_authority_response(exc, workflow_id)
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -993,11 +1334,20 @@ def api_submit_workflow_studio_authoring_proposal(workflow_id: str):
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/review")
 def api_review_workflow_studio_authoring_proposal(workflow_id: str):
+    target_not_found = _workflow_studio_target_not_found(workflow_id)
+    if target_not_found is not None:
+        return target_not_found
+    actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
+        workflow_id
+    )
+    if actor_error_response is not None:
+        return actor_error_response
     payload = request.get_json(silent=True) or {}
     action = _safe_request_arg(payload.get("action"))
     review_reason = _safe_request_arg(payload.get("review_reason")) or None
     namespace = _safe_request_arg(payload.get("namespace")) or None
-    user_concept_id, org_concept_id = _resolve_request_llm_scope_ids()
+    user_concept_id = actor_scope.user_concept_id
+    org_concept_id = actor_scope.organisation_concept_id
     if not action:
         return jsonify({"error": "review_action_required", "workflow_id": workflow_id}), 400
     try:
@@ -1025,6 +1375,8 @@ def api_review_workflow_studio_authoring_proposal(workflow_id: str):
         return jsonify(result)
     except WorkflowStudioConflictError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except WorkflowStudioAuthorityError as exc:
+        return _workflow_studio_authority_response(exc, workflow_id)
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -1046,10 +1398,19 @@ def api_review_workflow_studio_authoring_proposal(workflow_id: str):
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/rollback")
 def api_rollback_workflow_studio_authoring_promotion(workflow_id: str):
+    target_not_found = _workflow_studio_target_not_found(workflow_id)
+    if target_not_found is not None:
+        return target_not_found
+    actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
+        workflow_id
+    )
+    if actor_error_response is not None:
+        return actor_error_response
     payload = request.get_json(silent=True) or {}
     review_reason = _safe_request_arg(payload.get("review_reason")) or None
     namespace = _safe_request_arg(payload.get("namespace")) or None
-    user_concept_id, org_concept_id = _resolve_request_llm_scope_ids()
+    user_concept_id = actor_scope.user_concept_id
+    org_concept_id = actor_scope.organisation_concept_id
     try:
         result = rollback_workflow_authoring_promotion(
             workflow_id,
@@ -1074,6 +1435,8 @@ def api_rollback_workflow_studio_authoring_promotion(workflow_id: str):
         return jsonify(result)
     except WorkflowStudioConflictError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except WorkflowStudioAuthorityError as exc:
+        return _workflow_studio_authority_response(exc, workflow_id)
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -1095,9 +1458,17 @@ def api_rollback_workflow_studio_authoring_promotion(workflow_id: str):
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/publication/demote")
 def api_demote_workflow_studio_publication(workflow_id: str):
+    target_not_found = _workflow_studio_target_not_found(workflow_id)
+    if target_not_found is not None:
+        return target_not_found
+    actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
+        workflow_id
+    )
+    if actor_error_response is not None:
+        return actor_error_response
     payload = request.get_json(silent=True) or {}
     review_reason = _safe_request_arg(payload.get("review_reason")) or None
-    user_concept_id, _org_concept_id = _resolve_request_llm_scope_ids()
+    user_concept_id = actor_scope.user_concept_id
     try:
         result = demote_workflow_routing(
             workflow_id,
@@ -1106,6 +1477,8 @@ def api_demote_workflow_studio_publication(workflow_id: str):
         )
         _clear_workflow_definitions_cache()
         return jsonify(result)
+    except WorkflowStudioAuthorityError as exc:
+        return _workflow_studio_authority_response(exc, workflow_id)
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -1124,10 +1497,18 @@ def api_demote_workflow_studio_publication(workflow_id: str):
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/publication/supersede")
 def api_supersede_workflow_studio_publication(workflow_id: str):
+    target_not_found = _workflow_studio_target_not_found(workflow_id)
+    if target_not_found is not None:
+        return target_not_found
+    actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
+        workflow_id
+    )
+    if actor_error_response is not None:
+        return actor_error_response
     payload = request.get_json(silent=True) or {}
     replacement_workflow_id = _safe_request_arg(payload.get("replacement_workflow_id"))
     review_reason = _safe_request_arg(payload.get("review_reason")) or None
-    user_concept_id, _org_concept_id = _resolve_request_llm_scope_ids()
+    user_concept_id = actor_scope.user_concept_id
     if not replacement_workflow_id:
         return (
             jsonify(
@@ -1138,6 +1519,11 @@ def api_supersede_workflow_studio_publication(workflow_id: str):
             ),
             400,
         )
+    replacement_not_found = _workflow_studio_target_not_found(
+        replacement_workflow_id
+    )
+    if replacement_not_found is not None:
+        return replacement_not_found
     try:
         result = supersede_workflow_publication(
             workflow_id,
@@ -1147,6 +1533,8 @@ def api_supersede_workflow_studio_publication(workflow_id: str):
         )
         _clear_workflow_definitions_cache()
         return jsonify(result)
+    except WorkflowStudioAuthorityError as exc:
+        return _workflow_studio_authority_response(exc, workflow_id)
     except ValueError as exc:
         return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
     except Exception as exc:
@@ -1165,6 +1553,9 @@ def api_supersede_workflow_studio_publication(workflow_id: str):
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/description")
 def api_build_workflow_studio_description_proposal(workflow_id: str):
+    target_not_found = _workflow_studio_target_not_found(workflow_id)
+    if target_not_found is not None:
+        return target_not_found
     payload = request.get_json(silent=True) or {}
     mode = str(payload.get("mode") or "auto")
     user_concept_id, org_concept_id = _resolve_request_llm_scope_ids()
@@ -1199,7 +1590,17 @@ def api_build_workflow_studio_description_proposal(workflow_id: str):
 @workflows_bp.get("/api/workflows/executions/<execution_id>")
 def api_get_workflow_execution(execution_id: str):
     doc = get_workflow_execution_trace(execution_id)
-    if not doc:
+    workflow_id = doc.get("workflow_id") if isinstance(doc, dict) else None
+    workflow_visible = bool(
+        isinstance(workflow_id, str)
+        and workflow_id
+        in filter_workflow_ids_for_current_actor([workflow_id])
+    )
+    if (
+        not doc
+        or not workflow_visible
+        or not _workflow_trace_matches_current_actor(doc)
+    ):
         return (
             jsonify(
                 {"error": "workflow_execution_not_found", "execution_id": execution_id}
@@ -1216,14 +1617,41 @@ def api_list_recent_workflow_executions():
         limit = int(limit_raw)
     except Exception:
         limit = 20
-    namespace = request.args.get("namespace")
-    workflow_id = request.args.get("workflow_id")
+    actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=request.args.get("user_id"),
+        claimed_org_id=request.args.get("org_id"),
+        claimed_namespace=request.args.get("namespace"),
+    )
+    if actor_error_response is not None:
+        return actor_error_response
+    namespace = getattr(actor_scope, "namespace", None)
+    workflow_id = _safe_request_arg(request.args.get("workflow_id")) or None
+    if workflow_id and workflow_id not in filter_workflow_ids_for_current_actor(
+        [workflow_id]
+    ):
+        return jsonify({"items": [], "count": 0})
 
     docs = list_recent_workflow_execution_traces(
         limit=limit,
-        namespace=namespace or None,
-        workflow_id=workflow_id or None,
+        namespace=namespace,
+        workflow_id=workflow_id,
     )
+    visible_workflow_ids = set(
+        filter_workflow_ids_for_current_actor(
+            [
+                doc.get("workflow_id")
+                for doc in docs
+                if isinstance(doc, dict)
+            ]
+        )
+    )
+    docs = [
+        doc
+        for doc in docs
+        if isinstance(doc, dict)
+        and doc.get("workflow_id") in visible_workflow_ids
+        and _workflow_trace_matches_current_actor(doc)
+    ]
     return jsonify({"items": docs, "count": len(docs)})
 
 
@@ -1242,7 +1670,25 @@ def api_get_workflow_prediction_envelope():
             400,
         )
 
-    namespace = _safe_request_arg(request.args.get("namespace")) or None
+    actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=request.args.get("user_id"),
+        claimed_org_id=request.args.get("org_id"),
+        claimed_namespace=request.args.get("namespace"),
+    )
+    if actor_error_response is not None:
+        return actor_error_response
+    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "workflow_not_found",
+                    "workflow_id": workflow_id,
+                }
+            ),
+            404,
+        )
+    namespace = getattr(actor_scope, "namespace", None)
     model = _safe_request_arg(request.args.get("model")) or None
     provider = _safe_request_arg(request.args.get("provider")) or None
     limit_raw = request.args.get("limit", "50")
@@ -1294,8 +1740,15 @@ def api_get_workflow_prediction_envelope():
 def api_list_workflow_use_episodes():
     """List workflow-use episodes for monitor drill-down diagnostics."""
 
-    workflow_id = request.args.get("workflow_id")
-    namespace = request.args.get("namespace")
+    workflow_id = _safe_request_arg(request.args.get("workflow_id")) or None
+    actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=request.args.get("user_id"),
+        claimed_org_id=request.args.get("org_id"),
+        claimed_namespace=request.args.get("namespace"),
+    )
+    if actor_error_response is not None:
+        return actor_error_response
+    namespace = getattr(actor_scope, "namespace", None)
     session_id = request.args.get("session_id")
     turn_id = request.args.get("turn_id")
     try:
@@ -1312,18 +1765,38 @@ def api_list_workflow_use_episodes():
     }
 
     try:
+        from ...workflows.durable.registry_factory import (
+            build_durable_workflow_registry_read_only,
+        )
+
+        registry = build_durable_workflow_registry_read_only(
+            defer_parity_work=True
+        )
+        visible_workflow_ids = filter_workflow_ids_for_current_actor(
+            registry.all_workflow_ids()
+        )
+        if workflow_id:
+            visible_workflow_ids = [
+                candidate
+                for candidate in visible_workflow_ids
+                if candidate == workflow_id
+            ]
         items = list_workflow_use_episodes(
-            workflow_id=workflow_id or None,
-            namespace=namespace or None,
+            workflow_id=workflow_id,
+            workflow_ids=visible_workflow_ids,
+            namespace=namespace,
             session_id=session_id or None,
             turn_id=turn_id or None,
+            strict_namespace_scope=True,
             limit=limit,
         )
         total = count_workflow_use_episodes(
-            workflow_id=workflow_id or None,
-            namespace=namespace or None,
+            workflow_id=workflow_id,
+            workflow_ids=visible_workflow_ids,
+            namespace=namespace,
             session_id=session_id or None,
             turn_id=turn_id or None,
+            strict_namespace_scope=True,
         )
         return jsonify(
             {
@@ -1373,6 +1846,161 @@ def _get_instance_manager() -> WorkflowInstanceManager:
     return _instance_manager
 
 
+def _resolve_http_workflow_actor_scope(
+    *,
+    claimed_user_id: Any = None,
+    claimed_org_id: Any = None,
+    claimed_namespace: Any = None,
+):
+    """Resolve request actor authority without trusting HTTP payload claims."""
+
+    from ...services.workflow_actor_scope_service import (
+        WorkflowActorScopeError,
+        resolve_authoritative_workflow_actor_scope,
+    )
+
+    try:
+        return (
+            resolve_authoritative_workflow_actor_scope(
+                claimed_user_id=claimed_user_id,
+                claimed_org_id=claimed_org_id,
+                claimed_namespace=claimed_namespace,
+                allow_unscoped_claims=False,
+            ),
+            None,
+        )
+    except WorkflowActorScopeError as exc:
+        status_code = (
+            400 if exc.reason == "workflow_actor_namespace_invalid" else 403
+        )
+        return (
+            None,
+            (
+                jsonify(
+                    {
+                        "error": exc.reason,
+                        "error_code": exc.reason,
+                        "mismatch_fields": list(exc.mismatch_fields),
+                    }
+                ),
+                status_code,
+            ),
+        )
+
+
+def _workflow_schedule_matches_current_actor(schedule: Any) -> bool:
+    """Return whether the persisted schedule belongs to the request actor."""
+
+    actor_scope = _match_exact_persisted_workflow_actor(
+        user_id=getattr(schedule, "user_id", None),
+        org_id=getattr(schedule, "org_id", None),
+        namespace=getattr(schedule, "namespace", None),
+    )
+    workflow_id = getattr(schedule, "workflow_id", None)
+    return bool(
+        actor_scope is not None
+        and isinstance(workflow_id, str)
+        and workflow_id in filter_workflow_ids_for_current_actor([workflow_id])
+    )
+
+
+def _workflow_instance_matches_current_actor(instance: Any) -> bool:
+    """Return whether the persisted instance belongs to the request actor."""
+
+    actor_scope = _match_exact_persisted_workflow_actor(
+        user_id=getattr(instance, "user_id", None),
+        org_id=getattr(instance, "org_id", None),
+        namespace=getattr(instance, "namespace", None),
+    )
+    workflow_id = getattr(instance, "workflow_id", None)
+    return bool(
+        actor_scope is not None
+        and isinstance(workflow_id, str)
+        and workflow_id in filter_workflow_ids_for_current_actor([workflow_id])
+    )
+
+
+def _match_exact_persisted_workflow_actor(
+    *,
+    user_id: Any,
+    org_id: Any,
+    namespace: Any,
+):
+    """Return current actor scope only for a complete, canonical owner envelope.
+
+    Legacy rows with an omitted organisation or namespace cannot prove which
+    current tenant owns them. They remain available to trusted migration tools,
+    but actor-facing direct-ID routes conceal them.
+    """
+
+    actor_scope, _error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=user_id,
+        claimed_org_id=org_id,
+        claimed_namespace=namespace,
+    )
+    if actor_scope is None:
+        return None
+
+    def _normalise_concept_id(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        cleaned = value.strip()
+        return cleaned if cleaned.startswith("#") else f"#V#{cleaned}"
+
+    persisted_user_id = _normalise_concept_id(user_id)
+    persisted_org_id = _normalise_concept_id(org_id)
+    persisted_namespace = (
+        namespace.strip()
+        if isinstance(namespace, str) and namespace.strip()
+        else None
+    )
+    if persisted_user_id != actor_scope.user_concept_id:
+        return None
+    if persisted_org_id != actor_scope.organisation_concept_id:
+        return None
+    if persisted_namespace != actor_scope.namespace:
+        return None
+    return actor_scope
+
+
+def _workflow_trace_matches_current_actor(trace: Any) -> bool:
+    """Return whether a persisted trace belongs exactly to the request actor."""
+
+    if not isinstance(trace, dict):
+        return False
+    trace_namespace = trace.get("user_namespace") or trace.get("namespace")
+    trace_user_id = trace.get("user_id") or trace.get("user_concept_id")
+    trace_org_id = trace.get("org_id") or trace.get("organisation_concept_id")
+    actor_scope, _error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=trace_user_id,
+        claimed_org_id=trace_org_id,
+        claimed_namespace=trace_namespace,
+    )
+    if actor_scope is None:
+        return False
+
+    from ...services.namespace_service import derive_actor_context_from_namespace
+
+    namespace_user_id, namespace_org_id = derive_actor_context_from_namespace(
+        trace_namespace
+    )
+    persisted_user_id = trace_user_id or namespace_user_id
+    persisted_org_id = trace_org_id or namespace_org_id
+    if (
+        actor_scope.user_concept_id
+        and persisted_user_id != actor_scope.user_concept_id
+    ):
+        return False
+    if (
+        actor_scope.organisation_concept_id
+        and persisted_org_id != actor_scope.organisation_concept_id
+    ):
+        # Legacy traces without an organisation cannot prove which current
+        # organisation owns them; conceal them rather than crossing cohorts.
+        return False
+    return True
+
+
 @workflows_bp.post("/api/workflows/instances")
 def api_create_workflow_instance():
     """Create a new durable workflow instance.
@@ -1393,22 +2021,49 @@ def api_create_workflow_instance():
     if not workflow_id:
         return jsonify({"error": "workflow_id is required"}), 400
 
-    user_id = data.get("user_id", "anonymous")
-    org_id = data.get("org_id", "default")
-    namespace = resolve_canonical_namespace(
-        data.get("namespace"),
-        user_id,
-        org_id,
+    from ...services.workflow_actor_scope_service import (
+        WorkflowActorScopeError,
+        resolve_authoritative_workflow_actor_scope,
     )
-    if not namespace:
+
+    try:
+        actor_scope = resolve_authoritative_workflow_actor_scope(
+            claimed_user_id=data.get("user_id"),
+            claimed_org_id=data.get("org_id"),
+            claimed_namespace=data.get("namespace"),
+            allow_unscoped_claims=False,
+        )
+    except WorkflowActorScopeError as exc:
+        status_code = (
+            400
+            if exc.reason == "workflow_actor_namespace_invalid"
+            else 403
+        )
         return (
             jsonify(
                 {
-                    "error": "namespace must be canonical or derivable from user_id/org_id",
+                    "error": exc.reason,
+                    "error_code": exc.reason,
+                    "mismatch_fields": list(exc.mismatch_fields),
                 }
             ),
-            400,
+            status_code,
         )
+    user_id = actor_scope.user_concept_id
+    org_id = actor_scope.organisation_concept_id
+    namespace = actor_scope.namespace
+    if not user_id or not namespace:
+        return (
+            jsonify(
+                {
+                    "error": "workflow_actor_authority_required",
+                    "error_code": "workflow_actor_authority_required",
+                }
+            ),
+            403,
+        )
+    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+        return jsonify({"error": "workflow_not_found"}), 404
     inputs = data.get("inputs", {})
     max_retries = data.get("max_retries", 3)
 
@@ -1445,11 +2100,9 @@ def api_list_workflow_instances():
     - source_event_id: Filter by triggering event ID
     - limit: Maximum results (default 50)
     """
-    user_id = request.args.get("user_id")
-    org_id = request.args.get("org_id")
-    namespace = coerce_namespace(request.args.get("namespace")) or request.args.get(
-        "namespace"
-    )
+    claimed_user_id = request.args.get("user_id")
+    claimed_org_id = request.args.get("org_id")
+    claimed_namespace = request.args.get("namespace")
     status_str = request.args.get("status")
     workflow_id = request.args.get("workflow_id")
     source_event_type = request.args.get("source_event_type")
@@ -1469,6 +2122,21 @@ def api_list_workflow_instances():
             400,
         )
 
+    actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=claimed_user_id,
+        claimed_org_id=claimed_org_id,
+        claimed_namespace=claimed_namespace,
+    )
+    if actor_error_response is not None:
+        return actor_error_response
+    user_id = getattr(actor_scope, "user_concept_id", None)
+    org_id = getattr(actor_scope, "organisation_concept_id", None)
+    namespace = getattr(actor_scope, "namespace", None)
+    if workflow_id and workflow_id not in filter_workflow_ids_for_current_actor(
+        [workflow_id]
+    ):
+        return jsonify({"items": [], "count": 0})
+
     manager = _get_instance_manager()
     try:
         items = manager.list_instance_status_dicts(
@@ -1481,6 +2149,21 @@ def api_list_workflow_instances():
             source_event_id=source_event_id,
             limit=limit,
         )
+        visible_workflow_ids = set(
+            filter_workflow_ids_for_current_actor(
+                [
+                    item.get("workflow_id")
+                    for item in items
+                    if isinstance(item, dict)
+                ]
+            )
+        )
+        items = [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and item.get("workflow_id") in visible_workflow_ids
+        ]
     except Exception as exc:
         if _is_transient_workflow_instances_error(exc):
             logger.warning(
@@ -1540,6 +2223,16 @@ def api_get_workflow_instance(instance_id: str):
             ),
             404,
         )
+    if not _workflow_instance_matches_current_actor(instance):
+        return (
+            jsonify(
+                {
+                    "error": "instance_not_found",
+                    "instance_id": instance_id,
+                }
+            ),
+            404,
+        )
 
     # Return full details including inputs/outputs
     result = instance.to_status_dict()
@@ -1559,6 +2252,28 @@ def api_get_workflow_instance(instance_id: str):
 def api_cancel_workflow_instance(instance_id: str):
     """Cancel a running or pending workflow instance."""
     manager = _get_instance_manager()
+
+    try:
+        instance = manager.get_instance(instance_id)
+    except Exception as exc:
+        if _is_transient_workflow_instances_error(exc):
+            logger.warning(
+                "Workflow cancellation status degraded due to transient store error: %s",
+                exc,
+                exc_info=True,
+            )
+            return _build_retryable_workflow_instances_response(
+                error="Workflow cancellation temporarily unavailable; please retry.",
+                detail=str(exc),
+                payload={"instance_id": instance_id, "operation": "cancel"},
+            )
+        logger.exception("Failed to authorise workflow cancellation")
+        return jsonify({"error": str(exc)}), 500
+    if not instance or not _workflow_instance_matches_current_actor(instance):
+        return (
+            jsonify({"error": "instance_not_found", "instance_id": instance_id}),
+            404,
+        )
 
     try:
         success = manager.mark_cancelled(instance_id)
@@ -1581,37 +2296,6 @@ def api_cancel_workflow_instance(instance_id: str):
         return jsonify({"error": str(exc)}), 500
     if success:
         return jsonify({"status": "cancelled", "instance_id": instance_id})
-
-    # Preserve existing diagnostics, but only after the cancel attempt fails.
-    try:
-        instance = manager.get_instance(instance_id)
-    except Exception as exc:
-        if _is_transient_workflow_instances_error(exc):
-            logger.warning(
-                "Workflow cancel status check degraded due to transient store error: %s",
-                exc,
-                exc_info=True,
-            )
-            return _build_retryable_workflow_instances_response(
-                error="Workflow cancellation status temporarily unavailable; please retry.",
-                detail=str(exc),
-                payload={
-                    "instance_id": instance_id,
-                    "operation": "cancel",
-                },
-            )
-        logger.exception("Failed to diagnose workflow cancellation failure")
-        return jsonify({"error": str(exc)}), 500
-    if not instance:
-        return (
-            jsonify(
-                {
-                    "error": "instance_not_found",
-                    "instance_id": instance_id,
-                }
-            ),
-            404,
-        )
 
     if instance.status.is_terminal():
         return (
@@ -1655,6 +2339,11 @@ def api_retry_workflow_instance(instance_id: str):
                     "instance_id": instance_id,
                 }
             ),
+            404,
+        )
+    if not _workflow_instance_matches_current_actor(instance):
+        return (
+            jsonify({"error": "instance_not_found", "instance_id": instance_id}),
             404,
         )
 
@@ -1720,6 +2409,11 @@ def api_pause_workflow_instance(instance_id: str):
             ),
             404,
         )
+    if not _workflow_instance_matches_current_actor(instance):
+        return (
+            jsonify({"error": "instance_not_found", "instance_id": instance_id}),
+            404,
+        )
 
     if instance.status != WorkflowInstanceStatus.RUNNING:
         return (
@@ -1758,12 +2452,39 @@ def api_stream_workflow_instances():
             get_workflow_stream_service,
         )
 
-        user_id = request.args.get("user_id")
-        org_id = request.args.get("org_id")
-        namespace = request.args.get("namespace")
+        actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+            claimed_user_id=request.args.get("user_id"),
+            claimed_org_id=request.args.get("org_id"),
+            claimed_namespace=request.args.get("namespace"),
+        )
+        if actor_error_response is not None:
+            return actor_error_response
+        user_id = getattr(actor_scope, "user_concept_id", None)
+        org_id = getattr(actor_scope, "organisation_concept_id", None)
+        namespace = getattr(actor_scope, "namespace", None)
         workflow_id = request.args.get("workflow_id")
         instance_id = request.args.get("instance_id")
         status_raw = request.args.get("status")
+
+        if workflow_id:
+            visible_workflow_ids = set(
+                filter_workflow_ids_for_current_actor([workflow_id])
+            )
+            if workflow_id not in visible_workflow_ids:
+                return jsonify({"error": "workflow_not_found"}), 404
+        else:
+            from ...workflows.durable.registry_factory import (
+                build_durable_workflow_registry_read_only,
+            )
+
+            registry = build_durable_workflow_registry_read_only(
+                defer_parity_work=True
+            )
+            visible_workflow_ids = set(
+                filter_workflow_ids_for_current_actor(
+                    registry.all_workflow_ids()
+                )
+            )
 
         statuses = None
         if isinstance(status_raw, str) and status_raw.strip():
@@ -1781,6 +2502,7 @@ def api_stream_workflow_instances():
             workflow_id=workflow_id or None,
             instance_id=instance_id or None,
             statuses=statuses,
+            allowed_workflow_ids=visible_workflow_ids,
         )
 
         def generate():
@@ -1832,22 +2554,28 @@ def api_create_workflow_schedule():
     if not workflow_id:
         return jsonify({"error": "workflow_id is required"}), 400
 
-    user_id = data.get("user_id", "anonymous")
-    org_id = data.get("org_id", "default")
-    namespace = resolve_canonical_namespace(
-        data.get("namespace"),
-        user_id,
-        org_id,
+    actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=data.get("user_id"),
+        claimed_org_id=data.get("org_id"),
+        claimed_namespace=data.get("namespace"),
     )
-    if not namespace:
+    if actor_error_response is not None:
+        return actor_error_response
+    user_id = getattr(actor_scope, "user_concept_id", None)
+    org_id = getattr(actor_scope, "organisation_concept_id", None)
+    namespace = getattr(actor_scope, "namespace", None)
+    if not user_id or not namespace:
         return (
             jsonify(
                 {
-                    "error": "namespace must be canonical or derivable from user_id/org_id",
+                    "error": "workflow_actor_authority_required",
+                    "error_code": "workflow_actor_authority_required",
                 }
             ),
-            400,
+            403,
         )
+    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+        return jsonify({"error": "workflow_not_found"}), 404
     default_inputs = data.get("default_inputs", {})
     description = data.get("description")
 
@@ -1937,7 +2665,12 @@ def api_list_workflow_schedules():
     - enabled_only: Only return enabled schedules (default false)
     - limit: Maximum results (default 50)
     """
-    user_id = request.args.get("user_id")
+    actor_scope, actor_error_response = _resolve_http_workflow_actor_scope(
+        claimed_user_id=request.args.get("user_id"),
+    )
+    if actor_error_response is not None:
+        return actor_error_response
+    user_id = getattr(actor_scope, "user_concept_id", None)
     enabled_only = request.args.get("enabled_only", "false").lower() == "true"
     limit = min(int(request.args.get("limit", "50")), 200)
 
@@ -1947,6 +2680,11 @@ def api_list_workflow_schedules():
         enabled_only=enabled_only,
         limit=limit,
     )
+    schedules = [
+        schedule
+        for schedule in schedules
+        if _workflow_schedule_matches_current_actor(schedule)
+    ]
 
     return jsonify(
         {
@@ -1963,6 +2701,16 @@ def api_get_workflow_schedule(schedule_id: str):
     schedule = manager.get_schedule(schedule_id)
 
     if not schedule:
+        return (
+            jsonify(
+                {
+                    "error": "schedule_not_found",
+                    "schedule_id": schedule_id,
+                }
+            ),
+            404,
+        )
+    if not _workflow_schedule_matches_current_actor(schedule):
         return (
             jsonify(
                 {
@@ -2017,6 +2765,16 @@ def api_set_schedule_enabled(schedule_id: str):
             ),
             404,
         )
+    if not _workflow_schedule_matches_current_actor(schedule):
+        return (
+            jsonify(
+                {
+                    "error": "schedule_not_found",
+                    "schedule_id": schedule_id,
+                }
+            ),
+            404,
+        )
 
     success = manager.set_schedule_enabled(schedule_id, enabled)
     if success:
@@ -2047,6 +2805,16 @@ def api_delete_workflow_schedule(schedule_id: str):
             ),
             404,
         )
+    if not _workflow_schedule_matches_current_actor(schedule):
+        return (
+            jsonify(
+                {
+                    "error": "schedule_not_found",
+                    "schedule_id": schedule_id,
+                }
+            ),
+            404,
+        )
 
     success = manager.delete_schedule(schedule_id)
     if success:
@@ -2065,6 +2833,16 @@ def api_trigger_workflow_schedule(schedule_id: str):
 
     schedule = manager.get_schedule(schedule_id)
     if not schedule:
+        return (
+            jsonify(
+                {
+                    "error": "schedule_not_found",
+                    "schedule_id": schedule_id,
+                }
+            ),
+            404,
+        )
+    if not _workflow_schedule_matches_current_actor(schedule):
         return (
             jsonify(
                 {

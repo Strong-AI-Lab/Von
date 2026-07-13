@@ -15,6 +15,7 @@ import time
 from typing import Any, Callable
 
 from ...db.transient_errors import run_with_transient_mongo_retry
+from ...security.access_control import override_current_actor
 from ..engine import WorkflowDefinition
 from ..action_registry import ActionRegistry
 from .instance_manager import WorkflowInstanceManager
@@ -29,8 +30,10 @@ from .worker_identity import build_worker_build_identity
 logger = logging.getLogger(__name__)
 
 
-# Type for workflow definition loader
-WorkflowDefinitionLoader = Callable[[str], WorkflowDefinition | None]
+# Type for workflow definition loaders. Durable execution must resolve the
+# definition under the actor persisted on the instance, rather than trusting a
+# process-global registry entry that may have been warmed by another actor.
+WorkflowDefinitionLoader = Callable[..., WorkflowDefinition | None]
 
 
 def _default_live_load_getter() -> int:
@@ -78,7 +81,8 @@ class DurableWorkflowWorker:
             worker_id: Unique identifier for this worker (auto-generated if None).
             instance_manager: Manager for instance persistence.
             registry: Action registry for workflow execution.
-            definition_loader: Function to load workflow definitions by ID.
+            definition_loader: Function to load workflow definitions by ID and
+                persisted actor scope.
             poll_interval_seconds: Time between polling cycles.
             batch_size: Maximum concurrent instances.
             heartbeat_interval_seconds: Interval for lock heartbeat.
@@ -457,11 +461,32 @@ class DurableWorkflowWorker:
                 except Exception:
                     pass
 
-            # Load workflow definition
-            definition = _retry_store_call(
-                "load_definition",
-                lambda: self._definition_loader(instance.workflow_id),
-            )
+            # A durable worker has no Flask request context. Keep the persisted
+            # actor bound across definition loading *and the complete workflow
+            # run* so LLM prompt resolution, nested workflow loading, explicit
+            # actions, and fallback tools all enforce the same authority.
+            with override_current_actor(instance.user_id, instance.org_id):
+                definition = _retry_store_call(
+                    "load_definition",
+                    lambda: self._definition_loader(
+                        instance.workflow_id,
+                        actor_user_id=instance.user_id,
+                        actor_org_id=instance.org_id,
+                        actor_namespace=instance.namespace,
+                    ),
+                )
+
+                result = (
+                    self._executor.run_durable(
+                        instance_id,
+                        definition,
+                        worker_id=self._worker_id,
+                        resume_from_checkpoint=True,
+                    )
+                    if definition is not None
+                    else None
+                )
+
             if definition is None:
                 error = f"workflow_definition_not_found:{instance.workflow_id}"
                 _best_effort_mark_failed(
@@ -475,13 +500,10 @@ class DurableWorkflowWorker:
                         pass
                 return
 
-            # Execute with checkpointing
-            result = self._executor.run_durable(
-                instance_id,
-                definition,
-                worker_id=self._worker_id,
-                resume_from_checkpoint=True,
-            )
+            # The definition guard above establishes that execution produced a
+            # result; keep this assertion local so the optional is not allowed
+            # to leak into status handling below.
+            assert result is not None
 
             # Update status based on result
             if result.completed:

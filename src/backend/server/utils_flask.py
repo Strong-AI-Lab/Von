@@ -366,9 +366,37 @@ def _get_durable_definition_loader():
     if _durable_workflow_registry is None:
         _durable_workflow_registry = _build_durable_workflow_registry()
 
-    def loader(workflow_id: str):
+    def loader(
+        workflow_id: str,
+        *,
+        actor_user_id: str | None = None,
+        actor_org_id: str | None = None,
+        actor_namespace: str | None = None,
+    ):
         global _durable_workflow_registry
         try:
+            if actor_namespace:
+                from ..services.namespace_service import (
+                    derive_actor_context_from_namespace,
+                )
+
+                namespace_user_id, namespace_org_id = (
+                    derive_actor_context_from_namespace(actor_namespace)
+                )
+                if (
+                    namespace_user_id != actor_user_id
+                    or (
+                        namespace_org_id is not None
+                        and namespace_org_id != actor_org_id
+                    )
+                ):
+                    logging.getLogger(__name__).warning(
+                        "[durable_workflows] Refusing definition load with "
+                        "inconsistent persisted actor scope for %s",
+                        workflow_id,
+                    )
+                    return None
+
             from ..workflows.durable.registry_factory import (
                 resolve_workflow_definition_from_authority,
             )
@@ -379,6 +407,8 @@ def _get_durable_definition_loader():
                 use_current_shared_registry=True,
                 promote_to_registry=_durable_workflow_registry,
                 register_authoritative_fallback=True,
+                actor_user_id=actor_user_id,
+                actor_org_id=actor_org_id,
             )
             if resolution.registry is not None:
                 _durable_workflow_registry = resolution.registry
@@ -391,6 +421,13 @@ def _get_durable_definition_loader():
                     resolution.error_code,
                 )
         except Exception as exc:
+            from ..db.transient_errors import is_transient_mongo_error
+
+            if is_transient_mongo_error(exc):
+                # The worker wraps this loader in its bounded transient retry
+                # path. Do not collapse an authority-store outage into a
+                # permanent definition-not-found denial.
+                raise
             logging.getLogger(__name__).warning(
                 "[durable_workflows] Runtime workflow resolution failed for %s: %s",
                 workflow_id,

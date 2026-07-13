@@ -73,6 +73,44 @@ def _patch_submit_verified_instance_success(monkeypatch, manager: _StubWorkflowM
     )
 
 
+def _patch_owned_experiment_resources(
+    monkeypatch,
+    *,
+    spec_ids: tuple[str, ...] = (),
+    run_ids: tuple[str, ...] = (),
+) -> None:
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    actor_state = {
+        "namespace": "#V#user@org",
+        "user_id": "#V#user",
+        "org_id": "#V#org",
+    }
+    monkeypatch.setattr(
+        mod,
+        "_load_experiment_spec_state_for_authority",
+        lambda resource_id: (
+            {**actor_state, "experiment_spec_id": resource_id}
+            if resource_id in spec_ids
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_experiment_run_state_for_authority",
+        lambda resource_id: (
+            {**actor_state, "run_id": resource_id}
+            if resource_id in run_ids
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_concept_exists_for_authority",
+        lambda resource_id: resource_id in {*spec_ids, *run_ids},
+    )
+
+
 @dataclass
 class _StubWorkflowManager:
     last_call: dict[str, Any] | None = None
@@ -198,6 +236,7 @@ def test_theory_create_slice_action_derives_actor_context_from_namespace(monkeyp
 
 def test_execute_target_workflow_action_launches_durable_instance(monkeypatch):
     manager = _StubWorkflowManager()
+    _patch_owned_experiment_resources(monkeypatch, run_ids=("#V#run_1",))
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -456,6 +495,9 @@ def test_verify_arxiv_ingestion_result_action_forwards_expected_metadata(monkeyp
 
 def test_cleanup_arxiv_ingestion_artifacts_action_forwards_cleanup_targets(monkeypatch):
     from src.backend.workflows.durable import testing_workflow_actions as mod
+    from src.backend.services.arxiv_paper_link_service import (
+        predict_arxiv_paper_concept_id,
+    )
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -463,6 +505,32 @@ def test_cleanup_arxiv_ingestion_artifacts_action_forwards_cleanup_targets(monke
         "cleanup_arxiv_paper_ingestion_test_artifacts",
         lambda **kwargs: captured.update(kwargs)
         or {"success": True, "cleanup_passed": True},
+    )
+    paper_concept_id = predict_arxiv_paper_concept_id(arxiv_id="2603.21702")
+    concept_docs = {
+        paper_concept_id: {
+            "relationships": {
+                "#V#specific_to_user": ["#V#user"],
+                "#V#propositional_information_thing_has_computer_file": [
+                    "#V#file_copy_2603_21702",
+                    "#V#markdown_file_copy_2603_21702",
+                ],
+            }
+        },
+        "#V#file_copy_2603_21702": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+        "#V#markdown_file_copy_2603_21702": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+        "#V#topic_cs_ai": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+    }
+    monkeypatch.setattr(
+        mod,
+        "_load_cleanup_concept_for_authority",
+        lambda concept_id: concept_docs.get(concept_id),
     )
 
     registry = ActionRegistry()
@@ -472,9 +540,9 @@ def test_cleanup_arxiv_ingestion_artifacts_action_forwards_cleanup_targets(monke
 
     result = spec.handler(
         WorkflowActionRequest(
-            action_id=TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID,
-            inputs={
-                "paper_concept_id": "#V#paper_2603_21702",
+                action_id=TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID,
+                inputs={
+                    "paper_concept_id": paper_concept_id,
                 "file_copy_concept_id": "#V#file_copy_2603_21702",
                 "file_copy_concept_ids": [
                     "#V#file_copy_2603_21702",
@@ -485,13 +553,29 @@ def test_cleanup_arxiv_ingestion_artifacts_action_forwards_cleanup_targets(monke
                 "preexisting_author_concept_ids": ["#V#author_one"],
                 "preexisting_topic_concept_ids": [],
             },
-            environment=WorkflowEnvironment(llm_client=None),
-            data={},
+                environment=WorkflowEnvironment(
+                    llm_client=None,
+                    user_namespace="#V#user@org",
+                ),
+                data={
+                    "arxiv_id": "2603.21702",
+                    "paper_concept_id": paper_concept_id,
+                    "file_copy_concept_id": "#V#file_copy_2603_21702",
+                    "file_copy_concept_ids": [
+                        "#V#file_copy_2603_21702",
+                        "#V#markdown_file_copy_2603_21702",
+                    ],
+                    "expected_author_concept_ids": ["#V#author_one"],
+                    "expected_topic_concept_ids": ["#V#topic_cs_ai"],
+                    "preexisting_author_concept_ids": ["#V#author_one"],
+                    "preexisting_topic_concept_ids": [],
+                },
+                workflow_id="#V#arxiv_paper_ingestion_testing_workflow",
+            )
         )
-    )
 
     assert result.ok is True
-    assert captured["paper_concept_id"] == "#V#paper_2603_21702"
+    assert captured["paper_concept_id"] == paper_concept_id
     assert captured["file_copy_concept_id"] == "#V#file_copy_2603_21702"
     assert captured["file_copy_concept_ids"] == [
         "#V#file_copy_2603_21702",
@@ -519,16 +603,79 @@ def test_execute_regression_suite_action_forwards_suite_policy(monkeypatch):
         WorkflowActionRequest(
             action_id=EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
             inputs={
-                "execution_tier": "tier2",
-                "suite_policy": {"tiers": {"tier2": {"mode": "benchmark"}}},
+                "execution_tier": "tier1",
+                "suite_policy": {"tiers": {"tier1": {"mode": "cases"}}},
+                "cases": [{"observed_verdict": "pass"}],
             },
-            environment=WorkflowEnvironment(llm_client=None),
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
             data={},
         )
     )
 
     assert result.ok is True
-    assert captured["suite_policy"] == {"tiers": {"tier2": {"mode": "benchmark"}}}
+    assert captured["suite_policy"] == {"tiers": {"tier1": {"mode": "cases"}}}
+
+
+def test_execute_regression_suite_action_rejects_operator_only_benchmark_mode(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mod,
+        "execute_regression_suite",
+        lambda **_kwargs: calls.append("execute") or {"success": True},
+    )
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    action = registry.get(EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID)
+    assert action is not None
+
+    result = action.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
+            inputs={
+                "execution_tier": "tier2",
+                "benchmark_scenario": {"runs": 1000},
+                "output_root": "/tmp/caller-selected",
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={},
+        )
+    )
+
+    assert result.ok is False
+    assert result.error == "testing_regression_suite_operator_authority_required"
+    alias_result = action.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
+            inputs={
+                "execution_tier": "tier1",
+                "suite_policy": {
+                    "default_execution_tier": "tier1",
+                    "tiers": {
+                        "tier1": {"mode": "cases", "alias_for": "tier2"},
+                        "tier2": {"mode": "benchmark"},
+                    },
+                },
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={},
+        )
+    )
+    assert alias_result.ok is False
+    assert alias_result.error == "testing_regression_suite_operator_authority_required"
+    assert calls == []
 
 
 def test_start_run_action_returns_compact_summary(monkeypatch):
@@ -552,6 +699,7 @@ def test_start_run_action_returns_compact_summary(monkeypatch):
             "projection": {"large_payload": "y" * 4096},
         },
     )
+    _patch_owned_experiment_resources(monkeypatch, spec_ids=("#V#spec_1",))
 
     registry = ActionRegistry()
     register_testing_workflow_actions(registry)
@@ -562,7 +710,10 @@ def test_start_run_action_returns_compact_summary(monkeypatch):
         WorkflowActionRequest(
             action_id=EXPERIMENT_START_RUN_ACTION_ID,
             inputs={"experiment_spec_id": "#V#spec_1"},
-            environment=WorkflowEnvironment(llm_client=None),
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
             data={},
         )
     )
@@ -597,6 +748,7 @@ def test_record_observation_action_returns_compact_summary(monkeypatch):
             "projection": {"large_payload": "y" * 4096},
         },
     )
+    _patch_owned_experiment_resources(monkeypatch, run_ids=("#V#run_1",))
 
     registry = ActionRegistry()
     register_testing_workflow_actions(registry)
@@ -610,7 +762,10 @@ def test_record_observation_action_returns_compact_summary(monkeypatch):
                 "run_id": "#V#run_1",
                 "observations": [{"label": "metadata_representation", "verdict": "pass"}],
             },
-            environment=WorkflowEnvironment(llm_client=None),
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
             data={},
         )
     )
@@ -673,6 +828,7 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
         }
     )
     recorded: dict[str, Any] = {}
+    _patch_owned_experiment_resources(monkeypatch, run_ids=("#V#run_1",))
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -815,6 +971,10 @@ def test_execute_target_workflow_action_projects_pending_child_worker_blocker(
         }
     )
     recorded: dict[str, Any] = {}
+    _patch_owned_experiment_resources(
+        monkeypatch,
+        run_ids=("#V#run_pending_child",),
+    )
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -912,6 +1072,10 @@ def test_execute_target_workflow_action_fast_fails_when_worker_is_absent(
     manager = _StubWorkflowManager(
         instances_by_id={"#V#wf_instance_testing": pending_instance}
     )
+    _patch_owned_experiment_resources(
+        monkeypatch,
+        run_ids=("#V#run_pending_child",),
+    )
     captured_wait: dict[str, Any] = {}
     captured_status_call: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -990,6 +1154,10 @@ def test_execute_target_workflow_action_fail_closes_invalid_candidate_and_record
     from src.backend.workflows.durable import testing_workflow_actions as mod
 
     recorded: dict[str, Any] = {}
+    _patch_owned_experiment_resources(
+        monkeypatch,
+        run_ids=("#V#run_invalid_candidate",),
+    )
     monkeypatch.setattr(
         mod,
         "record_experiment_observation",
@@ -1025,7 +1193,10 @@ def test_execute_target_workflow_action_fail_closes_invalid_candidate_and_record
                     ],
                 },
             },
-            environment=WorkflowEnvironment(llm_client=None),
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
             data={},
         )
     )
@@ -1043,3 +1214,368 @@ def test_execute_target_workflow_action_fail_closes_invalid_candidate_and_record
         "workflow_generation_safety_failure",
     ]
     assert observation["quality_signals"]["requires_follow_up"] is True
+
+
+def test_experiment_create_uses_persisted_actor_not_input_identity_claims(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "_load_experiment_spec_state_for_authority",
+        lambda _resource_id: None,
+    )
+    monkeypatch.setattr(mod, "_concept_exists_for_authority", lambda _resource_id: False)
+    monkeypatch.setattr(
+        mod,
+        "create_experiment_spec",
+        lambda **kwargs: captured.update(kwargs)
+        or {"success": True, "experiment_spec_id": kwargs["experiment_spec_id"]},
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(EXPERIMENT_CREATE_SPEC_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_CREATE_SPEC_ACTION_ID,
+            inputs={
+                "name": "Actor-bound experiment",
+                "namespace": "#V#attacker@other_org",
+                "user_id": "#V#attacker",
+                "org_id": "#V#other_org",
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#owner@trusted_org",
+                user_concept_id="#V#owner",
+                org_concept_id="#V#trusted_org",
+            ),
+            data={
+                "namespace": "#V#persisted_attacker@other_org",
+                "user_id": "#V#persisted_attacker",
+                "org_id": "#V#other_org",
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert captured["namespace"] == "#V#owner@trusted_org"
+    assert captured["user_id"] == "#V#owner"
+    assert captured["org_id"] == "#V#trusted_org"
+    assert "attacker" not in captured["experiment_spec_id"]
+
+
+def test_foreign_experiment_spec_paths_deny_opaquely_before_service_mutation(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    mutation_calls: list[str] = []
+    foreign_state = {
+        "experiment_spec_id": "#V#foreign_spec",
+        "namespace": "#V#other@org",
+        "user_id": "#V#other",
+        "org_id": "#V#org",
+    }
+    monkeypatch.setattr(
+        mod,
+        "_load_experiment_spec_state_for_authority",
+        lambda _resource_id: dict(foreign_state),
+    )
+    monkeypatch.setattr(mod, "_concept_exists_for_authority", lambda _resource_id: True)
+    for service_name in (
+        "create_experiment_spec",
+        "start_experiment_run",
+        "prepare_experiment_spec_from_template",
+        "prepare_meeting_invitation_experiment_spec",
+    ):
+        monkeypatch.setattr(
+            mod,
+            service_name,
+            lambda _service_name=service_name, **_kwargs: mutation_calls.append(
+                _service_name
+            )
+            or {"success": True},
+        )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    requests = [
+        (
+            EXPERIMENT_CREATE_SPEC_ACTION_ID,
+            {"name": "Foreign", "experiment_spec_id": "#V#foreign_spec"},
+        ),
+        (
+            EXPERIMENT_START_RUN_ACTION_ID,
+            {"experiment_spec_id": "#V#foreign_spec"},
+        ),
+        (
+            TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
+            {
+                "experiment_spec_id": "#V#foreign_spec",
+                "scenario_template": {
+                    "schema_version": "testing_experiment_scenario_template.v1"
+                },
+            },
+        ),
+        (
+            TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
+            {
+                "experiment_spec_id": "#V#foreign_spec",
+                "invitation_text": "Meet tomorrow",
+            },
+        ),
+    ]
+    for action_id, inputs in requests:
+        action = registry.get(action_id)
+        assert action is not None
+        result = action.handler(
+            WorkflowActionRequest(
+                action_id=action_id,
+                inputs=inputs,
+                environment=WorkflowEnvironment(
+                    llm_client=None,
+                    user_namespace="#V#owner@org",
+                ),
+                data={},
+            )
+        )
+        assert result.ok is False
+        assert result.error == "experiment_resource_not_available"
+        assert "foreign_spec" not in result.outputs
+
+    assert mutation_calls == []
+
+
+def test_foreign_experiment_run_paths_deny_opaquely_before_service_mutation(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    mutation_calls: list[str] = []
+    owner_spec_state = {
+        "experiment_spec_id": "#V#owner_spec",
+        "namespace": "#V#owner@org",
+        "user_id": "#V#owner",
+        "org_id": "#V#org",
+    }
+    foreign_run_state = {
+        "run_id": "#V#foreign_run",
+        "namespace": "#V#other@org",
+        "user_id": "#V#other",
+        "org_id": "#V#org",
+    }
+    monkeypatch.setattr(
+        mod,
+        "_load_experiment_spec_state_for_authority",
+        lambda _resource_id: dict(owner_spec_state),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_experiment_run_state_for_authority",
+        lambda _resource_id: dict(foreign_run_state),
+    )
+    monkeypatch.setattr(mod, "_concept_exists_for_authority", lambda _resource_id: True)
+    for service_name in (
+        "start_experiment_run",
+        "record_experiment_observation",
+        "compute_experiment_verdict",
+        "emit_experiment_learning_signal",
+        "execute_regression_suite",
+    ):
+        monkeypatch.setattr(
+            mod,
+            service_name,
+            lambda _service_name=service_name, **_kwargs: mutation_calls.append(
+                _service_name
+            )
+            or {"success": True},
+        )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: mutation_calls.append("workflow_instance_manager"),
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    requests = [
+        (
+            EXPERIMENT_START_RUN_ACTION_ID,
+            {"experiment_spec_id": "#V#owner_spec", "run_id": "#V#foreign_run"},
+        ),
+        (
+            EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
+            {"run_id": "#V#foreign_run", "observations": [{"verdict": "pass"}]},
+        ),
+        (EXPERIMENT_COMPUTE_VERDICT_ACTION_ID, {"run_id": "#V#foreign_run"}),
+        (EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID, {"run_id": "#V#foreign_run"}),
+        (
+            EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
+            {
+                "run_id": "#V#foreign_run",
+                "cases": [{"observed_verdict": "pass"}],
+            },
+        ),
+        (
+            EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
+            {"run_id": "#V#foreign_run", "workflow_id": "#V#target_workflow"},
+        ),
+    ]
+    for action_id, inputs in requests:
+        action = registry.get(action_id)
+        assert action is not None
+        result = action.handler(
+            WorkflowActionRequest(
+                action_id=action_id,
+                inputs=inputs,
+                environment=WorkflowEnvironment(
+                    llm_client=None,
+                    user_namespace="#V#owner@org",
+                ),
+                data={},
+            )
+        )
+        assert result.ok is False
+        assert result.error == "experiment_resource_not_available"
+        assert "foreign_run" not in result.outputs
+
+    assert mutation_calls == []
+
+
+def test_foreign_testing_theory_paths_deny_before_service_mutation(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    mutation_calls: list[str] = []
+    foreign_state = {
+        "theory_id": "#V#foreign_theory",
+        "namespace": "#V#other@org",
+        "user_id": "#V#other",
+        "org_id": "#V#org",
+    }
+    monkeypatch.setattr(
+        mod,
+        "_load_testing_theory_state_for_authority",
+        lambda _resource_id: dict(foreign_state),
+    )
+    monkeypatch.setattr(mod, "_concept_exists_for_authority", lambda _resource_id: True)
+    for service_name in (
+        "create_testing_theory_slice",
+        "import_canonical_context_into_theory",
+        "assert_testing_theory_local_claims",
+        "compute_testing_theory_diff",
+        "rollback_testing_theory_local_writes",
+        "promote_testing_theory_validated_claims",
+    ):
+        monkeypatch.setattr(
+            mod,
+            service_name,
+            lambda _service_name=service_name, **_kwargs: mutation_calls.append(
+                _service_name
+            )
+            or {"success": True},
+        )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    requests = [
+        (THEORY_CREATE_SLICE_ACTION_ID, {"theory_id": "#V#foreign_theory"}),
+        (
+            THEORY_IMPORT_CANONICAL_CONTEXT_ACTION_ID,
+            {"theory_id": "#V#foreign_theory"},
+        ),
+        (
+            THEORY_ASSERT_LOCAL_CLAIM_ACTION_ID,
+            {"theory_id": "#V#foreign_theory", "claims": []},
+        ),
+        (THEORY_COMPUTE_DIFF_ACTION_ID, {"theory_id": "#V#foreign_theory"}),
+        (
+            THEORY_ROLLBACK_LOCAL_WRITES_ACTION_ID,
+            {"theory_id": "#V#foreign_theory", "clear_all": True},
+        ),
+        (
+            THEORY_PROMOTE_VALIDATED_CLAIMS_ACTION_ID,
+            {"theory_id": "#V#foreign_theory"},
+        ),
+    ]
+    for action_id, inputs in requests:
+        action = registry.get(action_id)
+        assert action is not None
+        result = action.handler(
+            WorkflowActionRequest(
+                action_id=action_id,
+                inputs=inputs,
+                environment=WorkflowEnvironment(
+                    llm_client=None,
+                    user_namespace="#V#owner@org",
+                ),
+                data={},
+            )
+        )
+        assert result.ok is False
+        assert result.error == "testing_theory_not_available"
+
+    gc_action = registry.get(THEORY_GC_EXPIRED_SLICES_ACTION_ID)
+    assert gc_action is not None
+    gc_result = gc_action.handler(
+        WorkflowActionRequest(
+            action_id=THEORY_GC_EXPIRED_SLICES_ACTION_ID,
+            inputs={},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#owner@org",
+            ),
+            data={},
+        )
+    )
+    assert gc_result.error == "testing_theory_gc_operator_authority_required"
+    assert mutation_calls == []
+
+
+def test_arxiv_cleanup_rejects_arbitrary_targets_before_service_mutation(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+    from src.backend.services.arxiv_paper_link_service import (
+        predict_arxiv_paper_concept_id,
+    )
+
+    mutation_calls: list[str] = []
+    fixture_paper_id = predict_arxiv_paper_concept_id(arxiv_id="2603.21702")
+    monkeypatch.setattr(
+        mod,
+        "cleanup_arxiv_paper_ingestion_test_artifacts",
+        lambda **_kwargs: mutation_calls.append("cleanup") or {"success": True},
+    )
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    action = registry.get(TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID)
+    assert action is not None
+
+    result = action.handler(
+        WorkflowActionRequest(
+            action_id=TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID,
+            inputs={
+                "paper_concept_id": "#V#arbitrary_foreign_concept",
+                "file_copy_concept_ids": ["#V#arbitrary_file"],
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#owner@org",
+            ),
+            data={
+                "arxiv_id": "2603.21702",
+                "paper_concept_id": fixture_paper_id,
+                "file_copy_concept_ids": ["#V#fixture_file"],
+                "expected_author_concept_ids": [],
+                "expected_topic_concept_ids": [],
+                "preexisting_author_concept_ids": [],
+                "preexisting_topic_concept_ids": [],
+            },
+            workflow_id="#V#arxiv_paper_ingestion_testing_workflow",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error == "testing_cleanup_authority_required"
+    assert mutation_calls == []

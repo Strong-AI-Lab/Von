@@ -43,6 +43,7 @@ from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
 from src.backend.services.prompt_template_service import PromptTemplateService
+from src.backend.services.workflow_actor_scope_service import WorkflowActorScopeError
 
 logger = logging.getLogger(__name__)
 
@@ -12070,6 +12071,8 @@ def _combine_dashboard_recommendations(
 
 
 def _turn_execution_build_benchmark(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...db.connection_manager import get_db
     from ...services.turn_execution_record_service import (
         TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
@@ -12727,6 +12730,8 @@ def _benchmark_suite_source_system(
 
 
 def _turn_execution_build_selector_benchmark(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn benchmark"):
+        return denial
     from ...services.workflow_selector_benchmark_service import (
         build_selector_routing_benchmark_report,
     )
@@ -12776,6 +12781,8 @@ def _turn_execution_build_selector_benchmark(**kwargs):
 
 
 def _turn_execution_build_context_answering_benchmark(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn benchmark"):
+        return denial
     from ...services.context_grounded_answering_benchmark_service import (
         build_context_grounded_answering_benchmark_report,
     )
@@ -12827,6 +12834,8 @@ def _turn_execution_build_context_answering_benchmark(**kwargs):
 
 
 def _turn_execution_build_dashboard(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...services.minimal_imposition_benchmark_service import (
         build_minimal_imposition_assessment,
     )
@@ -13357,6 +13366,8 @@ def _episode_critique_build_benchmark(**kwargs):
 
 
 def _turn_execution_backfill_from_chat_history(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...services.turn_execution_record_service import (
         backfill_turn_execution_records_from_chat_history,
     )
@@ -13390,6 +13401,8 @@ def _turn_execution_backfill_from_chat_history(**kwargs):
 
 
 def _turn_execution_namespace_coverage_report(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...services.turn_execution_record_service import (
         build_turn_execution_namespace_coverage_report,
     )
@@ -13414,6 +13427,8 @@ def _turn_execution_namespace_coverage_report(**kwargs):
 
 
 def _chat_history_get_segments(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+        return denial
     from ...services import chat_history_service
 
     access = _resolve_chat_history_read_target(kwargs)
@@ -13477,6 +13492,8 @@ def _chat_history_get_segments(**kwargs):
 
 
 def _chat_history_get_debug_entry(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+        return denial
     from ...services import chat_history_service
 
     access = _resolve_chat_history_read_target(kwargs)
@@ -13558,6 +13575,8 @@ def _chat_history_get_debug_entry(**kwargs):
 
 
 def _conversation_telemetry_get_locator(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+        return denial
     from ...services.conversation_telemetry_locator_service import (
         build_conversation_llm_telemetry_locator,
     )
@@ -13606,6 +13625,8 @@ def _conversation_telemetry_get_locator(**kwargs):
 
 
 def _turn_execution_get_live_progress(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...services.turn_execution_live_progress_service import (
         get_turn_execution_live_progress_payload,
     )
@@ -13652,12 +13673,16 @@ def _turn_execution_get_live_progress(**kwargs):
 
 
 def _turn_execution_list(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
     return _rag_list_indexed(**forwarded)
 
 
 def _turn_execution_get(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     request_id = kwargs.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
         return make_error_response(
@@ -13673,6 +13698,8 @@ def _turn_execution_get(**kwargs):
 
 
 def _turn_execution_get_diagnostics(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...services.turn_execution_diagnostics_service import (
         TurnExecutionDiagnosticsServiceError,
         get_turn_execution_diagnostics_payload,
@@ -13740,6 +13767,8 @@ def _failure_case_reference_resolve(**kwargs):
 
 
 def _turn_execution_get_critic_bundle(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...services.episode_critic_evidence_service import (
         build_episode_critic_evidence_bundle,
     )
@@ -13753,12 +13782,16 @@ def _turn_execution_get_critic_bundle(**kwargs):
 
 
 def _experiment_run_list(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "experiment_runs"
     return _rag_list_indexed(**forwarded)
 
 
 def _experiment_run_get(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     run_id = kwargs.get("run_id")
     session_id = kwargs.get("session_id")
     target = run_id if run_id is not None else session_id
@@ -13931,6 +13964,8 @@ def _context_bundle_build_benchmark(**kwargs):
 
 
 def _testing_theory_create_slice(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.testing_theory_service import create_testing_theory_slice
 
     return create_testing_theory_slice(
@@ -13952,6 +13987,8 @@ def _testing_theory_create_slice(**kwargs):
 
 
 def _testing_theory_import_canonical_context(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.testing_theory_service import import_canonical_context_into_theory
 
     return import_canonical_context_into_theory(
@@ -13962,6 +13999,8 @@ def _testing_theory_import_canonical_context(**kwargs):
 
 
 def _testing_theory_assert_local_claims(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.testing_theory_service import assert_testing_theory_local_claims
 
     claims = kwargs.get("claims")
@@ -13974,6 +14013,8 @@ def _testing_theory_assert_local_claims(**kwargs):
 
 
 def _testing_theory_compute_diff(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.testing_theory_service import compute_testing_theory_diff
 
     return compute_testing_theory_diff(
@@ -13982,6 +14023,8 @@ def _testing_theory_compute_diff(**kwargs):
 
 
 def _testing_theory_rollback_local_writes(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.testing_theory_service import rollback_testing_theory_local_writes
 
     return rollback_testing_theory_local_writes(
@@ -13992,6 +14035,8 @@ def _testing_theory_rollback_local_writes(**kwargs):
 
 
 def _testing_theory_promote_validated_claims(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.testing_theory_service import (
         promote_testing_theory_validated_claims,
     )
@@ -14005,6 +14050,8 @@ def _testing_theory_promote_validated_claims(**kwargs):
 
 
 def _testing_theory_gc_expired(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.testing_theory_service import (
         garbage_collect_expired_testing_theories,
     )
@@ -14016,6 +14063,8 @@ def _testing_theory_gc_expired(**kwargs):
 
 
 def _experiment_create_spec(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import create_experiment_spec
 
     return create_experiment_spec(
@@ -14043,6 +14092,8 @@ def _experiment_create_spec(**kwargs):
 
 
 def _experiment_start_run(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import start_experiment_run
 
     return start_experiment_run(
@@ -14063,6 +14114,8 @@ def _experiment_start_run(**kwargs):
 
 
 def _experiment_record_observation(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import record_experiment_observation
 
     observations = kwargs.get("observations")
@@ -14076,12 +14129,16 @@ def _experiment_record_observation(**kwargs):
 
 
 def _experiment_compute_verdict(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import compute_experiment_verdict
 
     return compute_experiment_verdict(run_id=str(kwargs.get("run_id") or "").strip())
 
 
 def _experiment_emit_learning_signal(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import emit_experiment_learning_signal
 
     return emit_experiment_learning_signal(
@@ -14094,6 +14151,9 @@ def _experiment_emit_learning_signal(**kwargs):
 
 
 def _experiment_execute_target_workflow(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import WorkflowInstanceManager
     from ...workflows.durable.workflow_instance_submission_service import (
         build_verified_instance_launch_payload,
@@ -14108,6 +14168,15 @@ def _experiment_execute_target_workflow(**kwargs):
             details={"missing": ["workflow_id"]},
         )
 
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+
     workflow_inputs = kwargs.get("workflow_inputs")
     if not isinstance(workflow_inputs, Mapping):
         workflow_inputs = {}
@@ -14115,10 +14184,9 @@ def _experiment_execute_target_workflow(**kwargs):
     submission = submit_verified_workflow_instance(
         manager=manager,
         workflow_id=workflow_id,
-        user_id=str(kwargs.get("user_id") or "anonymous").strip() or "anonymous",
-        org_id=str(kwargs.get("org_id") or "default").strip() or "default",
-        namespace=str(kwargs.get("namespace") or "#V#anonymous@default").strip()
-        or "#V#anonymous@default",
+        user_id=actor_scope.user_concept_id,
+        org_id=actor_scope.organisation_concept_id,
+        namespace=str(actor_scope.namespace or "").strip(),
         inputs=dict(workflow_inputs),
         max_retries=int(kwargs.get("max_retries", 3)),
     )
@@ -14129,6 +14197,8 @@ def _experiment_execute_target_workflow(**kwargs):
 
 
 def _experiment_execute_regression_suite(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import execute_regression_suite
 
     return execute_regression_suite(
@@ -14142,6 +14212,8 @@ def _experiment_execute_regression_suite(**kwargs):
 
 
 def _testing_prepare_experiment_spec(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import prepare_experiment_spec_from_template
 
     return prepare_experiment_spec_from_template(
@@ -14168,6 +14240,8 @@ def _testing_prepare_experiment_spec(**kwargs):
 
 
 def _testing_prepare_meeting_invitation_spec(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.experiment_run_service import (
         prepare_meeting_invitation_experiment_spec,
     )
@@ -14187,6 +14261,8 @@ def _testing_prepare_meeting_invitation_spec(**kwargs):
 
 
 def _testing_prepare_arxiv_paper_ingestion_fixture(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+        return denial
     from ...services.arxiv_ingestion_testing_service import (
         prepare_arxiv_paper_ingestion_test_fixture,
     )
@@ -14210,6 +14286,8 @@ def _testing_prepare_arxiv_paper_ingestion_fixture(**kwargs):
 
 
 def _testing_verify_arxiv_paper_ingestion_result(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.arxiv_ingestion_testing_service import (
         verify_arxiv_paper_ingestion_test_result,
     )
@@ -14232,6 +14310,8 @@ def _testing_verify_arxiv_paper_ingestion_result(**kwargs):
 
 
 def _testing_cleanup_arxiv_paper_ingestion_artifacts(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+        return denial
     from ...services.arxiv_ingestion_testing_service import (
         cleanup_arxiv_paper_ingestion_test_artifacts,
     )
@@ -14250,6 +14330,8 @@ def _testing_cleanup_arxiv_paper_ingestion_artifacts(**kwargs):
 
 
 def _turn_execution_search_failures(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+        return denial
     from ...services.turn_execution_record_service import (
         build_turn_execution_correctness_summary,
     )
@@ -15404,13 +15486,33 @@ def _upsert_renderer_profile(**kwargs):
 
 
 def _workflow_list_definitions(**kwargs):
-    """List available workflow definitions."""
+    """List workflow definitions without trusting payload-derived identity."""
+
+    from ...security.access_control import override_current_actor
+    from .gateway import get_internal_mcp_actor_context_source
+
+    if get_internal_mcp_actor_context_source() == "tool_payload_fallback":
+        # A default/untrusted gateway may propagate payload fields for generic
+        # tool compatibility, but those fields are not authentication
+        # authority. Project this sensitive read as an unauthenticated actor so
+        # public workflows remain discoverable while represented restrictions
+        # cannot be bypassed with another user's or organisation's ID.
+        with override_current_actor("#V#internal_mcp_unauthenticated_actor", None):
+            return _workflow_list_definitions_for_current_actor(**kwargs)
+    return _workflow_list_definitions_for_current_actor(**kwargs)
+
+
+def _workflow_list_definitions_for_current_actor(**kwargs):
+    """List available workflow definitions for the authoritative actor."""
     from ...workflows.durable.registry_factory import (
         build_durable_workflow_registry_read_only,
         get_or_build_workflow_registry_inventory_snapshot,
     )
     from ...workflows.workflow_listing_service import (
         build_workflow_listing_entry,
+        collect_workflow_introspection_projection_ids,
+        filter_workflow_ids_for_current_actor,
+        project_workflow_introspection_payload_for_current_actor,
     )
     from ...workflows.workflow_baseline_telemetry import (
         get_workflow_baseline_telemetry_snapshot,
@@ -15440,7 +15542,8 @@ def _workflow_list_definitions(**kwargs):
         # Diagnostics should be read-only: avoid bootstrap writes on introspection
         # pathways such as workflow_list_definitions and health checks.
         registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
-        ids = sorted(list(registry.all_workflow_ids()))
+        all_ids = sorted(list(registry.all_workflow_ids()))
+        ids = filter_workflow_ids_for_current_actor(all_ids)
         if requested_workflow_id:
             ids = [wid for wid in ids if wid == requested_workflow_id]
 
@@ -15479,7 +15582,11 @@ def _workflow_list_definitions(**kwargs):
             internal_method_names=build_default_catalogue().list_methods()
         )
 
-        return {
+        parity_inventory = get_or_build_workflow_registry_inventory_snapshot(
+            registry=registry,
+            allow_sync_build=False,
+        )
+        payload = {
             "success": True,
             "definitions": definitions,
             "count": len(definitions),
@@ -15491,13 +15598,33 @@ def _workflow_list_definitions(**kwargs):
                 "resolved_vontology_metadata": should_resolve_authoritative_metadata,
                 "reason_code": metadata_reason_code,
             },
-            "parity_inventory": get_or_build_workflow_registry_inventory_snapshot(
-                registry=registry,
-                allow_sync_build=False,
-            ),
-            "baseline_telemetry": get_workflow_baseline_telemetry_snapshot(),
+            "parity_inventory": parity_inventory,
             "capability_matrix": capability_matrix,
         }
+        if _internal_mcp_global_workflow_admin_authorised():
+            payload["baseline_telemetry"] = (
+                get_workflow_baseline_telemetry_snapshot()
+            )
+        else:
+            # Baseline telemetry is process-global and its recent guardrail
+            # events carry workflow/step/action IDs plus conversation and turn
+            # identifiers. Workflow visibility projection cannot make those
+            # arbitrary event payloads actor-safe, so ordinary and raw MCP
+            # callers receive only an explicit availability marker. Trusted
+            # operator diagnostics retain the full snapshot above.
+            payload["baseline_telemetry"] = {
+                "available": False,
+                "scope": "trusted_operator_only",
+            }
+        introspection_workflow_ids = collect_workflow_introspection_projection_ids(
+            all_ids,
+            parity_inventory=parity_inventory,
+        )
+        return project_workflow_introspection_payload_for_current_actor(
+            payload,
+            workflow_ids=introspection_workflow_ids,
+            total_workflow_ids=all_ids,
+        )
     except Exception as e:
         return make_error_response(
             "list_failed",
@@ -15507,7 +15634,10 @@ def _workflow_list_definitions(**kwargs):
 
 def _workflow_validate_candidate(**kwargs):
     """Validate a candidate workflow authoring spec without publishing it."""
-    from ...workflows.workflow_studio_service import validate_workflow_candidate
+    from ...workflows.workflow_studio_service import (
+        WorkflowStudioAuthorityError,
+        validate_workflow_candidate,
+    )
 
     workflow_id = _clean_optional_string(kwargs.get("workflow_id"))
     if not workflow_id:
@@ -15515,6 +15645,14 @@ def _workflow_validate_candidate(**kwargs):
             "workflow_id_required",
             "workflow_id is required for candidate validation.",
         )
+    try:
+        _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
     authoring_spec = kwargs.get("authoring_spec")
     if not isinstance(authoring_spec, Mapping):
         return make_error_response(
@@ -15532,6 +15670,11 @@ def _workflow_validate_candidate(**kwargs):
             validation_profile=_clean_optional_string(kwargs.get("validation_profile")),
             include_preview=bool(kwargs.get("include_preview", False)),
         )
+    except WorkflowStudioAuthorityError:
+        return make_error_response(
+            "not_found",
+            "Workflow is not available for candidate validation.",
+        )
     except Exception as exc:
         return make_error_response(
             "workflow_candidate_validation_failed",
@@ -15544,6 +15687,12 @@ def _workflow_list_use_episodes(**kwargs):
     from ...services.workflow_episode_service import (
         count_workflow_use_episodes,
         list_workflow_use_episodes,
+    )
+    from ...workflows.durable.registry_factory import (
+        build_durable_workflow_registry_read_only,
+    )
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
     )
 
     workflow_id = _clean_optional_string(kwargs.get("workflow_id"))
@@ -15558,18 +15707,49 @@ def _workflow_list_use_episodes(**kwargs):
     limit = max(1, min(limit, 200))
 
     try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=namespace,
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    namespace = actor_scope.namespace
+    if not namespace:
+        return make_error_response(
+            "workflow_actor_authority_required",
+            "Workflow episode listing requires actor authority.",
+        )
+
+    try:
+        registry = build_durable_workflow_registry_read_only(
+            defer_parity_work=True
+        )
+        visible_workflow_ids = filter_workflow_ids_for_current_actor(
+            registry.all_workflow_ids()
+        )
+        if workflow_id:
+            visible_workflow_ids = [
+                candidate
+                for candidate in visible_workflow_ids
+                if candidate == workflow_id
+            ]
         items = list_workflow_use_episodes(
             workflow_id=workflow_id,
+            workflow_ids=visible_workflow_ids,
             namespace=namespace,
             session_id=session_id,
             turn_id=turn_id,
+            strict_namespace_scope=True,
             limit=limit,
         )
         total = count_workflow_use_episodes(
             workflow_id=workflow_id,
+            workflow_ids=visible_workflow_ids,
             namespace=namespace,
             session_id=session_id,
             turn_id=turn_id,
+            strict_namespace_scope=True,
         )
     except Exception as exc:
         return make_error_response(
@@ -15608,6 +15788,12 @@ def _workflow_list_use_episodes(**kwargs):
 def _workflow_mcp_health_check(**kwargs):
     """Run lightweight gateway-path health checks for core workflow MCP tools."""
 
+    if not _internal_mcp_global_workflow_admin_authorised():
+        return make_error_response(
+            "workflow_global_admin_authority_required",
+            "Workflow control-plane health diagnostics require trusted operator authority.",
+        )
+
     from time import perf_counter
     from .gateway import InternalMCPGateway
     from .transport import InternalMCPTransport
@@ -15639,6 +15825,7 @@ def _workflow_mcp_health_check(**kwargs):
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
     capability_matrix = build_workflow_surface_capability_matrix(
         internal_method_names=gateway.describe_methods().keys()
@@ -15695,6 +15882,12 @@ def _workflow_mcp_health_check(**kwargs):
 def _workflow_materialisation_diagnostics(**kwargs):
     """Diagnose workflow/testing concept materialisation parity state."""
 
+    if not _internal_mcp_global_workflow_admin_authorised():
+        return make_error_response(
+            "workflow_global_admin_authority_required",
+            "Workflow materialisation diagnostics require trusted operator authority.",
+        )
+
     from ...services.workflow_materialisation_diagnostics_service import (
         build_workflow_materialisation_diagnostics,
     )
@@ -15717,6 +15910,12 @@ def _workflow_materialisation_diagnostics(**kwargs):
 
 def _workflow_concept_parity_audit(**kwargs):
     """Audit workflow-related concept parity with environment/bootstrap provenance."""
+
+    if not _internal_mcp_global_workflow_admin_authorised():
+        return make_error_response(
+            "workflow_global_admin_authority_required",
+            "Workflow parity diagnostics require trusted operator authority.",
+        )
 
     from ...services.workflow_materialisation_diagnostics_service import (
         build_workflow_concept_parity_audit,
@@ -15778,14 +15977,38 @@ def _workflow_bind_event(**kwargs):
             "workflow_id is required",
             details={"missing": ["workflow_id"]},
         )
+    if not _internal_mcp_global_workflow_admin_authorised():
+        return make_error_response(
+            "workflow_global_admin_authority_required",
+            "Global workflow event-binding mutation requires trusted operator authority.",
+        )
 
     event_type = event_type_raw.strip()
     workflow_id = workflow_id_raw.strip()
+
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+        return make_error_response(
+            "not_found",
+            "Workflow is not available for event binding.",
+        )
+
     input_mapping_raw = kwargs.get("input_mapping")
     condition_raw = kwargs.get("condition")
     enabled = kwargs.get("enabled", True)
     replace_existing = kwargs.get("replace_existing", False)
-    actor = kwargs.get("actor")
 
     input_mapping: dict[str, str] = {}
     if isinstance(input_mapping_raw, dict):
@@ -15813,10 +16036,11 @@ def _workflow_bind_event(**kwargs):
     if not isinstance(replace_existing, bool):
         replace_existing = bool(replace_existing)
 
-    actor_clean = actor.strip() if isinstance(actor, str) and actor.strip() else None
+    # Mutation provenance is the authoritative ambient/operator actor, never a
+    # caller-supplied audit label.
+    actor_clean = actor_scope.user_concept_id
     if actor_clean is None:
-        actor_id, _actor_org = resolve_event_actor_context()
-        actor_clean = actor_id
+        actor_clean, _actor_org = resolve_event_actor_context()
 
     workflow_registry_known: bool | None = None
     try:
@@ -15875,10 +16099,28 @@ def _workflow_bind_event(**kwargs):
 def _workflow_list_event_bindings(**kwargs):
     """List authoritative persisted event -> workflow bindings."""
 
+    if not _internal_mcp_global_workflow_admin_authorised():
+        return make_error_response(
+            "workflow_global_admin_authority_required",
+            "Global workflow event-binding inspection requires trusted operator authority.",
+        )
+
     from ...services.workflow_event_integration_service import (
         build_event_workflow_binding_diagnostics,
         list_event_workflow_bindings,
     )
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    try:
+        _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
 
     event_type = kwargs.get("event_type")
     enabled_only = kwargs.get("enabled_only", False)
@@ -15898,6 +16140,20 @@ def _workflow_list_event_bindings(**kwargs):
         enabled_only=enabled_only,
         limit=limit,
     )
+    binding_workflow_ids = [
+        item.get("workflow_id")
+        for item in bindings
+        if isinstance(item, Mapping)
+    ]
+    visible_workflow_ids = set(
+        filter_workflow_ids_for_current_actor(binding_workflow_ids)
+    )
+    bindings = [
+        item
+        for item in bindings
+        if isinstance(item, Mapping)
+        and item.get("workflow_id") in visible_workflow_ids
+    ]
     diagnostics = build_event_workflow_binding_diagnostics(bindings)
     return {
         "success": True,
@@ -15927,6 +16183,11 @@ def _workflow_set_event_binding_enabled(**kwargs):
             "binding_id is required",
             details={"missing": ["binding_id"]},
         )
+    if not _internal_mcp_global_workflow_admin_authorised():
+        return make_error_response(
+            "workflow_global_admin_authority_required",
+            "Global workflow event-binding mutation requires trusted operator authority.",
+        )
 
     enabled = kwargs.get("enabled")
     if not isinstance(enabled, bool):
@@ -15936,15 +16197,33 @@ def _workflow_set_event_binding_enabled(**kwargs):
             details={"missing": ["enabled"]},
         )
 
-    actor = kwargs.get("actor")
-    actor_clean = actor.strip() if isinstance(actor, str) and actor.strip() else None
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+
+    actor_clean = actor_scope.user_concept_id
     if actor_clean is None:
-        actor_id, _actor_org = resolve_event_actor_context()
-        actor_clean = actor_id
+        actor_clean, _actor_org = resolve_event_actor_context()
 
     manager = WorkflowInstanceManager()
     existing = manager.get_event_binding(binding_id.strip())
     if existing is None:
+        return make_error_response(
+            "not_found",
+            f"Event binding not found: {binding_id}",
+        )
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    if existing.workflow_id not in filter_workflow_ids_for_current_actor(
+        [existing.workflow_id]
+    ):
         return make_error_response(
             "not_found",
             f"Event binding not found: {binding_id}",
@@ -15995,8 +16274,39 @@ def _workflow_delete_event_binding(**kwargs):
             "binding_id is required",
             details={"missing": ["binding_id"]},
         )
+    if not _internal_mcp_global_workflow_admin_authorised():
+        return make_error_response(
+            "workflow_global_admin_authority_required",
+            "Global workflow event-binding mutation requires trusted operator authority.",
+        )
+
+    try:
+        _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
 
     manager = WorkflowInstanceManager()
+    existing = manager.get_event_binding(binding_id.strip())
+    if existing is None:
+        return make_error_response(
+            "not_found",
+            f"Event binding not found: {binding_id}",
+        )
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    if existing.workflow_id not in filter_workflow_ids_for_current_actor(
+        [existing.workflow_id]
+    ):
+        return make_error_response(
+            "not_found",
+            f"Event binding not found: {binding_id}",
+        )
     try:
         deleted = manager.delete_event_binding(binding_id.strip())
     except Exception as exc:
@@ -16020,9 +16330,152 @@ def _workflow_delete_event_binding(**kwargs):
     }
 
 
+def _resolve_internal_mcp_workflow_launch_actor_scope(
+    *,
+    user_id: Any,
+    org_id: Any,
+    namespace: Any,
+):
+    """Bind workflow-launch claims to actor authority predating tool payloads."""
+
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from ...services.workflow_actor_scope_service import (
+        resolve_authoritative_workflow_actor_scope,
+    )
+    from .gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+    )
+
+    actor_source = get_internal_mcp_actor_context_source()
+    preexisting_actor = get_internal_mcp_preexisting_actor_context()
+    ambient_kwargs: dict[str, Any] = {}
+    trusted_unscoped = False
+    if preexisting_actor is not None:
+        ambient_kwargs = {
+            "ambient_user_id": preexisting_actor[0],
+            "ambient_org_id": preexisting_actor[1],
+            "ambient_context_supplied": True,
+        }
+    elif actor_source in {
+        "tool_payload_fallback",
+        "trusted_operator_payload_fallback",
+    }:
+        # The gateway installed actor context from these same arguments. It is
+        # useful propagation for trusted operator/background calls, but it is
+        # not ambient authentication authority against which claims may prove
+        # themselves.
+        ambient_kwargs = {
+            "ambient_user_id": None,
+            "ambient_org_id": None,
+            "ambient_context_supplied": False,
+        }
+        trusted_unscoped = actor_source == "trusted_operator_payload_fallback"
+    else:
+        trusted_unscoped = not bool(
+            get_effective_user_concept_id()
+            or get_effective_organisation_concept_id()
+        )
+
+    claimed_namespace = (
+        namespace.strip()
+        if isinstance(namespace, str) and namespace.strip()
+        else None
+    )
+    claimed_user_id = user_id
+    claimed_org_id = org_id
+    if trusted_unscoped and claimed_namespace is None:
+        claimed_user_id = (
+            user_id
+            if isinstance(user_id, str) and user_id.strip()
+            else "anonymous"
+        )
+        claimed_org_id = (
+            org_id if isinstance(org_id, str) and org_id.strip() else "default"
+        )
+
+    return resolve_authoritative_workflow_actor_scope(
+        claimed_user_id=claimed_user_id,
+        claimed_org_id=claimed_org_id,
+        claimed_namespace=claimed_namespace,
+        allow_unscoped_claims=trusted_unscoped,
+        **ambient_kwargs,
+    )
+
+
+def _internal_mcp_global_workflow_admin_authorised() -> bool:
+    """Return whether a caller may mutate process-global workflow controls.
+
+    Event bindings are currently global records rather than tenant-owned
+    resources.  Until that storage contract carries represented ownership,
+    ordinary authenticated actors must not be able to disable or replace a
+    binding for every user merely because they can execute its workflow.
+    """
+
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from .gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+    )
+
+    source = get_internal_mcp_actor_context_source()
+    if source == "trusted_operator_payload_fallback":
+        return True
+    if source is not None or get_internal_mcp_preexisting_actor_context() is not None:
+        return False
+    # Preserve deliberately direct operator/startup calls, while refusing a
+    # direct call made inside an authenticated user/workflow actor context.
+    return not bool(
+        get_effective_user_concept_id()
+        or get_effective_organisation_concept_id()
+    )
+
+
+def _internal_mcp_operator_control_plane_denial(
+    surface: str,
+) -> dict[str, Any] | None:
+    """Reject global diagnostic/control records outside operator provenance.
+
+    Experiment runs and raw turn/chat telemetry do not yet carry one complete,
+    consistently enforced actor-ownership contract. Until that represented
+    authority is added, exposing them to ordinary or payload-only callers can
+    reveal restricted workflow identifiers and evidence. Trusted operator and
+    direct startup paths retain access; actor-owned access is a separate
+    capability rather than a claim inferred from request fields.
+    """
+
+    if _internal_mcp_global_workflow_admin_authorised():
+        return None
+    return make_error_response(
+        "workflow_global_admin_authority_required",
+        f"{surface.strip().capitalize()} access requires trusted operator authority.",
+    )
+
+
+def _workflow_actor_scope_error_response(exc: Exception) -> dict[str, Any]:
+    reason = str(getattr(exc, "reason", "") or "workflow_actor_scope_mismatch")
+    mismatch_fields = getattr(exc, "mismatch_fields", ())
+    return make_error_response(
+        reason,
+        "Workflow launch actor scope conflicts with ambient authority.",
+        details={
+            "mismatch_fields": [
+                str(item)
+                for item in mismatch_fields
+                if item in {"user_id", "org_id", "namespace"}
+            ]
+        },
+    )
+
+
 def _workflow_create_instance(**kwargs):
     """Create a new durable workflow instance."""
-    from ...services.namespace_service import resolve_canonical_namespace
     from ...workflows.durable import WorkflowInstanceManager
     from ...workflows.durable.workflow_instance_submission_service import (
         submit_verified_workflow_instance,
@@ -16036,8 +16489,8 @@ def _workflow_create_instance(**kwargs):
             details={"missing": ["workflow_id"]},
         )
 
-    user_id_raw = kwargs.get("user_id", "anonymous")
-    org_id_raw = kwargs.get("org_id", "default")
+    user_id_raw = kwargs.get("user_id")
+    org_id_raw = kwargs.get("org_id")
     namespace_raw = kwargs.get("namespace")
     inputs_raw = kwargs.get("inputs", {})
     max_retries_raw = kwargs.get("max_retries", 3)
@@ -16045,21 +16498,21 @@ def _workflow_create_instance(**kwargs):
     source_event_id_raw = kwargs.get("source_event_id")
     event_idempotency_key_raw = kwargs.get("event_idempotency_key")
 
-    user_id = (
-        user_id_raw.strip()
-        if isinstance(user_id_raw, str) and user_id_raw.strip()
-        else "anonymous"
-    )
-    org_id = (
-        org_id_raw.strip()
-        if isinstance(org_id_raw, str) and org_id_raw.strip()
-        else "default"
-    )
-    namespace = resolve_canonical_namespace(namespace_raw, user_id, org_id)
-    if not namespace:
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=user_id_raw,
+            org_id=org_id_raw,
+            namespace=namespace_raw,
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    user_id = actor_scope.user_concept_id
+    org_id = actor_scope.organisation_concept_id
+    namespace = actor_scope.namespace
+    if not user_id or not namespace:
         return make_error_response(
-            "invalid_namespace",
-            "namespace must be canonical or derivable from user_id/org_id",
+            "workflow_actor_authority_required",
+            "Workflow launch requires a canonical user and namespace.",
         )
     source_event_type = (
         source_event_type_raw.strip()
@@ -16108,7 +16561,6 @@ def _workflow_create_instance(**kwargs):
 
 def _workflow_execute(**kwargs):
     """Launch a durable workflow instance and optionally await a terminal result."""
-    from ...services.namespace_service import resolve_canonical_namespace
     from ...workflows.durable import WorkflowInstanceManager
     from ...workflows.durable.execution_observability import (
         await_workflow_terminal_state,
@@ -16129,8 +16581,8 @@ def _workflow_execute(**kwargs):
             details={"missing": ["workflow_id"]},
         )
 
-    user_id_raw = kwargs.get("user_id", "anonymous")
-    org_id_raw = kwargs.get("org_id", "default")
+    user_id_raw = kwargs.get("user_id")
+    org_id_raw = kwargs.get("org_id")
     namespace_raw = kwargs.get("namespace")
     inputs_raw = kwargs.get("inputs", {})
     max_retries_raw = kwargs.get("max_retries", 3)
@@ -16178,21 +16630,21 @@ def _workflow_execute(**kwargs):
         poll_interval_seconds = 1.0
     poll_interval_seconds = max(0.0, poll_interval_seconds)
 
-    user_id = (
-        user_id_raw.strip()
-        if isinstance(user_id_raw, str) and user_id_raw.strip()
-        else "anonymous"
-    )
-    org_id = (
-        org_id_raw.strip()
-        if isinstance(org_id_raw, str) and org_id_raw.strip()
-        else "default"
-    )
-    namespace = resolve_canonical_namespace(namespace_raw, user_id, org_id)
-    if not namespace:
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=user_id_raw,
+            org_id=org_id_raw,
+            namespace=namespace_raw,
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    user_id = actor_scope.user_concept_id
+    org_id = actor_scope.organisation_concept_id
+    namespace = actor_scope.namespace
+    if not user_id or not namespace:
         return make_error_response(
-            "invalid_namespace",
-            "namespace must be canonical or derivable from user_id/org_id",
+            "workflow_actor_authority_required",
+            "Workflow launch requires a canonical user and namespace.",
         )
     source_event_type = (
         source_event_type_raw.strip()
@@ -16285,6 +16737,65 @@ def _workflow_execute(**kwargs):
         )
 
 
+def _workflow_persisted_record_matches_internal_actor(record: Any) -> bool:
+    """Return whether a persisted workflow record belongs to the MCP actor."""
+
+    def _value(field_name: str) -> Any:
+        if isinstance(record, Mapping):
+            return record.get(field_name)
+        return getattr(record, field_name, None)
+
+    claimed_user_id = _value("user_id") or _value("user_concept_id")
+    claimed_org_id = _value("org_id") or _value("organisation_concept_id")
+    claimed_namespace = _value("namespace") or _value("user_namespace")
+    if not claimed_user_id and not claimed_namespace:
+        from .gateway import (
+            get_internal_mcp_actor_context_source,
+            get_internal_mcp_preexisting_actor_context,
+        )
+
+        return bool(
+            get_internal_mcp_preexisting_actor_context() is None
+            and get_internal_mcp_actor_context_source()
+            == "trusted_operator_payload_fallback"
+        )
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=claimed_user_id,
+            org_id=claimed_org_id,
+            namespace=claimed_namespace,
+        )
+    except WorkflowActorScopeError:
+        return False
+    from ...services.namespace_service import resolve_canonical_namespace
+
+    persisted_namespace = resolve_canonical_namespace(
+        claimed_namespace,
+        claimed_user_id,
+        claimed_org_id,
+    )
+    # Non-operator access requires an exact persisted cohort.  A legacy
+    # user-only record cannot be safely attributed to one of that user's
+    # current organisations and therefore fails closed.
+    actor_matches = bool(
+        persisted_namespace
+        and actor_scope.namespace
+        and persisted_namespace == actor_scope.namespace
+    )
+    if not actor_matches:
+        return False
+
+    workflow_id = _value("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return True
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    workflow_id = workflow_id.strip()
+    return workflow_id in filter_workflow_ids_for_current_actor([workflow_id])
+
+
 def _workflow_get_execution_trace(**kwargs):
     """Get a persisted durable workflow execution trace by execution or instance ID."""
     from ...workflows import get_workflow_execution_trace
@@ -16313,6 +16824,7 @@ def _workflow_get_execution_trace(**kwargs):
             details={"missing_any_of": ["execution_id", "instance_id"]},
         )
 
+    trace_link_authorised = False
     if execution_id is None and instance_id is not None:
         manager = WorkflowInstanceManager()
         instance = manager.get_instance(instance_id)
@@ -16321,6 +16833,12 @@ def _workflow_get_execution_trace(**kwargs):
                 "not_found",
                 f"Workflow instance not found: {instance_id}",
             )
+        if not _workflow_persisted_record_matches_internal_actor(instance):
+            return make_error_response(
+                "not_found",
+                f"Workflow instance not found: {instance_id}",
+            )
+        trace_link_authorised = True
         execution_id = (
             instance.execution_trace_id.strip()
             if isinstance(instance.execution_trace_id, str)
@@ -16357,6 +16875,35 @@ def _workflow_get_execution_trace(**kwargs):
             "not_found",
             f"Workflow execution trace not found: {execution_id}",
         )
+    if not _workflow_persisted_record_matches_internal_actor(trace_doc):
+        return make_error_response(
+            "not_found",
+            f"Workflow execution trace not found: {execution_id}",
+        )
+    linked_instance_id = trace_doc.get("instance_id")
+    if (
+        trace_link_authorised
+        and isinstance(linked_instance_id, str)
+        and linked_instance_id.strip()
+        and linked_instance_id.strip() != instance_id
+    ):
+        return make_error_response(
+            "not_found",
+            f"Workflow execution trace not found: {execution_id}",
+        )
+    trace_workflow_id = trace_doc.get("workflow_id")
+    if isinstance(trace_workflow_id, str) and trace_workflow_id.strip():
+        from ...workflows.workflow_listing_service import (
+            filter_workflow_ids_for_current_actor,
+        )
+
+        if trace_workflow_id.strip() not in filter_workflow_ids_for_current_actor(
+            [trace_workflow_id.strip()]
+        ):
+            return make_error_response(
+                "not_found",
+                f"Workflow execution trace not found: {execution_id}",
+            )
 
     return {
         "success": True,
@@ -16379,11 +16926,20 @@ def _workflow_list_execution_traces(**kwargs):
         limit = 20
     limit = max(1, min(limit, 100))
 
-    namespace = kwargs.get("namespace")
-    if not isinstance(namespace, str) or not namespace.strip():
-        namespace = None
-    else:
-        namespace = namespace.strip()
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    namespace = actor_scope.namespace
+    if not namespace:
+        return make_error_response(
+            "workflow_actor_authority_required",
+            "Workflow trace listing requires actor authority.",
+        )
 
     workflow_id = kwargs.get("workflow_id")
     if not isinstance(workflow_id, str) or not workflow_id.strip():
@@ -16396,10 +16952,24 @@ def _workflow_list_execution_traces(**kwargs):
         namespace=namespace,
         workflow_id=workflow_id,
     )
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    visible_workflow_ids = set(
+        filter_workflow_ids_for_current_actor(
+            [
+                trace.get("workflow_id")
+                for trace in traces
+                if isinstance(trace, Mapping)
+            ]
+        )
+    )
     summaries = [
         build_workflow_execution_trace_summary(trace)
         for trace in traces
         if isinstance(trace, Mapping)
+        and trace.get("workflow_id") in visible_workflow_ids
     ]
     return {
         "success": True,
@@ -16421,6 +16991,32 @@ def _workflow_build_prediction_envelope(**kwargs):
             "workflow_id is required",
             details={"missing": ["workflow_id"]},
         )
+    workflow_id = workflow_id.strip()
+
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    namespace = actor_scope.namespace
+    if not namespace:
+        return make_error_response(
+            "workflow_actor_authority_required",
+            "Workflow prediction requires actor authority.",
+        )
+
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+        return make_error_response(
+            "not_found",
+            "Workflow is not available for prediction.",
+        )
 
     try:
         limit = int(kwargs.get("limit", 50))
@@ -16430,7 +17026,7 @@ def _workflow_build_prediction_envelope(**kwargs):
     try:
         return build_workflow_prediction_envelope(
             workflow_id=workflow_id,
-            namespace=kwargs.get("namespace"),
+            namespace=namespace,
             model=kwargs.get("model"),
             provider=kwargs.get("provider"),
             limit=limit,
@@ -16449,23 +17045,41 @@ def _workflow_build_prediction_envelope(**kwargs):
 
 def _workflow_list_instances(**kwargs):
     """List workflow instances with filters."""
-    from ...services.namespace_service import coerce_namespace
     from ...workflows.durable import WorkflowInstanceManager, WorkflowInstanceStatus
 
-    user_id = kwargs.get("user_id")
-    org_id = kwargs.get("org_id")
-    namespace_raw = kwargs.get("namespace")
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    user_id = actor_scope.user_concept_id
+    org_id = actor_scope.organisation_concept_id
+    namespace = actor_scope.namespace
+    if not user_id or not namespace:
+        return make_error_response(
+            "workflow_actor_authority_required",
+            "Workflow instance listing requires actor authority.",
+        )
     status_str = kwargs.get("status")
     workflow_id = kwargs.get("workflow_id")
+    if isinstance(workflow_id, str):
+        workflow_id = workflow_id.strip() or None
+    if workflow_id:
+        from ...workflows.workflow_listing_service import (
+            filter_workflow_ids_for_current_actor,
+        )
+
+        if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+            return {"success": True, "instances": [], "count": 0}
     source_event_type = kwargs.get("source_event_type")
     source_event_id = kwargs.get("source_event_id")
     session_id = kwargs.get("session_id") or kwargs.get("conversation_session_id")
     request_id = kwargs.get("request_id") or kwargs.get("turn_id")
     from_utc = kwargs.get("from_utc")
     to_utc = kwargs.get("to_utc")
-    namespace = coerce_namespace(namespace_raw)
-    if namespace is None and isinstance(namespace_raw, str) and namespace_raw.strip():
-        namespace = namespace_raw.strip()
     try:
         limit = int(kwargs.get("limit", 50))
     except (TypeError, ValueError):
@@ -16502,6 +17116,11 @@ def _workflow_list_instances(**kwargs):
         limit=limit,
     )
 
+    instances = [
+        instance
+        for instance in instances
+        if _workflow_persisted_record_matches_internal_actor(instance)
+    ]
     return {
         "success": True,
         "instances": [inst.to_status_dict() for inst in instances],
@@ -16525,6 +17144,11 @@ def _workflow_get_instance(**kwargs):
     instance = manager.get_instance(instance_id.strip())
 
     if not instance:
+        return make_error_response(
+            "not_found",
+            f"Workflow instance not found: {instance_id}",
+        )
+    if not _workflow_persisted_record_matches_internal_actor(instance):
         return make_error_response(
             "not_found",
             f"Workflow instance not found: {instance_id}",
@@ -16560,6 +17184,11 @@ def _workflow_cancel_instance(**kwargs):
     instance = manager.get_instance(instance_id.strip())
 
     if not instance:
+        return make_error_response(
+            "not_found",
+            f"Workflow instance not found: {instance_id}",
+        )
+    if not _workflow_persisted_record_matches_internal_actor(instance):
         return make_error_response(
             "not_found",
             f"Workflow instance not found: {instance_id}",
@@ -16602,6 +17231,11 @@ def _workflow_retry_instance(**kwargs):
             "not_found",
             f"Workflow instance not found: {instance_id}",
         )
+    if not _workflow_persisted_record_matches_internal_actor(instance):
+        return make_error_response(
+            "not_found",
+            f"Workflow instance not found: {instance_id}",
+        )
 
     if instance.status != WorkflowInstanceStatus.FAILED:
         return make_error_response(
@@ -16629,10 +17263,51 @@ def _workflow_retry_instance(**kwargs):
 # =============================================================================
 
 
+def _workflow_schedule_matches_actor_scope(schedule: Any, actor_scope: Any) -> bool:
+    """Check a persisted schedule against one already-authorised actor scope."""
+
+    from ...services.workflow_actor_scope_service import (
+        WorkflowActorScopeError,
+        resolve_authoritative_workflow_actor_scope,
+    )
+
+    try:
+        resolve_authoritative_workflow_actor_scope(
+            claimed_user_id=getattr(schedule, "user_id", None),
+            claimed_org_id=getattr(schedule, "org_id", None),
+            claimed_namespace=getattr(schedule, "namespace", None),
+            allow_unscoped_claims=False,
+            ambient_user_id=getattr(actor_scope, "user_concept_id", None),
+            ambient_org_id=getattr(actor_scope, "organisation_concept_id", None),
+            ambient_context_supplied=True,
+        )
+    except WorkflowActorScopeError:
+        return False
+    workflow_id = getattr(schedule, "workflow_id", None)
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return False
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    workflow_id = workflow_id.strip()
+    return workflow_id in filter_workflow_ids_for_current_actor([workflow_id])
+
+
+def _authorise_internal_mcp_workflow_schedule(schedule: Any):
+    """Authorise a schedule record through gateway actor provenance."""
+
+    return _resolve_internal_mcp_workflow_launch_actor_scope(
+        user_id=getattr(schedule, "user_id", None),
+        org_id=getattr(schedule, "org_id", None),
+        namespace=getattr(schedule, "namespace", None),
+    )
+
+
 def _workflow_create_schedule(**kwargs):
     """Create a new workflow schedule."""
     from datetime import datetime
-    from ...services.namespace_service import resolve_canonical_namespace
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import (
         WorkflowInstanceManager,
         WorkflowSchedule,
@@ -16647,13 +17322,31 @@ def _workflow_create_schedule(**kwargs):
             details={"missing": ["workflow_id"]},
         )
 
-    user_id = kwargs.get("user_id", "anonymous")
-    org_id = kwargs.get("org_id", "default")
-    namespace = resolve_canonical_namespace(kwargs.get("namespace"), user_id, org_id)
-    if not namespace:
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    user_id = actor_scope.user_concept_id
+    org_id = actor_scope.organisation_concept_id
+    namespace = actor_scope.namespace
+    if not user_id or not namespace:
         return make_error_response(
-            "invalid_namespace",
-            "namespace must be canonical or derivable from user_id/org_id",
+            "workflow_actor_authority_required",
+            "Workflow schedule actor authority is required.",
+        )
+    from ...workflows.workflow_listing_service import (
+        filter_workflow_ids_for_current_actor,
+    )
+
+    workflow_id = workflow_id.strip()
+    if workflow_id not in filter_workflow_ids_for_current_actor([workflow_id]):
+        return make_error_response(
+            "not_found",
+            "Workflow definition not found.",
         )
     default_inputs = kwargs.get("default_inputs", {})
     description = kwargs.get("description")
@@ -16677,7 +17370,7 @@ def _workflow_create_schedule(**kwargs):
                 "interval_seconds is required for interval type",
             )
         schedule = WorkflowSchedule.create_interval(
-            workflow_id.strip(),
+            workflow_id,
             interval_seconds=int(interval_seconds),
             user_id=user_id,
             org_id=org_id,
@@ -16694,7 +17387,7 @@ def _workflow_create_schedule(**kwargs):
                 "cron_expression is required for cron type",
             )
         schedule = WorkflowSchedule.create_cron(
-            workflow_id.strip(),
+            workflow_id,
             cron_expression=cron_expression.strip(),
             user_id=user_id,
             org_id=org_id,
@@ -16718,7 +17411,7 @@ def _workflow_create_schedule(**kwargs):
                 "Invalid run_at datetime format. Use ISO format: 2026-02-04T10:00:00Z",
             )
         schedule = WorkflowSchedule.create_once(
-            workflow_id.strip(),
+            workflow_id,
             run_at=run_at,
             user_id=user_id,
             org_id=org_id,
@@ -16747,9 +17440,18 @@ def _workflow_create_schedule(**kwargs):
 
 def _workflow_list_schedules(**kwargs):
     """List workflow schedules."""
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import WorkflowInstanceManager
 
-    user_id = kwargs.get("user_id")
+    try:
+        actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
+            user_id=kwargs.get("user_id"),
+            org_id=kwargs.get("org_id"),
+            namespace=kwargs.get("namespace"),
+        )
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    user_id = actor_scope.user_concept_id
     enabled_only = kwargs.get("enabled_only", False)
     limit = min(int(kwargs.get("limit", 50)), 200)
 
@@ -16759,6 +17461,11 @@ def _workflow_list_schedules(**kwargs):
         enabled_only=bool(enabled_only),
         limit=limit,
     )
+    schedules = [
+        schedule
+        for schedule in schedules
+        if _workflow_schedule_matches_actor_scope(schedule, actor_scope)
+    ]
 
     return {
         "success": True,
@@ -16769,6 +17476,7 @@ def _workflow_list_schedules(**kwargs):
 
 def _workflow_get_schedule(**kwargs):
     """Get details of a specific workflow schedule."""
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import WorkflowInstanceManager
 
     schedule_id = kwargs.get("schedule_id")
@@ -16783,6 +17491,15 @@ def _workflow_get_schedule(**kwargs):
     schedule = manager.get_schedule(schedule_id.strip())
 
     if not schedule:
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
+    try:
+        actor_scope = _authorise_internal_mcp_workflow_schedule(schedule)
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    if not _workflow_schedule_matches_actor_scope(schedule, actor_scope):
         return make_error_response(
             "not_found",
             f"Workflow schedule not found: {schedule_id}",
@@ -16806,6 +17523,7 @@ def _workflow_get_schedule(**kwargs):
 
 def _workflow_set_schedule_enabled(**kwargs):
     """Enable or disable a workflow schedule."""
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import WorkflowInstanceManager
 
     schedule_id = kwargs.get("schedule_id")
@@ -16832,6 +17550,15 @@ def _workflow_set_schedule_enabled(**kwargs):
             "not_found",
             f"Workflow schedule not found: {schedule_id}",
         )
+    try:
+        actor_scope = _authorise_internal_mcp_workflow_schedule(schedule)
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    if not _workflow_schedule_matches_actor_scope(schedule, actor_scope):
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
 
     success = manager.set_schedule_enabled(schedule_id.strip(), enabled)
     if success:
@@ -16846,6 +17573,7 @@ def _workflow_set_schedule_enabled(**kwargs):
 
 def _workflow_delete_schedule(**kwargs):
     """Delete a workflow schedule."""
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import WorkflowInstanceManager
 
     schedule_id = kwargs.get("schedule_id")
@@ -16864,6 +17592,15 @@ def _workflow_delete_schedule(**kwargs):
             "not_found",
             f"Workflow schedule not found: {schedule_id}",
         )
+    try:
+        actor_scope = _authorise_internal_mcp_workflow_schedule(schedule)
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    if not _workflow_schedule_matches_actor_scope(schedule, actor_scope):
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
 
     success = manager.delete_schedule(schedule_id.strip())
     if success:
@@ -16878,6 +17615,7 @@ def _workflow_delete_schedule(**kwargs):
 
 def _workflow_trigger_schedule(**kwargs):
     """Manually trigger a workflow schedule immediately."""
+    from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import WorkflowInstanceManager
     from ...workflows.durable.workflow_instance_submission_service import (
         submit_verified_workflow_instance,
@@ -16895,6 +17633,15 @@ def _workflow_trigger_schedule(**kwargs):
     schedule = manager.get_schedule(schedule_id.strip())
 
     if not schedule:
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
+    try:
+        actor_scope = _authorise_internal_mcp_workflow_schedule(schedule)
+    except WorkflowActorScopeError as exc:
+        return _workflow_actor_scope_error_response(exc)
+    if not _workflow_schedule_matches_actor_scope(schedule, actor_scope):
         return make_error_response(
             "not_found",
             f"Workflow schedule not found: {schedule_id}",

@@ -31,6 +31,9 @@ from ...workflows.durable.claim_diagnostics import (
 from ...workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
+from ...workflows.workflow_listing_service import (
+    filter_workflow_ids_for_current_actor,
+)
 from ...workflows.durable.turn_execution_runtime_support import (
     coerce_user_visible_response_text,
     strip_completion_ledger_suffix,
@@ -61,6 +64,7 @@ from ...services.coding_agent_identity_bootstrap_service import (
     VON_SYSTEM_ID,
 )
 from ...services.window_session_context_service import (
+    WindowSessionOwnershipError,
     set_window_organisation,
     clear_window_organisation,
     get_effective_context,
@@ -10283,13 +10287,53 @@ def onboard_new_member():
             400,
         )
 
+    from ...services.workflow_actor_scope_service import (
+        WorkflowActorScopeError,
+        resolve_authoritative_workflow_actor_scope,
+    )
+
+    try:
+        actor_scope = resolve_authoritative_workflow_actor_scope(
+            claimed_user_id=data.get("user_id"),
+            claimed_org_id=data.get("org_id"),
+            claimed_namespace=data.get("namespace"),
+            allow_unscoped_claims=False,
+        )
+    except WorkflowActorScopeError as exc:
+        status_code = (
+            400 if exc.reason == "workflow_actor_namespace_invalid" else 403
+        )
+        return (
+            jsonify(
+                {
+                    "error": exc.reason,
+                    "error_code": exc.reason,
+                    "mismatch_fields": list(exc.mismatch_fields),
+                }
+            ),
+            status_code,
+        )
+    user_id = actor_scope.user_concept_id
+    org_id = actor_scope.organisation_concept_id
+    namespace = actor_scope.namespace
+    if not user_id or not namespace:
+        return (
+            jsonify(
+                {
+                    "error": "workflow_actor_authority_required",
+                    "error_code": "workflow_actor_authority_required",
+                }
+            ),
+            403,
+        )
+
     inputs = _build_onboarding_inputs(member_name=member_name, request_payload=data)
     workflow_candidates = _resolve_onboarding_workflow_candidates(data)
     if not workflow_candidates:
         return (
             jsonify(
                 {
-                    "error": "No onboarding workflows configured or discoverable.",
+                    "error": "No onboarding workflow is currently available.",
                     "error_code": "onboarding_workflow_not_configured",
                 }
             ),
@@ -10297,61 +10341,6 @@ def onboard_new_member():
         )
 
     try:
-        user_concept_id = None
-        try:
-            from ...security.access_control import get_effective_user_concept_id
-
-            user_concept_id = get_effective_user_concept_id()
-        except Exception:
-            user_concept_id = session.get("user_concept_id")
-
-        window_session_id = request.headers.get("X-Von-Window-Session")
-        effective = get_effective_context(
-            window_session_id, dict(session), user_concept_id
-        )
-        namespace_resolution = _resolve_generate_namespace_context(
-            user_concept_id=user_concept_id,
-            effective_context=effective,
-            flask_session_snapshot=dict(session),
-        )
-
-        effective_org_id = _normalise_concept_id(
-            effective.get("organisation_id") if isinstance(effective, dict) else None
-        )
-        requested_org_id = _normalise_concept_id(data.get("org_id"))
-        org_id = effective_org_id or requested_org_id or "default"
-
-        user_id = (
-            _normalise_concept_id(user_concept_id)
-            or _normalise_concept_id(data.get("user_id"))
-            or _normalise_concept_id(session.get("user_concept_id"))
-            or "anonymous"
-        )
-
-        from ...services.namespace_service import resolve_canonical_namespace
-
-        requested_namespace = data.get("namespace")
-        if not isinstance(requested_namespace, str) or not requested_namespace.strip():
-            requested_namespace = None
-        namespace = resolve_canonical_namespace(
-            namespace_resolution.get("namespace") or requested_namespace,
-            user_id,
-            org_id if org_id != "default" else None,
-        )
-        if not isinstance(namespace, str) or not namespace.strip():
-            return (
-                jsonify(
-                    {
-                        "error": "namespace_resolution_failed",
-                        "message": (
-                            "Workflow launch namespace must be canonical or "
-                            "derivable from authenticated user/org context."
-                        ),
-                    }
-                ),
-                400,
-            )
-
         manager = get_instance_manager()
         attempt_payloads: list[dict[str, Any]] = []
         for workflow_id in workflow_candidates:
@@ -16304,14 +16293,6 @@ def set_user_concept():
         from ...services.namespace_service import derive_namespace
         from ...security.access_control import get_effective_user_concept_id
 
-        authenticated_id = get_effective_user_concept_id() or (
-            session.get("user_id")
-            or session.get("user_concept_id")
-            or session.get("user_email")
-        )
-        if not authenticated_id:
-            return jsonify({"error": "Not authenticated"}), 401
-
         data = request.get_json(silent=True) or {}
         user_concept_id = data.get("user_concept_id")
         if not isinstance(user_concept_id, str) or not user_concept_id.strip():
@@ -16320,6 +16301,52 @@ def set_user_concept():
         user_concept_id = user_concept_id.strip()
         if not user_concept_id.startswith("#V#"):
             user_concept_id = f"#V#{user_concept_id}"
+
+        # This endpoint may backfill the canonical concept ID for a legacy
+        # authenticated session, but it is not an account switcher. Resolve the
+        # server-side login identity (including its durable email relation) and
+        # require an exact match before changing any actor/session scope.
+        authenticated_id = get_effective_user_concept_id()
+        if not authenticated_id:
+            stored_concept_id = session.get("user_concept_id")
+            if isinstance(stored_concept_id, str) and stored_concept_id.strip():
+                authenticated_id = stored_concept_id.strip()
+        if not authenticated_id:
+            authenticated_email = session.get("user_email")
+            if isinstance(authenticated_email, str) and authenticated_email.strip():
+                from ...services.settings_service import _find_user_concept_by_email
+
+                email_user = _find_user_concept_by_email(authenticated_email.strip())
+                if isinstance(email_user, dict):
+                    authenticated_id = email_user.get("concept_id") or email_user.get(
+                        "id"
+                    )
+        if not authenticated_id:
+            legacy_user_id = session.get("user_id")
+            if isinstance(legacy_user_id, str) and legacy_user_id.strip():
+                legacy_user_id = legacy_user_id.strip()
+                if "@" not in legacy_user_id:
+                    authenticated_id = (
+                        legacy_user_id
+                        if legacy_user_id.startswith("#V#")
+                        else f"#V#{legacy_user_id}"
+                    )
+        if not authenticated_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        authenticated_concept_id = str(authenticated_id).strip()
+        if not authenticated_concept_id.startswith("#V#"):
+            authenticated_concept_id = f"#V#{authenticated_concept_id}"
+        if authenticated_concept_id != user_concept_id:
+            return (
+                jsonify(
+                    {
+                        "error": "authenticated_user_concept_mismatch",
+                        "error_code": "authenticated_user_concept_mismatch",
+                    }
+                ),
+                403,
+            )
 
         user_slug = user_concept_id[3:]
         user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
@@ -16403,6 +16430,16 @@ def set_user_concept():
             ),
             200,
         )
+    except WindowSessionOwnershipError:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_actor_mismatch",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
+        )
     except Exception as e:
         print(f"Error setting user concept: {e}")
         return jsonify({"error": str(e)}), 500
@@ -16425,7 +16462,6 @@ def set_organisation():
     """
     try:
         from ...services.namespace_service import derive_namespace
-        from ...security.role_resolver import get_user_role
 
         user_id = (
             session.get("user_concept_id")
@@ -16488,20 +16524,55 @@ def set_organisation():
         if not org_id:
             return jsonify({"error": "organisation_concept_id required"}), 400
 
-        # TODO: Validate user is member of org (once membership model exists)
-        # For now, allow any org switch
-
         # org_id may arrive as a concept id (e.g., "#V#university_of_auckland_strong_ai_lab")
         org_slug = str(org_id)
         if org_slug.startswith("#V#"):
             org_slug = org_slug[3:]
         org_slug = org_slug.strip().lower().replace(" ", "_")
 
-        # Get role for this user in this org (stub resolver expects slugs)
+        from ...services.organisation_membership_service import (
+            resolve_user_organisation_membership,
+        )
+
+        user_concept_id = (
+            str(user_id).strip()
+            if str(user_id).strip().startswith("#")
+            else f"#V#{user_slug}"
+        )
+        organisation_concept_id = f"#V#{org_slug}"
         try:
-            role_in_org = get_user_role(user_slug, org_slug)
-        except Exception:
-            role_in_org = "member"  # Default fallback
+            membership = resolve_user_organisation_membership(
+                user_concept_id,
+                organisation_concept_id,
+            )
+        except ValueError:
+            membership = None
+        except Exception as exc:
+            current_app.logger.warning(
+                "Organisation membership resolution failed for session scope",
+                extra={"exception_type": type(exc).__name__},
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "organisation_membership_unavailable",
+                        "error_code": "organisation_membership_unavailable",
+                    }
+                ),
+                503,
+            )
+        if membership is None:
+            return (
+                jsonify(
+                    {
+                        "error": "organisation_membership_required",
+                        "error_code": "organisation_membership_required",
+                    }
+                ),
+                403,
+            )
+
+        role_in_org = str(membership.get("role") or "member").strip() or "member"
 
         # Derive composite namespace using slug values
         namespace = derive_namespace(user_slug, org_slug)
@@ -16544,6 +16615,16 @@ def set_organisation():
             200,
         )
 
+    except WindowSessionOwnershipError:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_actor_mismatch",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
+        )
     except Exception as e:
         print(f"Error setting organisation: {e}")
         return jsonify({"error": str(e)}), 500
@@ -16811,6 +16892,16 @@ def set_chat_session():
                 }
             ),
             200,
+        )
+    except WindowSessionOwnershipError:
+        return (
+            jsonify(
+                {
+                    "error": "window_session_actor_mismatch",
+                    "error_code": "window_session_actor_mismatch",
+                }
+            ),
+            403,
         )
     except Exception as e:
         if chat_history_service.is_transient_chat_history_error(e):
@@ -17556,7 +17647,10 @@ def _resolve_onboarding_workflow_candidates(
     except Exception:
         pass
 
-    return candidates
+    # Registry and configured candidate lists are global acceleration/configuration
+    # surfaces, not visibility authority.  Project the complete ordered candidate
+    # set once before any launch attempt or response can expose an identifier.
+    return filter_workflow_ids_for_current_actor(candidates)
 
 
 def _normalise_concept_id(value: str | None) -> str | None:

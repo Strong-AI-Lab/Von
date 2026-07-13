@@ -114,18 +114,53 @@ def _clear_workflow_capability_index_status_cache():
         pass
 
 
-def test_workflow_execution_routes_roundtrip(app_client):
+def _allow_synthetic_workflow_access(monkeypatch) -> None:
+    """Keep synthetic route fixtures explicit about their access authority."""
+
+    import src.backend.workflows.workflow_listing_service as listing_service
+
+    monkeypatch.setattr(
+        listing_service,
+        "filter_accessible_concept_ids",
+        lambda workflow_ids: set(workflow_ids),
+    )
+
+
+def _authenticate_workflow_studio_client(
+    app_client,
+    *,
+    user_id: str = "#V#studio_author",
+    org_id: str = "#V#studio_org",
+) -> None:
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = user_id
+        flask_session["organisation_concept_id"] = org_id
+
+
+def test_workflow_execution_routes_roundtrip(monkeypatch, app_client):
     from src.backend.workflows.trace_model import WorkflowExecutionTrace
     from src.backend.workflows.trace_store import insert_workflow_execution_trace
+    import src.backend.server.routes.workflows_routes as workflows_routes
 
     trace = WorkflowExecutionTrace(workflow_id="#V#chat_assistant_workflow")
-    trace.user_namespace = "#V#unit_test_user"
+    trace.user_namespace = "#V#unit_test_user@unit_test_org"
+    trace.org_id = "#V#unit_test_org"
     trace.start_step("llm.generate", inputs={"prompt": "hi"}).finish_success(
         {"response_preview": "hello"}
     )
     trace.finish_completed()
 
     insert_workflow_execution_trace(trace.to_storage_document())
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: [
+            item for item in workflow_ids if isinstance(item, str)
+        ],
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#unit_test_user"
+        flask_session["organisation_concept_id"] = "#V#unit_test_org"
 
     resp = app_client.get(f"/api/workflows/executions/{trace.execution_id}")
     assert resp.status_code == 200
@@ -144,9 +179,128 @@ def test_workflow_execution_routes_roundtrip(app_client):
     )
 
 
+def test_workflow_execution_routes_conceal_cross_org_traces(
+    monkeypatch,
+    app_client,
+):
+    from src.backend.workflows.trace_model import WorkflowExecutionTrace
+    from src.backend.workflows.trace_store import insert_workflow_execution_trace
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    workflow_id = "#V#actor_scoped_trace_workflow"
+    own_trace = WorkflowExecutionTrace(workflow_id=workflow_id)
+    own_trace.user_namespace = "#V#same_user@org_a"
+    own_trace.org_id = "#V#org_a"
+    own_trace.finish_completed()
+    foreign_trace = WorkflowExecutionTrace(workflow_id=workflow_id)
+    foreign_trace.user_namespace = "#V#same_user@org_b"
+    foreign_trace.org_id = "#V#org_b"
+    foreign_trace.finish_completed()
+    insert_workflow_execution_trace(own_trace.to_storage_document())
+    insert_workflow_execution_trace(foreign_trace.to_storage_document())
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#same_user"
+        flask_session["organisation_concept_id"] = "#V#org_a"
+
+    own = app_client.get(f"/api/workflows/executions/{own_trace.execution_id}")
+    assert own.status_code == 200
+    foreign = app_client.get(
+        f"/api/workflows/executions/{foreign_trace.execution_id}"
+    )
+    assert foreign.status_code == 404
+    assert foreign.get_json() == {
+        "error": "workflow_execution_not_found",
+        "execution_id": foreign_trace.execution_id,
+    }
+
+    forged = app_client.get(
+        "/api/workflows/executions/recent",
+        query_string={"namespace": "#V#same_user/#V#org_b"},
+    )
+    assert forged.status_code == 403
+    recent = app_client.get(
+        "/api/workflows/executions/recent",
+        query_string={"limit": 20, "workflow_id": workflow_id},
+    )
+    assert recent.status_code == 200
+    execution_ids = {
+        item.get("execution_id") for item in recent.get_json()["items"]
+    }
+    assert own_trace.execution_id in execution_ids
+    assert foreign_trace.execution_id not in execution_ids
+
+
+def test_workflow_prediction_forces_ambient_actor_namespace(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_build_workflow_prediction_envelope(**kwargs):
+        calls.append(dict(kwargs))
+        return {"success": True, "workflow_id": kwargs["workflow_id"]}
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_prediction_envelope",
+        _fake_build_workflow_prediction_envelope,
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#prediction_user"
+        flask_session["organisation_concept_id"] = "#V#prediction_org"
+
+    forged = app_client.get(
+        "/api/workflows/predictions/envelope",
+        query_string={
+            "workflow_id": "#V#prediction_workflow",
+            "namespace": "#V#prediction_user/#V#foreign_org",
+        },
+    )
+    assert forged.status_code == 403
+    assert calls == []
+
+    response = app_client.get(
+        "/api/workflows/predictions/envelope",
+        query_string={"workflow_id": "#V#prediction_workflow"},
+    )
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "workflow_id": "#V#prediction_workflow",
+            "namespace": "#V#prediction_user@prediction_org",
+            "model": None,
+            "provider": None,
+            "limit": 50,
+        }
+    ]
+
+
 def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "resolve_workflow_definition_from_authority",
+        lambda *_args, **_kwargs: types.SimpleNamespace(definition=object()),
+    )
     monkeypatch.setattr(
         workflows_routes,
         "build_workflow_process_graph",
@@ -210,10 +364,91 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
     assert data["raw_source"] == "none"
 
 
+def test_workflow_definition_endpoint_conceals_hidden_existing_workflow(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda _workflow_ids: [],
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (_ for _ in ()).throw(
+            AssertionError("hidden workflow graph must not be loaded")
+        ),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "resolve_workflow_narrative_text",
+        lambda _workflow_id: (_ for _ in ()).throw(
+            AssertionError("hidden workflow narrative must not be loaded")
+        ),
+    )
+
+    response = app_client.get(
+        "/api/workflows/definitions/%23V%23hidden_existing_workflow"
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "workflow_definition_not_found"
+
+
+def test_workflow_definition_endpoint_conceals_visible_root_with_hidden_child(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "resolve_workflow_definition_from_authority",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            definition=None,
+            error_code="workflow_definition_not_loadable_for_actor",
+        ),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (_ for _ in ()).throw(
+            AssertionError("raw graph must not load after hidden-child denial")
+        ),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "resolve_workflow_narrative_text",
+        lambda _workflow_id: (_ for _ in ()).throw(
+            AssertionError("narrative must not reveal a denied graph")
+        ),
+    )
+
+    response = app_client.get(
+        "/api/workflows/definitions/%23V%23visible_root_hidden_child"
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "workflow_definition_not_found",
+        "workflow_id": "#V#visible_root_hidden_child",
+    }
+
+
 def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.workflows.durable.registry_factory as registry_factory
     import src.backend.services.workflow_discovery_service as workflow_discovery_service
+
+    _allow_synthetic_workflow_access(monkeypatch)
 
     class _FakeDefinition:
         def __init__(self, initial_state: str, purpose: str):
@@ -288,7 +523,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_usage_aggregates_for_workflows",
-        lambda workflow_ids: {
+        lambda workflow_ids, **_kwargs: {
             "#V#alpha_workflow": {
                 "attempts": 8,
                 "completions": 6,
@@ -306,7 +541,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_episode_counts_for_workflows",
-        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+        lambda workflow_ids, **_kwargs: {
             "#V#alpha_workflow": 3,
             "#V#beta_workflow": 0,
         },
@@ -317,10 +552,14 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
         lambda: {
             "ready": False,
             "status": "error",
-            "summary": "Workflow capability index not ready.",
-            "detail": "Last build failed: metadata too long",
-            "last_error": "metadata too long",
-            "size": 0,
+            "summary": "#V#hidden_workflow",
+            "detail": "Last build failed for #V#hidden_workflow",
+            "last_error": "failed to index #V#hidden_workflow",
+            "last_invalidation_reason": (
+                "workflow_routing_text_relation_changed:#V#hidden_workflow"
+            ),
+            "last_manifest_path": "/private/#V#hidden_workflow.json",
+            "size": 41,
         },
     )
     classification_map = {
@@ -351,6 +590,10 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
         _fake_classify_workflow_executability,
     )
 
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#catalogue_user"
+        flask_session["organisation_concept_id"] = "#V#catalogue_org"
+
     resp = app_client.get("/api/workflows/definitions?limit=10")
     assert resp.status_code == 200
     payload = resp.get_json()
@@ -358,12 +601,19 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert payload["count"] == 2
     assert payload["total"] == 2
     assert payload["episodes_scope"] == {
-        "namespace": None,
+        "namespace": "#V#catalogue_user@catalogue_org",
         "session_id": None,
         "turn_id": None,
     }
     assert payload["capability_index"]["ready"] is False
     assert payload["capability_index"]["status"] == "error"
+    assert payload["capability_index"]["visible_workflow_count"] == 2
+    assert payload["capability_index"]["workflow_count_scope"] == "actor_visible"
+    assert "size" not in payload["capability_index"]
+    assert "last_error" not in payload["capability_index"]
+    assert "last_invalidation_reason" not in payload["capability_index"]
+    assert "last_manifest_path" not in payload["capability_index"]
+    assert "#V#hidden_workflow" not in resp.get_data(as_text=True)
     assert payload["parity_inventory"]["counts"]["registry"] == 2
     assert "#V#salient_predicate_governance_workflow" in payload["parity_inventory"]["vontology_only_workflow_ids"]
 
@@ -413,6 +663,11 @@ def test_workflow_capability_index_status_endpoint_returns_readiness_report(
 
     monkeypatch.setattr(
         workflows_routes,
+        "_actor_visible_workflow_count",
+        lambda: 3,
+    )
+    monkeypatch.setattr(
+        workflows_routes,
         "get_workflow_capability_index_readiness_report",
         lambda: {
             "ready": False,
@@ -431,6 +686,9 @@ def test_workflow_capability_index_status_endpoint_returns_readiness_report(
     assert payload["ready"] is False
     assert payload["status"] == "timeout"
     assert payload["build_in_progress"] is True
+    assert payload["visible_workflow_count"] == 3
+    assert payload["workflow_count_scope"] == "actor_visible"
+    assert "size" not in payload
     assert payload["cache"]["state"] == "computed"
 
 
@@ -442,13 +700,18 @@ def test_workflow_capability_index_status_endpoint_caches_repeated_reads(
     with workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_LOCK:
         workflows_routes._WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE.clear()
     monkeypatch.setenv("VON_WORKFLOW_CAPABILITY_INDEX_STATUS_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(
+        workflows_routes,
+        "_actor_visible_workflow_count",
+        lambda: 2,
+    )
     calls = {"count": 0}
 
     def _fake_report():
         calls["count"] += 1
         return {
             "ready": calls["count"] >= 2,
-            "status": f"status-{calls['count']}",
+            "status": "building" if calls["count"] == 1 else "ready",
             "summary": "Workflow capability index status.",
         }
 
@@ -469,18 +732,68 @@ def test_workflow_capability_index_status_endpoint_caches_repeated_reads(
     first_payload = first.get_json()
     second_payload = second.get_json()
     bypass_payload = bypass.get_json()
-    assert first_payload["status"] == "status-1"
+    assert first_payload["status"] == "building"
     assert first_payload["cache"]["state"] == "computed"
-    assert second_payload["status"] == "status-1"
+    assert second_payload["status"] == "building"
     assert second_payload["cache"]["state"] == "fresh"
-    assert bypass_payload["status"] == "status-2"
+    assert bypass_payload["status"] == "ready"
     assert bypass_payload["cache"]["state"] == "computed"
+
+
+def test_workflow_capability_index_status_redacts_global_hidden_diagnostics(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    hidden_workflow_id = "#V#hidden_sail_workflow"
+    monkeypatch.setattr(
+        workflows_routes,
+        "_actor_visible_workflow_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_capability_index_readiness_report",
+        lambda: {
+            "ready": False,
+            "status": "error",
+            "size": 41,
+            "last_built_size": 41,
+            "last_invalidation_reason": (
+                f"workflow_routing_text_relation_changed:{hidden_workflow_id}"
+            ),
+            "last_error": f"failed to index {hidden_workflow_id}",
+            "query_surface_last_error": hidden_workflow_id,
+            "last_manifest_path": f"/private/{hidden_workflow_id}",
+            "last_manifest_detail": hidden_workflow_id,
+            "summary": hidden_workflow_id,
+            "detail": hidden_workflow_id,
+            "checked_at_utc": hidden_workflow_id,
+        },
+    )
+
+    response = app_client.get("/api/workflows/capability-index/status?nocache=1")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "error"
+    assert payload["visible_workflow_count"] == 1
+    assert payload["visible_workflow_count_available"] is True
+    assert payload["checked_at_utc"] is None
+    assert hidden_workflow_id not in response.get_data(as_text=True)
+    assert "last_invalidation_reason" not in payload
+    assert "last_error" not in payload
+    assert "last_manifest_path" not in payload
+    assert "size" not in payload
 
 
 def test_workflow_definitions_list_includes_relation_description_source(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.workflows.durable.registry_factory as registry_factory
     import src.backend.services.workflow_discovery_service as workflow_discovery_service
+
+    _allow_synthetic_workflow_access(monkeypatch)
 
     class _FakeDefinition:
         def __init__(self, initial_state: str, purpose: str):
@@ -539,12 +852,12 @@ def test_workflow_definitions_list_includes_relation_description_source(monkeypa
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_usage_aggregates_for_workflows",
-        lambda workflow_ids: {},
+        lambda workflow_ids, **_kwargs: {},
     )
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_episode_counts_for_workflows",
-        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+        lambda workflow_ids, **_kwargs: {
             "#V#legacy_workflow": 0,
         },
     )
@@ -586,6 +899,26 @@ def test_workflow_definitions_list_includes_relation_description_source(monkeypa
 
 def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    class _Registry:
+        @staticmethod
+        def all_workflow_ids():
+            return ["#V#alpha_workflow"]
+
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        lambda **_kwargs: _Registry(),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#user"
+        flask_session["organisation_concept_id"] = "#V#org"
 
     expected_items = [
         {
@@ -613,7 +946,8 @@ def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
 
     def _fake_list_workflow_use_episodes(**kwargs):
         assert kwargs["workflow_id"] == "#V#alpha_workflow"
-        assert kwargs["namespace"] == "#V#user/#V#org"
+        assert kwargs["workflow_ids"] == ["#V#alpha_workflow"]
+        assert kwargs["namespace"] == "#V#user@org"
         assert kwargs["session_id"] == "session-1"
         assert kwargs["turn_id"] == "turn-123"
         assert kwargs["limit"] == 25
@@ -621,7 +955,8 @@ def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
 
     def _fake_count_workflow_use_episodes(**kwargs):
         assert kwargs["workflow_id"] == "#V#alpha_workflow"
-        assert kwargs["namespace"] == "#V#user/#V#org"
+        assert kwargs["workflow_ids"] == ["#V#alpha_workflow"]
+        assert kwargs["namespace"] == "#V#user@org"
         assert kwargs["session_id"] == "session-1"
         assert kwargs["turn_id"] == "turn-123"
         return 3
@@ -651,7 +986,7 @@ def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
     assert payload["has_more"] is True
     assert payload["items"] == expected_items
     assert payload["filters"]["workflow_id"] == "#V#alpha_workflow"
-    assert payload["filters"]["namespace"] == "#V#user/#V#org"
+    assert payload["filters"]["namespace"] == "#V#user@org"
     assert payload["filters"]["session_id"] == "session-1"
     assert payload["filters"]["turn_id"] == "turn-123"
 
@@ -660,6 +995,26 @@ def test_workflow_episodes_list_endpoint_returns_structured_diagnostics_on_failu
     monkeypatch, app_client
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    class _Registry:
+        @staticmethod
+        def all_workflow_ids():
+            return ["#V#alpha_workflow"]
+
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        lambda **_kwargs: _Registry(),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#user"
+        flask_session["organisation_concept_id"] = "#V#org"
 
     def _boom(**_kwargs):
         raise RuntimeError("mongodb timeout while reading workflow episodes")
@@ -683,11 +1038,199 @@ def test_workflow_episodes_list_endpoint_returns_structured_diagnostics_on_failu
     assert payload["error"] == "workflow_episodes_fetch_failed"
     assert payload["error_type"] == "RuntimeError"
     assert payload["filters"]["workflow_id"] == "#V#alpha_workflow"
-    assert payload["filters"]["namespace"] == "#V#user/#V#org"
+    assert payload["filters"]["namespace"] == "#V#user@org"
     assert payload["filters"]["session_id"] == "session-1"
     assert payload["filters"]["turn_id"] == "turn-123"
-    assert payload["diagnostics"]["namespace"] == "#V#user/#V#org"
+    assert payload["diagnostics"]["namespace"] == "#V#user@org"
     assert "mongodb timeout" in payload["diagnostics"]["backend_reason"]
+
+
+def test_workflow_episodes_reject_forged_actor_scope_before_store_read(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        workflows_routes,
+        "list_workflow_use_episodes",
+        lambda **kwargs: calls.append(dict(kwargs)) or [],
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#episode_user"
+        flask_session["organisation_concept_id"] = "#V#org_a"
+
+    response = app_client.get(
+        "/api/workflows/episodes",
+        query_string={
+            "workflow_id": "#V#restricted_workflow",
+            "namespace": "#V#episode_user/#V#org_b",
+        },
+    )
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_workflow_instance_stream_always_binds_ambient_actor(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.services.durable_workflow_stream_service as stream_module
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    captured: list[dict[str, object]] = []
+
+    class _StreamService:
+        def subscribe(self, **kwargs):
+            captured.append(dict(kwargs))
+            return object()
+
+        @staticmethod
+        def generate_events(_subscriber):
+            yield "data: {}\n\n"
+
+        @staticmethod
+        def unsubscribe(_subscriber):
+            return None
+
+    monkeypatch.setattr(
+        stream_module,
+        "get_workflow_stream_service",
+        lambda: _StreamService(),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+
+    unauthenticated = app_client.get("/api/workflows/instances/stream")
+    assert unauthenticated.status_code == 403
+    assert captured == []
+
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#stream_user"
+        flask_session["organisation_concept_id"] = "#V#stream_org"
+
+    forged = app_client.get(
+        "/api/workflows/instances/stream",
+        query_string={"org_id": "#V#foreign_org"},
+    )
+    assert forged.status_code == 403
+    assert captured == []
+
+    response = app_client.get(
+        "/api/workflows/instances/stream",
+        query_string={
+            "workflow_id": "#V#stream_workflow",
+            "status": "running,completed",
+        },
+    )
+    assert response.status_code == 200
+    assert captured == [
+        {
+            "user_id": "#V#stream_user",
+            "org_id": "#V#stream_org",
+            "namespace": "#V#stream_user@stream_org",
+            "workflow_id": "#V#stream_workflow",
+            "instance_id": None,
+            "statuses": {"running", "completed"},
+            "allowed_workflow_ids": {"#V#stream_workflow"},
+        }
+    ]
+
+
+def test_revoked_workflow_visibility_hides_trace_prediction_episode_and_stream_surfaces(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.services.durable_workflow_stream_service as stream_module
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    workflow_id = "#V#revoked_workflow"
+    trace = {
+        "execution_id": "trace-revoked",
+        "workflow_id": workflow_id,
+        "user_namespace": "#V#actor@org",
+        "user_id": "#V#actor",
+        "org_id": "#V#org",
+    }
+    prediction_calls: list[object] = []
+    episode_calls: list[dict[str, object]] = []
+    stream_calls: list[object] = []
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda _workflow_ids: [],
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_execution_trace",
+        lambda _execution_id: dict(trace),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "list_recent_workflow_execution_traces",
+        lambda **_kwargs: [dict(trace)],
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_prediction_envelope",
+        lambda **_kwargs: prediction_calls.append(object()),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        lambda **_kwargs: types.SimpleNamespace(
+            all_workflow_ids=lambda: [workflow_id]
+        ),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "list_workflow_use_episodes",
+        lambda **kwargs: episode_calls.append(dict(kwargs)) or [],
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "count_workflow_use_episodes",
+        lambda **kwargs: episode_calls.append(dict(kwargs)) or 0,
+    )
+    monkeypatch.setattr(
+        stream_module,
+        "get_workflow_stream_service",
+        lambda: stream_calls.append(object()),
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#actor"
+        flask_session["organisation_concept_id"] = "#V#org"
+
+    exact = app_client.get("/api/workflows/executions/trace-revoked")
+    recent = app_client.get("/api/workflows/executions/recent")
+    prediction = app_client.get(
+        "/api/workflows/predictions/envelope",
+        query_string={"workflow_id": workflow_id},
+    )
+    episodes = app_client.get(
+        "/api/workflows/episodes",
+        query_string={"workflow_id": workflow_id},
+    )
+    stream = app_client.get(
+        "/api/workflows/instances/stream",
+        query_string={"workflow_id": workflow_id},
+    )
+
+    assert exact.status_code == 404
+    assert recent.get_json() == {"items": [], "count": 0}
+    assert prediction.status_code == 404
+    assert prediction_calls == []
+    assert episodes.status_code == 200
+    assert episodes.get_json()["items"] == []
+    assert all(call["workflow_ids"] == [] for call in episode_calls)
+    assert stream.status_code == 404
+    assert stream_calls == []
 
 
 def test_create_workflow_instance_route_rejects_unrunnable_workflow(
@@ -700,6 +1243,11 @@ def test_create_workflow_instance_route_rejects_unrunnable_workflow(
 
     manager = object()
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
 
     def _fake_submit_verified_workflow_instance(**kwargs):
         assert kwargs.get("manager") is manager
@@ -721,6 +1269,10 @@ def test_create_workflow_instance_route_rejects_unrunnable_workflow(
         "submit_verified_workflow_instance",
         _fake_submit_verified_workflow_instance,
     )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
 
     response = app_client.post(
         "/api/workflows/instances",
@@ -742,6 +1294,37 @@ def test_create_workflow_instance_route_rejects_unrunnable_workflow(
     ]
 
 
+def test_create_workflow_instance_rejects_body_actor_impersonation(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    def _unexpected_submission(**_kwargs):
+        raise AssertionError("forged actor must be rejected before submission")
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "submit_verified_workflow_instance",
+        _unexpected_submission,
+    )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#outsider"
+
+    response = app_client.post(
+        "/api/workflows/instances",
+        json={
+            "workflow_id": "#V#restricted_workflow",
+            "user_id": "#V#trusted_member",
+            "org_id": "#V#trusted_org",
+            "namespace": "#V#trusted_member@trusted_org",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error_code"] == "workflow_actor_scope_mismatch"
+
+
 def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
     monkeypatch, app_client
 ):
@@ -761,6 +1344,11 @@ def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
 
     manager = types.SimpleNamespace(get_schedule=lambda _: schedule)
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
 
     def _fake_submit_verified_workflow_instance(**kwargs):
         assert kwargs.get("manager") is manager
@@ -782,6 +1370,10 @@ def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
         "submit_verified_workflow_instance",
         _fake_submit_verified_workflow_instance,
     )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
 
     response = app_client.post(
         "/api/workflows/schedules/%23V%23schedule_test_1/trigger",
@@ -810,6 +1402,15 @@ def test_create_workflow_schedule_route_canonicalises_legacy_namespace(
 
     manager = types.SimpleNamespace(create_schedule=_create_schedule)
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
 
     response = app_client.post(
         "/api/workflows/schedules",
@@ -829,6 +1430,180 @@ def test_create_workflow_schedule_route_canonicalises_legacy_namespace(
     assert getattr(schedule, "namespace", None) == "#V#user_1@org_1"
 
 
+def test_create_workflow_schedule_rejects_body_actor_impersonation(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    manager = types.SimpleNamespace(
+        create_schedule=lambda _schedule: (_ for _ in ()).throw(
+            AssertionError("forged actor must be rejected before persistence")
+        )
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#outsider"
+        session["organisation_concept_id"] = "#V#outsider_org"
+
+    response = app_client.post(
+        "/api/workflows/schedules",
+        json={
+            "workflow_id": "#V#restricted_workflow",
+            "user_id": "#V#trusted_member",
+            "org_id": "#V#trusted_org",
+            "namespace": "#V#trusted_member@trusted_org",
+            "schedule_type": "interval",
+            "interval_seconds": 60,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error_code"] == "workflow_actor_scope_mismatch"
+
+
+def test_list_workflow_schedules_filters_to_exact_request_actor(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    own_schedule = types.SimpleNamespace(
+        schedule_id="schedule-own",
+        workflow_id="#V#visible_workflow",
+        user_id="#V#user_1",
+        org_id="#V#org_1",
+        namespace="#V#user_1@org_1",
+        to_status_dict=lambda: {"schedule_id": "schedule-own"},
+    )
+    foreign_schedule = types.SimpleNamespace(
+        schedule_id="schedule-foreign",
+        workflow_id="#V#visible_workflow",
+        user_id="#V#other_user",
+        org_id="#V#other_org",
+        namespace="#V#other_user@other_org",
+        to_status_dict=lambda: {"schedule_id": "schedule-foreign"},
+    )
+
+    def _list_schedules(**kwargs):
+        assert kwargs["user_id"] == "#V#user_1"
+        return [own_schedule, foreign_schedule]
+
+    manager = types.SimpleNamespace(list_schedules=_list_schedules)
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
+
+    response = app_client.get("/api/workflows/schedules")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "items": [{"schedule_id": "schedule-own"}],
+        "count": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/api/workflows/schedules/schedule-foreign", None),
+        (
+            "PUT",
+            "/api/workflows/schedules/schedule-foreign/enabled",
+            {"enabled": False},
+        ),
+        ("DELETE", "/api/workflows/schedules/schedule-foreign", None),
+        ("POST", "/api/workflows/schedules/schedule-foreign/trigger", None),
+    ],
+)
+def test_workflow_schedule_routes_hide_other_actor_schedule(
+    monkeypatch, app_client, method, path, body
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    foreign_schedule = types.SimpleNamespace(
+        schedule_id="schedule-foreign",
+        workflow_id="#V#restricted_workflow",
+        user_id="#V#other_user",
+        org_id="#V#other_org",
+        namespace="#V#other_user@other_org",
+        default_inputs={},
+    )
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("foreign schedule must not be read, mutated, or triggered")
+
+    manager = types.SimpleNamespace(
+        get_schedule=lambda _schedule_id: foreign_schedule,
+        set_schedule_enabled=_unexpected,
+        delete_schedule=_unexpected,
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "submit_verified_workflow_instance",
+        _unexpected,
+    )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
+
+    response = app_client.open(path, method=method, json=body)
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "schedule_not_found",
+        "schedule_id": "schedule-foreign",
+    }
+
+
+@pytest.mark.parametrize(
+    ("persisted_org_id", "persisted_namespace"),
+    [
+        ("#V#org_a", "#V#same_user@org_a"),
+        (None, None),
+    ],
+)
+def test_direct_schedule_id_requires_complete_exact_actor_envelope(
+    monkeypatch,
+    app_client,
+    persisted_org_id,
+    persisted_namespace,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    schedule = types.SimpleNamespace(
+        schedule_id="schedule-cross-org",
+        workflow_id="#V#visible_workflow",
+        user_id="#V#same_user",
+        org_id=persisted_org_id,
+        namespace=persisted_namespace,
+    )
+    manager = types.SimpleNamespace(
+        get_schedule=lambda _schedule_id: schedule,
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#same_user"
+        session["organisation_concept_id"] = "#V#org_b"
+
+    response = app_client.get("/api/workflows/schedules/schedule-cross-org")
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "schedule_not_found",
+        "schedule_id": "schedule-cross-org",
+    }
+
+
 def test_list_workflow_instances_returns_retryable_degraded_payload_for_mongo_timeout(
     monkeypatch, app_client
 ):
@@ -840,6 +1615,10 @@ def test_list_workflow_instances_returns_retryable_degraded_payload_for_mongo_ti
         )
     )
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
 
     response = app_client.get("/api/workflows/instances")
 
@@ -933,6 +1712,15 @@ def test_list_workflow_instances_accepts_comma_separated_status_filters(
 
     manager = types.SimpleNamespace(list_instance_status_dicts=_list_instance_status_dicts)
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
 
     response = app_client.get(
         "/api/workflows/instances",
@@ -956,37 +1744,46 @@ def test_list_workflow_instances_accepts_comma_separated_status_filters(
 
 
 def test_list_workflow_instances_keeps_running_rows_visible_during_pending_backlog(
+    monkeypatch,
     app_client,
 ):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
     from src.backend.workflows.durable.instance_manager import WorkflowInstanceManager
     from src.backend.workflows.durable.models import WorkflowInstanceStatus
 
     manager = WorkflowInstanceManager()
-    user_id = "user-monitor"
-    namespace = "user-monitor/org-1"
+    user_id = "#V#user_monitor"
+    org_id = "#V#org_1"
+    namespace = "#V#user_monitor@org_1"
 
     running_alpha = manager.create_instance(
         "#V#alpha_workflow",
         user_id=user_id,
-        org_id="org-1",
+        org_id=org_id,
         namespace=namespace,
     )
     pending_alpha_old = manager.create_instance(
         "#V#alpha_workflow",
         user_id=user_id,
-        org_id="org-1",
+        org_id=org_id,
         namespace=namespace,
     )
     pending_alpha_new = manager.create_instance(
         "#V#alpha_workflow",
         user_id=user_id,
-        org_id="org-1",
+        org_id=org_id,
         namespace=namespace,
     )
     running_beta = manager.create_instance(
         "#V#beta_workflow",
         user_id=user_id,
-        org_id="org-1",
+        org_id=org_id,
         namespace=namespace,
     )
 
@@ -1034,6 +1831,10 @@ def test_list_workflow_instances_keeps_running_rows_visible_during_pending_backl
         },
     )
 
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = user_id
+        session["organisation_concept_id"] = org_id
+
     response = app_client.get(
         "/api/workflows/instances",
         query_string={
@@ -1067,18 +1868,32 @@ def test_list_workflow_instances_rejects_invalid_comma_separated_status_filters(
     assert "Invalid status" in payload["error"]
 
 
-def test_cancel_workflow_instance_route_avoids_preflight_read_on_success(
+def test_cancel_workflow_instance_route_authorises_before_mutation(
     monkeypatch, app_client
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    instance = types.SimpleNamespace(
+        workflow_id="#V#visible_workflow",
+        user_id="#V#user_1",
+        org_id="#V#org_1",
+        namespace="#V#user_1@org_1",
+        status=types.SimpleNamespace(is_terminal=lambda: False),
+    )
     manager = types.SimpleNamespace(
         mark_cancelled=lambda instance_id: instance_id == "inst-1",
-        get_instance=lambda _instance_id: (_ for _ in ()).throw(
-            AssertionError("cancel success path should not read instance first")
-        ),
+        get_instance=lambda _instance_id: instance,
     )
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
 
     response = app_client.post("/api/workflows/instances/inst-1/cancel")
 
@@ -1091,12 +1906,28 @@ def test_cancel_workflow_instance_returns_retryable_degraded_payload_for_timeout
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    instance = types.SimpleNamespace(
+        workflow_id="#V#visible_workflow",
+        user_id="#V#user_1",
+        org_id="#V#org_1",
+        namespace="#V#user_1@org_1",
+    )
     manager = types.SimpleNamespace(
+        get_instance=lambda _instance_id: instance,
         mark_cancelled=lambda _instance_id: (_ for _ in ()).throw(
             PyMongoError("timed out while waiting for majority write acknowledgement")
         )
     )
     monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
 
     response = app_client.post("/api/workflows/instances/inst-timeout/cancel")
 
@@ -1112,10 +1943,209 @@ def test_cancel_workflow_instance_returns_retryable_degraded_payload_for_timeout
     )
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/workflows/instances/instance-foreign"),
+        ("POST", "/api/workflows/instances/instance-foreign/cancel"),
+        ("POST", "/api/workflows/instances/instance-foreign/retry"),
+        ("POST", "/api/workflows/instances/instance-foreign/pause"),
+    ],
+)
+def test_workflow_instance_routes_hide_other_actor_instance(
+    monkeypatch,
+    app_client,
+    method,
+    path,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    foreign_instance = types.SimpleNamespace(
+        instance_id="instance-foreign",
+        user_id="#V#other_user",
+        org_id="#V#other_org",
+        namespace="#V#other_user@other_org",
+        status=workflows_routes.WorkflowInstanceStatus.RUNNING,
+    )
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("foreign workflow instance must not be mutated")
+
+    manager = types.SimpleNamespace(
+        get_instance=lambda _instance_id: foreign_instance,
+        mark_cancelled=_unexpected,
+        reset_for_retry=_unexpected,
+        pause_instance=_unexpected,
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#user_1"
+        session["organisation_concept_id"] = "#V#org_1"
+
+    response = app_client.open(path, method=method)
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "instance_not_found",
+        "instance_id": "instance-foreign",
+    }
+
+
+@pytest.mark.parametrize(
+    ("persisted_org_id", "persisted_namespace"),
+    [
+        ("#V#org_a", "#V#same_user@org_a"),
+        (None, None),
+    ],
+)
+def test_direct_instance_id_requires_complete_exact_actor_envelope(
+    monkeypatch,
+    app_client,
+    persisted_org_id,
+    persisted_namespace,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    instance = types.SimpleNamespace(
+        instance_id="instance-cross-org",
+        workflow_id="#V#visible_workflow",
+        user_id="#V#same_user",
+        org_id=persisted_org_id,
+        namespace=persisted_namespace,
+    )
+    manager = types.SimpleNamespace(
+        get_instance=lambda _instance_id: instance,
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    with app_client.session_transaction() as session:
+        session["user_concept_id"] = "#V#same_user"
+        session["organisation_concept_id"] = "#V#org_b"
+
+    response = app_client.get("/api/workflows/instances/instance-cross-org")
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "instance_not_found",
+        "instance_id": "instance-cross-org",
+    }
+
+
+def test_revoked_workflow_visibility_hides_same_actor_http_instance_history(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    instance = types.SimpleNamespace(
+        instance_id="instance-revoked",
+        workflow_id="#V#revoked_workflow",
+        user_id="#V#actor",
+        org_id="#V#org",
+        namespace="#V#actor@org",
+        status=workflows_routes.WorkflowInstanceStatus.RUNNING,
+    )
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("revoked instance must not be mutated")
+
+    manager = types.SimpleNamespace(
+        list_instance_status_dicts=lambda **_kwargs: [
+            {
+                "instance_id": instance.instance_id,
+                "workflow_id": instance.workflow_id,
+                "status": "running",
+            }
+        ],
+        get_instance=lambda _instance_id: instance,
+        mark_cancelled=_unexpected,
+        reset_for_retry=_unexpected,
+        pause_instance=_unexpected,
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda _workflow_ids: [],
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#actor"
+        flask_session["organisation_concept_id"] = "#V#org"
+
+    listed = app_client.get("/api/workflows/instances")
+    responses = [
+        app_client.get("/api/workflows/instances/instance-revoked"),
+        app_client.post("/api/workflows/instances/instance-revoked/cancel"),
+        app_client.post("/api/workflows/instances/instance-revoked/retry"),
+        app_client.post("/api/workflows/instances/instance-revoked/pause"),
+    ]
+
+    assert listed.get_json() == {"items": [], "count": 0}
+    assert all(response.status_code == 404 for response in responses)
+    assert all("revoked_workflow" not in response.get_data(as_text=True) for response in responses)
+
+
+def test_revoked_workflow_visibility_hides_same_actor_http_schedules(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    schedule = types.SimpleNamespace(
+        schedule_id="schedule-revoked",
+        workflow_id="#V#revoked_workflow",
+        user_id="#V#actor",
+        org_id="#V#org",
+        namespace="#V#actor@org",
+    )
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("revoked schedule must not be mutated or triggered")
+
+    manager = types.SimpleNamespace(
+        list_schedules=lambda **_kwargs: [schedule],
+        get_schedule=lambda _schedule_id: schedule,
+        set_schedule_enabled=_unexpected,
+        delete_schedule=_unexpected,
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda _workflow_ids: [],
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "submit_verified_workflow_instance",
+        _unexpected,
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#actor"
+        flask_session["organisation_concept_id"] = "#V#org"
+
+    listed = app_client.get("/api/workflows/schedules")
+    responses = [
+        app_client.get("/api/workflows/schedules/schedule-revoked"),
+        app_client.put(
+            "/api/workflows/schedules/schedule-revoked/enabled",
+            json={"enabled": False},
+        ),
+        app_client.delete("/api/workflows/schedules/schedule-revoked"),
+        app_client.post("/api/workflows/schedules/schedule-revoked/trigger"),
+    ]
+
+    assert listed.get_json() == {"items": [], "count": 0}
+    assert all(response.status_code == 404 for response in responses)
+    assert all("revoked_workflow" not in response.get_data(as_text=True) for response in responses)
+
+
 def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.services.workflow_discovery_service as workflow_discovery_service
     import src.backend.workflows.durable.registry_factory as registry_factory
+
+    _allow_synthetic_workflow_access(monkeypatch)
 
     class _FakeDefinition:
         initial_state = "start"
@@ -1163,12 +2193,12 @@ def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client)
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_usage_aggregates_for_workflows",
-        lambda workflow_ids: {},
+        lambda workflow_ids, **_kwargs: {},
     )
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_episode_counts_for_workflows",
-        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+        lambda workflow_ids, **_kwargs: {
             "#V#cached_workflow": 0
         },
     )
@@ -1243,12 +2273,12 @@ def test_workflow_definitions_list_nocache_bypasses_cache(monkeypatch, app_clien
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_usage_aggregates_for_workflows",
-        lambda workflow_ids: {},
+        lambda workflow_ids, **_kwargs: {},
     )
     monkeypatch.setattr(
         workflows_routes,
         "get_workflow_episode_counts_for_workflows",
-        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+        lambda workflow_ids, **_kwargs: {
             "#V#cached_workflow": 0
         },
     )
@@ -1275,7 +2305,7 @@ def test_workflow_definitions_list_serves_stale_when_refresh_in_progress(
     import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.workflows.durable.registry_factory as registry_factory
 
-    cache_key = (10, None, None, None)
+    cache_key = (10, None, None, None, "user:anon|org:none")
     stale_payload = {
         "items": [
             {
@@ -1334,13 +2364,72 @@ def test_workflow_definitions_list_serves_stale_when_refresh_in_progress(
     assert float(payload["cache"]["retry_after_seconds"]) > 0.0
 
 
+def test_cached_workflow_definitions_are_reprojected_for_ambient_actor(
+    monkeypatch,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    from src.backend.security import access_control
+
+    visible_id = "#V#visible_workflow"
+    restricted_id = "#V#restricted_workflow"
+
+    class _Collection:
+        def find(self, query, _projection):
+            requested_ids = set(query["concept_id"]["$in"])
+            documents = {
+                visible_id: {"concept_id": visible_id, "relationships": {}},
+                restricted_id: {
+                    "concept_id": restricted_id,
+                    "relationships": {
+                        "#V#specific_to_user": ["#V#other_actor"]
+                    },
+                },
+            }
+            return [documents[item] for item in requested_ids if item in documents]
+
+    monkeypatch.setattr(
+        access_control,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    cached_payload = {
+        "_introspection_workflow_ids": [visible_id, restricted_id],
+        "items": [
+            {"workflow_id": visible_id, "description": "visible"},
+            {"workflow_id": restricted_id, "description": "restricted metadata"},
+        ],
+        "count": 2,
+        "total": 2,
+        "parity_inventory": {
+            "registry_workflow_ids": [visible_id, restricted_id],
+        },
+    }
+
+    with access_control.override_current_actor("#V#current_actor", "#V#team_org"):
+        projected = workflows_routes._attach_workflow_definitions_cache_metadata(
+            cached_payload,
+            state="fresh",
+            age_seconds=0.0,
+            refresh_in_progress=False,
+        )
+
+    assert projected["items"] == [
+        {"workflow_id": visible_id, "description": "visible"}
+    ]
+    assert projected["count"] == 1
+    assert projected["total"] == 1
+    assert restricted_id not in str(projected)
+    assert "restricted metadata" not in str(projected)
+    assert "_introspection_workflow_ids" not in projected
+
+
 def test_workflow_definitions_list_serves_expired_cache_and_starts_background_refresh(
     monkeypatch, app_client
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.workflows.durable.registry_factory as registry_factory
 
-    cache_key = (10, None, None, None)
+    cache_key = (10, None, None, None, "user:anon|org:none")
     stale_payload = {
         "items": [
             {
@@ -1414,7 +2503,7 @@ def test_workflow_definitions_list_refresh_in_progress_without_stale_returns_503
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    cache_key = (10, None, None, None)
+    cache_key = (10, None, None, None, "user:anon|org:none")
     with workflows_routes._WORKFLOW_DEFINITIONS_CACHE_LOCK:
         workflows_routes._WORKFLOW_DEFINITIONS_CACHE.clear()
 
@@ -1474,6 +2563,7 @@ def test_workflow_studio_catalogue_endpoint(monkeypatch, app_client):
 def test_workflow_studio_detail_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
     monkeypatch.setattr(
         workflows_routes,
         "build_workflow_studio_detail_payload",
@@ -1513,8 +2603,38 @@ def test_workflow_studio_detail_endpoint(monkeypatch, app_client):
     assert payload["views"]["topology"]["definition"]["initial_step"] == "start"
 
 
+def test_workflow_studio_detail_hides_actor_incomplete_definition(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+
+    def _raise_actor_authority_error(*_args, **_kwargs):
+        raise workflows_routes.WorkflowStudioAuthorityError(
+            "workflow_definition_not_loadable_for_actor"
+        )
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_studio_detail_payload",
+        _raise_actor_authority_error,
+    )
+
+    resp = app_client.get("/api/workflow-studio/workflows/%23V%23alpha_workflow")
+
+    assert resp.status_code == 404
+    assert resp.get_json() == {
+        "error": "workflow_definition_not_found",
+        "workflow_id": "#V#alpha_workflow",
+    }
+
+
 def test_workflow_studio_authoring_preview_conflict_returns_409(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
 
     def _raise_conflict(*_args, **_kwargs):
         raise workflows_routes.WorkflowStudioConflictError(
@@ -1540,6 +2660,8 @@ def test_workflow_studio_authoring_preview_conflict_returns_409(monkeypatch, app
 def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+
     monkeypatch.setattr(
         workflows_routes,
         "apply_workflow_authoring_spec",
@@ -1549,6 +2671,7 @@ def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
             "preview": {"contract_validation": {"valid": True}},
         },
     )
+    _authenticate_workflow_studio_client(app_client)
 
     resp = app_client.post(
         "/api/workflow-studio/workflows/%23V%23alpha_workflow/authoring/apply",
@@ -1568,12 +2691,14 @@ def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
 def test_workflow_studio_authoring_proposal_submit_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(
-        workflows_routes,
-        "_resolve_request_llm_scope_ids",
-        lambda: ("#V#test_user", "#V#test_org"),
+    _authenticate_workflow_studio_client(
+        app_client,
+        user_id="#V#test_user",
+        org_id="#V#test_org",
     )
     monkeypatch.setattr(
         workflows_routes,
@@ -1610,12 +2735,14 @@ def test_workflow_studio_authoring_proposal_submit_endpoint(monkeypatch, app_cli
 def test_workflow_studio_authoring_proposal_review_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(
-        workflows_routes,
-        "_resolve_request_llm_scope_ids",
-        lambda: ("#V#reviewer", "#V#test_org"),
+    _authenticate_workflow_studio_client(
+        app_client,
+        user_id="#V#reviewer",
+        org_id="#V#test_org",
     )
     monkeypatch.setattr(
         workflows_routes,
@@ -1646,8 +2773,13 @@ def test_workflow_studio_authoring_proposal_review_endpoint(monkeypatch, app_cli
 
 
 def test_workflow_studio_publication_supersede_endpoint_requires_replacement_id(
+    monkeypatch,
     app_client,
 ):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    _authenticate_workflow_studio_client(app_client)
     resp = app_client.post(
         "/api/workflow-studio/workflows/%23V%23alpha_workflow/publication/supersede",
         json={},
@@ -1660,6 +2792,8 @@ def test_workflow_studio_publication_supersede_endpoint_requires_replacement_id(
 
 def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
 
     captured: dict[str, str | None] = {}
 
@@ -1706,6 +2840,276 @@ def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
         "mode": "llm",
         "user_concept_id": "#V#test_user",
         "org_concept_id": "#V#test_org",
+    }
+
+
+def test_workflow_studio_preview_remains_available_to_anonymous_new_target(
+    monkeypatch,
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "preview_workflow_authoring_spec",
+        lambda workflow_id, **_kwargs: {
+            "success": True,
+            "workflow_id": workflow_id,
+        },
+    )
+
+    response = app_client.post(
+        "/api/workflow-studio/workflows/%23V%23new_workflow/authoring/preview",
+        json={
+            "authoring_spec": {
+                "workflow_id": "#V#new_workflow",
+                "steps": [{"state_id": "start"}],
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["workflow_id"] == "#V#new_workflow"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "service_name"),
+    [
+        (
+            "authoring/apply",
+            {
+                "authoring_spec": {
+                    "workflow_id": "#V#new_workflow",
+                    "steps": [{"state_id": "start"}],
+                }
+            },
+            "apply_workflow_authoring_spec",
+        ),
+        (
+            "proposals/authoring",
+            {
+                "authoring_spec": {
+                    "workflow_id": "#V#new_workflow",
+                    "steps": [{"state_id": "start"}],
+                }
+            },
+            "submit_workflow_authoring_proposal",
+        ),
+    ],
+)
+def test_workflow_studio_anonymous_actor_cannot_mutate_new_target(
+    monkeypatch,
+    app_client,
+    path,
+    payload,
+    service_name,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    def _unexpected_mutation(*_args, **_kwargs):
+        raise AssertionError("anonymous Studio route must not enter mutation service")
+
+    monkeypatch.setattr(workflows_routes, service_name, _unexpected_mutation)
+
+    response = app_client.post(
+        f"/api/workflow-studio/workflows/%23V%23new_workflow/{path}",
+        json=payload,
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "error": "workflow_actor_authority_required",
+        "error_code": "workflow_actor_authority_required",
+        "workflow_id": "#V#new_workflow",
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "service_name"),
+    [
+        (
+            "authoring/apply",
+            {
+                "authoring_spec": {
+                    "workflow_id": "#V#public_workflow",
+                    "steps": [{"state_id": "start"}],
+                }
+            },
+            "apply_workflow_authoring_spec",
+        ),
+        (
+            "proposals/authoring",
+            {
+                "authoring_spec": {
+                    "workflow_id": "#V#public_workflow",
+                    "steps": [{"state_id": "start"}],
+                }
+            },
+            "submit_workflow_authoring_proposal",
+        ),
+        (
+            "proposals/review",
+            {"action": "approve"},
+            "review_workflow_authoring_proposal",
+        ),
+        (
+            "proposals/rollback",
+            {},
+            "rollback_workflow_authoring_promotion",
+        ),
+        ("publication/demote", {}, "demote_workflow_routing"),
+        (
+            "publication/supersede",
+            {"replacement_workflow_id": "#V#replacement_workflow"},
+            "supersede_workflow_publication",
+        ),
+    ],
+)
+def test_workflow_studio_anonymous_actor_cannot_mutate_public_target(
+    monkeypatch,
+    app_client,
+    path,
+    payload,
+    service_name,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    def _unexpected_mutation(*_args, **_kwargs):
+        raise AssertionError("anonymous Studio route must not enter mutation service")
+
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(workflows_routes, service_name, _unexpected_mutation)
+
+    response = app_client.post(
+        f"/api/workflow-studio/workflows/%23V%23public_workflow/{path}",
+        json=payload,
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "error": "workflow_actor_authority_required",
+        "error_code": "workflow_actor_authority_required",
+        "workflow_id": "#V#public_workflow",
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "service_name"),
+    [
+        ("authoring/preview", "preview_workflow_authoring_spec"),
+        ("authoring/apply", "apply_workflow_authoring_spec"),
+        ("proposals/authoring", "submit_workflow_authoring_proposal"),
+    ],
+)
+def test_workflow_studio_authoring_routes_allow_provably_new_targets(
+    monkeypatch,
+    app_client,
+    path,
+    service_name,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: False)
+    _authenticate_workflow_studio_client(
+        app_client,
+        user_id="#V#author",
+        org_id="#V#org",
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        service_name,
+        lambda workflow_id, **_kwargs: {
+            "success": True,
+            "workflow_id": workflow_id,
+        },
+    )
+
+    response = app_client.post(
+        f"/api/workflow-studio/workflows/%23V%23new_workflow/{path}",
+        json={
+            "authoring_spec": {
+                "workflow_id": "#V#new_workflow",
+                "steps": [{"state_id": "start"}],
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["workflow_id"] == "#V#new_workflow"
+
+
+@pytest.mark.parametrize(
+    ("path", "service_name"),
+    [
+        ("authoring/preview", "preview_workflow_authoring_spec"),
+        ("authoring/apply", "apply_workflow_authoring_spec"),
+        ("proposals/authoring", "submit_workflow_authoring_proposal"),
+    ],
+)
+def test_workflow_studio_authoring_routes_conceal_hidden_existing_targets(
+    monkeypatch,
+    app_client,
+    path,
+    service_name,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    def _raise_hidden(*_args, **_kwargs):
+        raise workflows_routes.WorkflowStudioAuthorityError(
+            "workflow_definition_not_loadable_for_actor"
+        )
+
+    _authenticate_workflow_studio_client(app_client)
+    monkeypatch.setattr(workflows_routes, service_name, _raise_hidden)
+    response = app_client.post(
+        f"/api/workflow-studio/workflows/%23V%23hidden_workflow/{path}",
+        json={
+            "authoring_spec": {
+                "workflow_id": "#V#hidden_workflow",
+                "steps": [{"state_id": "start"}],
+            }
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "workflow_definition_not_found",
+        "workflow_id": "#V#hidden_workflow",
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("proposals/review", {"action": "approve"}),
+        ("proposals/rollback", {}),
+        ("publication/demote", {}),
+        (
+            "publication/supersede",
+            {"replacement_workflow_id": "#V#replacement"},
+        ),
+        ("proposals/description", {}),
+    ],
+)
+def test_workflow_studio_existing_target_mutations_conceal_hidden_workflows(
+    monkeypatch,
+    app_client,
+    path,
+    payload,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: False)
+
+    response = app_client.post(
+        f"/api/workflow-studio/workflows/%23V%23hidden_workflow/{path}",
+        json=payload,
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "workflow_definition_not_found",
+        "workflow_id": "#V#hidden_workflow",
     }
 
 

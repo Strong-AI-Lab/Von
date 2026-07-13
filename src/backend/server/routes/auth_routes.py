@@ -34,6 +34,47 @@ def _set_google_auth_service(service: GoogleAuthService | None) -> None:
 # In production, this should be Redis or database-backed
 _oauth_states = {}
 
+_ACTOR_SCOPE_SESSION_KEYS = (
+    "organisation_concept_id",
+    "role_in_org",
+    "namespace",
+    "session_id",
+)
+
+
+def _normalise_session_identity(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().lower()
+
+
+def _clear_scope_if_authenticated_identity_changes(
+    *,
+    new_user_concept_id: object,
+    new_email: object,
+) -> None:
+    """Drop prior actor scope unless the new login proves the same identity."""
+    previous_concept_id = _normalise_session_identity(
+        session.get("user_concept_id")
+    )
+    previous_email = _normalise_session_identity(session.get("user_email"))
+    next_concept_id = _normalise_session_identity(new_user_concept_id)
+    next_email = _normalise_session_identity(new_email)
+
+    same_actor = False
+    if previous_concept_id and next_concept_id:
+        same_actor = previous_concept_id == next_concept_id
+    elif previous_email and next_email:
+        same_actor = previous_email == next_email
+
+    had_previous_identity = bool(previous_concept_id or previous_email)
+    has_stale_scope_without_identity = not had_previous_identity and any(
+        session.get(key) is not None for key in _ACTOR_SCOPE_SESSION_KEYS
+    )
+    if (had_previous_identity and not same_actor) or has_stale_scope_without_identity:
+        for key in _ACTOR_SCOPE_SESSION_KEYS:
+            session.pop(key, None)
+
 
 def _build_auth_status_payload() -> dict:
     """Build the canonical auth-status payload for browser consumers."""
@@ -194,10 +235,18 @@ def callback():
                 409,
             )
 
+        # Never carry organisation/namespace/chat authority across accounts in
+        # the same browser session.
+        user_concept_id = user.get("concept_id") if user else None
+        _clear_scope_if_authenticated_identity_changes(
+            new_user_concept_id=user_concept_id,
+            new_email=email,
+        )
+
         # Set session variables for web authentication
         session["user_email"] = email
         session["google_user_info"] = {"name": name, "email": email}
-        session["user_concept_id"] = user.get("concept_id") if user else None
+        session["user_concept_id"] = user_concept_id
         session["auth_provider"] = "google_oauth"
         session.pop("browser_test_fixture_id", None)
         print(f"[auth_callback] session_updated user_email={email}")
@@ -341,6 +390,12 @@ def exchange_auth_token():
             400,
         )
 
+    # The parent window may already hold another user's org/session context.
+    _clear_scope_if_authenticated_identity_changes(
+        new_user_concept_id=user.get("concept_id"),
+        new_email=user.get("email"),
+    )
+
     # Set session variables based on the user object
     session["user_email"] = user.get("email")
     session["google_user_info"] = {"name": user.get("name"), "email": user.get("email")}
@@ -430,6 +485,22 @@ def browser_test_login():
             409,
         )
     except Exception as exc:
+        from ...services.window_session_context_service import (
+            WindowSessionOwnershipError,
+        )
+
+        if isinstance(exc, WindowSessionOwnershipError):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "window_session_actor_mismatch",
+                        "error_code": "window_session_actor_mismatch",
+                        "browser_test_mode": describe_browser_test_mode(),
+                    }
+                ),
+                403,
+            )
         return (
             jsonify(
                 {
@@ -459,6 +530,20 @@ def browser_test_login():
 def logout():
     """Log out the current user by clearing their session."""
     user_email = session.get("user_email")
+    user_id = (
+        session.get("user_concept_id")
+        or session.get("user_id")
+        or session.get("user_email")
+    )
+
+    from ...services.window_session_context_service import (
+        delete_window_context_if_owned,
+    )
+
+    delete_window_context_if_owned(
+        request.headers.get("X-Von-Window-Session"),
+        user_id,
+    )
 
     # Clear the entire session to ensure a clean logout
     session.clear()

@@ -58,6 +58,21 @@ from src.backend.services.operational_learning_release_vontology_service import 
 from src.backend.workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
 )
+from src.backend.workflows.durable.registry_factory import (
+    resolve_workflow_definition_from_authority,
+)
+from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
+from src.backend.workflows.workflow_registry import (
+    WorkflowRegistration,
+    WorkflowRegistry,
+)
+from src.backend.security.access_control import (
+    get_effective_organisation_concept_id,
+)
+from src.backend.services.workflow_discovery_service import (
+    WorkflowMatch,
+    _filter_actor_accessible_workflow_matches,
+)
 
 
 # --- retrieval barriers remain inspectable and recoverable ------------------
@@ -116,6 +131,168 @@ def test_retrieval_incompatibility_is_not_collapsed_into_authoritative_empty() -
     assert empty["usable"] is True
     assert empty["authoritative_empty"] is True
     assert empty["rebuild_required"] is False
+
+
+def test_actor_scoped_workflow_authority_preserves_trusted_execution_opportunity(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    workflow_id = "#V#synthetic_actor_scoped_workflow"
+    cached_definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="#V#synthetic_start",
+        states={
+            "#V#synthetic_start": WorkflowStateSpec(
+                state_id="#V#synthetic_start",
+                terminal=True,
+            )
+        },
+        termination_states=("#V#synthetic_start",),
+        metadata={"authority_probe": "unpartitioned_cache"},
+    )
+    actor_scoped_definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="#V#synthetic_start",
+        states=cached_definition.states,
+        termination_states=cached_definition.termination_states,
+        metadata={"authority_probe": "represented_actor_scope"},
+    )
+    registry = WorkflowRegistry()
+    registry.register(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=cached_definition,
+            source="vontology",
+        )
+    )
+
+    def _load_for_current_actor(_workflow_id):
+        if get_effective_organisation_concept_id() == "#V#synthetic_trusted_org":
+            return actor_scoped_definition
+        return None
+
+    monkeypatch.setattr(registry_factory, "_is_agent_test_instance", lambda: False)
+    monkeypatch.setattr(
+        registry_factory,
+        "load_workflow_definition_from_vontology",
+        _load_for_current_actor,
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "describe_concept_access",
+        lambda _concept_id: {
+            "exists": True,
+            "accessible": False,
+            "access_control_enforced": True,
+            "restriction_families_present": ["specific_to_org"],
+            "specific_to_org_restricted": True,
+        },
+    )
+
+    trusted = resolve_workflow_definition_from_authority(
+        workflow_id,
+        registry=registry,
+        use_current_shared_registry=False,
+        actor_user_id="#V#synthetic_member",
+        actor_org_id="#V#synthetic_trusted_org",
+    )
+    outsider = resolve_workflow_definition_from_authority(
+        workflow_id,
+        registry=registry,
+        use_current_shared_registry=False,
+        actor_user_id="#V#synthetic_outsider",
+        actor_org_id="#V#synthetic_other_org",
+    )
+
+    assert trusted.success is True
+    assert trusted.definition is actor_scoped_definition
+    assert (trusted.diagnostics or {})["shared_registry_definition_trusted"] is False
+    assert outsider.success is False
+    assert outsider.definition is None
+    assert outsider.error_code == "workflow_concept_not_accessible"
+    assert (outsider.diagnostics or {})["workflow_access"]["accessible"] is False
+
+
+def test_actor_visibility_barrier_preserves_accessible_discovery_opportunity(
+    monkeypatch,
+) -> None:
+    import src.backend.services.workflow_discovery_service as discovery_service
+
+    accessible_id = "#V#synthetic_accessible_workflow"
+    restricted_id = "#V#synthetic_restricted_workflow"
+    monkeypatch.setattr(
+        discovery_service,
+        "filter_actor_accessible_workflow_ids",
+        lambda _concept_ids: {accessible_id},
+    )
+
+    filtered = _filter_actor_accessible_workflow_matches(
+        [
+            WorkflowMatch(
+                concept_id=restricted_id,
+                name="Synthetic Restricted Workflow",
+                routing_index_metadata={"private_projection": True},
+            ),
+            WorkflowMatch(
+                concept_id=accessible_id,
+                name="Synthetic Accessible Workflow",
+            ),
+        ]
+    )
+
+    assert [match.concept_id for match in filtered] == [accessible_id]
+
+
+def test_stale_discovery_projection_keeps_currently_visible_recovery_candidate(
+    monkeypatch,
+) -> None:
+    import src.backend.services.workflow_discovery_access_service as access_service
+
+    accessible_id = "#V#synthetic_accessible_workflow"
+    restricted_id = "#V#synthetic_restricted_workflow"
+    monkeypatch.setattr(
+        access_service.access_control,
+        "should_enforce_access_control",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        access_service,
+        "_fresh_actor_accessible_workflow_ids",
+        lambda _concept_ids: {accessible_id},
+    )
+
+    projected = access_service.project_workflow_discovery_payload_for_current_actor(
+        {
+            "matches": [
+                {
+                    "concept_id": restricted_id,
+                    "description": "private stale metadata",
+                },
+                {"concept_id": accessible_id, "description": "usable route"},
+            ],
+            "candidates": [
+                {"concept_id": restricted_id},
+                {"concept_id": accessible_id},
+            ],
+            "routing_matches": [
+                {"concept_id": restricted_id},
+                {"concept_id": accessible_id},
+            ],
+            "candidate_count": 2,
+            "match_count": 2,
+        }
+    )
+
+    assert [item["concept_id"] for item in projected["matches"]] == [
+        accessible_id
+    ]
+    assert projected["candidate_count"] == 1
+    assert projected["match_count"] == 1
+    assert restricted_id not in repr(projected)
+    assert projected["workflow_discovery_visibility_projection"]["status"] == (
+        "filtered"
+    )
 
 
 # --- terminal receipts retain represented recovery opportunities ------------

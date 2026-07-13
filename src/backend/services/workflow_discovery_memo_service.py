@@ -19,7 +19,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-_CACHE_SCHEMA_VERSION = "turn_workflow_discovery_memo.v1"
+from .workflow_discovery_access_service import (
+    WorkflowDiscoveryActorScopeError,
+    bind_workflow_discovery_actor,
+    build_workflow_discovery_actor_scope_failure,
+    project_workflow_discovery_payload_for_current_actor,
+)
+
+_CACHE_SCHEMA_VERSION = "turn_workflow_discovery_memo.v2"
 _DEFAULT_TTL_SECONDS = 900.0
 _DEFAULT_MAX_ENTRIES = 256
 _CACHE_LOCK = threading.Lock()
@@ -212,6 +219,7 @@ def _build_cache_key_payload(
     *,
     turn_scope: str | None,
     namespace: str | None,
+    access_scope_key: str,
     user_input: str,
     requested_query: str | None,
     expected_outcome_contract: Mapping[str, Any] | None,
@@ -226,6 +234,7 @@ def _build_cache_key_payload(
         "schema_version": _CACHE_SCHEMA_VERSION,
         "turn_scope": _safe_text(turn_scope),
         "namespace": _safe_text(namespace),
+        "access_scope_key": _safe_text(access_scope_key),
         "user_input_digest": _digest_payload(_safe_text(user_input)),
         "requested_query_digest": _digest_payload(_safe_text(requested_query)),
         "expected_outcome_contract_digest": _digest_payload(
@@ -291,10 +300,11 @@ def _prune_locked(now: float, *, ttl_seconds: float, max_entries: int) -> None:
         _CACHE.popitem(last=False)
 
 
-def discover_workflows_for_turn_memoized(
+def _discover_workflows_for_turn_memoized_scoped(
     user_input: str,
     *,
     namespace: Optional[str] = None,
+    access_scope_key: str,
     turn_scope: str | None = None,
     requested_query: str | None = None,
     expected_outcome_contract: Mapping[str, Any] | None = None,
@@ -314,6 +324,7 @@ def discover_workflows_for_turn_memoized(
     key_payload = _build_cache_key_payload(
         turn_scope=turn_scope,
         namespace=namespace,
+        access_scope_key=access_scope_key,
         user_input=user_input,
         requested_query=requested_query,
         expected_outcome_contract=expected_outcome_contract,
@@ -335,22 +346,32 @@ def discover_workflows_for_turn_memoized(
     )
     lookup_started = time.perf_counter()
     now = time.perf_counter()
+    cached_entry: _MemoEntry | None = None
     with _CACHE_LOCK:
         _prune_locked(now, ttl_seconds=ttl_seconds, max_entries=max_entries)
         entry = _CACHE.get(cache_key_digest)
         if entry is not None:
             _CACHE.move_to_end(cache_key_digest)
-            lookup_elapsed_ms = (time.perf_counter() - lookup_started) * 1000.0
-            return _annotate_payload(
-                entry.payload,
-                cache_hit=True,
-                cache_key_digest=cache_key_digest,
-                turn_scope=turn_scope,
-                candidate_count=entry.candidate_count,
-                lookup_elapsed_ms=lookup_elapsed_ms,
-                capability_index_version=entry.capability_index_version,
-                uncached_elapsed_ms=entry.uncached_elapsed_ms,
-            )
+            cached_entry = entry
+
+    if cached_entry is not None:
+        # The memo is evidence, not authority.  Re-project outside the cache lock
+        # so live Vontology access can neither leak stale metadata nor serialise
+        # unrelated discovery calls behind a database read.
+        projected_payload = project_workflow_discovery_payload_for_current_actor(
+            cached_entry.payload
+        )
+        lookup_elapsed_ms = (time.perf_counter() - lookup_started) * 1000.0
+        return _annotate_payload(
+            projected_payload,
+            cache_hit=True,
+            cache_key_digest=cache_key_digest,
+            turn_scope=turn_scope,
+            candidate_count=_candidate_count(projected_payload),
+            lookup_elapsed_ms=lookup_elapsed_ms,
+            capability_index_version=cached_entry.capability_index_version,
+            uncached_elapsed_ms=cached_entry.uncached_elapsed_ms,
+        )
 
     if discovery_func is None:
         from . import workflow_discovery_service
@@ -462,6 +483,56 @@ def discover_workflows_for_turn_memoized(
         capability_index_version=capability_version,
         uncached_elapsed_ms=uncached_elapsed_ms,
     )
+
+
+def discover_workflows_for_turn_memoized(
+    user_input: str,
+    *,
+    namespace: Optional[str] = None,
+    turn_scope: str | None = None,
+    requested_query: str | None = None,
+    expected_outcome_contract: Mapping[str, Any] | None = None,
+    relevance_threshold: float = 0.70,
+    max_results: int = 3,
+    timeout_seconds: float | str | None = None,
+    allow_non_executable: Optional[bool] = None,
+    workflow_registry: Any | None = None,
+    discovery_func: Callable[..., Optional[dict[str, Any]]] | None = None,
+) -> Optional[dict[str, Any]]:
+    """Run workflow discovery under one actor-bound, turn-scoped memo key."""
+
+    if not user_input or len(str(user_input).strip()) < 5:
+        return None
+
+    try:
+        with bind_workflow_discovery_actor(namespace) as actor_scope:
+            return _discover_workflows_for_turn_memoized_scoped(
+                user_input,
+                namespace=actor_scope.namespace,
+                access_scope_key=actor_scope.cache_scope_key,
+                turn_scope=turn_scope,
+                requested_query=requested_query,
+                expected_outcome_contract=expected_outcome_contract,
+                relevance_threshold=relevance_threshold,
+                max_results=max_results,
+                timeout_seconds=timeout_seconds,
+                allow_non_executable=allow_non_executable,
+                workflow_registry=workflow_registry,
+                discovery_func=discovery_func,
+            )
+    except WorkflowDiscoveryActorScopeError as exc:
+        payload = build_workflow_discovery_actor_scope_failure(
+            query=user_input,
+            requested_query=requested_query,
+            reason=exc.reason,
+            origin="turn_scoped_workflow_discovery_memo_actor_scope_rejected",
+        )
+        payload["workflow_discovery_cache"] = {
+            "schema_version": _CACHE_SCHEMA_VERSION,
+            "cache_hit": False,
+            "cache_skipped_reason": "actor_scope_rejected",
+        }
+        return payload
 
 
 __all__ = [

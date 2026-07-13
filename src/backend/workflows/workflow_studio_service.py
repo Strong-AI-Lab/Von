@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..db.transient_errors import is_transient_mongo_error
+from ..security.access_control import (
+    can_access_concept,
+    get_effective_organisation_concept_id,
+    get_effective_user_concept_id,
+)
 from ..languagemodels.llm_interface import get_active_model_name, get_llm_client
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
 from ..services.episode_critique_memory_service import (
@@ -38,13 +43,17 @@ from ..services.workflow_episode_service import (
     get_workflow_usage_aggregates_for_workflows,
     list_workflow_use_episodes,
 )
-from ..services.workflow_event_integration_service import (
-    build_event_workflow_binding_diagnostics,
+from ..services.namespace_service import resolve_canonical_namespace
+from ..services.workflow_actor_scope_service import (
+    WorkflowActorScope,
+    WorkflowActorScopeError,
+    resolve_authoritative_workflow_actor_scope,
 )
 from .durable.registry_factory import (
     get_or_build_workflow_registry_inventory_snapshot,
     get_shared_durable_action_registry,
     get_shared_workflow_registry_read_only,
+    resolve_workflow_definition_from_authority,
 )
 from .durable.models import WorkflowInstanceStatus, WorkflowSchedule
 from .durable.startup import get_instance_manager
@@ -52,7 +61,6 @@ from .trace_store import list_recent_workflow_execution_traces
 from .vontology_loader import (
     build_workflow_process_graph,
     build_workflow_process_graph_from_definition,
-    load_workflow_definition_from_vontology,
     resolve_workflow_background_launch_policy,
     resolve_workflow_discovery_exemplars,
     resolve_workflow_launch_input_contract,
@@ -78,7 +86,12 @@ from .workflow_definition_identity_service import (
     build_workflow_definition_identity_from_graph,
     validate_workflow_definition_contract,
 )
-from .workflow_listing_service import build_workflow_listing_entry
+from .workflow_listing_service import (
+    build_workflow_listing_entry,
+    collect_workflow_introspection_projection_ids,
+    filter_workflow_ids_for_current_actor,
+    project_workflow_introspection_payload_for_current_actor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +114,16 @@ _WORKFLOW_ROUTING_ROLE_VALUES = {"execution", "authoring", "maintenance"}
 
 class WorkflowStudioConflictError(RuntimeError):
     """Raised when preview/apply targets a stale workflow definition."""
+
+
+class WorkflowStudioAuthorityError(RuntimeError):
+    """Raised when the current actor cannot load one complete workflow graph."""
+
+    def __init__(self, error_code: str) -> None:
+        self.error_code = _clean_text(error_code) or (
+            "workflow_definition_not_loadable_for_actor"
+        )
+        super().__init__(self.error_code)
 
 
 def _clean_text(value: Any) -> str:
@@ -174,77 +197,147 @@ def _workflow_definition_loader(workflow_id: str):
     if not workflow_id_clean:
         return None
     try:
-        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
-        definition = registry.get(workflow_id_clean)
-        if definition is not None:
-            return definition
-    except Exception:
-        logger.debug(
-            "workflow studio could not load registry definition for %s",
-            workflow_id_clean,
-            exc_info=True,
+        definition, _source, _registry = _load_actor_scoped_runtime_definition(
+            workflow_id_clean
         )
-    try:
-        return load_workflow_definition_from_vontology(workflow_id_clean)
+        return definition
     except Exception:
         logger.debug(
-            "workflow studio could not load Vontology definition for %s",
+            "workflow studio could not load actor-scoped definition for %s",
             workflow_id_clean,
             exc_info=True,
         )
         return None
 
 
-def _workflow_concept_exists(workflow_id: str) -> bool:
-    workflow_id_clean = _clean_text(workflow_id)
-    if not workflow_id_clean:
+def _actor_visible_concept_exists(concept_id: str) -> bool:
+    concept_id_clean = _clean_text(concept_id)
+    if not concept_id_clean:
         return False
     try:
-        from ..db.repositories.concepts_repository import ConceptsRepository
+        from ..services.concept_service import _find_raw_concept_by_exact_concept_id
 
-        return bool(
-            ConceptsRepository.find_one({"concept_id": workflow_id_clean}, {"_id": 1})
-        )
-    except Exception:
-        logger.debug(
-            "workflow studio concept existence check failed for %s",
-            workflow_id_clean,
+        # Existence and actor visibility are deliberately separate here.  The
+        # ordinary exact concept reader returns the same not-found result for an
+        # absent concept and one concealed from the current actor.  Treating both
+        # as absent would let Studio authoring attempt to recreate a hidden ID.
+        raw_concept = _find_raw_concept_by_exact_concept_id(concept_id_clean)
+    except Exception as exc:
+        logger.warning(
+            "workflow studio concept existence authority unavailable for %s",
+            concept_id_clean,
             exc_info=True,
         )
+        raise WorkflowStudioAuthorityError(
+            "workflow_concept_existence_authority_unavailable"
+        ) from exc
+    if raw_concept is None:
         return False
+    try:
+        if can_access_concept(concept_id_clean):
+            return True
+    except Exception as exc:
+        logger.warning(
+            "workflow studio concept visibility authority unavailable for %s",
+            concept_id_clean,
+            exc_info=True,
+        )
+        raise WorkflowStudioAuthorityError(
+            "workflow_concept_existence_authority_unavailable"
+        ) from exc
+    raise WorkflowStudioAuthorityError(
+        "workflow_definition_not_loadable_for_actor"
+    )
 
 
-def _load_runtime_definition(
+def _workflow_concept_exists(workflow_id: str) -> bool:
+    return _actor_visible_concept_exists(workflow_id)
+
+
+def _resolve_current_studio_actor_scope() -> WorkflowActorScope:
+    """Resolve the ambient Studio actor and require one canonical namespace."""
+
+    ambient_user_id = get_effective_user_concept_id()
+    ambient_org_id = get_effective_organisation_concept_id()
+    try:
+        scope = resolve_authoritative_workflow_actor_scope(
+            allow_unscoped_claims=False,
+            ambient_user_id=ambient_user_id,
+            ambient_org_id=ambient_org_id,
+            ambient_context_supplied=bool(ambient_user_id or ambient_org_id),
+        )
+    except WorkflowActorScopeError as exc:
+        raise WorkflowStudioAuthorityError(exc.reason) from exc
+    if not scope.user_concept_id or not scope.namespace:
+        raise WorkflowStudioAuthorityError("workflow_actor_authority_required")
+    return scope
+
+
+def require_workflow_studio_mutation_actor() -> WorkflowActorScope:
+    """Require authenticated ambient authority before any Studio write.
+
+    Authoring payload identity fields are collaboration metadata, not
+    authentication authority.  Keeping this gate in the service means direct
+    callers and HTTP routes share the same fail-closed rule.
+    """
+
+    return _resolve_current_studio_actor_scope()
+
+
+def _resolve_studio_episode_actor_scope(
+    claimed_namespace: str | None,
+) -> WorkflowActorScope:
+    """Resolve metrics scope and reject caller-selected foreign namespaces."""
+
+    actor_scope = _resolve_current_studio_actor_scope()
+    claimed = _clean_text(claimed_namespace)
+    if claimed:
+        canonical_claim = resolve_canonical_namespace(claimed)
+        if canonical_claim != actor_scope.namespace:
+            raise WorkflowStudioAuthorityError("workflow_actor_scope_mismatch")
+    return actor_scope
+
+
+def _load_actor_scoped_runtime_definition(
     workflow_id: str,
-) -> tuple[Any | None, str, Any]:
+) -> tuple[Any, str, Any]:
+    """Load a complete request-scoped graph without trusting shared cache data."""
+
     workflow_id_clean = _clean_text(workflow_id)
     registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
-    definition = None
-    source = "unknown"
-    try:
-        definition = registry.get(workflow_id_clean)
-        source = (
-            registry.get_registration_source(workflow_id_clean, resolve_lazy=True)
-            or "unknown"
+    resolution = resolve_workflow_definition_from_authority(
+        workflow_id_clean,
+        registry=registry,
+        use_current_shared_registry=False,
+        register_authoritative_fallback=True,
+        actor_user_id=get_effective_user_concept_id(),
+        actor_org_id=get_effective_organisation_concept_id(),
+    )
+    if resolution.definition is None:
+        raise WorkflowStudioAuthorityError(
+            resolution.error_code or "workflow_definition_not_loadable_for_actor"
         )
-    except Exception:
-        logger.debug(
-            "workflow studio registry.get failed for %s",
-            workflow_id_clean,
-            exc_info=True,
-        )
-    if definition is None:
-        try:
-            definition = load_workflow_definition_from_vontology(workflow_id_clean)
-            if definition is not None:
-                source = "vontology"
-        except Exception:
-            logger.debug(
-                "workflow studio load_workflow_definition_from_vontology failed for %s",
-                workflow_id_clean,
-                exc_info=True,
-            )
-    return definition, source, registry
+    return (
+        resolution.definition,
+        resolution.registration_source or "vontology",
+        resolution.registry or registry,
+    )
+
+
+def _load_authoring_runtime_definition(
+    workflow_id: str,
+) -> tuple[Any | None, str, Any]:
+    """Load an existing target with actor authority, while allowing new IDs."""
+
+    workflow_id_clean = _clean_text(workflow_id)
+    registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
+    existing_registry_ids = set(registry.all_workflow_ids())
+    if (
+        workflow_id_clean not in existing_registry_ids
+        and not _workflow_concept_exists(workflow_id_clean)
+    ):
+        return None, "new_workflow", registry
+    return _load_actor_scoped_runtime_definition(workflow_id_clean)
 
 
 def build_workflow_catalogue_payload(
@@ -255,6 +348,8 @@ def build_workflow_catalogue_payload(
     turn_id: str | None,
     include_designs: bool = True,
 ) -> dict[str, Any]:
+    actor_scope = _resolve_studio_episode_actor_scope(namespace)
+    actor_namespace = actor_scope.namespace
     registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
     inventory_snapshot = get_or_build_workflow_registry_inventory_snapshot(
         registry=registry,
@@ -263,14 +358,26 @@ def build_workflow_catalogue_payload(
     if not isinstance(inventory_snapshot, dict):
         inventory_snapshot = {}
 
-    workflow_ids = sorted(list(registry.all_workflow_ids()))
+    all_workflow_ids = sorted(list(registry.all_workflow_ids()))
+    introspection_workflow_ids = collect_workflow_introspection_projection_ids(
+        all_workflow_ids,
+        parity_inventory=inventory_snapshot,
+    )
+    workflow_ids = filter_workflow_ids_for_current_actor(all_workflow_ids)
     selected_ids = workflow_ids[:limit]
-    usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(selected_ids)
+    usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(
+        selected_ids,
+        namespace=actor_namespace,
+        session_id=session_id,
+        turn_id=turn_id,
+        strict_namespace_scope=True,
+    )
     episode_count_map = get_workflow_episode_counts_for_workflows(
         selected_ids,
-        namespace=namespace or None,
+        namespace=actor_namespace,
         session_id=session_id or None,
         turn_id=turn_id or None,
+        strict_namespace_scope=True,
     )
 
     items: list[dict[str, Any]] = []
@@ -332,17 +439,22 @@ def build_workflow_catalogue_payload(
         if include_designs or item["is_executable"]:
             items.append(item)
 
-    return {
+    payload = {
         "items": items,
         "count": len(items),
         "total": len(workflow_ids),
         "episodes_scope": {
-            "namespace": namespace or None,
+            "namespace": actor_namespace,
             "session_id": session_id or None,
             "turn_id": turn_id or None,
         },
         "parity_inventory": inventory_snapshot,
     }
+    return project_workflow_introspection_payload_for_current_actor(
+        payload,
+        workflow_ids=introspection_workflow_ids,
+        total_workflow_ids=all_workflow_ids,
+    )
 
 
 def _build_decision_view(definition: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -470,30 +582,36 @@ def _build_topology_summary(definition: Mapping[str, Any] | None) -> dict[str, A
 
 def _build_operations_payload(workflow_id: str) -> dict[str, Any]:
     manager = get_instance_manager()
+    actor_scope = _resolve_current_studio_actor_scope()
 
-    schedules = [
-        schedule.to_status_dict()
-        for schedule in manager.list_schedules(workflow_id=workflow_id, limit=200)
-    ]
-
-    all_bindings = [
-        binding.to_status_dict()
-        for binding in manager.list_event_bindings(limit=500)
-    ]
-    workflow_bindings = [
-        binding
-        for binding in all_bindings
-        if _clean_text(binding.get("workflow_id")) == workflow_id
-    ]
-    binding_diagnostics = [
-        row
-        for row in build_event_workflow_binding_diagnostics(all_bindings)
-        if workflow_id in (row.get("workflow_ids") or [])
-    ]
+    schedule_items = manager.list_schedules(
+        user_id=actor_scope.user_concept_id,
+        workflow_id=workflow_id,
+        limit=200,
+    )
+    schedules = []
+    for schedule in schedule_items:
+        schedule_namespace = resolve_canonical_namespace(
+            getattr(schedule, "namespace", None),
+            getattr(schedule, "user_id", None),
+            getattr(schedule, "org_id", None),
+        )
+        if (
+            _clean_text(getattr(schedule, "user_id", None))
+            != actor_scope.user_concept_id
+            or (_clean_text(getattr(schedule, "org_id", None)) or None)
+            != actor_scope.organisation_concept_id
+            or schedule_namespace != actor_scope.namespace
+        ):
+            continue
+        schedules.append(schedule.to_status_dict())
 
     instances_payload: dict[str, Any]
     try:
         instance_items = manager.list_instance_status_dicts(
+            user_id=actor_scope.user_concept_id,
+            org_id=actor_scope.organisation_concept_id,
+            namespace=actor_scope.namespace,
             workflow_id=workflow_id,
             limit=30,
         )
@@ -527,9 +645,15 @@ def _build_operations_payload(workflow_id: str) -> dict[str, Any]:
 
     execution_items = list_recent_workflow_execution_traces(
         limit=12,
+        namespace=actor_scope.namespace,
         workflow_id=workflow_id,
     )
-    episode_items = list_workflow_use_episodes(workflow_id=workflow_id, limit=12)
+    episode_items = list_workflow_use_episodes(
+        workflow_id=workflow_id,
+        namespace=actor_scope.namespace,
+        strict_namespace_scope=True,
+        limit=12,
+    )
 
     return {
         "schedules": {
@@ -537,9 +661,14 @@ def _build_operations_payload(workflow_id: str) -> dict[str, Any]:
             "count": len(schedules),
         },
         "bindings": {
-            "items": workflow_bindings,
-            "count": len(workflow_bindings),
-            "diagnostics": binding_diagnostics,
+            # Event bindings are global control-plane records, not actor-owned
+            # workflow evidence.  They remain available through the explicit
+            # trusted-operator MCP surface and are intentionally absent here.
+            "items": [],
+            "count": 0,
+            "diagnostics": [],
+            "available": False,
+            "reason": "trusted_operator_surface_required",
         },
         "instances": instances_payload,
         "executions": {
@@ -1406,7 +1535,9 @@ def build_workflow_studio_detail_payload(
     if not workflow_id_clean:
         raise ValueError("workflow_id is required")
 
-    runtime_definition, source, registry = _load_runtime_definition(workflow_id_clean)
+    runtime_definition, source, registry = _load_actor_scoped_runtime_definition(
+        workflow_id_clean
+    )
     if runtime_definition is not None:
         definition_graph = build_workflow_process_graph_from_definition(runtime_definition)
         warnings = list((definition_graph or {}).get("warnings") or [])
@@ -1414,11 +1545,18 @@ def build_workflow_studio_detail_payload(
         definition_graph, warnings = build_workflow_process_graph(workflow_id_clean)
     raw, raw_source = resolve_workflow_narrative_text(workflow_id_clean)
 
+    actor_scope = _resolve_studio_episode_actor_scope(namespace)
     listing_entry = build_workflow_listing_entry(
         registry=registry,
         workflow_id=workflow_id_clean,
     )
-    usage_aggregate_map = get_workflow_usage_aggregates_for_workflows([workflow_id_clean])
+    usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(
+        [workflow_id_clean],
+        namespace=actor_scope.namespace,
+        session_id=session_id,
+        turn_id=turn_id,
+        strict_namespace_scope=True,
+    )
     usage = (
         usage_aggregate_map.get(workflow_id_clean, {})
         if isinstance(usage_aggregate_map, dict)
@@ -1458,9 +1596,10 @@ def build_workflow_studio_detail_payload(
     operations = _build_operations_payload(workflow_id_clean)
     episodes_count = count_workflow_use_episodes(
         workflow_id=workflow_id_clean,
-        namespace=namespace or None,
+        namespace=actor_scope.namespace,
         session_id=session_id or None,
         turn_id=turn_id or None,
+        strict_namespace_scope=True,
     )
 
     completion_rate = usage.get("completion_rate")
@@ -1470,7 +1609,7 @@ def build_workflow_studio_detail_payload(
     )
     improvement_guidance = _build_improvement_guidance_payload(
         workflow_id_clean,
-        namespace=namespace,
+        namespace=actor_scope.namespace,
     )
 
     return {
@@ -1797,7 +1936,7 @@ def preview_workflow_authoring_spec(
     base_definition_hash: str | None = None,
 ) -> dict[str, Any]:
     workflow_id_clean = _clean_text(workflow_id)
-    runtime_definition, runtime_source, _registry = _load_runtime_definition(
+    runtime_definition, runtime_source, _registry = _load_authoring_runtime_definition(
         workflow_id_clean
     )
     _ensure_current_hash_matches(
@@ -1857,12 +1996,162 @@ def preview_workflow_authoring_spec(
     }
 
 
+def _collect_explicit_authored_concept_ids(
+    authoring_spec: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Collect caller-selected concept IDs that publication will persist or link.
+
+    Generated step and mapping IDs remain the publication service's concern.
+    This preflight covers IDs an author can choose directly, including legacy
+    metadata/input encodings accepted by the normaliser.
+    """
+
+    collected: list[str] = []
+
+    def _append(value: Any, *, field: str, require_concept_id: bool = True) -> None:
+        value_clean = _clean_text(value)
+        if not value_clean:
+            return
+        if require_concept_id and not value_clean.startswith("#"):
+            raise ValueError(f"workflow_authoring_concept_id_invalid:{field}")
+        if value_clean.startswith("#") and value_clean not in collected:
+            collected.append(value_clean)
+
+    raw_steps = authoring_spec.get("steps")
+    if not isinstance(raw_steps, list):
+        return ()
+    for index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, Mapping):
+            continue
+        field_prefix = f"steps[{index}]"
+        _append(raw_step.get("concept_id"), field=f"{field_prefix}.concept_id")
+        _append(
+            raw_step.get("action_concept_id"),
+            field=f"{field_prefix}.action_concept_id",
+        )
+        _append(
+            raw_step.get("subworkflow_id"),
+            field=f"{field_prefix}.subworkflow_id",
+        )
+
+        metadata = _as_mapping(raw_step.get("metadata"))
+        _append(
+            metadata.get("workflow_step_concept_id"),
+            field=f"{field_prefix}.metadata.workflow_step_concept_id",
+        )
+
+        prompt_contract = _as_mapping(raw_step.get("prompt_contract"))
+        _append(
+            prompt_contract.get("resolved_prompt_concept_id"),
+            field=f"{field_prefix}.prompt_contract.resolved_prompt_concept_id",
+        )
+        requested_prompt_ids = prompt_contract.get("requested_prompt_concept_ids")
+        if isinstance(requested_prompt_ids, Sequence) and not isinstance(
+            requested_prompt_ids,
+            (str, bytes, bytearray),
+        ):
+            for prompt_index, prompt_id in enumerate(requested_prompt_ids):
+                _append(
+                    prompt_id,
+                    field=(
+                        f"{field_prefix}.prompt_contract."
+                        f"requested_prompt_concept_ids[{prompt_index}]"
+                    ),
+                )
+
+        raw_inputs = raw_step.get("inputs")
+        if isinstance(raw_inputs, Mapping):
+            for tool_param, raw_value in raw_inputs.items():
+                if not isinstance(raw_value, Mapping):
+                    continue
+                _append(
+                    raw_value.get("$mapping_concept_id")
+                    or raw_value.get("mapping_concept_id"),
+                    field=f"{field_prefix}.inputs.{tool_param}.mapping_concept_id",
+                )
+
+        context_mappings = raw_step.get("context_input_mappings")
+        if isinstance(context_mappings, Sequence) and not isinstance(
+            context_mappings,
+            (str, bytes, bytearray),
+        ):
+            for mapping_index, raw_mapping in enumerate(context_mappings):
+                if not isinstance(raw_mapping, Mapping):
+                    continue
+                _append(
+                    raw_mapping.get("mapping_concept_id")
+                    or raw_mapping.get("$mapping_concept_id"),
+                    field=(
+                        f"{field_prefix}.context_input_mappings[{mapping_index}]."
+                        "mapping_concept_id"
+                    ),
+                )
+
+        for mappings_field, mappings_value in (
+            (
+                "tool_output_context_mappings",
+                raw_step.get("tool_output_context_mappings"),
+            ),
+            (
+                "metadata.tool_output_context_mappings",
+                metadata.get("tool_output_context_mappings"),
+            ),
+        ):
+            if not isinstance(mappings_value, Sequence) or isinstance(
+                mappings_value,
+                (str, bytes, bytearray),
+            ):
+                continue
+            for mapping_index, raw_mapping in enumerate(mappings_value):
+                if not isinstance(raw_mapping, Mapping):
+                    continue
+                _append(
+                    raw_mapping.get("mapping_concept_id"),
+                    field=(
+                        f"{field_prefix}.{mappings_field}[{mapping_index}]."
+                        "mapping_concept_id"
+                    ),
+                )
+
+        writes_context_keys = raw_step.get("writes_context_keys")
+        if not isinstance(writes_context_keys, Sequence) or isinstance(
+            writes_context_keys,
+            (str, bytes, bytearray),
+        ):
+            writes_context_keys = metadata.get("writes_context_keys")
+        if isinstance(writes_context_keys, Sequence) and not isinstance(
+            writes_context_keys,
+            (str, bytes, bytearray),
+        ):
+            for context_key in writes_context_keys:
+                _append(
+                    context_key,
+                    field=f"{field_prefix}.writes_context_keys",
+                    require_concept_id=False,
+                )
+
+    return tuple(collected)
+
+
+def _preflight_explicit_authored_concept_ids(
+    authoring_spec: Mapping[str, Any],
+) -> None:
+    """Fail before publication when an authored child ID is hidden or unknown."""
+
+    for concept_id in _collect_explicit_authored_concept_ids(authoring_spec):
+        # A provably absent child may be created by canonical publication.
+        # Existing children must be visible to the ambient actor; the helper
+        # raises a concealment-safe authority error when they are not.
+        _actor_visible_concept_exists(concept_id)
+
+
 def apply_workflow_authoring_spec(
     workflow_id: str,
     *,
     authoring_spec: Mapping[str, Any],
     base_definition_hash: str | None = None,
 ) -> dict[str, Any]:
+    require_workflow_studio_mutation_actor()
     preview = preview_workflow_authoring_spec(
         workflow_id,
         authoring_spec=authoring_spec,
@@ -1878,13 +2167,13 @@ def apply_workflow_authoring_spec(
     purpose = _clean_text(
         authoring_spec.get("description") or authoring_spec.get("workflow_description")
     )
-    runtime_definition, _runtime_source, _registry = _load_runtime_definition(
+    runtime_definition, _runtime_source, _registry = _load_authoring_runtime_definition(
         _clean_text(workflow_id)
     )
-    create_missing_workflow = not (
-        runtime_definition is not None
-        or _workflow_concept_exists(_clean_text(workflow_id))
+    create_missing_workflow = bool(
+        runtime_definition is None and _runtime_source == "new_workflow"
     )
+    _preflight_explicit_authored_concept_ids(authoring_spec)
     publication = publish_workflow_definition_from_definition(
         definition=definition,
         create_missing=create_missing_workflow,
@@ -1908,6 +2197,7 @@ def submit_workflow_authoring_proposal(
     proposed_by: str | None = None,
     proposal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    require_workflow_studio_mutation_actor()
     workflow_id_clean = _clean_text(workflow_id)
     preview_payload = preview_workflow_authoring_spec(
         workflow_id_clean,
@@ -1922,7 +2212,7 @@ def submit_workflow_authoring_proposal(
         include_preview=False,
     )
     candidate_validation = _as_mapping(validation_payload.get("candidate_validation"))
-    runtime_definition, runtime_source, _registry = _load_runtime_definition(
+    runtime_definition, runtime_source, _registry = _load_authoring_runtime_definition(
         workflow_id_clean
     )
     current_spec = (
@@ -2043,6 +2333,7 @@ def record_workflow_authoring_promotion_evaluation(
     promotion_evaluation: Mapping[str, Any],
     proposal_id: str | None = None,
 ) -> dict[str, Any]:
+    require_workflow_studio_mutation_actor()
     workflow_id_clean = _clean_text(workflow_id)
     if not workflow_id_clean:
         raise ValueError("workflow_id_required")
@@ -2140,6 +2431,7 @@ def review_workflow_authoring_proposal(
     org_id: str | None = None,
     namespace: str | None = None,
 ) -> dict[str, Any]:
+    require_workflow_studio_mutation_actor()
     workflow_id_clean = _clean_text(workflow_id)
     review_action = _clean_text(action).lower()
     if review_action not in {"approve", "reject"}:
@@ -2207,7 +2499,7 @@ def review_workflow_authoring_proposal(
             "review_action": review_action,
         }
 
-    runtime_definition, runtime_source, _registry = _load_runtime_definition(
+    runtime_definition, runtime_source, _registry = _load_authoring_runtime_definition(
         workflow_id_clean
     )
     current_spec = (
@@ -2297,13 +2589,14 @@ def rollback_workflow_authoring_promotion(
     org_id: str | None = None,
     namespace: str | None = None,
 ) -> dict[str, Any]:
+    require_workflow_studio_mutation_actor()
     workflow_id_clean = _clean_text(workflow_id)
     proposal = _load_workflow_authoring_proposal(workflow_id_clean)
     proposal_payload = _as_mapping(proposal)
     previous_authoring_spec = proposal_payload.get("previous_authoring_spec")
     if not isinstance(previous_authoring_spec, Mapping):
         raise ValueError("workflow_authoring_previous_spec_missing")
-    runtime_definition, runtime_source, _registry = _load_runtime_definition(
+    runtime_definition, runtime_source, _registry = _load_authoring_runtime_definition(
         workflow_id_clean
     )
     current_identity = (
@@ -2376,7 +2669,9 @@ def demote_workflow_routing(
     review_reason: str | None = None,
     reviewed_by: str | None = None,
 ) -> dict[str, Any]:
+    require_workflow_studio_mutation_actor()
     workflow_id_clean = _clean_text(workflow_id)
+    _load_actor_scoped_runtime_definition(workflow_id_clean)
     lifecycle, _source = resolve_workflow_publication_lifecycle(workflow_id_clean)
     current = _as_mapping(lifecycle)
     runtime_enablement = _set_workflow_runtime_enablement(workflow_id_clean, enabled=False)
@@ -2419,10 +2714,15 @@ def supersede_workflow_publication(
     review_reason: str | None = None,
     reviewed_by: str | None = None,
 ) -> dict[str, Any]:
+    require_workflow_studio_mutation_actor()
     workflow_id_clean = _clean_text(workflow_id)
     replacement_workflow_id_clean = _clean_text(replacement_workflow_id)
     if not replacement_workflow_id_clean:
         raise ValueError("replacement_workflow_id_required")
+    # Resolve both complete graphs before the first mutation. A visible source
+    # must not be disabled merely because its replacement is hidden or partial.
+    _load_actor_scoped_runtime_definition(workflow_id_clean)
+    _load_actor_scoped_runtime_definition(replacement_workflow_id_clean)
     current_runtime_enablement = _set_workflow_runtime_enablement(
         workflow_id_clean,
         enabled=False,
@@ -2572,6 +2872,7 @@ def build_workflow_description_proposal(
 
 
 __all__ = [
+    "WorkflowStudioAuthorityError",
     "WorkflowStudioConflictError",
     "apply_workflow_authoring_spec",
     "build_workflow_catalogue_payload",
@@ -2581,6 +2882,7 @@ __all__ = [
     "get_workflow_authoring_proposal",
     "get_workflow_authoring_proposal_by_id",
     "preview_workflow_authoring_spec",
+    "require_workflow_studio_mutation_actor",
     "record_workflow_authoring_promotion_evaluation",
     "review_workflow_authoring_proposal",
     "rollback_workflow_authoring_promotion",

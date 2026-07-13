@@ -72,3 +72,61 @@ def test_generate_events_emits_workflow_status_sse_payload() -> None:
         assert '"max_retries": 5' in event_str
     finally:
         service.shutdown()
+
+
+def test_subscriber_filters_events_to_current_actor_visible_workflows() -> None:
+    service = DurableWorkflowStreamService()
+    try:
+        instance = _build_instance()
+        subscriber = service.subscribe(
+            namespace=instance.namespace,
+            allowed_workflow_ids={"#V#different_visible_workflow"},
+        )
+
+        notified = service.broadcast(_event_from_instance(instance))
+
+        assert notified == 0
+        assert subscriber.event_queue.empty()
+    finally:
+        service.shutdown()
+
+
+def test_subscriber_revalidates_visibility_after_subscription_revocation(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.workflow_listing_service as listing_service
+    from src.backend.security import access_control
+
+    service = DurableWorkflowStreamService()
+    observed_actor: list[tuple[str | None, str | None]] = []
+
+    def _current_visibility(_workflow_ids):
+        observed_actor.append(
+            (
+                access_control.get_effective_user_concept_id(),
+                access_control.get_effective_organisation_concept_id(),
+            )
+        )
+        return []
+
+    monkeypatch.setattr(
+        listing_service,
+        "filter_workflow_ids_for_current_actor",
+        _current_visibility,
+    )
+    try:
+        instance = _build_instance()
+        subscriber = service.subscribe(
+            user_id=instance.user_id,
+            org_id=instance.org_id,
+            namespace=instance.namespace,
+            allowed_workflow_ids={instance.workflow_id},
+        )
+
+        notified = service.broadcast(_event_from_instance(instance))
+
+        assert notified == 0
+        assert subscriber.event_queue.empty()
+        assert observed_actor == [(instance.user_id, instance.org_id)]
+    finally:
+        service.shutdown()

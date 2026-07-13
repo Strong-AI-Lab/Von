@@ -9,13 +9,26 @@ from typing import Any, cast
 
 import pytest
 
-from src.backend.workflows.action_registry import ActionRegistry
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    ActionSpec,
+    WorkflowActionRequest,
+    WorkflowActionResult,
+)
 from src.backend.workflows.durable.durable_executor import DurableWorkflowResult
 from src.backend.workflows.durable.models import (
     WorkflowInstance,
     WorkflowInstanceStatus,
 )
 from src.backend.workflows.durable.worker import DurableWorkflowWorker
+from src.backend.workflows.durable.registry_factory import (
+    WorkflowDefinitionAuthorityTransientError,
+)
+from src.backend.workflows.engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowStateSpec,
+)
 
 
 class _WorkerManagerStub:
@@ -85,6 +98,26 @@ class _PollManagerStub:
 
     def mark_worker_stopped(self, **kwargs: Any) -> bool:
         self.stopped_calls.append(dict(kwargs))
+        return True
+
+
+class _SuccessfulWorkerManagerStub(_WorkerManagerStub):
+    def __init__(self, instances: list[WorkflowInstance]) -> None:
+        super().__init__()
+        self.instances = {instance.instance_id: instance for instance in instances}
+        self.checkpoint_calls: list[dict[str, Any]] = []
+
+    def get_instance(self, instance_id: str) -> WorkflowInstance | None:
+        return self.instances.get(instance_id)
+
+    def is_cancelled(self, _instance_id: str) -> bool:
+        return False
+
+    def extend_lock(self, _instance_id: str, _worker_id: str) -> bool:
+        return True
+
+    def checkpoint(self, instance_id: str, **kwargs: Any) -> bool:
+        self.checkpoint_calls.append({"instance_id": instance_id, **kwargs})
         return True
 
 
@@ -256,7 +289,7 @@ def test_worker_cleanup_removes_tracking_even_if_release_lock_fails() -> None:
         worker_id="worker-1548",
         instance_manager=manager,  # type: ignore[arg-type]
         registry=ActionRegistry(),
-        definition_loader=lambda _workflow_id: None,
+        definition_loader=lambda _workflow_id, **_actor: None,
     )
     instance = _build_instance()
     worker._current_instances[instance.instance_id] = Thread()
@@ -269,6 +302,266 @@ def test_worker_cleanup_removes_tracking_even_if_release_lock_fails() -> None:
     assert manager.mark_failed_calls[0]["increment_retry"] is False
 
 
+def test_worker_loads_definition_under_persisted_instance_actor_scope() -> None:
+    manager = _WorkerManagerStub()
+    loader_calls: list[dict[str, Any]] = []
+
+    def _actor_scoped_loader(workflow_id: str, **actor: Any) -> None:
+        loader_calls.append({"workflow_id": workflow_id, **actor})
+        return None
+
+    worker = DurableWorkflowWorker(
+        worker_id="worker-2580",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=_actor_scoped_loader,
+    )
+    instance = _build_instance()
+    worker._current_instances[instance.instance_id] = Thread()
+
+    worker._process_instance(instance)
+
+    assert loader_calls == [
+        {
+            "workflow_id": instance.workflow_id,
+            "actor_user_id": instance.user_id,
+            "actor_org_id": instance.org_id,
+            "actor_namespace": instance.namespace,
+        }
+    ]
+    assert manager.mark_failed_calls[0]["error"] == (
+        f"workflow_definition_not_found:{instance.workflow_id}"
+    )
+
+
+def test_worker_keeps_cached_definition_prompt_reads_under_persisted_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A globally warmed definition must not make a hidden prompt readable."""
+    import src.backend.security.access_control as access_control
+    from src.backend.services import prompt_template_service
+
+    hidden_prompt_id = "#V#owner_only_prompt"
+
+    class _Concepts:
+        def find_one(self, query, _projection=None):
+            if query.get("concept_id") != hidden_prompt_id:
+                return None
+            return {
+                "concept_id": hidden_prompt_id,
+                "relationships": {"specific_to_user": ["#V#prompt_owner"]},
+            }
+
+    monkeypatch.setattr(
+        access_control,
+        "get_concepts_collection",
+        lambda: _Concepts(),
+    )
+    monkeypatch.setattr(
+        prompt_template_service,
+        "get_texts_for_concept",
+        lambda concept_id: (
+            [{"predicate": "hasContent", "text": "owner secret"}]
+            if access_control.can_access_concept(concept_id)
+            else []
+        ),
+    )
+
+    # Model a process-global registry entry warmed by the owner. The same object
+    # is then returned to a worker processing another actor's queued instance.
+    warmed_definition = SimpleNamespace(
+        workflow_id="#V#cached_workflow",
+        prompt_concept_id=hidden_prompt_id,
+    )
+    with access_control.override_current_actor("#V#prompt_owner", "#V#owner_org"):
+        assert access_control.can_access_concept(hidden_prompt_id) is True
+
+    instance = WorkflowInstance.create(
+        warmed_definition.workflow_id,
+        user_id="#V#queued_outsider",
+        org_id="#V#other_org",
+        namespace="#V#queued_outsider@other_org",
+    )
+    instance.status = WorkflowInstanceStatus.RUNNING
+    manager = _WorkerManagerStub()
+    observed: dict[str, Any] = {}
+
+    def _run_durable(*_args: Any, **_kwargs: Any) -> DurableWorkflowResult:
+        observed["user"] = access_control.get_effective_user_concept_id()
+        observed["org"] = access_control.get_effective_organisation_concept_id()
+        observed["prompt"] = prompt_template_service.PromptTemplateService().resolve_prompt_text(
+            [warmed_definition.prompt_concept_id]
+        )
+        return DurableWorkflowResult(
+            instance_id=instance.instance_id,
+            data={},
+            completed=True,
+            final_state="done",
+        )
+
+    worker = DurableWorkflowWorker(
+        worker_id="worker-2580-prompt-scope",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id, **_actor: warmed_definition,
+    )
+    worker._executor = cast(Any, SimpleNamespace(run_durable=_run_durable))
+
+    worker._process_instance(instance)
+
+    assert observed == {
+        "user": "#V#queued_outsider",
+        "org": "#V#other_org",
+        "prompt": (None, None),
+    }
+    assert manager.mark_completed_calls
+
+
+def test_worker_completes_same_org_instances_with_each_persisted_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "#V#same_org_actor_propagation_workflow"
+    instances = [
+        WorkflowInstance.create(
+            workflow_id,
+            user_id=user_id,
+            org_id="#V#trusted_org",
+            namespace=f"{user_id}@trusted_org",
+            inputs={
+                "user_concept_id": "#V#forged_input_actor",
+                "org_concept_id": "#V#forged_org",
+                "namespace": "#V#forged_input_actor@forged_org",
+            },
+        )
+        for user_id in ("#V#owner", "#V#cohort_member")
+    ]
+    for instance in instances:
+        instance.status = WorkflowInstanceStatus.RUNNING
+
+    manager = _SuccessfulWorkerManagerStub(instances)
+    loader_calls: list[dict[str, Any]] = []
+    action_calls: list[dict[str, Any]] = []
+
+    def _load_definition(workflow_id_arg: str, **actor: Any) -> WorkflowDefinition:
+        loader_calls.append({"workflow_id": workflow_id_arg, **actor})
+        return WorkflowDefinition(
+            workflow_id=workflow_id_arg,
+            initial_state="#V#done",
+            states={
+                "#V#done": WorkflowStateSpec(
+                    state_id="#V#done",
+                    actions=(WorkflowActionInvocation(action_id="actor.probe"),),
+                    terminal=True,
+                )
+            },
+            termination_states=("#V#done",),
+        )
+
+    def _actor_probe(request: WorkflowActionRequest) -> WorkflowActionResult:
+        action_calls.append(
+            {
+                "environment_user": request.environment.user_concept_id,
+                "environment_org": request.environment.org_concept_id,
+                "environment_namespace": request.environment.user_namespace,
+                "context_user": request.data.get("user_concept_id"),
+                "context_org": request.data.get("org_concept_id"),
+                "context_namespace": request.data.get("namespace"),
+            }
+        )
+        return WorkflowActionResult(outputs={"actor_probe_completed": True})
+
+    registry = ActionRegistry()
+    registry.register(ActionSpec(action_id="actor.probe", handler=_actor_probe))
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_llm_client",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_active_model_name",
+        lambda **_kwargs: "synthetic-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory._get_or_build_durable_mcp_gateway",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+        lambda _trace: "trace-same-org-actor",
+    )
+    worker = DurableWorkflowWorker(
+        worker_id="worker-2580-same-org",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=registry,
+        definition_loader=_load_definition,
+    )
+
+    for instance in instances:
+        worker._process_instance(instance)
+
+    assert loader_calls == [
+        {
+            "workflow_id": workflow_id,
+            "actor_user_id": instance.user_id,
+            "actor_org_id": instance.org_id,
+            "actor_namespace": instance.namespace,
+        }
+        for instance in instances
+    ]
+    assert action_calls == [
+        {
+            "environment_user": instance.user_id,
+            "environment_org": instance.org_id,
+            "environment_namespace": instance.namespace,
+            "context_user": instance.user_id,
+            "context_org": instance.org_id,
+            "context_namespace": instance.namespace,
+        }
+        for instance in instances
+    ]
+    assert [call["instance_id"] for call in manager.mark_completed_calls] == [
+        instance.instance_id for instance in instances
+    ]
+    assert manager.mark_failed_calls == []
+
+
+def test_worker_retries_transient_actor_scoped_definition_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _WorkerManagerStub()
+    loader_calls: list[dict[str, Any]] = []
+
+    def _transient_loader(workflow_id: str, **actor: Any) -> None:
+        loader_calls.append({"workflow_id": workflow_id, **actor})
+        raise WorkflowDefinitionAuthorityTransientError(
+            "workflow_definition_authority temporarily unavailable:synthetic"
+        )
+
+    monkeypatch.setenv("VON_TRANSIENT_MONGO_RETRY_MAX_ATTEMPTS", "3")
+    monkeypatch.setattr(
+        "src.backend.db.transient_errors.attempt_reconnect",
+        lambda **_kwargs: {"reconnected": True},
+    )
+    monkeypatch.setattr("src.backend.db.transient_errors.time.sleep", lambda _delay: None)
+    worker = DurableWorkflowWorker(
+        worker_id="worker-2580-transient",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=_transient_loader,
+    )
+    instance = _build_instance()
+    worker._current_instances[instance.instance_id] = Thread()
+
+    worker._process_instance(instance)
+
+    assert len(loader_calls) == 3
+    assert all(call["actor_user_id"] == instance.user_id for call in loader_calls)
+    assert all(call["actor_org_id"] == instance.org_id for call in loader_calls)
+    assert manager.mark_failed_calls[0]["increment_retry"] is True
+    assert manager.mark_failed_calls[0]["error"].startswith(
+        "worker_exception:workflow_definition_authority temporarily unavailable"
+    )
+
+
 def test_worker_swallows_mark_failed_errors_during_exception_path() -> None:
     manager = _WorkerManagerStub()
     manager.mark_failed_error = RuntimeError("mongo_timeout")
@@ -278,7 +571,9 @@ def test_worker_swallows_mark_failed_errors_during_exception_path() -> None:
         registry=ActionRegistry(),
         definition_loader=cast(
             Any,
-            lambda _workflow_id: SimpleNamespace(workflow_id=_workflow_id),
+            lambda _workflow_id, **_actor: SimpleNamespace(
+                workflow_id=_workflow_id
+            ),
         ),
     )
     instance = _build_instance()
@@ -308,7 +603,9 @@ def test_worker_persists_bounded_failed_outputs_from_result_context() -> None:
         registry=ActionRegistry(),
         definition_loader=cast(
             Any,
-            lambda _workflow_id: SimpleNamespace(workflow_id=_workflow_id),
+            lambda _workflow_id, **_actor: SimpleNamespace(
+                workflow_id=_workflow_id
+            ),
         ),
     )
     instance = _build_instance()
@@ -406,7 +703,9 @@ def test_worker_persists_bounded_completed_outputs_from_declared_payload() -> No
         registry=ActionRegistry(),
         definition_loader=cast(
             Any,
-            lambda _workflow_id: SimpleNamespace(workflow_id=_workflow_id),
+            lambda _workflow_id, **_actor: SimpleNamespace(
+                workflow_id=_workflow_id
+            ),
         ),
     )
     instance = _build_instance()

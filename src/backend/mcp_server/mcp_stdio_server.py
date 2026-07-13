@@ -478,9 +478,15 @@ internal_mcp_catalogue_module = importlib.import_module(
     "src.backend.integrations.internal_mcp.catalogue"
 )
 internal_mcp_module = importlib.import_module("src.backend.integrations.internal_mcp")
+internal_mcp_gateway_module = importlib.import_module(
+    "src.backend.integrations.internal_mcp.gateway"
+)
 InternalMCPGateway = internal_mcp_module.InternalMCPGateway
 InternalMCPTransport = internal_mcp_module.InternalMCPTransport
 build_default_catalogue = internal_mcp_module.build_default_catalogue
+bind_internal_mcp_actor_context_source = (
+    internal_mcp_gateway_module.bind_internal_mcp_actor_context_source
+)
 gmail_service = importlib.import_module("src.backend.integrations.google.gmail_service")
 _bind_imports(
     "src.backend.services.rag_service",
@@ -1218,6 +1224,13 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         get_active_model_name,
         get_llm_client,
     )
+    from src.backend.services.workflow_actor_scope_service import (
+        WorkflowActorScopeError,
+        resolve_provenance_bound_workflow_actor_scope,
+    )
+    from src.backend.integrations.internal_mcp.gateway import (
+        get_internal_mcp_actor_context_source,
+    )
 
     prompt = arguments.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -1271,6 +1284,41 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             user_concept_id = namespace_user_id
         if org_concept_id is None:
             org_concept_id = namespace_org_id
+
+    # Raw stdio arguments are transport payload, not authenticated actor
+    # authority.  Reject identity-bearing chat runs before model, retrieval, or
+    # workflow work.  The deliberately configured local-operator gateway is
+    # the sole payload-only identity exception.
+    inherited_actor_source = get_internal_mcp_actor_context_source()
+    actor_context_source = (
+        "trusted_operator_payload_fallback"
+        if inherited_actor_source == "trusted_operator_payload_fallback"
+        else "tool_payload_fallback"
+    )
+    try:
+        resolve_provenance_bound_workflow_actor_scope(
+            claimed_user_id=user_concept_id,
+            claimed_org_id=org_concept_id,
+            claimed_namespace=user_namespace,
+            actor_context_source=actor_context_source,
+            preexisting_actor_context=None,
+        )
+    except WorkflowActorScopeError as exc:
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": exc.reason,
+                    "error_code": exc.reason,
+                    "workflow_actor_scope": {
+                        "schema_version": "workflow_actor_scope_resolution.v1",
+                        "status": "rejected",
+                        "reason": exc.reason,
+                        "mismatch_fields": list(exc.mismatch_fields),
+                    },
+                }
+            )
+        ]
     gmail_profile = (
         arguments.get("gmail_profile")
         if isinstance(arguments.get("gmail_profile"), str)
@@ -1368,7 +1416,12 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
     catalogue = build_default_catalogue()
     transport = InternalMCPTransport()
     base_gateway = InternalMCPGateway(
-        catalogue=catalogue, transport=transport, enabled=True
+        catalogue=catalogue,
+        transport=transport,
+        enabled=True,
+        trusted_actor_payload_fallback=(
+            actor_context_source == "trusted_operator_payload_fallback"
+        ),
     )
     gateway = _RestrictedGateway(
         gateway=base_gateway, allow_writes=effective_allow_writes
@@ -1387,18 +1440,22 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
     try:
 
         def _run_orchestrator_sync():
-            return orchestrator.run(
-                prompt=prompt,
-                context=context,
-                llm_client=llm_client,
-                model=model_name,
-                user_namespace=user_namespace,
-                gmail_profile=gmail_profile,
-                auxiliary_system_prompt=auxiliary_system_prompt,
-                preferred_language=get_preferred_language(),
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-            )
+            # ContextVars are not propagated by run_in_executor.  Bind actor
+            # provenance inside the worker thread so every nested direct or MCP
+            # workflow launch observes the same authority boundary.
+            with bind_internal_mcp_actor_context_source(actor_context_source):
+                return orchestrator.run(
+                    prompt=prompt,
+                    context=context,
+                    llm_client=llm_client,
+                    model=model_name,
+                    user_namespace=user_namespace,
+                    gmail_profile=gmail_profile,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    preferred_language=get_preferred_language(),
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                )
 
         orchestrator_result = await _run_blocking_with_timeout(
             _run_orchestrator_sync,
@@ -3395,6 +3452,20 @@ def _run_catalogue_proxy_handler(
         ]
 
 
+def _run_untrusted_workflow_proxy_handler(
+    handler: Callable[..., Any],
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    """Run a raw stdio workflow call without promoting payload actor claims."""
+
+    with bind_internal_mcp_actor_context_source("tool_payload_fallback"):
+        return _run_catalogue_proxy_handler(
+            handler,
+            arguments,
+            tool_family_label="Workflow",
+        )
+
+
 async def _handle_jira_search(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_search,
@@ -3553,30 +3624,27 @@ async def _handle_list_recent_screenshots(
 async def _handle_workflow_list_definitions(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_list_definitions,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_validate_candidate(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_validate_candidate,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_list_use_episodes(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_list_use_episodes,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
@@ -3601,50 +3669,45 @@ async def _handle_upsert_renderer_profile(
 
 
 async def _handle_workflow_bind_event(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_bind_event,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_list_event_bindings(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_list_event_bindings,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_set_event_binding_enabled(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_set_event_binding_enabled,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_delete_event_binding(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_delete_event_binding,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_mcp_health_check(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_mcp_health_check,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
@@ -3671,220 +3734,197 @@ async def _handle_mongo_query_diagnostics_report(
 async def _handle_workflow_materialisation_diagnostics(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_materialisation_diagnostics,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_concept_parity_audit(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_concept_parity_audit,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_create_instance(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_create_instance,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_execute(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_execute,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_list_instances(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_list_instances,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_list_execution_traces(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_list_execution_traces,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_build_prediction_envelope(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_build_prediction_envelope,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_get_instance(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_get_instance,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_get_execution_trace(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_get_execution_trace,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_cancel_instance(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_cancel_instance,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_retry_instance(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_retry_instance,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_create_schedule(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_create_schedule,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_list_schedules(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_list_schedules,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_get_schedule(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_get_schedule,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_set_schedule_enabled(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_set_schedule_enabled,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_delete_schedule(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_delete_schedule,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_workflow_trigger_schedule(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _workflow_trigger_schedule,
         arguments,
-        tool_family_label="Workflow",
     )
 
 
 async def _handle_chat_history_get_segments(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _chat_history_get_segments,
         arguments,
-        tool_family_label="ChatHistory",
     )
 
 
 async def _handle_chat_history_get_debug_entry(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _chat_history_get_debug_entry,
         arguments,
-        tool_family_label="ChatHistory",
     )
 
 
 async def _handle_conversation_telemetry_get_locator(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _conversation_telemetry_get_locator,
         arguments,
-        tool_family_label="ChatHistory",
     )
 
 
 async def _handle_turn_execution_list(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_list,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_get(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_get,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_get_diagnostics(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_get_diagnostics,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
@@ -3911,70 +3951,63 @@ async def _handle_failure_case_reference_resolve(
 async def _handle_turn_execution_get_live_progress(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_get_live_progress,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_get_critic_bundle(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_get_critic_bundle,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_search_failures(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_search_failures,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_build_benchmark(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_build_benchmark,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_build_selector_benchmark(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_build_selector_benchmark,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_build_context_answering_benchmark(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_build_context_answering_benchmark,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_build_dashboard(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_build_dashboard,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
@@ -4011,36 +4044,32 @@ async def _handle_skill_catalogue_sync(
 async def _handle_turn_execution_backfill_from_chat_history(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_backfill_from_chat_history,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_turn_execution_namespace_coverage_report(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _turn_execution_namespace_coverage_report,
         arguments,
-        tool_family_label="TurnExecution",
     )
 
 
 async def _handle_experiment_run_list(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_run_list,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_experiment_run_get(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_run_get,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
@@ -4177,188 +4206,169 @@ async def _handle_context_bundle_build_benchmark(
 async def _handle_testing_theory_create_slice(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_theory_create_slice,
         arguments,
-        tool_family_label="TestingTheory",
     )
 
 
 async def _handle_testing_theory_import_canonical_context(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_theory_import_canonical_context,
         arguments,
-        tool_family_label="TestingTheory",
     )
 
 
 async def _handle_testing_theory_assert_local_claims(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_theory_assert_local_claims,
         arguments,
-        tool_family_label="TestingTheory",
     )
 
 
 async def _handle_testing_theory_compute_diff(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_theory_compute_diff,
         arguments,
-        tool_family_label="TestingTheory",
     )
 
 
 async def _handle_testing_theory_rollback_local_writes(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_theory_rollback_local_writes,
         arguments,
-        tool_family_label="TestingTheory",
     )
 
 
 async def _handle_testing_theory_promote_validated_claims(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_theory_promote_validated_claims,
         arguments,
-        tool_family_label="TestingTheory",
     )
 
 
 async def _handle_testing_theory_gc_expired(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_theory_gc_expired,
         arguments,
-        tool_family_label="TestingTheory",
     )
 
 
 async def _handle_experiment_create_spec(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_create_spec,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_experiment_start_run(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_start_run,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_experiment_record_observation(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_record_observation,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_experiment_compute_verdict(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_compute_verdict,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_experiment_emit_learning_signal(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_emit_learning_signal,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_experiment_execute_target_workflow(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_execute_target_workflow,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_experiment_execute_regression_suite(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _experiment_execute_regression_suite,
         arguments,
-        tool_family_label="Experiment",
     )
 
 
 async def _handle_testing_prepare_meeting_invitation_spec(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_prepare_meeting_invitation_spec,
         arguments,
-        tool_family_label="TestingWorkflow",
     )
 
 
 async def _handle_testing_prepare_experiment_spec(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_prepare_experiment_spec,
         arguments,
-        tool_family_label="TestingWorkflow",
     )
 
 
 async def _handle_testing_prepare_arxiv_paper_ingestion_fixture(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_prepare_arxiv_paper_ingestion_fixture,
         arguments,
-        tool_family_label="TestingWorkflow",
     )
 
 
 async def _handle_testing_verify_arxiv_paper_ingestion_result(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_verify_arxiv_paper_ingestion_result,
         arguments,
-        tool_family_label="TestingWorkflow",
     )
 
 
 async def _handle_testing_cleanup_arxiv_paper_ingestion_artifacts(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_untrusted_workflow_proxy_handler(
         _testing_cleanup_arxiv_paper_ingestion_artifacts,
         arguments,
-        tool_family_label="TestingWorkflow",
     )
 
 

@@ -5,11 +5,21 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ...security.access_control import bypass_access_control
+from ...security.visibility_predicates import CANONICAL_SPECIFIC_TO_USER_PREDICATE
+from ...services import concept_service
+from ...services.arxiv_paper_link_service import (
+    extract_arxiv_id_candidates,
+    predict_arxiv_paper_concept_id,
+)
 from ...services.experiment_run_service import (
+    _resolve_regression_suite_mode,
     compute_experiment_verdict,
     create_experiment_spec,
     emit_experiment_learning_signal,
     execute_regression_suite,
+    get_experiment_run_state,
+    get_experiment_spec_state,
     prepare_experiment_spec_from_template,
     prepare_meeting_invitation_experiment_spec,
     record_experiment_observation,
@@ -20,12 +30,12 @@ from ...services.arxiv_ingestion_testing_service import (
     prepare_arxiv_paper_ingestion_test_fixture,
     verify_arxiv_paper_ingestion_test_result,
 )
-from ...services.namespace_service import parse_namespace
+from ...services.namespace_service import parse_namespace, resolve_canonical_namespace
 from ...services.testing_theory_service import (
     assert_testing_theory_local_claims,
     compute_testing_theory_diff,
     create_testing_theory_slice,
-    garbage_collect_expired_testing_theories,
+    get_testing_theory_state,
     import_canonical_context_into_theory,
     promote_testing_theory_validated_claims,
     rollback_testing_theory_local_writes,
@@ -36,6 +46,7 @@ from ...workflows.workflow_studio_service import (
     validate_workflow_candidate,
 )
 from ...services.testing_workflow_contracts import (
+    ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
     EXPERIMENT_COMPUTE_VERDICT_ACTION_ID,
     EXPERIMENT_CREATE_SPEC_ACTION_ID,
     EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
@@ -56,6 +67,9 @@ from ...services.testing_workflow_contracts import (
     THEORY_IMPORT_CANONICAL_CONTEXT_ACTION_ID,
     THEORY_PROMOTE_VALIDATED_CLAIMS_ACTION_ID,
     THEORY_ROLLBACK_LOCAL_WRITES_ACTION_ID,
+)
+from ...services.workflow_vontology_materialisation_helpers import (
+    stable_named_instance_concept_id,
 )
 from ..action_registry import (
     ActionRegistry,
@@ -127,13 +141,51 @@ def _context_mapping(request: WorkflowActionRequest) -> dict[str, Any]:
 def _derive_actor_context(request: WorkflowActionRequest) -> dict[str, Any]:
     inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
     context = _context_mapping(request)
-    namespace = _safe_str(inputs.get("namespace")) or _safe_str(context.get("namespace"))
-    user_id = _safe_str(inputs.get("user_id")) or _safe_str(context.get("user_id"))
-    org_id = _safe_str(inputs.get("org_id")) or _safe_str(context.get("org_id"))
-
     environment_namespace = _safe_str(getattr(request.environment, "user_namespace", None))
-    if not namespace and environment_namespace:
+    environment_user_id = _safe_str(
+        getattr(request.environment, "user_concept_id", None)
+    )
+    environment_org_id = _safe_str(
+        getattr(request.environment, "org_concept_id", None)
+    )
+    context_namespace = _safe_str(context.get("namespace")) or _safe_str(
+        context.get("user_namespace")
+    )
+    context_user_id = _safe_str(context.get("user_concept_id")) or _safe_str(
+        context.get("user_id")
+    )
+    context_org_id = _safe_str(
+        context.get("organisation_concept_id")
+    ) or _safe_str(context.get("org_concept_id")) or _safe_str(context.get("org_id"))
+
+    # The durable executor reconstructs these fields from the persisted
+    # WorkflowInstance before every action.  Treat that environment/context as
+    # actor authority and never let authored action inputs replace it.
+    has_environment_actor = bool(
+        environment_namespace or environment_user_id or environment_org_id
+    )
+    has_persisted_context_actor = bool(
+        context_namespace or context_user_id or context_org_id
+    )
+    if has_environment_actor:
         namespace = environment_namespace
+        user_id = environment_user_id
+        org_id = environment_org_id
+        source = "workflow_environment"
+    elif has_persisted_context_actor:
+        namespace = context_namespace
+        user_id = context_user_id
+        org_id = context_org_id
+        source = "persisted_workflow_context"
+    else:
+        # Kept only for non-authoritative compatibility callers.  Every
+        # experiment mutation below requires a workflow environment/context,
+        # so payload identity cannot grant access to owned resources.
+        namespace = _safe_str(inputs.get("namespace"))
+        user_id = _safe_str(inputs.get("user_id"))
+        org_id = _safe_str(inputs.get("org_id"))
+        source = "action_input_claim"
+
     if namespace and (not user_id or not org_id):
         try:
             parsed = parse_namespace(namespace)
@@ -150,7 +202,421 @@ def _derive_actor_context(request: WorkflowActionRequest) -> dict[str, Any]:
         "namespace": namespace or None,
         "user_id": user_id or None,
         "org_id": org_id or None,
+        "authoritative": source != "action_input_claim",
+        "source": source,
     }
+
+
+_EXPERIMENT_RESOURCE_NOT_AVAILABLE = "experiment_resource_not_available"
+_TESTING_THEORY_NOT_AVAILABLE = "testing_theory_not_available"
+_TESTING_CLEANUP_AUTHORITY_REQUIRED = "testing_cleanup_authority_required"
+
+
+def _failed_action(error: str) -> WorkflowActionResult:
+    return WorkflowActionResult(
+        status="failed",
+        error=error,
+        outputs={"success": False, "error": error},
+    )
+
+
+def _canonical_actor_namespace(actor: Mapping[str, Any]) -> str | None:
+    return resolve_canonical_namespace(
+        actor.get("namespace"),
+        actor.get("user_id"),
+        actor.get("org_id"),
+    )
+
+
+def _actor_has_durable_authority(actor: Mapping[str, Any]) -> bool:
+    return bool(
+        actor.get("authoritative")
+        and actor.get("user_id")
+        and _canonical_actor_namespace(actor)
+    )
+
+
+def _resource_state_owned_by_actor(
+    state: Mapping[str, Any] | None,
+    actor: Mapping[str, Any],
+) -> bool:
+    if not isinstance(state, Mapping) or not _actor_has_durable_authority(actor):
+        return False
+    actor_namespace = _canonical_actor_namespace(actor)
+    resource_namespace = resolve_canonical_namespace(
+        state.get("namespace"),
+        state.get("user_id"),
+        state.get("org_id"),
+    )
+    if not actor_namespace or resource_namespace != actor_namespace:
+        return False
+    stored_user_id = _safe_str(state.get("user_id"))
+    stored_org_id = _safe_str(state.get("org_id"))
+    if stored_user_id and stored_user_id != _safe_str(actor.get("user_id")):
+        return False
+    if stored_org_id and stored_org_id != _safe_str(actor.get("org_id")):
+        return False
+    return True
+
+
+def _load_experiment_spec_state_for_authority(
+    experiment_spec_id: str,
+) -> dict[str, Any] | None:
+    with bypass_access_control():
+        return get_experiment_spec_state(experiment_spec_id)
+
+
+def _load_experiment_run_state_for_authority(
+    run_id: str,
+) -> dict[str, Any] | None:
+    with bypass_access_control():
+        return get_experiment_run_state(run_id)
+
+
+def _concept_exists_for_authority(concept_id: str) -> bool:
+    if not concept_id:
+        return False
+    try:
+        with bypass_access_control():
+            return isinstance(
+                concept_service.get_concept_by_concept_id_exact(concept_id),
+                Mapping,
+            )
+    except concept_service.ConceptNotFoundError:
+        return False
+
+
+def _owned_experiment_spec_or_denial(
+    *,
+    experiment_spec_id: str,
+    actor: Mapping[str, Any],
+    allow_new: bool,
+) -> WorkflowActionResult | None:
+    if not _actor_has_durable_authority(actor):
+        return _failed_action("workflow_actor_authority_required")
+    try:
+        state = _load_experiment_spec_state_for_authority(experiment_spec_id)
+        concept_exists = _concept_exists_for_authority(experiment_spec_id)
+    except Exception:
+        return _failed_action(_EXPERIMENT_RESOURCE_NOT_AVAILABLE)
+    if state is None:
+        if allow_new and not concept_exists:
+            return None
+        return _failed_action(_EXPERIMENT_RESOURCE_NOT_AVAILABLE)
+    if not _resource_state_owned_by_actor(state, actor):
+        return _failed_action(_EXPERIMENT_RESOURCE_NOT_AVAILABLE)
+    return None
+
+
+def _owned_experiment_run_or_denial(
+    *,
+    run_id: str,
+    actor: Mapping[str, Any],
+    allow_new: bool = False,
+) -> WorkflowActionResult | None:
+    if not _actor_has_durable_authority(actor):
+        return _failed_action("workflow_actor_authority_required")
+    try:
+        state = _load_experiment_run_state_for_authority(run_id)
+        concept_exists = _concept_exists_for_authority(run_id)
+    except Exception:
+        return _failed_action(_EXPERIMENT_RESOURCE_NOT_AVAILABLE)
+    if state is None:
+        if allow_new and not concept_exists:
+            return None
+        return _failed_action(_EXPERIMENT_RESOURCE_NOT_AVAILABLE)
+    if not _resource_state_owned_by_actor(state, actor):
+        return _failed_action(_EXPERIMENT_RESOURCE_NOT_AVAILABLE)
+    return None
+
+
+def _load_testing_theory_state_for_authority(
+    theory_id: str,
+) -> dict[str, Any] | None:
+    with bypass_access_control():
+        return get_testing_theory_state(theory_id)
+
+
+def _owned_testing_theory_or_denial(
+    *,
+    theory_id: str,
+    actor: Mapping[str, Any],
+    allow_new: bool = False,
+) -> WorkflowActionResult | None:
+    if not _actor_has_durable_authority(actor):
+        return _failed_action("workflow_actor_authority_required")
+    try:
+        state = _load_testing_theory_state_for_authority(theory_id)
+        concept_exists = _concept_exists_for_authority(theory_id)
+    except Exception:
+        return _failed_action(_TESTING_THEORY_NOT_AVAILABLE)
+    if state is None:
+        if allow_new and not concept_exists:
+            return None
+        return _failed_action(_TESTING_THEORY_NOT_AVAILABLE)
+    if not _resource_state_owned_by_actor(state, actor):
+        return _failed_action(_TESTING_THEORY_NOT_AVAILABLE)
+    return None
+
+
+def _referenced_theories_owned_or_denial(
+    *,
+    theory_ids: Any,
+    actor: Mapping[str, Any],
+) -> WorkflowActionResult | None:
+    for theory_id in _normalise_concept_ids(theory_ids):
+        if denial := _owned_testing_theory_or_denial(
+            theory_id=theory_id,
+            actor=actor,
+        ):
+            return denial
+    return None
+
+
+def _actor_scoped_experiment_spec_id(
+    *,
+    actor: Mapping[str, Any],
+    label: str,
+) -> str:
+    namespace = _canonical_actor_namespace(actor) or "unscoped"
+    return stable_named_instance_concept_id(
+        f"{label.strip() or 'Testing experiment'} [{namespace}]",
+        prefix="experiment_spec",
+    )
+
+
+def _actor_scoped_testing_theory_id(
+    *,
+    actor: Mapping[str, Any],
+    label: str,
+) -> str:
+    namespace = _canonical_actor_namespace(actor) or "unscoped"
+    return stable_named_instance_concept_id(
+        f"{label.strip() or 'Ephemeral testing theory'} [{namespace}]",
+        prefix="ephemeral_theory",
+    )
+
+
+def _normalise_concept_ids(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return []
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw_item in value:
+        item = _safe_str(raw_item)
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        items.append(item)
+    return items
+
+
+def _load_cleanup_concept_for_authority(
+    concept_id: str,
+) -> Mapping[str, Any] | None:
+    try:
+        with bypass_access_control():
+            concept = concept_service.get_concept_by_concept_id_exact(concept_id)
+    except concept_service.ConceptNotFoundError:
+        return None
+    return concept if isinstance(concept, Mapping) else None
+
+
+def _concept_is_owned_by_actor(
+    concept: Mapping[str, Any] | None,
+    actor: Mapping[str, Any],
+) -> bool:
+    if not isinstance(concept, Mapping):
+        return False
+    actor_user_id = _safe_str(actor.get("user_id"))
+    if not actor_user_id:
+        return False
+    if _safe_str(concept.get("created_by_concept_id")) == actor_user_id:
+        return True
+    relationships = concept.get("relationships")
+    if not isinstance(relationships, Mapping):
+        return False
+    scoped_users = _normalise_concept_ids(
+        relationships.get(CANONICAL_SPECIFIC_TO_USER_PREDICATE)
+    )
+    return actor_user_id in scoped_users
+
+
+def _validated_arxiv_cleanup_inputs(
+    request: WorkflowActionRequest,
+    *,
+    actor: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, WorkflowActionResult | None]:
+    """Validate one cleanup against persisted fixture lineage and ownership.
+
+    The underlying helper is deliberately powerful because certification needs
+    to remove temporary Vontology and blob artefacts.  A durable workflow may
+    therefore invoke it only from the canonical arXiv testing workflow, with
+    targets bounded by that workflow's prepared fixture and with every target
+    that will actually be deleted scoped to the persisted workflow actor.
+    """
+
+    if (
+        request.workflow_id != ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID
+        or not _actor_has_durable_authority(actor)
+    ):
+        return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
+
+    inputs = dict(request.inputs or {})
+    context = _context_mapping(request)
+    arxiv_id = _safe_str(context.get("arxiv_id"))
+    fixture_paper_id = _safe_str(context.get("paper_concept_id"))
+    requested_paper_id = _safe_str(inputs.get("paper_concept_id"))
+    if not arxiv_id or not fixture_paper_id or requested_paper_id != fixture_paper_id:
+        return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
+    if predict_arxiv_paper_concept_id(arxiv_id=arxiv_id) != fixture_paper_id:
+        return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
+
+    requested_file_copy_ids = _normalise_concept_ids(
+        [
+            inputs.get("file_copy_concept_id"),
+            *_normalise_concept_ids(inputs.get("file_copy_concept_ids")),
+        ]
+    )
+    fixture_file_copy_ids = set(
+        _normalise_concept_ids(
+            [
+                context.get("file_copy_concept_id"),
+                *_normalise_concept_ids(context.get("file_copy_concept_ids")),
+            ]
+        )
+    )
+    requested_author_ids = _normalise_concept_ids(inputs.get("author_concept_ids"))
+    requested_topic_ids = _normalise_concept_ids(inputs.get("topic_concept_ids"))
+    fixture_author_ids = set(
+        _normalise_concept_ids(context.get("expected_author_concept_ids"))
+    )
+    fixture_topic_ids = set(
+        _normalise_concept_ids(context.get("expected_topic_concept_ids"))
+    )
+    preexisting_author_ids = set(
+        _normalise_concept_ids(inputs.get("preexisting_author_concept_ids"))
+    )
+    preexisting_topic_ids = set(
+        _normalise_concept_ids(inputs.get("preexisting_topic_concept_ids"))
+    )
+    fixture_preexisting_author_ids = set(
+        _normalise_concept_ids(context.get("preexisting_author_concept_ids"))
+    )
+    fixture_preexisting_topic_ids = set(
+        _normalise_concept_ids(context.get("preexisting_topic_concept_ids"))
+    )
+
+    if (
+        not requested_file_copy_ids
+        or not set(requested_file_copy_ids).issubset(fixture_file_copy_ids)
+        or not set(requested_author_ids).issubset(fixture_author_ids)
+        or not set(requested_topic_ids).issubset(fixture_topic_ids)
+        or preexisting_author_ids != fixture_preexisting_author_ids
+        or preexisting_topic_ids != fixture_preexisting_topic_ids
+    ):
+        return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
+
+    try:
+        paper_concept = _load_cleanup_concept_for_authority(fixture_paper_id)
+        paper_relationships = (
+            paper_concept.get("relationships")
+            if isinstance(paper_concept, Mapping)
+            else None
+        )
+        linked_file_copy_ids = set(
+            _normalise_concept_ids(
+                paper_relationships.get(
+                    "#V#propositional_information_thing_has_computer_file"
+                )
+                if isinstance(paper_relationships, Mapping)
+                else []
+            )
+        )
+        deletion_targets = [
+            fixture_paper_id,
+            *requested_file_copy_ids,
+            *[
+                item
+                for item in requested_author_ids
+                if item not in preexisting_author_ids
+            ],
+            *[
+                item for item in requested_topic_ids if item not in preexisting_topic_ids
+            ],
+        ]
+        owned_targets = all(
+            _concept_is_owned_by_actor(
+                _load_cleanup_concept_for_authority(concept_id),
+                actor,
+            )
+            for concept_id in deletion_targets
+        )
+    except Exception:
+        return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
+
+    if (
+        not _concept_is_owned_by_actor(paper_concept, actor)
+        or not set(requested_file_copy_ids).issubset(linked_file_copy_ids)
+        or not owned_targets
+    ):
+        return None, _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
+
+    return {
+        "paper_concept_id": fixture_paper_id,
+        "file_copy_concept_id": requested_file_copy_ids[0],
+        "file_copy_concept_ids": requested_file_copy_ids,
+        "author_concept_ids": requested_author_ids,
+        "topic_concept_ids": requested_topic_ids,
+        "preexisting_author_concept_ids": sorted(preexisting_author_ids),
+        "preexisting_topic_concept_ids": sorted(preexisting_topic_ids),
+    }, None
+
+
+def _arxiv_repair_is_actor_owned(
+    *,
+    inputs: Mapping[str, Any],
+    actor: Mapping[str, Any],
+) -> bool:
+    candidates = extract_arxiv_id_candidates(
+        inputs.get("arxiv_id"),
+        inputs.get("arxiv_source"),
+        inputs.get("source_uri"),
+        inputs.get("prompt_text") or inputs.get("prompt"),
+    )
+    if not candidates:
+        # The fixture service will reject the identifier without mutation.
+        return True
+    paper_id = predict_arxiv_paper_concept_id(arxiv_id=candidates[0])
+    try:
+        paper = _load_cleanup_concept_for_authority(paper_id)
+    except Exception:
+        return False
+    if paper is None:
+        return True
+    if not _concept_is_owned_by_actor(paper, actor):
+        return False
+    relationships = paper.get("relationships")
+    linked_file_copy_ids = _normalise_concept_ids(
+        relationships.get("#V#propositional_information_thing_has_computer_file")
+        if isinstance(relationships, Mapping)
+        else []
+    )
+    try:
+        return all(
+            _concept_is_owned_by_actor(
+                _load_cleanup_concept_for_authority(concept_id),
+                actor,
+            )
+            for concept_id in linked_file_copy_ids
+        )
+    except Exception:
+        return False
 
 
 def _result_from_payload(payload: Mapping[str, Any] | None) -> WorkflowActionResult:
@@ -597,9 +1063,34 @@ def _summarise_learning_signal_payload(
 def _handle_theory_create_slice(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
+    name = _safe_str(inputs.get("name")) or "Ephemeral testing theory"
+    theory_id = _safe_str(inputs.get("theory_id")) or _actor_scoped_testing_theory_id(
+        actor=actor,
+        label=name,
+    )
+    if denial := _owned_testing_theory_or_denial(
+        theory_id=theory_id,
+        actor=actor,
+        allow_new=True,
+    ):
+        return denial
+    if denial := _referenced_theories_owned_or_denial(
+        theory_ids=inputs.get("included_theory_ids"),
+        actor=actor,
+    ):
+        return denial
+    experiment_spec_id = _safe_str(inputs.get("experiment_spec_id")) or None
+    if experiment_spec_id and (
+        denial := _owned_experiment_spec_or_denial(
+            experiment_spec_id=experiment_spec_id,
+            actor=actor,
+            allow_new=False,
+        )
+    ):
+        return denial
     result = create_testing_theory_slice(
-        name=_safe_str(inputs.get("name")) or "Ephemeral testing theory",
-        theory_id=_safe_str(inputs.get("theory_id")) or None,
+        name=name,
+        theory_id=theory_id,
         namespace=actor["namespace"],
         user_id=actor["user_id"],
         org_id=actor["org_id"],
@@ -608,7 +1099,7 @@ def _handle_theory_create_slice(request: WorkflowActionRequest) -> WorkflowActio
         expected_observations=inputs.get("expected_observations") or [],
         promotion_policy=inputs.get("promotion_policy"),
         retention_policy=inputs.get("retention_policy"),
-        experiment_spec_id=_safe_str(inputs.get("experiment_spec_id")) or None,
+        experiment_spec_id=experiment_spec_id,
         ttl_seconds=inputs.get("ttl_seconds"),
         description=_safe_str(inputs.get("description")) or None,
     )
@@ -617,8 +1108,20 @@ def _handle_theory_create_slice(request: WorkflowActionRequest) -> WorkflowActio
 
 def _handle_theory_import_context(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    theory_id = _safe_str(inputs.get("theory_id"))
+    if denial := _owned_testing_theory_or_denial(
+        theory_id=theory_id,
+        actor=actor,
+    ):
+        return denial
+    if denial := _referenced_theories_owned_or_denial(
+        theory_ids=inputs.get("theory_ids"),
+        actor=actor,
+    ):
+        return denial
     result = import_canonical_context_into_theory(
-        theory_id=_safe_str(inputs.get("theory_id")),
+        theory_id=theory_id,
         concept_ids=inputs.get("concept_ids") or [],
         theory_ids=inputs.get("theory_ids") or [],
     )
@@ -627,11 +1130,18 @@ def _handle_theory_import_context(request: WorkflowActionRequest) -> WorkflowAct
 
 def _handle_theory_assert_local_claim(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    theory_id = _safe_str(inputs.get("theory_id"))
+    if denial := _owned_testing_theory_or_denial(
+        theory_id=theory_id,
+        actor=actor,
+    ):
+        return denial
     claims = inputs.get("claims")
     if claims is None and "claim" in inputs:
         claims = inputs.get("claim")
     result = assert_testing_theory_local_claims(
-        theory_id=_safe_str(inputs.get("theory_id")),
+        theory_id=theory_id,
         claims=claims or [],
     )
     return _result_from_payload(result)
@@ -639,15 +1149,29 @@ def _handle_theory_assert_local_claim(request: WorkflowActionRequest) -> Workflo
 
 def _handle_theory_compute_diff(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    theory_id = _safe_str(inputs.get("theory_id"))
+    if denial := _owned_testing_theory_or_denial(
+        theory_id=theory_id,
+        actor=actor,
+    ):
+        return denial
     return _result_from_payload(
-        compute_testing_theory_diff(theory_id=_safe_str(inputs.get("theory_id")))
+        compute_testing_theory_diff(theory_id=theory_id)
     )
 
 
 def _handle_theory_rollback(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    theory_id = _safe_str(inputs.get("theory_id"))
+    if denial := _owned_testing_theory_or_denial(
+        theory_id=theory_id,
+        actor=actor,
+    ):
+        return denial
     result = rollback_testing_theory_local_writes(
-        theory_id=_safe_str(inputs.get("theory_id")),
+        theory_id=theory_id,
         assertion_ids=inputs.get("assertion_ids") or [],
         clear_all=bool(inputs.get("clear_all", False)),
     )
@@ -656,30 +1180,55 @@ def _handle_theory_rollback(request: WorkflowActionRequest) -> WorkflowActionRes
 
 def _handle_theory_promote(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    theory_id = _safe_str(inputs.get("theory_id"))
+    if denial := _owned_testing_theory_or_denial(
+        theory_id=theory_id,
+        actor=actor,
+    ):
+        return denial
+    experiment_run_id = _safe_str(inputs.get("experiment_run_id")) or None
+    if experiment_run_id and (
+        denial := _owned_experiment_run_or_denial(
+            run_id=experiment_run_id,
+            actor=actor,
+        )
+    ):
+        return denial
     result = promote_testing_theory_validated_claims(
-        theory_id=_safe_str(inputs.get("theory_id")),
+        theory_id=theory_id,
         assertion_ids=inputs.get("assertion_ids") or [],
-        experiment_run_id=_safe_str(inputs.get("experiment_run_id")) or None,
+        experiment_run_id=experiment_run_id,
         required_verdict=_safe_str(inputs.get("required_verdict")) or "pass",
     )
     return _result_from_payload(result)
 
 
 def _handle_theory_gc(request: WorkflowActionRequest) -> WorkflowActionResult:
-    inputs = dict(request.inputs or {})
-    result = garbage_collect_expired_testing_theories(
-        now_utc=_safe_str(inputs.get("now_utc")) or None,
-        limit=int(inputs.get("limit", 100) or 100),
-    )
-    return _result_from_payload(result)
+    # The current service scans every visible org theory and has no exact actor
+    # predicate.  Until it accepts an enforced owner filter, durable workflows
+    # must fail closed; the trusted operator MCP path remains available for
+    # explicit global maintenance.
+    del request
+    return _failed_action("testing_theory_gc_operator_authority_required")
 
 
 def _handle_experiment_create_spec(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
+    name = _safe_str(inputs.get("name")) or "Testing experiment"
+    experiment_spec_id = _safe_str(inputs.get("experiment_spec_id")) or (
+        _actor_scoped_experiment_spec_id(actor=actor, label=name)
+    )
+    if denial := _owned_experiment_spec_or_denial(
+        experiment_spec_id=experiment_spec_id,
+        actor=actor,
+        allow_new=True,
+    ):
+        return denial
     result = create_experiment_spec(
-        name=_safe_str(inputs.get("name")) or "Testing experiment",
-        experiment_spec_id=_safe_str(inputs.get("experiment_spec_id")) or None,
+        name=name,
+        experiment_spec_id=experiment_spec_id,
         namespace=actor["namespace"],
         user_id=actor["user_id"],
         org_id=actor["org_id"],
@@ -706,9 +1255,27 @@ def _handle_experiment_create_spec(request: WorkflowActionRequest) -> WorkflowAc
 def _handle_experiment_start_run(request: WorkflowActionRequest) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
+    experiment_spec_id = _safe_str(inputs.get("experiment_spec_id"))
+    if not experiment_spec_id:
+        return _failed_action("experiment_spec_id_required")
+    if denial := _owned_experiment_spec_or_denial(
+        experiment_spec_id=experiment_spec_id,
+        actor=actor,
+        allow_new=False,
+    ):
+        return denial
+    run_id = _safe_str(inputs.get("run_id")) or None
+    if run_id and (
+        denial := _owned_experiment_run_or_denial(
+            run_id=run_id,
+            actor=actor,
+            allow_new=True,
+        )
+    ):
+        return denial
     result = start_experiment_run(
-        experiment_spec_id=_safe_str(inputs.get("experiment_spec_id")),
-        run_id=_safe_str(inputs.get("run_id")) or None,
+        experiment_spec_id=experiment_spec_id,
+        run_id=run_id,
         theory_id=_safe_str(inputs.get("theory_id")) or None,
         namespace=actor["namespace"],
         user_id=actor["user_id"],
@@ -729,11 +1296,18 @@ def _handle_experiment_record_observation(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    run_id = _safe_str(inputs.get("run_id"))
+    if denial := _owned_experiment_run_or_denial(
+        run_id=run_id,
+        actor=actor,
+    ):
+        return denial
     observations = inputs.get("observations")
     if observations is None and "observation" in inputs:
         observations = inputs.get("observation")
     result = record_experiment_observation(
-        run_id=_safe_str(inputs.get("run_id")),
+        run_id=run_id,
         observations=observations or [],
         turn_execution_request_ids=inputs.get("turn_execution_request_ids") or [],
     )
@@ -744,9 +1318,16 @@ def _handle_experiment_compute_verdict(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    run_id = _safe_str(inputs.get("run_id"))
+    if denial := _owned_experiment_run_or_denial(
+        run_id=run_id,
+        actor=actor,
+    ):
+        return denial
     return _result_from_payload(
         _summarise_experiment_verdict_payload(
-            compute_experiment_verdict(run_id=_safe_str(inputs.get("run_id")))
+            compute_experiment_verdict(run_id=run_id)
         )
     )
 
@@ -755,8 +1336,15 @@ def _handle_experiment_emit_learning_signal(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    run_id = _safe_str(inputs.get("run_id"))
+    if denial := _owned_experiment_run_or_denial(
+        run_id=run_id,
+        actor=actor,
+    ):
+        return denial
     result = emit_experiment_learning_signal(
-        run_id=_safe_str(inputs.get("run_id")),
+        run_id=run_id,
         selection_experience_id=_safe_str(inputs.get("selection_experience_id")) or None,
         turn_text=_safe_str(inputs.get("turn_text")) or None,
         expected_workflow_id=_safe_str(inputs.get("expected_workflow_id")) or None,
@@ -775,6 +1363,8 @@ def _handle_experiment_execute_target_workflow(
 
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
+    if not _actor_has_durable_authority(actor):
+        return _failed_action("workflow_actor_authority_required")
     workflow_id = _safe_str(inputs.get("workflow_id")) or _safe_str(
         next(iter(inputs.get("target_workflow_ids") or []), None)
     )
@@ -796,6 +1386,13 @@ def _handle_experiment_execute_target_workflow(
         else {}
     )
     run_id = _safe_str(inputs.get("run_id")) or None
+    if run_id and (
+        denial := _owned_experiment_run_or_denial(
+            run_id=run_id,
+            actor=actor,
+        )
+    ):
+        return denial
     theory_id = _safe_str(inputs.get("theory_id")) or None
     candidate_validation = _clone_mapping(inputs.get("candidate_validation"))
     fail_on_invalid_candidate = _coerce_bool(
@@ -1095,13 +1692,40 @@ def _handle_experiment_execute_regression_suite(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    execution_tier = _safe_str(inputs.get("execution_tier")).lower() or "tier1"
+    suite_policy = inputs.get("suite_policy")
+    suite_resolution, suite_error = _resolve_regression_suite_mode(
+        execution_tier=execution_tier,
+        suite_policy=suite_policy if isinstance(suite_policy, Mapping) else None,
+    )
+    resolved_tier = _safe_str((suite_resolution or {}).get("execution_tier")).lower()
+    resolved_mode = _safe_str((suite_resolution or {}).get("suite_mode")).lower()
+    if (
+        suite_error is None
+        and (resolved_tier != "tier1" or resolved_mode != "cases")
+    ) or isinstance(inputs.get("benchmark_scenario"), Mapping) or bool(
+        _safe_str(inputs.get("output_root"))
+    ):
+        # Tier 2 clones/drops a database and writes caller-selected archives.
+        # Durable actor identity is not operator authority; certification must
+        # use the explicitly trusted MCP control plane for that mode.
+        return _failed_action("testing_regression_suite_operator_authority_required")
+    run_id = _safe_str(inputs.get("run_id")) or None
+    if run_id and (
+        denial := _owned_experiment_run_or_denial(
+            run_id=run_id,
+            actor=actor,
+        )
+    ):
+        return denial
     result = execute_regression_suite(
-        execution_tier=_safe_str(inputs.get("execution_tier")) or "tier1",
+        execution_tier=execution_tier,
         cases=inputs.get("cases") or [],
         benchmark_scenario=inputs.get("benchmark_scenario"),
         output_root=_safe_str(inputs.get("output_root")) or None,
-        run_id=_safe_str(inputs.get("run_id")) or None,
-        suite_policy=inputs.get("suite_policy"),
+        run_id=run_id,
+        suite_policy=suite_policy,
     )
     return _result_from_payload(result)
 
@@ -1160,8 +1784,24 @@ def _handle_testing_prepare_experiment_spec(
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
+    scenario_template = inputs.get("scenario_template")
+    template_name = (
+        _safe_str(scenario_template.get("name"))
+        if isinstance(scenario_template, Mapping)
+        else ""
+    )
+    name = _safe_str(inputs.get("name")) or template_name or "Testing experiment"
+    experiment_spec_id = _safe_str(inputs.get("experiment_spec_id")) or (
+        _actor_scoped_experiment_spec_id(actor=actor, label=name)
+    )
+    if denial := _owned_experiment_spec_or_denial(
+        experiment_spec_id=experiment_spec_id,
+        actor=actor,
+        allow_new=True,
+    ):
+        return denial
     result = prepare_experiment_spec_from_template(
-        scenario_template=inputs.get("scenario_template"),
+        scenario_template=scenario_template,
         template_inputs={
             key: value
             for key, value in inputs.items()
@@ -1175,8 +1815,8 @@ def _handle_testing_prepare_experiment_spec(
                 "org_id",
             }
         },
-        experiment_spec_id=_safe_str(inputs.get("experiment_spec_id")) or None,
-        name=_safe_str(inputs.get("name")) or None,
+        experiment_spec_id=experiment_spec_id,
+        name=name,
         namespace=actor["namespace"],
         user_id=actor["user_id"],
         org_id=actor["org_id"],
@@ -1189,10 +1829,20 @@ def _handle_testing_prepare_meeting_spec(
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
+    name = _safe_str(inputs.get("name")) or "Meeting invitation testing experiment"
+    experiment_spec_id = _safe_str(inputs.get("experiment_spec_id")) or (
+        _actor_scoped_experiment_spec_id(actor=actor, label=name)
+    )
+    if denial := _owned_experiment_spec_or_denial(
+        experiment_spec_id=experiment_spec_id,
+        actor=actor,
+        allow_new=True,
+    ):
+        return denial
     result = prepare_meeting_invitation_experiment_spec(
         invitation_text=_safe_str(inputs.get("invitation_text")),
-        experiment_spec_id=_safe_str(inputs.get("experiment_spec_id")) or None,
-        name=_safe_str(inputs.get("name")) or None,
+        experiment_spec_id=experiment_spec_id,
+        name=name,
         namespace=actor["namespace"],
         user_id=actor["user_id"],
         org_id=actor["org_id"],
@@ -1209,6 +1859,17 @@ def _handle_testing_prepare_arxiv_fixture(
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
+    if not _actor_has_durable_authority(actor):
+        return _failed_action("workflow_actor_authority_required")
+    repair_existing_artifacts = _coerce_bool(
+        inputs.get("repair_existing_artifacts"),
+        default=False,
+    )
+    if repair_existing_artifacts and not _arxiv_repair_is_actor_owned(
+        inputs=inputs,
+        actor=actor,
+    ):
+        return _failed_action(_TESTING_CLEANUP_AUTHORITY_REQUIRED)
     result = prepare_arxiv_paper_ingestion_test_fixture(
         prompt_text=(
             _safe_str(inputs.get("prompt_text"))
@@ -1224,10 +1885,7 @@ def _handle_testing_prepare_arxiv_fixture(
             default=15.0,
             minimum=1.0,
         ),
-        repair_existing_artifacts=_coerce_bool(
-            inputs.get("repair_existing_artifacts"),
-            default=False,
-        ),
+        repair_existing_artifacts=repair_existing_artifacts,
     )
     return _result_from_payload(result)
 
@@ -1257,7 +1915,11 @@ def _handle_testing_verify_arxiv_ingestion_result(
 def _handle_testing_cleanup_arxiv_ingestion_artifacts(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
-    inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    inputs, denial = _validated_arxiv_cleanup_inputs(request, actor=actor)
+    if denial is not None:
+        return denial
+    assert inputs is not None
     result = cleanup_arxiv_paper_ingestion_test_artifacts(
         paper_concept_id=_safe_str(inputs.get("paper_concept_id")) or None,
         file_copy_concept_id=_safe_str(inputs.get("file_copy_concept_id")) or None,

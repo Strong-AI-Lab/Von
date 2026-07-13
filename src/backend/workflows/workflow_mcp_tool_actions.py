@@ -20,6 +20,7 @@ from .action_registry import (
 )
 from .mcp_tool_bridge import (
     apply_runtime_defaults_to_mcp_payload,
+    mcp_input_schema_declares_field,
     resolve_internal_mcp_tool_name,
     workflow_action_result_from_mcp_payload,
 )
@@ -374,6 +375,45 @@ def _handle_workflow_mcp_invoke_tool(
                 request.environment, "default_gmail_profile", None
             ),
         )
+        input_schema = getattr(method_definition, "input_schema", None)
+        authoritative_actor_fields = {
+            "user_id": getattr(request.environment, "user_concept_id", None),
+            "user_concept_id": getattr(
+                request.environment,
+                "user_concept_id",
+                None,
+            ),
+            "org_id": getattr(request.environment, "org_concept_id", None),
+            "organisation_concept_id": getattr(
+                request.environment,
+                "org_concept_id",
+                None,
+            ),
+            "namespace": getattr(request.environment, "user_namespace", None),
+            "user_namespace": getattr(
+                request.environment,
+                "user_namespace",
+                None,
+            ),
+        }
+        for field_name, field_value in authoritative_actor_fields.items():
+            canonical_schema_less_field = field_name in {
+                "user_concept_id",
+                "org_id",
+                "namespace",
+            }
+            if not (
+                (input_schema is None and canonical_schema_less_field)
+                or mcp_input_schema_declares_field(input_schema, field_name)
+            ):
+                # Undeclared aliases are removed even for permissive schemas:
+                # otherwise a handler could prefer a forged duplicate over the
+                # authoritative field projected by the workflow environment.
+                payload.pop(field_name, None)
+                continue
+            if field_value is None:
+                continue
+            payload[field_name] = field_value
 
         if _runtime_write_policy_missing(
             request=request,
@@ -432,7 +472,13 @@ def _handle_workflow_mcp_invoke_tool(
                 },
             )
 
-        result = gateway.invoke(resolved_tool_name, payload)
+        from ..security.access_control import override_current_actor
+
+        with override_current_actor(
+            getattr(request.environment, "user_concept_id", None),
+            getattr(request.environment, "org_concept_id", None),
+        ):
+            result = gateway.invoke(resolved_tool_name, payload)
         action_result = workflow_action_result_from_mcp_payload(
             tool_name=resolved_tool_name,
             payload=result.payload,
@@ -440,6 +486,7 @@ def _handle_workflow_mcp_invoke_tool(
         )
         action_result.outputs["mcp_requested_tool"] = requested_tool_name
         action_result.outputs["mcp_resolved_tool"] = resolved_tool_name
+        action_result.outputs["workflow_actor_scope_enforced"] = True
         return action_result
     except Exception as exc:
         logger.warning(

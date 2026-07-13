@@ -75,6 +75,84 @@ Organisation scoping depends on what the backend considers the active organisati
 
 - `access_control.py` reads organisation context from the Flask session (e.g., `session["organisation_concept_id"]` in the routes that set it).
 
+### Workflow authority, discovery, and process-global caches
+
+Workflow definitions and their discovery metadata are Vontology-governed
+concept data, so the same visibility rules apply to them. A process-global
+workflow registry, capability index, or discovery memo is a performance surface,
+not an access authority.
+
+For actor-scoped workflow operations:
+
+- bind and validate the authenticated actor or canonical namespace before any
+  memo-cache lookup or capability result projection;
+- treat memoised and durable-carried workflow-discovery payloads as evidence,
+  not authority: re-project candidate, routing, and readiness metadata through
+  current actor visibility on every reuse, and fail closed if that visibility
+  authority is unavailable;
+- filter workflow IDs before purpose, description, routing, executability, or
+  readiness metadata is returned;
+- load the complete workflow graph through the actor-scoped Vontology loader,
+  even if another actor has already warmed a shared registry entry (including
+  an entry registered by just-in-time discovery rather than normal startup);
+- keep actor-scoped definitions request-local rather than promoting them into an
+  unpartitioned process-global registry; and
+- carry the persisted user, organisation, and namespace into background durable
+  worker definition loading and nested workflow resolution;
+- treat workflow-launch `user_id`, `org_id`, and `namespace` values as claims,
+  not authentication authority: authenticated or parent-workflow actor context
+  wins, contradictory claims fail closed, and payload-only fallback is allowed
+  only on an explicitly trusted local-operator gateway; and
+- apply the same actor envelope to workflow instances, schedules, streams,
+  traces, use episodes, prediction summaries, and Studio detail reads. Legacy
+  user-only telemetry cannot prove present organisation ownership and therefore
+  fails closed on an organisation-scoped read. A stream's subscription-time
+  visible-ID set is only an upper bound: current visibility is checked again
+  before each event so revocation takes effect without reconnecting.
+
+Apply one coherent visibility envelope to a restricted workflow root and every
+restricted graph node needed to execute it. A visible root with inaccessible
+required steps is an incomplete graph, while a restricted root whose metadata
+is emitted from a global index is an information leak. Both should fail closed
+with typed, metadata-free diagnostics for actors outside the intended scope.
+
+Process-global workflow control-plane records need stronger authority than
+workflow visibility. Event bindings currently have no tenant owner and one
+binding affects every actor, while materialisation/parity/health reports expose
+global environment and registry state. Their internal MCP surfaces are therefore
+trusted-operator-only. Do not infer permission to inspect or mutate them merely
+because an authenticated actor can execute the referenced workflow. An eventual
+actor-managed event-binding feature must first add represented ownership and
+tenant-scoped persistence/runtime lookup.
+
+The same temporary operator boundary applies to experiment-run control records
+and raw turn/chat diagnostic MCP reads. Those stores do not yet enforce one
+complete actor-ownership contract at every read and mutation boundary, and they
+can contain restricted workflow identifiers. Raw stdio payload identity is not
+authority. Actor-owned access should be restored only with canonical persisted
+user, organisation, and namespace ownership plus current workflow-visibility
+projection; trusted operational certification remains available through the
+explicit operator gateway.
+
+#### Rollout requirements for actor-scoped workflow authority
+
+Deployments enabling these boundaries must invalidate or require
+re-authentication of sessions created before the canonical actor-context fix.
+An old session can otherwise retain an identity or organisation claim that was
+established under weaker account-switch semantics.
+
+At the HTTP boundary, the ingress proxy must strip client-supplied identity and
+operator headers and set any permitted replacements itself after authentication.
+Application support for a validated identity header is not evidence that an
+internet client may assert that header directly. Keep the operator token out of
+browser-delivered configuration and rotate it through the deployment secret
+path.
+
+Workflow Studio remains a trusted-pilot authoring surface until represented
+editor/owner permissions and immediate membership-revocation invalidation are
+implemented. Workflow visibility alone grants read/execution eligibility; it
+must not be treated as a general authoring role.
+
 ## 3) Roles and permissions (RBAC)
 
 ### Current status

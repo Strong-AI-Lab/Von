@@ -34,6 +34,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ..vontology.utils_vontology import get_concept_description
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
+from .workflow_discovery_access_service import (
+    WorkflowDiscoveryActorScopeError,
+    bind_workflow_discovery_actor,
+    build_workflow_discovery_actor_scope_failure,
+    filter_actor_accessible_workflow_ids,
+)
 from .workflow_capability_service import (
     get_workflow_capability_index_runtime_state,
     resolve_workflow_capabilities_for_contract,
@@ -1134,11 +1140,12 @@ def _resolve_contract_direct_workflow_candidates(
                 continue
             seen.add(lowered)
             candidate_ids.append(workflow_id)
-            if len(candidate_ids) >= max(1, int(limit)):
-                break
 
+    accessible_candidate_ids = filter_actor_accessible_workflow_ids(candidate_ids)
     matches: list[WorkflowMatch] = []
-    for workflow_id in candidate_ids[: max(1, int(limit))]:
+    for workflow_id in candidate_ids:
+        if workflow_id not in accessible_candidate_ids:
+            continue
         purpose, _source = _peek_registry_workflow_metadata(
             workflow_id,
             workflow_registry=workflow_registry,
@@ -1153,6 +1160,8 @@ def _resolve_contract_direct_workflow_candidates(
                 match_source="contract_direct_workflow_resolution",
             )
         )
+        if len(matches) >= max(1, int(limit)):
+            break
     return matches
 
 
@@ -1894,6 +1903,19 @@ def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
     return sum(1 for match in matches if bool(match.is_executable))
 
 
+def _filter_actor_accessible_workflow_matches(
+    matches: Sequence[WorkflowMatch],
+) -> list[WorkflowMatch]:
+    """Apply canonical actor visibility to every discovery result source."""
+
+    if not matches:
+        return []
+    accessible_ids = filter_actor_accessible_workflow_ids(
+        match.concept_id for match in matches
+    )
+    return [match for match in matches if match.concept_id in accessible_ids]
+
+
 def _search_workflow_capabilities(
     query: str,
     *,
@@ -2501,6 +2523,21 @@ def discover_workflows(
             )
             logger.warning(f"Vontology workflow discovery failed: {e}")
 
+    # Every search substrate, including exact registry and future sources, must
+    # converge through the same actor-visibility boundary before descriptions,
+    # routing projections, or readiness metadata are enriched and serialised.
+    access_filter_started_at = time.perf_counter()
+    all_matches = _filter_actor_accessible_workflow_matches(all_matches)
+    _record_discovery_stage_timing(
+        stage_timings,
+        stage="actor_access_filter",
+        started_at=access_filter_started_at,
+        status="completed",
+        # Do not reveal how many hidden candidates existed before actor
+        # projection. The visible count is already present in the final result.
+        visible_candidate_count=len(all_matches),
+    )
+
     # Deduplicate and rank (keep a larger pre-limit for executability-aware
     # ranking to avoid early relevance-only truncation).
     dedupe_started_at = time.perf_counter()
@@ -2779,7 +2816,7 @@ def discover_workflows_for_turn(
 
     Args:
         user_input: The user's prompt text
-        namespace: Optional namespace for scoped search (future use)
+        namespace: Optional canonical actor namespace for scoped search
         relevance_threshold: Minimum relevance score
         max_results: Maximum workflows to return
 
@@ -2796,31 +2833,43 @@ def discover_workflows_for_turn(
     )
 
     try:
-        effective_allow_non_executable = (
-            _env_allow_non_executable_default()
-            if allow_non_executable is None
-            else bool(allow_non_executable)
-        )
-        result = discover_workflows(
-            user_input,
-            relevance_threshold=relevance_threshold,
-            max_results=max_results,
-            timeout_seconds=effective_timeout_seconds,
-            allow_non_executable=effective_allow_non_executable,
-            workflow_registry=workflow_registry,
-            expected_outcome_contract=expected_outcome_contract,
+        with bind_workflow_discovery_actor(namespace):
+            effective_allow_non_executable = (
+                _env_allow_non_executable_default()
+                if allow_non_executable is None
+                else bool(allow_non_executable)
+            )
+            result = discover_workflows(
+                user_input,
+                relevance_threshold=relevance_threshold,
+                max_results=max_results,
+                timeout_seconds=effective_timeout_seconds,
+                allow_non_executable=effective_allow_non_executable,
+                workflow_registry=workflow_registry,
+                expected_outcome_contract=expected_outcome_contract,
+                requested_query=requested_query,
+            )
+            payload = result.to_dict()
+            # Self-describing telemetry: every discovery payload records where it
+            # came from so downstream diagnostics can explain empty results.
+            payload.setdefault(
+                "discovery_payload_origin", "discover_workflows_for_turn"
+            )
+            # Represented selector fast-path metadata (JVNAUTOSCI-2406): stamp the
+            # Vontology-authored policy and structural contract-coverage flags so
+            # the selector's represented fast path can apply; absence fails closed
+            # to the selector LLM.
+            payload = _attach_selector_fast_path_metadata(payload)
+            return payload
+
+    except WorkflowDiscoveryActorScopeError as exc:
+        logger.warning("Workflow discovery actor scope rejected: %s", exc.reason)
+        return build_workflow_discovery_actor_scope_failure(
+            query=user_input,
             requested_query=requested_query,
+            reason=exc.reason,
+            origin="discover_workflows_for_turn_actor_scope_rejected",
         )
-        payload = result.to_dict()
-        # Self-describing telemetry: every discovery payload records where it
-        # came from so downstream diagnostics can explain empty results.
-        payload.setdefault("discovery_payload_origin", "discover_workflows_for_turn")
-        # Represented selector fast-path metadata (JVNAUTOSCI-2406): stamp the
-        # Vontology-authored policy and structural contract-coverage flags so
-        # the selector's represented fast path can apply; absence fails closed
-        # to the selector LLM.
-        payload = _attach_selector_fast_path_metadata(payload)
-        return payload
 
     except Exception as e:
         logger.warning(f"Workflow discovery for turn failed: {e}")

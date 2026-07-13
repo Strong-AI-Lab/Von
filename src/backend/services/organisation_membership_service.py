@@ -21,6 +21,56 @@ ALT_MEMBERSHIP_RELATIONSHIP = "#V#member_of_organisation"
 ROLE_PREDICATE = "#V#hasRole"
 
 
+def _normalise_concept_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return text if text.startswith("#") else f"#V#{text}"
+
+
+def resolve_user_organisation_membership(
+    user_concept_id: str,
+    organisation_concept_id: str,
+) -> Dict[str, Any] | None:
+    """Return the represented membership record for an exact user/org pair."""
+
+    user_id = _normalise_concept_id(user_concept_id)
+    org_id = _normalise_concept_id(organisation_concept_id)
+    if user_id is None or org_id is None:
+        return None
+    memberships = get_user_memberships(user_id)
+    for membership in memberships.get("memberships", []):
+        if not isinstance(membership, dict):
+            continue
+        if _normalise_concept_id(
+            membership.get("organisation_concept_id")
+        ) == org_id:
+            return {
+                "user_concept_id": user_id,
+                "organisation_concept_id": org_id,
+                "role": str(membership.get("role") or "member").strip()
+                or "member",
+            }
+    return None
+
+
+def is_user_member_of_organisation(
+    user_concept_id: str,
+    organisation_concept_id: str,
+) -> bool:
+    """Return whether Vontology represents the user as an org member."""
+
+    return (
+        resolve_user_organisation_membership(
+            user_concept_id,
+            organisation_concept_id,
+        )
+        is not None
+    )
+
+
 def create_organisation_membership(
     user_concept_id: str, organisation_concept_id: str, role: str = "member"
 ) -> Dict[str, Any]:

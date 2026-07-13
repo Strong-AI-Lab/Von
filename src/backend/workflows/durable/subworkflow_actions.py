@@ -59,6 +59,10 @@ from ..tool_invocation_evidence import (
     derive_tool_invocation_records_from_step_envelopes,
 )
 from ..metadata_validation import LAST_METADATA_EVENT_KEY, WORKFLOW_METADATA_EVENTS_KEY
+from .nested_workflow_authority import (
+    NESTED_WORKFLOW_DEFINITION_NOT_FOUND,
+    resolve_nested_workflow_definition,
+)
 from ..plan_state_runtime import (
     LAST_WORKFLOW_COMPLETION_GATE_KEY,
     LAST_WORKFLOW_PLAN_STATE_EVENT_KEY,
@@ -1017,34 +1021,30 @@ def _build_subworkflow_handler(
                 invocation_limit=invocation_limit,
             )
 
-        definition = definition_loader(child_workflow_id)
+        authority_resolution = resolve_nested_workflow_definition(
+            workflow_id=child_workflow_id,
+            environment=request.environment,
+            fallback_loader=definition_loader,
+        )
+        definition = authority_resolution.definition
         if definition is None:
-            try:
-                from ...services.namespace_service import (
-                    derive_actor_context_from_namespace,
+            error_code = authority_resolution.error_code
+            error = (
+                f"subworkflow_definition_not_found:{child_workflow_id}"
+                if error_code == NESTED_WORKFLOW_DEFINITION_NOT_FOUND
+                else (
+                    "subworkflow_definition_resolution_failed:"
+                    f"{child_workflow_id}:{error_code or 'unknown'}"
                 )
-                from .registry_factory import resolve_workflow_definition_from_authority
-
-                namespace_user, namespace_org = derive_actor_context_from_namespace(
-                    request.environment.user_namespace
-                )
-                actor_user_id = request.environment.user_concept_id or namespace_user
-                actor_org_id = request.environment.org_concept_id or namespace_org
-                resolution = resolve_workflow_definition_from_authority(
-                    child_workflow_id,
-                    registry=None,
-                    use_current_shared_registry=True,
-                    register_authoritative_fallback=True,
-                    actor_user_id=actor_user_id,
-                    actor_org_id=actor_org_id,
-                )
-                definition = resolution.definition
-            except Exception:
-                definition = None
-        if definition is None:
+            )
             return WorkflowActionResult(
                 status="failed",
-                error=f"subworkflow_definition_not_found:{child_workflow_id}",
+                error=error,
+                outputs={
+                    "subworkflow_authority_resolution": (
+                        authority_resolution.to_projection()
+                    )
+                },
             )
 
         child_chain = [*invocation_chain, child_workflow_id]
@@ -1085,6 +1085,7 @@ def _build_subworkflow_handler(
                 "invocation_chain": list(child_chain),
                 "invocation_count": invocation_count + 1,
                 "invocation_limit": invocation_limit,
+                "authority_resolution": authority_resolution.to_projection(),
             },
         )
         executor = WorkflowExecutor(
@@ -1106,6 +1107,7 @@ def _build_subworkflow_handler(
             "invocation_chain": list(child_chain),
             "invocation_count": invocation_count + 1,
             "invocation_limit": invocation_limit,
+            "authority_resolution": authority_resolution.to_projection(),
             "child_completed": bool(child_result.completed),
             "child_final_state": _normalise_text(child_result.final_state),
             "child_error": _normalise_text(child_result.error) or None,

@@ -1438,10 +1438,20 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
         inspect_execution,
     )
 
-    certification_script._live_execution(_args(), contract)
+    certification_script._live_execution(
+        _args(model="gpt-5.4-mini"),
+        contract,
+    )
 
     assert [call["await_terminal"] for call in workflow_calls] == [False, True]
     assert [call["timeout_seconds"] for call in workflow_calls] == [0.0, 5.0]
+    assert all(
+        call["inputs"] == {
+            "target": "stable-read-only-target",
+            "requested_model": "gpt-5.4-mini",
+        }
+        for call in workflow_calls
+    )
     assert len({call["event_idempotency_key"] for call in workflow_calls}) == 1
     assert observed_execution["terminal_state"] == "completed"
     assert observed_execution["path_analysis"]["submission_count"] == 2

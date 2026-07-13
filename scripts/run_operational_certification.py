@@ -2793,6 +2793,13 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             ):
                 raise ValueError("represented_durable_submission_plan_invalid")
             correlation_id = _text(reset_evidence.get("correlation_id"))
+            workflow_inputs = _mapping(inputs.get("workflow_inputs"))
+            if _text(args.model):
+                # ``--model`` is a campaign runtime control for every LLM-backed
+                # adapter. Carry it unchanged into the durable instance so the
+                # workflow runtime, rather than the runner, resolves provider
+                # details and records the override in execution telemetry.
+                workflow_inputs["requested_model"] = _text(args.model)
             payloads: list[dict[str, Any]] = []
             for step_index, raw_step in enumerate(submission_plan, start=1):
                 step = dict(raw_step)
@@ -2812,7 +2819,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     _mapping(
                         _workflow_execute(
                             workflow_id=workflow_id,
-                            inputs=_mapping(inputs.get("workflow_inputs")),
+                            inputs=workflow_inputs,
                             namespace=effective_namespace,
                             user_id=effective_user_id,
                             org_id=effective_org_id,

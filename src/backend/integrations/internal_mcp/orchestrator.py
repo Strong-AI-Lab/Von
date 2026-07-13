@@ -31,7 +31,12 @@ from typing import (
 )
 from urllib.parse import urlparse
 
-from .gateway import InternalMCPGateway, MethodDefinition
+from .gateway import (
+    InternalMCPGateway,
+    MethodDefinition,
+    get_internal_mcp_actor_context_source,
+    get_internal_mcp_preexisting_actor_context,
+)
 from .schemas import (
     Schema as McpSchema,
     coerce_payload_types,
@@ -218,6 +223,10 @@ from src.backend.services.buttonify_service import (
     enforce_buttonify_prompt_contract,
 )
 from src.backend.services.namespace_service import derive_actor_context_from_namespace
+from src.backend.services.workflow_actor_scope_service import (
+    WorkflowActorScopeError,
+    resolve_provenance_bound_workflow_actor_scope,
+)
 from src.backend.services.settings_service import (
     INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
     INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
@@ -3880,6 +3889,8 @@ class InternalMCPChatOrchestrator:
         workflow_id: str | None,
         *,
         register_authoritative_fallback: bool = True,
+        actor_user_id: str | None = None,
+        actor_org_id: str | None = None,
     ) -> tuple[WorkflowRegistration | None, Any | None]:
         """Resolve a workflow definition from runtime registry or Vontology.
 
@@ -3907,6 +3918,8 @@ class InternalMCPChatOrchestrator:
                 self._workflow_registry if register_authoritative_fallback else None
             ),
             register_authoritative_fallback=register_authoritative_fallback,
+            actor_user_id=actor_user_id,
+            actor_org_id=actor_org_id,
         )
         if resolution.registry is not None:
             self._workflow_registry = resolution.registry
@@ -31474,6 +31487,142 @@ class InternalMCPChatOrchestrator:
         if not isinstance(data, dict):
             data = dict(data) if isinstance(data, Mapping) else {}
 
+        def _safe_scalar_text(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            return cleaned or None
+
+        environment_user_id = _safe_scalar_text(
+            getattr(environment, "user_concept_id", None)
+        )
+        environment_org_id = _safe_scalar_text(
+            getattr(environment, "org_concept_id", None)
+        )
+        environment_namespace = _safe_scalar_text(
+            getattr(environment, "user_namespace", None)
+        )
+        payload_user_id = _safe_scalar_text(data.get("user_concept_id"))
+        payload_org_id = _safe_scalar_text(
+            data.get("org_concept_id") or data.get("organisation_concept_id")
+        )
+        payload_namespace = (
+            _safe_scalar_text(user_namespace)
+            or _safe_scalar_text(data.get("namespace"))
+            or _safe_scalar_text(data.get("user_namespace"))
+        )
+        actor_context_source = get_internal_mcp_actor_context_source()
+        preexisting_actor_context = get_internal_mcp_preexisting_actor_context()
+
+        def _has_actor_claim(*values: Any) -> bool:
+            return any(_safe_scalar_text(value) is not None for value in values)
+
+        environment_has_claims = _has_actor_claim(
+            environment_user_id,
+            environment_org_id,
+            environment_namespace,
+        )
+        payload_has_claims = _has_actor_claim(
+            payload_user_id,
+            payload_org_id,
+            payload_namespace,
+        )
+
+        def _resolve_claim_set(
+            *,
+            claimed_user_id: str | None,
+            claimed_org_id: str | None,
+            claimed_namespace: str | None,
+        ):
+            return resolve_provenance_bound_workflow_actor_scope(
+                claimed_user_id=claimed_user_id,
+                claimed_org_id=claimed_org_id,
+                claimed_namespace=claimed_namespace,
+                actor_context_source=actor_context_source,
+                preexisting_actor_context=preexisting_actor_context,
+            )
+
+        try:
+            environment_scope = (
+                _resolve_claim_set(
+                    claimed_user_id=environment_user_id,
+                    claimed_org_id=environment_org_id,
+                    claimed_namespace=environment_namespace,
+                )
+                if environment_has_claims
+                else None
+            )
+            payload_scope = (
+                _resolve_claim_set(
+                    claimed_user_id=payload_user_id,
+                    claimed_org_id=payload_org_id,
+                    claimed_namespace=payload_namespace,
+                )
+                if payload_has_claims
+                else None
+            )
+            if environment_scope is not None and payload_scope is not None:
+                cross_source_mismatches: list[str] = []
+                if (
+                    environment_scope.user_concept_id is not None
+                    and payload_scope.user_concept_id is not None
+                    and environment_scope.user_concept_id
+                    != payload_scope.user_concept_id
+                ):
+                    cross_source_mismatches.append("user_id")
+                if (
+                    environment_scope.organisation_concept_id is not None
+                    and payload_scope.organisation_concept_id is not None
+                    and environment_scope.organisation_concept_id
+                    != payload_scope.organisation_concept_id
+                ):
+                    cross_source_mismatches.append("org_id")
+                if cross_source_mismatches:
+                    raise WorkflowActorScopeError(
+                        "workflow_actor_scope_mismatch",
+                        mismatch_fields=tuple(cross_source_mismatches),
+                    )
+            actor_scope = (
+                payload_scope
+                or environment_scope
+                or _resolve_claim_set(
+                    claimed_user_id=None,
+                    claimed_org_id=None,
+                    claimed_namespace=None,
+                )
+            )
+        except WorkflowActorScopeError as exc:
+            return WorkflowResult(
+                data={
+                    "workflow_actor_scope": {
+                        "schema_version": "workflow_actor_scope_resolution.v1",
+                        "status": "rejected",
+                        "reason": exc.reason,
+                        "mismatch_fields": list(exc.mismatch_fields),
+                    }
+                },
+                completed=False,
+                final_state="workflow_actor_scope_validation",
+                error=exc.reason,
+            )
+
+        resolved_user_id = actor_scope.user_concept_id
+        resolved_org_id = actor_scope.organisation_concept_id
+        resolved_namespace = (
+            actor_scope.namespace or payload_namespace or environment_namespace
+        )
+        if resolved_user_id is not None:
+            data["user_concept_id"] = resolved_user_id
+        if resolved_org_id is not None:
+            data["org_concept_id"] = resolved_org_id
+            data["organisation_concept_id"] = resolved_org_id
+        else:
+            data.pop("org_concept_id", None)
+            data.pop("organisation_concept_id", None)
+        if resolved_namespace is not None:
+            data["namespace"] = resolved_namespace
+            data["user_namespace"] = resolved_namespace
+
         resolved_session_id = (
             conversation_session_id
             or data.get("conversation_session_id")
@@ -31497,7 +31646,11 @@ class InternalMCPChatOrchestrator:
             )
 
             workflow_registration, workflow_definition_for_identity = (
-                self._resolve_workflow_registration_and_definition(workflow_id)
+                self._resolve_workflow_registration_and_definition(
+                    workflow_id,
+                    actor_user_id=resolved_user_id,
+                    actor_org_id=resolved_org_id,
+                )
             )
             workflow_def = workflow_definition_for_identity
             workflow_source = (
@@ -31524,12 +31677,6 @@ class InternalMCPChatOrchestrator:
             workflow_definition_for_identity = None
             workflow_definition_identity = None
             workflow_def = None
-
-        def _safe_scalar_text(value: Any) -> str | None:
-            if not isinstance(value, str):
-                return None
-            cleaned = value.strip()
-            return cleaned or None
 
         def _safe_mapping_snapshot(
             payload: Any,
@@ -32429,14 +32576,6 @@ class InternalMCPChatOrchestrator:
                 }
             return runtime
 
-        resolved_user_id = _safe_scalar_text(data.get("user_concept_id"))
-        resolved_org_id = _safe_scalar_text(data.get("org_concept_id"))
-        resolved_namespace = (
-            _safe_scalar_text(user_namespace)
-            or _safe_scalar_text(data.get("namespace"))
-            or _safe_scalar_text(data.get("user_namespace"))
-        )
-
         durable_instance_manager = None
         durable_instance_id: str | None = None
         durable_instance_created_new: bool | None = None
@@ -32444,7 +32583,9 @@ class InternalMCPChatOrchestrator:
         if workflow_def is None:
             try:
                 workflow_def = self._resolve_workflow_registration_and_definition(
-                    workflow_id
+                    workflow_id,
+                    actor_user_id=resolved_user_id,
+                    actor_org_id=resolved_org_id,
                 )[1]
             except Exception:
                 workflow_def = None
@@ -33140,7 +33281,11 @@ class InternalMCPChatOrchestrator:
             else (
                 workflow_def
                 if workflow_def is not None
-                else self._resolve_workflow_registration_and_definition(workflow_id)[1]
+                else self._resolve_workflow_registration_and_definition(
+                    workflow_id,
+                    actor_user_id=resolved_user_id,
+                    actor_org_id=resolved_org_id,
+                )[1]
             )
         )
         if workflow_def is None:
@@ -33184,14 +33329,14 @@ class InternalMCPChatOrchestrator:
             llm_client=llm_client,
             gateway=self._gateway,
             model=model,
-            user_namespace=user_namespace,
+            user_namespace=resolved_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
             max_tool_invocations=self._max_tool_invocations,
             max_tool_result_chars=self._max_tool_result_chars,
             max_tool_result_field_chars=self._max_tool_result_field_chars,
             default_gmail_profile=self._default_gmail_profile,
-            user_concept_id=data.get("user_concept_id"),
-            org_concept_id=data.get("org_concept_id"),
+            user_concept_id=resolved_user_id,
+            org_concept_id=resolved_org_id,
         )
         try:
             result = self._workflow_executor.run(
@@ -39303,6 +39448,22 @@ class InternalMCPChatOrchestrator:
         org_concept_id: Optional[str] = None,
         turn_memory_context: Mapping[str, Any] | None = None,
     ) -> OrchestratorResult:
+        actor_context_source = get_internal_mcp_actor_context_source()
+        if actor_context_source is not None:
+            # ``run`` can produce a direct response without reaching
+            # ``execute_workflow``.  Validate gateway/proxy provenance at the
+            # entry boundary so payload actor fields cannot influence model,
+            # retrieval, discovery, or direct-response work first.
+            resolve_provenance_bound_workflow_actor_scope(
+                claimed_user_id=user_concept_id,
+                claimed_org_id=org_concept_id,
+                claimed_namespace=user_namespace,
+                actor_context_source=actor_context_source,
+                preexisting_actor_context=(
+                    get_internal_mcp_preexisting_actor_context()
+                ),
+            )
+
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
         orchestrator_start = time.perf_counter()

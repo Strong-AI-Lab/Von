@@ -251,10 +251,13 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             context = dict(instance.inputs)
             current_state = definition.initial_state
             step_index = 0
-        context.setdefault("user_concept_id", instance.user_id)
-        context.setdefault("org_concept_id", instance.org_id)
-        context.setdefault("namespace", instance.namespace)
-        context.setdefault("user_namespace", instance.namespace)
+        # Persisted instance actor scope is execution authority. Neither launch
+        # inputs nor a restored checkpoint may replace it.
+        context["user_concept_id"] = instance.user_id
+        context["org_concept_id"] = instance.org_id
+        context["organisation_concept_id"] = instance.org_id
+        context["namespace"] = instance.namespace
+        context["user_namespace"] = instance.namespace
         clear_control_signal_context(context)
 
         # Create execution environment

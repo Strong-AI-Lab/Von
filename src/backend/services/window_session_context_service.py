@@ -32,6 +32,25 @@ WINDOW_SESSION_TTL_SECONDS = 3600
 CLEANUP_INTERVAL_SECONDS = 300
 
 
+class WindowSessionOwnershipError(PermissionError):
+    """Raised when a live window-session ID is used by a different actor."""
+
+
+def _normalise_owner_id(value: Optional[str]) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _has_authoritative_scope(ctx: "WindowSessionContext") -> bool:
+    return bool(
+        _normalise_owner_id(ctx.organisation_concept_id)
+        or _normalise_owner_id(ctx.role_in_org)
+        or _normalise_owner_id(ctx.namespace)
+    )
+
+
 @dataclass
 class WindowSessionContext:
     """Context data for a single window/tab session."""
@@ -127,7 +146,7 @@ class WindowSessionStore:
     def get_or_create(
         self, window_session_id: str, user_id: Optional[str] = None
     ) -> WindowSessionContext:
-        """Get existing context or create a new one."""
+        """Get or create a context without rebinding a live ID across actors."""
         with self._lock:
             ctx = self._sessions.get(window_session_id)
             if ctx is not None:
@@ -138,10 +157,22 @@ class WindowSessionStore:
                     )
                     self._sessions[window_session_id] = ctx
                 else:
+                    stored_owner = _normalise_owner_id(ctx.user_id)
+                    requested_owner = _normalise_owner_id(user_id)
+                    if stored_owner and stored_owner != requested_owner:
+                        raise WindowSessionOwnershipError(
+                            "window_session_owned_by_different_actor"
+                        )
+                    if not stored_owner and requested_owner:
+                        # An unowned partial/chat-only entry may be claimed at
+                        # login. Never let a caller adopt pre-existing org,
+                        # role, or namespace authority from an anonymous ID.
+                        if _has_authoritative_scope(ctx):
+                            raise WindowSessionOwnershipError(
+                                "window_session_unowned_authority_conflict"
+                            )
+                        ctx.user_id = requested_owner
                     ctx.touch()
-                    # Update user_id if provided and different
-                    if user_id and ctx.user_id != user_id:
-                        ctx.user_id = user_id
             else:
                 ctx = WindowSessionContext(
                     window_session_id=window_session_id, user_id=user_id
@@ -150,8 +181,24 @@ class WindowSessionStore:
             return ctx
 
     def set(self, ctx: WindowSessionContext) -> None:
-        """Store or update a window session context."""
+        """Store a context without replacing another live actor's entry."""
         with self._lock:
+            existing = self._sessions.get(ctx.window_session_id)
+            if existing is not None and not existing.is_expired():
+                stored_owner = _normalise_owner_id(existing.user_id)
+                incoming_owner = _normalise_owner_id(ctx.user_id)
+                if stored_owner and stored_owner != incoming_owner:
+                    raise WindowSessionOwnershipError(
+                        "window_session_owned_by_different_actor"
+                    )
+                if (
+                    not stored_owner
+                    and incoming_owner
+                    and _has_authoritative_scope(existing)
+                ):
+                    raise WindowSessionOwnershipError(
+                        "window_session_unowned_authority_conflict"
+                    )
             ctx.touch()
             self._sessions[ctx.window_session_id] = ctx
 
@@ -162,6 +209,26 @@ class WindowSessionStore:
                 del self._sessions[window_session_id]
                 return True
             return False
+
+    def delete_if_owned(
+        self,
+        window_session_id: str,
+        user_id: Optional[str],
+    ) -> bool:
+        """Delete a live context only when the authenticated owner matches."""
+        with self._lock:
+            ctx = self._sessions.get(window_session_id)
+            if ctx is None:
+                return False
+            if ctx.is_expired():
+                del self._sessions[window_session_id]
+                return False
+            stored_owner = _normalise_owner_id(ctx.user_id)
+            requested_owner = _normalise_owner_id(user_id)
+            if not stored_owner or stored_owner != requested_owner:
+                return False
+            del self._sessions[window_session_id]
+            return True
 
     def cleanup_expired(self) -> int:
         """Remove all expired sessions. Returns count removed."""
@@ -282,6 +349,15 @@ def get_effective_context(
     if window_session_id:
         window_ctx = get_window_context(window_session_id)
         if window_ctx is not None:
+            stored_owner = _normalise_owner_id(window_ctx.user_id)
+            authenticated_owner = _normalise_owner_id(user_id)
+            if not stored_owner or stored_owner != authenticated_owner:
+                # Treat an unknown ID and another actor's ID identically. In
+                # particular, do not expose its org, role, namespace, chat ID,
+                # or even a distinguishable context source.
+                window_ctx = None
+
+        if window_ctx is not None:
             if _window_context_has_authoritative_scope(window_ctx):
                 return {
                     "user_id": user_id,
@@ -324,6 +400,16 @@ def get_effective_context(
         "chat_session_id": flask_session.get("session_id"),
         "source": "flask_session",
     }
+
+
+def delete_window_context_if_owned(
+    window_session_id: Optional[str],
+    user_id: Optional[str],
+) -> bool:
+    """Invalidate the current actor's per-window context, if one exists."""
+    if not isinstance(window_session_id, str) or not window_session_id.strip():
+        return False
+    return get_window_session_store().delete_if_owned(window_session_id.strip(), user_id)
 
 
 def set_window_chat_session(

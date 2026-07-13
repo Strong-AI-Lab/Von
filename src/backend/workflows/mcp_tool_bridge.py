@@ -161,6 +161,17 @@ def mcp_input_schema_accepts_field(input_schema: Any, field_name: str) -> bool:
     return cleaned_field_name in _mcp_schema_fields(input_schema)
 
 
+def mcp_input_schema_declares_field(input_schema: Any, field_name: str) -> bool:
+    """Return whether ``field_name`` is explicitly declared by an MCP schema."""
+
+    cleaned_field_name = str(field_name or "").strip()
+    return bool(
+        cleaned_field_name
+        and input_schema is not None
+        and cleaned_field_name in _mcp_schema_fields(input_schema)
+    )
+
+
 def mcp_method_accepts_namespace(method_definition: Any) -> bool:
     """Return whether a resolved MCP method can receive ``namespace``."""
 
@@ -413,6 +424,7 @@ __all__ = [
     "apply_namespace_to_mcp_payload",
     "candidate_internal_mcp_tool_names",
     "mcp_input_schema_accepts_field",
+    "mcp_input_schema_declares_field",
     "mcp_input_schema_accepts_namespace",
     "mcp_method_accepts_namespace",
     "resolve_internal_mcp_tool_name",

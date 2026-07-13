@@ -237,3 +237,110 @@ def test_durable_fallback_coerces_numeric_like_tool_payload_fields(monkeypatch):
     assert observed["top_k_type"] == "int"
     assert observed["namespace"] == "#V#sandbox_ns"
     assert result.outputs["mcp_result"]["top_k"] == 10
+
+
+def test_durable_fallback_overwrites_actor_claims_and_binds_ambient_actor(
+    monkeypatch,
+):
+    observed: dict[str, object] = {}
+
+    def _actor_handler(
+        *,
+        user_id: str,
+        user_concept_id: str,
+        org_id: str,
+        organisation_concept_id: str,
+        namespace: str,
+        user_namespace: str,
+    ) -> dict[str, object]:
+        from src.backend.security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
+
+        observed.update(
+            {
+                "user_id": user_id,
+                "user_concept_id": user_concept_id,
+                "org_id": org_id,
+                "organisation_concept_id": organisation_concept_id,
+                "namespace": namespace,
+                "user_namespace": user_namespace,
+                "ambient_user": get_effective_user_concept_id(),
+                "ambient_org": get_effective_organisation_concept_id(),
+            }
+        )
+        return {"success": True}
+
+    actor_fields = {
+        "user_id": str,
+        "user_concept_id": str,
+        "org_id": str,
+        "organisation_concept_id": str,
+        "namespace": str,
+        "user_namespace": str,
+    }
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="actor_probe",
+            handler=_actor_handler,
+            input_schema=Schema(
+                required=actor_fields,
+                optional={},
+                allow_unknown=False,
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={},
+                allow_unknown=False,
+            ),
+            category="read",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory._get_or_build_durable_mcp_gateway",
+        lambda: gateway,
+    )
+    request = WorkflowActionRequest(
+        action_id="actor_probe",
+        inputs={
+            "user_id": "#V#forged_user",
+            "user_concept_id": "#V#forged_user",
+            "org_id": "#V#forged_org",
+            "organisation_concept_id": "#V#forged_org",
+            "namespace": "#V#forged_user@forged_org",
+            "user_namespace": "#V#forged_user@forged_org",
+        },
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#trusted_user@trusted_org",
+            user_concept_id="#V#trusted_user",
+            org_concept_id="#V#trusted_org",
+        ),
+        data={},
+        workflow_id="#V#actor_scope_workflow",
+        workflow_state_id="probe",
+        workflow_state_metadata={},
+    )
+
+    result = _durable_mcp_fallback_action(request)
+
+    assert result.status == "success"
+    assert result.outputs["workflow_actor_scope_enforced"] is True
+    assert observed == {
+        "user_id": "#V#trusted_user",
+        "user_concept_id": "#V#trusted_user",
+        "org_id": "#V#trusted_org",
+        "organisation_concept_id": "#V#trusted_org",
+        "namespace": "#V#trusted_user@trusted_org",
+        "user_namespace": "#V#trusted_user@trusted_org",
+        "ambient_user": "#V#trusted_user",
+        "ambient_org": "#V#trusted_org",
+    }

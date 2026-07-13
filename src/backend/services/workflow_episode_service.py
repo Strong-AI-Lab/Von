@@ -43,7 +43,11 @@ def _safe_str(value: Any) -> str | None:
     return cleaned or None
 
 
-def _namespace_equivalents(namespace: str | None) -> list[str]:
+def _namespace_equivalents(
+    namespace: str | None,
+    *,
+    include_user_only_legacy: bool = True,
+) -> list[str]:
     """Return deterministic namespace variants for cross-format compatibility.
 
     Workflow episodes have historically used both ``user/org`` and
@@ -94,16 +98,18 @@ def _namespace_equivalents(namespace: str | None) -> list[str]:
             ):
                 _add(f"{user_part}@{org_part}")
 
-    # Cross-era compatibility: some historical writes used user-only namespace
-    # or user/default placeholders before org-scoped namespaces were stable.
-    if user_part:
-        _add(user_part)
-        _add(f"{user_part}/default")
-        if user_part.startswith("#V#"):
-            _add(f"{user_part}/#V#default")
-    elif clean_namespace.startswith("#V#"):
-        _add(f"{clean_namespace}/default")
-        _add(f"{clean_namespace}/#V#default")
+    if include_user_only_legacy:
+        # Cross-era compatibility for deliberately unscoped/operator queries.
+        # Actor-authorised reads disable this widening because a user-only or
+        # default-era record cannot prove which present organisation owns it.
+        if user_part:
+            _add(user_part)
+            _add(f"{user_part}/default")
+            if user_part.startswith("#V#"):
+                _add(f"{user_part}/#V#default")
+        elif clean_namespace.startswith("#V#"):
+            _add(f"{clean_namespace}/default")
+            _add(f"{clean_namespace}/#V#default")
 
     return values
 
@@ -115,6 +121,7 @@ def _build_episode_query(
     namespace: str | None = None,
     session_id: str | None = None,
     turn_id: str | None = None,
+    strict_namespace_scope: bool = False,
 ) -> dict[str, Any]:
     """Build a normalised Mongo query for workflow episode filtering."""
 
@@ -125,7 +132,10 @@ def _build_episode_query(
         for item in (workflow_ids or [])
         if isinstance(item, str) and item.strip()
     ]
-    if cleaned_ids:
+    if workflow_ids is not None:
+        # An explicitly empty actor-visible set must match nothing.  Treating
+        # it like an omitted filter would turn a fail-closed visibility
+        # projection into an unscoped episode query.
         query["workflow_id"] = {"$in": sorted(set(cleaned_ids))}
     else:
         clean_workflow_id = _safe_str(workflow_id)
@@ -134,11 +144,18 @@ def _build_episode_query(
 
     clean_namespace = _safe_str(namespace)
     if clean_namespace:
-        namespace_values = _namespace_equivalents(clean_namespace)
+        namespace_values = _namespace_equivalents(
+            clean_namespace,
+            include_user_only_legacy=not strict_namespace_scope,
+        )
         if len(namespace_values) <= 1:
             query["namespace"] = clean_namespace
         else:
             query["namespace"] = {"$in": namespace_values}
+    elif strict_namespace_scope:
+        # A strict actor-facing query without a proven namespace must match
+        # nothing; omitting the predicate would silently widen to global data.
+        query["namespace"] = {"$in": []}
 
     clean_session_id = _safe_str(session_id)
     if clean_session_id:
@@ -703,9 +720,11 @@ def finalise_workflow_use_episode(
 def list_workflow_use_episodes(
     *,
     workflow_id: str | None = None,
+    workflow_ids: Iterable[str] | None = None,
     namespace: str | None = None,
     session_id: str | None = None,
     turn_id: str | None = None,
+    strict_namespace_scope: bool = False,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     coll = _get_collection()
@@ -715,9 +734,11 @@ def list_workflow_use_episodes(
     safe_limit = max(1, min(int(limit), 200))
     query = _build_episode_query(
         workflow_id=workflow_id,
+        workflow_ids=workflow_ids,
         namespace=namespace,
         session_id=session_id,
         turn_id=turn_id,
+        strict_namespace_scope=strict_namespace_scope,
     )
 
     cursor = coll.find(query).sort("attempt_started_at", DESCENDING).limit(safe_limit)
@@ -752,9 +773,11 @@ def get_latest_workflow_use_episode(
 def count_workflow_use_episodes(
     *,
     workflow_id: str | None = None,
+    workflow_ids: Iterable[str] | None = None,
     namespace: str | None = None,
     session_id: str | None = None,
     turn_id: str | None = None,
+    strict_namespace_scope: bool = False,
 ) -> int:
     """Return the number of workflow-use episodes matching supplied filters."""
 
@@ -764,9 +787,11 @@ def count_workflow_use_episodes(
 
     query = _build_episode_query(
         workflow_id=workflow_id,
+        workflow_ids=workflow_ids,
         namespace=namespace,
         session_id=session_id,
         turn_id=turn_id,
+        strict_namespace_scope=strict_namespace_scope,
     )
     return int(coll.count_documents(query))
 
@@ -777,6 +802,7 @@ def get_workflow_episode_counts_for_workflows(
     namespace: str | None = None,
     session_id: str | None = None,
     turn_id: str | None = None,
+    strict_namespace_scope: bool = False,
 ) -> dict[str, int]:
     """Return episode counts keyed by workflow ID for monitor summaries."""
 
@@ -798,6 +824,7 @@ def get_workflow_episode_counts_for_workflows(
         namespace=namespace,
         session_id=session_id,
         turn_id=turn_id,
+        strict_namespace_scope=strict_namespace_scope,
     )
     pipeline = [
         {"$match": query},
@@ -813,8 +840,19 @@ def get_workflow_episode_counts_for_workflows(
 
 def get_workflow_usage_aggregates_for_workflows(
     workflow_ids: Iterable[str],
+    *,
+    namespace: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    strict_namespace_scope: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Return attempts/completions aggregates keyed by workflow_id."""
+    """Return attempts/completions aggregates keyed by workflow_id.
+
+    When an actor/session filter is supplied, derive the result from episode
+    rows under that exact scope. Process-global concept aggregates are useful
+    for trusted operations but cannot be projected safely into tenant-facing
+    workflow catalogue surfaces.
+    """
 
     ids = [
         item.strip() for item in workflow_ids if isinstance(item, str) and item.strip()
@@ -833,6 +871,50 @@ def get_workflow_usage_aggregates_for_workflows(
         }
         for workflow_id in unique_ids
     }
+
+    scoped_query_required = bool(
+        strict_namespace_scope or namespace or session_id or turn_id
+    )
+    if scoped_query_required:
+        coll = _get_collection()
+        if coll is None:
+            return aggregate_map
+        query = _build_episode_query(
+            workflow_ids=unique_ids,
+            namespace=namespace,
+            session_id=session_id,
+            turn_id=turn_id,
+            strict_namespace_scope=strict_namespace_scope,
+        )
+        pipeline = [
+            {"$match": query},
+            {
+                "$group": {
+                    "_id": "$workflow_id",
+                    "attempts": {"$sum": 1},
+                    "completions": {
+                        "$sum": {"$cond": [{"$eq": ["$completed", True]}, 1, 0]}
+                    },
+                    "last_episode_at": {"$max": "$attempt_started_at"},
+                }
+            },
+        ]
+        for row in coll.aggregate(pipeline):
+            workflow_id = _safe_str(row.get("_id"))
+            if workflow_id is None or workflow_id not in aggregate_map:
+                continue
+            attempts = int(row.get("attempts", 0))
+            completions = int(row.get("completions", 0))
+            aggregate_map[workflow_id] = {
+                "attempts": attempts,
+                "completions": completions,
+                "completion_rate": (
+                    completions / attempts if attempts > 0 else None
+                ),
+                "last_episode_at": _iso_or_none(row.get("last_episode_at")),
+                "updated_at": None,
+            }
+        return aggregate_map
 
     projection = {
         "concept_id": 1,

@@ -1,4 +1,7 @@
 from __future__ import annotations
+import hmac
+import os
+
 from flask import Blueprint, current_app, jsonify, request
 from ...db import connection_manager as conn_mgr
 from ...services.mongo_startup_config import run_mongo_startup_probe
@@ -10,6 +13,17 @@ from ...services.coding_agent_mcp_access_profile_service import (
 )
 
 admin_bp = Blueprint("admin_routes", __name__, url_prefix="/admin")
+
+
+def _trusted_operator_token_authorised() -> bool:
+    """Require the configured global operator token for raw diagnostics."""
+    expected = os.getenv("VON_ADMIN_TOKEN")
+    if not isinstance(expected, str) or not expected.strip():
+        return False
+    provided = request.headers.get("X-Von-Admin-Token") or request.headers.get(
+        "X-Admin-Token"
+    )
+    return bool(provided) and hmac.compare_digest(provided, expected)
 
 
 @admin_bp.route("/db/health", methods=["GET"])
@@ -50,6 +64,8 @@ def _collect_required_concept_ids_from_query() -> list[str]:
 
 @admin_bp.route("/workflow_materialisation_diagnostics", methods=["GET"])
 def workflow_materialisation_diagnostics():
+    if not _trusted_operator_token_authorised():
+        return jsonify({"error": "trusted_operator_authority_required"}), 403
     include_present_raw = (
         (request.args.get("include_present_concepts") or "").strip().lower()
     )

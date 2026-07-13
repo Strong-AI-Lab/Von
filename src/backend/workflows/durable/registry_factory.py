@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, List
 
+from ...db.transient_errors import is_transient_mongo_error
 from .. import WorkflowRegistry
 from ..engine import WorkflowDefinition
 from ..definitions import CONVERSATION_TURN_WORKFLOW_IDS
@@ -29,6 +30,7 @@ from ..workflow_registry import LazyWorkflowRegistration, WorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import (
     apply_runtime_defaults_to_mcp_payload,
+    mcp_input_schema_declares_field,
     resolve_internal_mcp_tool_name,
     workflow_action_result_from_mcp_payload,
 )
@@ -48,7 +50,13 @@ from ..workflow_description_quality_service import (
     summarise_workflow_description_quality,
 )
 from ..workflow_purity_report import build_workflow_purity_report
-from ...security.access_control import override_current_actor
+from ...security.access_control import (
+    describe_concept_access,
+    get_effective_organisation_concept_id,
+    get_effective_user_concept_id,
+    override_current_actor,
+    should_enforce_access_control,
+)
 
 logger = logging.getLogger(__name__)
 _inventory_lock = Lock()
@@ -220,6 +228,10 @@ class WorkflowDefinitionAuthorityResolution:
         return payload
 
 
+class WorkflowDefinitionAuthorityTransientError(RuntimeError):
+    """A retryable failure while reading actor-scoped workflow authority."""
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -377,6 +389,13 @@ def register_workflow_from_vontology(
         return False, "invalid_workflow_id"
 
     workflow_id = workflow_id.strip()
+    if (actor_user_id or actor_org_id) and not _is_agent_test_instance():
+        # An actor-scoped Vontology definition must not be promoted into the
+        # process-global registry. Callers that have actor context must use
+        # resolve_workflow_definition_from_authority(), which returns the
+        # access-checked definition without caching it globally.
+        return False, "actor_scoped_registration_requires_authority_resolution"
+
     existing_registration = registry.get_registration(workflow_id)
     if existing_registration is not None and not replace_existing:
         return True, None
@@ -441,6 +460,16 @@ def _normalise_actor_concept_id(value: str | None) -> str | None:
     if text.startswith("#"):
         return text
     return f"#V#{text}"
+
+
+def _safe_workflow_access_diagnostics(details: Dict[str, Any]) -> Dict[str, Any]:
+    """Project only the bounded access decision, not hidden concept metadata."""
+
+    return {
+        "checked": True,
+        "accessible": bool(details.get("accessible")),
+        "access_control_enforced": bool(details.get("access_control_enforced")),
+    }
 
 
 def _promote_workflow_definition_to_registry(
@@ -511,6 +540,17 @@ def resolve_workflow_definition_from_authority(
 
     actor_user_id = _normalise_actor_concept_id(actor_user_id)
     actor_org_id = _normalise_actor_concept_id(actor_org_id)
+    access_control_enforced = should_enforce_access_control()
+    if access_control_enforced:
+        # Request callers do not always forward their already-authenticated
+        # actor explicitly. Preserve that authority before the resolver binds
+        # its own scoped loader context below.
+        actor_user_id = actor_user_id or _normalise_actor_concept_id(
+            get_effective_user_concept_id()
+        )
+        actor_org_id = actor_org_id or _normalise_actor_concept_id(
+            get_effective_organisation_concept_id()
+        )
     active_registry = (
         get_shared_workflow_registry_read_only(defer_parity_work=True)
         if use_current_shared_registry or registry is None
@@ -528,50 +568,131 @@ def resolve_workflow_definition_from_authority(
     definition: WorkflowDefinition | None = None
     error_code: str | None = None
 
-    with override_current_actor(actor_user_id, actor_org_id):
-        try:
-            definition = active_registry.get(workflow_id_text)
-            registration = active_registry.get_registration(workflow_id_text)
-        except Exception as exc:
-            error_code = f"registry_lookup_failed:{type(exc).__name__}"
-            logger.debug(
-                "workflow definition registry lookup failed for %s",
-                workflow_id_text,
-                exc_info=True,
-            )
+    actor_context_supplied = bool(actor_user_id or actor_org_id)
+    registration_hint: WorkflowRegistration | LazyWorkflowRegistration | None = None
+    try:
+        registration_hint = active_registry.peek_registration(workflow_id_text)
+    except Exception:
+        logger.debug(
+            "workflow registration metadata peek failed for %s",
+            workflow_id_text,
+            exc_info=True,
+        )
+    registration_hint_source = str(
+        getattr(registration_hint, "source", "") or ""
+    ).strip()
+    repo_seed_agent_test_registration = bool(
+        _is_agent_test_instance()
+        and registration_hint_source == "repo_seed_agent_test"
+    )
+    actor_scoped_authority_required = bool(
+        (actor_context_supplied or access_control_enforced)
+        and not _is_agent_test_instance()
+    )
+    diagnostics["actor_scoped_authority_required"] = actor_scoped_authority_required
+    diagnostics["access_control_enforced"] = access_control_enforced
+    if repo_seed_agent_test_registration:
+        diagnostics["actor_scoped_authority_bypass_reason"] = "repo_seed_agent_test"
+    if actor_context_supplied and _is_agent_test_instance():
+        diagnostics["actor_scoped_authority_bypass_reason"] = "repo_seed_agent_test"
 
-        if definition is None and register_authoritative_fallback:
+    with override_current_actor(actor_user_id, actor_org_id):
+        if actor_scoped_authority_required:
+            # The process-wide registry is an execution cache, not an access
+            # authority. A definition warmed by one actor can contain
+            # actor-restricted steps, mappings, or prompts, so an explicit actor
+            # must prove the complete graph through the access-controlled
+            # Vontology loader. Keep the resulting definition request-scoped and
+            # never promote it into the unpartitioned shared registry.
+            diagnostics["actor_scoped_authoritative_load_attempted"] = True
+            diagnostics["shared_registry_definition_trusted"] = False
             try:
-                registered, register_error = register_workflow_from_vontology(
-                    registry=active_registry,
-                    workflow_id=workflow_id_text,
-                    actor_user_id=actor_user_id,
-                    actor_org_id=actor_org_id,
+                definition = load_workflow_definition_from_vontology(workflow_id_text)
+                diagnostics["actor_scoped_authoritative_load_success"] = bool(
+                    definition is not None
                 )
-                diagnostics["vontology_registration_attempted"] = True
-                diagnostics["vontology_registration_success"] = bool(registered)
-                if register_error:
-                    diagnostics["vontology_registration_error_code"] = register_error
-                if registered:
-                    definition = active_registry.get(workflow_id_text)
-                    registration = active_registry.get_registration(workflow_id_text)
-                    error_code = (
-                        None if definition is not None else "definition_not_loadable"
+                if definition is not None:
+                    registration = WorkflowRegistration(
+                        workflow_id=definition.workflow_id,
+                        definition=definition,
+                        purpose=definition.purpose,
+                        source="vontology",
                     )
-                elif not error_code:
-                    error_code = register_error or "definition_not_loadable"
+                else:
+                    access_details = describe_concept_access(workflow_id_text)
+                    diagnostics["workflow_access"] = _safe_workflow_access_diagnostics(
+                        access_details
+                    )
+                    if bool(access_details.get("accessible")):
+                        error_code = "workflow_definition_not_loadable_for_actor"
+                    else:
+                        error_code = "workflow_concept_not_accessible"
             except Exception as exc:
-                diagnostics["vontology_registration_attempted"] = True
-                diagnostics["vontology_registration_success"] = False
-                diagnostics["vontology_registration_exception_type"] = type(
+                if is_transient_mongo_error(exc):
+                    raise WorkflowDefinitionAuthorityTransientError(
+                        "workflow_definition_authority temporarily unavailable:"
+                        f"{workflow_id_text}:{type(exc).__name__}"
+                    ) from exc
+                diagnostics["actor_scoped_authoritative_load_success"] = False
+                diagnostics["actor_scoped_authoritative_load_exception_type"] = type(
                     exc
                 ).__name__
-                error_code = f"vontology_registration_failed:{type(exc).__name__}"
+                error_code = "workflow_definition_not_loadable_for_actor"
                 logger.debug(
-                    "workflow definition Vontology registration failed for %s",
+                    "actor-scoped workflow definition load failed for %s",
                     workflow_id_text,
                     exc_info=True,
                 )
+        else:
+            try:
+                definition = active_registry.get(workflow_id_text)
+                registration = active_registry.get_registration(workflow_id_text)
+            except Exception as exc:
+                error_code = f"registry_lookup_failed:{type(exc).__name__}"
+                logger.debug(
+                    "workflow definition registry lookup failed for %s",
+                    workflow_id_text,
+                    exc_info=True,
+                )
+
+            if definition is None and register_authoritative_fallback:
+                try:
+                    registered, register_error = register_workflow_from_vontology(
+                        registry=active_registry,
+                        workflow_id=workflow_id_text,
+                        actor_user_id=actor_user_id,
+                        actor_org_id=actor_org_id,
+                    )
+                    diagnostics["vontology_registration_attempted"] = True
+                    diagnostics["vontology_registration_success"] = bool(registered)
+                    if register_error:
+                        diagnostics["vontology_registration_error_code"] = (
+                            register_error
+                        )
+                    if registered:
+                        definition = active_registry.get(workflow_id_text)
+                        registration = active_registry.get_registration(
+                            workflow_id_text
+                        )
+                        error_code = (
+                            None
+                            if definition is not None
+                            else "definition_not_loadable"
+                        )
+                    elif not error_code:
+                        error_code = register_error or "definition_not_loadable"
+                except Exception as exc:
+                    diagnostics["vontology_registration_attempted"] = True
+                    diagnostics["vontology_registration_success"] = False
+                    diagnostics["vontology_registration_exception_type"] = type(
+                        exc
+                    ).__name__
+                    error_code = f"vontology_registration_failed:{type(exc).__name__}"
+                    logger.debug(
+                        "workflow definition Vontology registration failed for %s",
+                        workflow_id_text,
+                        exc_info=True,
+                    )
 
     registration_source = _registration_source_for(
         registration,
@@ -580,6 +701,7 @@ def resolve_workflow_definition_from_authority(
     promoted_registration = None
     if (
         definition is not None
+        and not actor_scoped_authority_required
         and promote_to_registry is not None
         and promote_to_registry is not active_registry
     ):
@@ -594,25 +716,26 @@ def resolve_workflow_definition_from_authority(
         registration = promoted_registration
 
     definition_identity = None
-    try:
-        from ..workflow_definition_identity_service import (
-            build_workflow_definition_identity,
-        )
+    if definition is not None or not actor_scoped_authority_required:
+        try:
+            from ..workflow_definition_identity_service import (
+                build_workflow_definition_identity,
+            )
 
-        definition_identity = build_workflow_definition_identity(
-            workflow_id=workflow_id_text,
-            source=registration_source or "unknown",
-            definition=definition,
-            authoritative_definition=(
-                definition if registration_source.lower() == "vontology" else None
-            ),
-        )
-    except Exception:
-        logger.debug(
-            "workflow definition identity build failed for %s",
-            workflow_id_text,
-            exc_info=True,
-        )
+            definition_identity = build_workflow_definition_identity(
+                workflow_id=workflow_id_text,
+                source=registration_source or "unknown",
+                definition=definition,
+                authoritative_definition=(
+                    definition if registration_source.lower() == "vontology" else None
+                ),
+            )
+        except Exception:
+            logger.debug(
+                "workflow definition identity build failed for %s",
+                workflow_id_text,
+                exc_info=True,
+            )
 
     diagnostics["status"] = "resolved" if definition is not None else "failed"
     if error_code:
@@ -624,7 +747,11 @@ def resolve_workflow_definition_from_authority(
         registration=registration,
         definition=definition,
         registration_source=registration_source,
-        known_workflow_ids=_known_workflow_ids_for_registry(active_registry),
+        known_workflow_ids=(
+            ()
+            if actor_scoped_authority_required
+            else _known_workflow_ids_for_registry(active_registry)
+        ),
         definition_identity=definition_identity,
         error_code=error_code,
         diagnostics=diagnostics,
@@ -732,6 +859,34 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
                 == "apply_recovery_tool_batch"
             ),
         )
+        input_schema = getattr(method_definition, "input_schema", None)
+        authoritative_actor_fields = {
+            "user_id": getattr(environment, "user_concept_id", None),
+            "user_concept_id": getattr(environment, "user_concept_id", None),
+            "org_id": getattr(environment, "org_concept_id", None),
+            "organisation_concept_id": getattr(
+                environment,
+                "org_concept_id",
+                None,
+            ),
+            "namespace": getattr(environment, "user_namespace", None),
+            "user_namespace": getattr(environment, "user_namespace", None),
+        }
+        for field_name, field_value in authoritative_actor_fields.items():
+            canonical_schema_less_field = field_name in {
+                "user_concept_id",
+                "org_id",
+                "namespace",
+            }
+            if not (
+                (input_schema is None and canonical_schema_less_field)
+                or mcp_input_schema_declares_field(input_schema, field_name)
+            ):
+                payload.pop(field_name, None)
+                continue
+            if field_value is None:
+                continue
+            payload[field_name] = field_value
         blocked_result = enforce_workflow_mcp_write_guardrails(
             request=request,
             resolved_tool_name=resolved_tool_name,
@@ -739,7 +894,11 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
         )
         if blocked_result is not None:
             return blocked_result
-        result = gateway.invoke(resolved_tool_name, payload)
+        with override_current_actor(
+            getattr(environment, "user_concept_id", None),
+            getattr(environment, "org_concept_id", None),
+        ):
+            result = gateway.invoke(resolved_tool_name, payload)
         try:
             from ..workflow_baseline_telemetry import (
                 record_generic_fallback_mcp_invocation,
@@ -748,11 +907,13 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
             record_generic_fallback_mcp_invocation(success=True)
         except Exception:
             pass
-        return workflow_action_result_from_mcp_payload(
+        action_result = workflow_action_result_from_mcp_payload(
             tool_name=tool_name,
             payload=result.payload,
             duration_ms=result.duration_ms,
         )
+        action_result.outputs["workflow_actor_scope_enforced"] = True
+        return action_result
     except Exception as exc:
         try:
             from ..workflow_baseline_telemetry import (

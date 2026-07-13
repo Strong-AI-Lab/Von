@@ -368,6 +368,77 @@ def test_durable_executor_uses_scoped_active_model_and_context_defaults() -> Non
     )
 
 
+def test_durable_executor_overwrites_forged_actor_fields_when_resuming() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_actor_resume_authority",
+        initial_state="capture",
+        states={
+            "capture": WorkflowStateSpec(
+                state_id="capture",
+                actions=(WorkflowActionInvocation(action_id="capture.actor"),),
+                terminal=True,
+            ),
+        },
+    )
+    captured: dict[str, object] = {}
+    registry = ActionRegistry()
+
+    def capture_handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        for field_name in (
+            "user_concept_id",
+            "org_concept_id",
+            "organisation_concept_id",
+            "namespace",
+            "user_namespace",
+        ):
+            captured[field_name] = request.data.get(field_name)
+        return WorkflowActionResult(outputs={"captured": True})
+
+    registry.register(ActionSpec(action_id="capture.actor", handler=capture_handler))
+    manager = MagicMock()
+    instance = _build_instance(definition.workflow_id)
+    forged_scope = {
+        "user_concept_id": "#V#forged_user",
+        "org_concept_id": "#V#forged_org",
+        "organisation_concept_id": "#V#forged_org",
+        "namespace": "#V#forged_user@forged_org",
+        "user_namespace": "#V#forged_user@forged_org",
+    }
+    instance.inputs = dict(forged_scope)
+    instance.workflow_data = dict(forged_scope)
+    instance.current_state = "capture"
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="scoped-model",
+        ),
+    ):
+        result = executor.run_durable(
+            instance.instance_id,
+            definition,
+            resume_from_checkpoint=True,
+        )
+
+    assert result.completed is True
+    assert captured == {
+        "user_concept_id": instance.user_id,
+        "org_concept_id": instance.org_id,
+        "organisation_concept_id": instance.org_id,
+        "namespace": instance.namespace,
+        "user_namespace": instance.namespace,
+    }
+
+
 def test_durable_executor_prefers_requested_model_override_from_instance_inputs() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#durable_requested_model_override",

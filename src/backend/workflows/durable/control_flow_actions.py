@@ -51,6 +51,10 @@ from ..tool_invocation_evidence import (
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..vontology_loader import load_workflow_definition_from_vontology
+from .nested_workflow_authority import (
+    NESTED_WORKFLOW_DEFINITION_NOT_FOUND,
+    resolve_nested_workflow_definition,
+)
 
 
 _DEFAULT_FORK_BRANCH_LIMIT = 8
@@ -358,16 +362,31 @@ def _build_fork_handler(
 
         for branch in branch_specs:
             child_workflow_id = branch["workflow_id"]
-            child_definition = definition_loader(child_workflow_id)
+            authority_resolution = resolve_nested_workflow_definition(
+                workflow_id=child_workflow_id,
+                environment=request.environment,
+                fallback_loader=definition_loader,
+            )
+            child_definition = authority_resolution.definition
             if child_definition is None:
+                authority_error_code = authority_resolution.error_code
+                child_error = (
+                    f"fork_child_definition_not_found:{child_workflow_id}"
+                    if authority_error_code == NESTED_WORKFLOW_DEFINITION_NOT_FOUND
+                    else (
+                        "fork_child_definition_resolution_failed:"
+                        f"{child_workflow_id}:{authority_error_code or 'unknown'}"
+                    )
+                )
                 branch_result = {
                     "branch_id": branch["branch_id"],
                     "workflow_id": child_workflow_id,
                     "completed": False,
                     "final_state": "",
-                    "error": f"fork_child_definition_not_found:{child_workflow_id}",
+                    "error": child_error,
                     "result": {},
                     "result_envelope": None,
+                    "authority_resolution": authority_resolution.to_projection(),
                 }
                 branch_results.append(branch_result)
                 failed_branch = branch_result
@@ -388,6 +407,7 @@ def _build_fork_handler(
                     "fork_branch_id": branch["branch_id"],
                     "failure_policy": failure_policy,
                     "merge_policy": merge_policy,
+                    "authority_resolution": authority_resolution.to_projection(),
                 },
             )
             child_result = WorkflowExecutor(
@@ -412,6 +432,7 @@ def _build_fork_handler(
                     if isinstance(child_result.result_envelope, Mapping)
                     else None
                 ),
+                "authority_resolution": authority_resolution.to_projection(),
             }
             branch_results.append(branch_result)
             if not child_result.completed:
@@ -492,11 +513,30 @@ def _build_for_each_handler(
                 error="for_each_workflow_id_missing",
             )
 
-        child_definition = definition_loader(child_workflow_id)
+        authority_resolution = resolve_nested_workflow_definition(
+            workflow_id=child_workflow_id,
+            environment=request.environment,
+            fallback_loader=definition_loader,
+        )
+        child_definition = authority_resolution.definition
         if child_definition is None:
+            authority_error_code = authority_resolution.error_code
+            error = (
+                f"for_each_definition_not_found:{child_workflow_id}"
+                if authority_error_code == NESTED_WORKFLOW_DEFINITION_NOT_FOUND
+                else (
+                    "for_each_definition_resolution_failed:"
+                    f"{child_workflow_id}:{authority_error_code or 'unknown'}"
+                )
+            )
             return WorkflowActionResult(
                 status="failed",
-                error=f"for_each_definition_not_found:{child_workflow_id}",
+                error=error,
+                outputs={
+                    "for_each_authority_resolution": (
+                        authority_resolution.to_projection()
+                    )
+                },
             )
 
         items, items_source, items_error = _resolve_items_sequence(request=request)
@@ -558,6 +598,7 @@ def _build_for_each_handler(
                     "index_context_key": index_context_key,
                     "item_index": index,
                     "success_policy": success_policy,
+                    "authority_resolution": authority_resolution.to_projection(),
                 },
             )
             child_result = WorkflowExecutor(
@@ -668,6 +709,7 @@ def _build_for_each_handler(
             "for_each_success_count": success_count,
             "for_each_error_count": error_count,
             "for_each_partial_success": success_count > 0 and error_count > 0,
+            "for_each_authority_resolution": authority_resolution.to_projection(),
             "iteration_results": iteration_results,
             "iteration_errors": iteration_errors,
             "successful_results": successful_results,

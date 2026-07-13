@@ -751,6 +751,9 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.backend.workflows.durable import testing_workflow_actions as actions_module
+    from src.backend.services.arxiv_paper_link_service import (
+        predict_arxiv_paper_concept_id,
+    )
     from src.backend.workflows.durable.workflow_instance_submission_service import (
         WorkflowInstanceSubmissionResult,
     )
@@ -761,6 +764,7 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
         ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID
     )
     assert definition is not None
+    paper_concept_id = predict_arxiv_paper_concept_id(arxiv_id="2603.21702")
 
     monkeypatch.setattr(
         actions_module,
@@ -780,7 +784,7 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
             "expected_topic_concept_ids": ["#V#topic_cs_ai"],
             "preexisting_author_concept_ids": [],
             "preexisting_topic_concept_ids": [],
-            "paper_concept_id": "#V#paper_on_arxiv_2603_21702",
+            "paper_concept_id": paper_concept_id,
         },
     )
     monkeypatch.setattr(
@@ -789,7 +793,7 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
         lambda **_kwargs: {
             "success": True,
             "verification_passed": True,
-            "paper_concept_id": "#V#paper_on_arxiv_2603_21702",
+            "paper_concept_id": paper_concept_id,
             "file_copy_concept_id": "#V#file_copy_2603_21702",
             "file_copy_concept_ids": [
                 "#V#file_copy_2603_21702",
@@ -839,7 +843,7 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
             "cleanup_summary": {
                 "cleanup_passed": True,
                 "deleted_concept_ids": [
-                    "#V#paper_on_arxiv_2603_21702",
+                    paper_concept_id,
                     "#V#file_copy_2603_21702",
                     "#V#markdown_file_copy_2603_21702",
                 ],
@@ -863,7 +867,7 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
                 workflow_id="#V#arxiv_paper_representation_workflow",
                 status=WorkflowInstanceStatus.COMPLETED,
                 outputs={
-                    "paper_concept_id": "#V#paper_on_arxiv_2603_21702",
+                    "paper_concept_id": paper_concept_id,
                     "file_copy_concept_id": "#V#file_copy_2603_21702",
                 },
             )
@@ -872,6 +876,37 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
+    )
+    cleanup_docs = {
+        paper_concept_id: {
+            "relationships": {
+                "#V#specific_to_user": ["#V#user"],
+                "#V#propositional_information_thing_has_computer_file": [
+                    "#V#file_copy_2603_21702",
+                    "#V#markdown_file_copy_2603_21702",
+                ],
+            }
+        },
+        "#V#file_copy_2603_21702": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+        "#V#markdown_file_copy_2603_21702": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+        "#V#author_one": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+        "#V#author_two": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+        "#V#topic_cs_ai": {
+            "relationships": {"#V#specific_to_user": ["#V#user"]}
+        },
+    }
+    monkeypatch.setattr(
+        actions_module,
+        "_load_cleanup_concept_for_authority",
+        lambda concept_id: cleanup_docs.get(concept_id),
     )
 
     def _fake_submit_verified_workflow_instance(**kwargs: Any) -> WorkflowInstanceSubmissionResult:

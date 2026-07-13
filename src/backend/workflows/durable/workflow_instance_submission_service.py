@@ -46,7 +46,6 @@ from ..vontology_loader import (
     build_workflow_process_graph,
     build_workflow_process_graph_from_definition,
     detect_vacuous_workflow_steps,
-    load_workflow_definition_from_vontology,
 )
 from ..workflow_definition_identity_service import (
     build_workflow_definition_identity,
@@ -464,12 +463,13 @@ def _resolve_submission_launch_inputs(
     )
     launch_inputs = dict(inputs)
     if actor_user_id:
-        launch_inputs.setdefault("user_concept_id", actor_user_id)
+        launch_inputs["user_concept_id"] = actor_user_id
     if actor_org_id:
-        launch_inputs.setdefault("org_concept_id", actor_org_id)
+        launch_inputs["org_concept_id"] = actor_org_id
+        launch_inputs["organisation_concept_id"] = actor_org_id
     if actor_namespace:
-        launch_inputs.setdefault("user_namespace", actor_namespace)
-        launch_inputs.setdefault("namespace", actor_namespace)
+        launch_inputs["user_namespace"] = actor_namespace
+        launch_inputs["namespace"] = actor_namespace
 
     resolution = resolve_workflow_launch_inputs(
         workflow_id=workflow_id,
@@ -1375,6 +1375,22 @@ def submit_verified_workflow_instance(
             },
             created_new=None,
         )
+    actor_input_overrides: list[str] = []
+    authoritative_actor_inputs = {
+        "user_concept_id": resolved_user_id,
+        "org_concept_id": resolved_org_id,
+        "organisation_concept_id": resolved_org_id,
+        "namespace": canonical_namespace,
+        "user_namespace": canonical_namespace,
+    }
+    for field_name, authoritative_value in authoritative_actor_inputs.items():
+        if authoritative_value is None:
+            inputs_payload.pop(field_name, None)
+            continue
+        existing_value = inputs_payload.get(field_name)
+        if existing_value is not None and existing_value != authoritative_value:
+            actor_input_overrides.append(field_name)
+        inputs_payload[field_name] = authoritative_value
     preflight = verify_workflow_runnable(
         workflow_id,
         action_registry_override=action_registry_override,
@@ -1385,6 +1401,12 @@ def submit_verified_workflow_instance(
         preflight=preflight,
         postflight=None,
     )
+    actor_input_projection = {
+        "schema_version": "workflow_actor_input_projection.v1",
+        "authoritative_fields": sorted(authoritative_actor_inputs),
+        "overridden_fields": sorted(actor_input_overrides),
+    }
+    verification_payload["workflow_actor_input_projection"] = actor_input_projection
 
     if not preflight.runnable_verification_success:
         return WorkflowInstanceSubmissionResult(
@@ -1528,6 +1550,7 @@ def submit_verified_workflow_instance(
         preflight=preflight,
         postflight=postflight,
     )
+    verification_payload["workflow_actor_input_projection"] = actor_input_projection
     verification_payload["workflow_launch_input_resolution"] = launch_diagnostics
     if created_new and not postflight.runnable_verification_success:
         manager.mark_failed(

@@ -197,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
     result = gateway.invoke(args.tool_name, payload).payload
 

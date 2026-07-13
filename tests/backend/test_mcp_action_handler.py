@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from src.backend.workflows.action_registry import (
     ActionRegistry,
@@ -155,6 +156,74 @@ class TestFallbackHandler:
         assert req.workflow_state_id == "write_step"
         assert req.workflow_state_metadata == {
             "mutation_authority": {"maximum_level": "read_only"}
+        }
+
+    @pytest.mark.parametrize("registered", [True, False])
+    def test_handler_runs_under_environment_actor_scope(
+        self,
+        monkeypatch,
+        registered: bool,
+    ) -> None:
+        """Explicit and fallback actions inherit durable actor authority."""
+        import src.backend.security.access_control as access_control
+
+        class _Concepts:
+            _docs = {
+                "#V#team_visible": {
+                    "concept_id": "#V#team_visible",
+                    "relationships": {"specific_to_org": ["#V#team_org"]},
+                },
+                "#V#foreign_hidden": {
+                    "concept_id": "#V#foreign_hidden",
+                    "relationships": {"specific_to_org": ["#V#foreign_org"]},
+                },
+            }
+
+            def find_one(self, query, _projection=None):
+                return self._docs.get(query.get("concept_id"))
+
+        monkeypatch.setattr(
+            access_control,
+            "get_concepts_collection",
+            lambda: _Concepts(),
+        )
+
+        def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+            return WorkflowActionResult(
+                outputs={
+                    "user": access_control.get_effective_user_concept_id(),
+                    "org": access_control.get_effective_organisation_concept_id(),
+                    "team_visible": access_control.can_access_concept(
+                        "#V#team_visible"
+                    ),
+                    "foreign_visible": access_control.can_access_concept(
+                        "#V#foreign_hidden"
+                    ),
+                }
+            )
+
+        registry = ActionRegistry()
+        if registered:
+            registry.register(ActionSpec(action_id="scoped.action", handler=handler))
+        else:
+            registry.set_fallback_handler(handler)
+
+        result = registry.execute(
+            "scoped.action",
+            inputs={},
+            context={},
+            env=WorkflowEnvironment(
+                llm_client=None,
+                user_concept_id="#V#team_member",
+                org_concept_id="#V#team_org",
+            ),
+        )
+
+        assert result.outputs == {
+            "user": "#V#team_member",
+            "org": "#V#team_org",
+            "team_visible": True,
+            "foreign_visible": False,
         }
 
 

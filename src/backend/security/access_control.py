@@ -7,7 +7,7 @@ from contextvars import ContextVar
 import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from flask import has_request_context, session, request
+from flask import g, has_request_context, request, session
 
 from ..db.mongo_client import get_concepts_collection
 from .visibility_predicates import (
@@ -364,7 +364,7 @@ def get_effective_user_concept_id() -> Optional[str]:
             if validated:
                 return validated
 
-    cached_header = _HEADER_CACHE.get()
+    cached_header = getattr(g, "_von_access_header_user", None)
     if cached_header:
         return cached_header
 
@@ -378,7 +378,7 @@ def get_effective_user_concept_id() -> Optional[str]:
     if header_user:
         validated = _validate_person_concept(header_user)
         if validated:
-            _HEADER_CACHE.set(validated)
+            g._von_access_header_user = validated
             return validated
     return None
 
@@ -427,10 +427,22 @@ def should_enforce_access_control() -> bool:
 
 
 def _current_evaluator() -> AccessEvaluator:
-    current = _EVALUATOR.get()
     user_id = get_effective_user_concept_id()
     org_id = get_effective_organisation_concept_id()
     enforce = should_enforce_access_control()
+    if has_request_context():
+        current = getattr(g, "_von_access_evaluator", None)
+        if (
+            current is None
+            or current.user_id != user_id
+            or current.org_id != org_id
+            or current.enforce != enforce
+        ):
+            current = AccessEvaluator(user_id, org_id, enforce)
+            g._von_access_evaluator = current
+        return current
+
+    current = _EVALUATOR.get()
     if (
         current is None
         or current.user_id != user_id
@@ -747,6 +759,22 @@ def can_access_concept(concept_id: Any) -> bool:
 def filter_accessible_concept_ids(concept_ids: Iterable[Any]) -> set[str]:
     evaluator = _current_evaluator()
     return evaluator.accessible_concept_ids(concept_ids)
+
+
+def invalidate_current_access_evaluator() -> None:
+    """Discard actor-visibility decisions cached in the current context.
+
+    Most concept reads benefit from one request-local evaluator.  Derived
+    authority surfaces that intentionally outlive a single read (for example a
+    same-turn workflow-discovery memo) must be able to re-check live Vontology
+    visibility rather than inheriting an earlier positive decision.  Clearing
+    both storage locations keeps this safe in Flask requests and background
+    workflow contexts.
+    """
+
+    _EVALUATOR.set(None)
+    if has_request_context():
+        g._von_access_evaluator = None
 
 
 def cache_scope_key() -> str:

@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
@@ -12,6 +15,7 @@ from src.backend.integrations.internal_mcp.workflow_surface_capabilities import 
 from src.backend.workflows.durable.models import (
     EventWorkflowBinding,
     WorkflowInstanceStatus,
+    WorkflowSchedule,
 )
 from src.backend.workflows.durable.scheduler import WorkflowScheduler
 from workflow_test_support import (
@@ -26,6 +30,7 @@ def _build_gateway() -> InternalMCPGateway:
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
 
 
@@ -819,6 +824,163 @@ def test_workflow_list_definitions_skips_bootstrap_writes():
     assert result.get("success") is True
 
 
+def test_workflow_list_definitions_filters_warm_registry_by_ambient_actor(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+    from src.backend.security import access_control
+
+    public_workflow_id = "#V#public_profile_workflow"
+    team_workflow_id = "#V#team_profile_workflow"
+    private_workflow_id = "#V#private_profile_workflow"
+    all_workflow_ids = [
+        private_workflow_id,
+        public_workflow_id,
+        team_workflow_id,
+    ]
+
+    class _Collection:
+        _documents = {
+            public_workflow_id: {
+                "concept_id": public_workflow_id,
+                "relationships": {},
+            },
+            team_workflow_id: {
+                "concept_id": team_workflow_id,
+                "relationships": {
+                    "#V#specific_to_organisation": ["#V#team_org"]
+                },
+            },
+            private_workflow_id: {
+                "concept_id": private_workflow_id,
+                "relationships": {
+                    "#V#specific_to_user": ["#V#private_owner"]
+                },
+            },
+        }
+
+        def find(self, query, _projection):
+            requested_ids = set(query["concept_id"]["$in"])
+            return [
+                document
+                for concept_id, document in self._documents.items()
+                if concept_id in requested_ids
+            ]
+
+    class _WarmRegistry:
+        def all_workflow_ids(self):
+            # This intentionally remains global and actor-agnostic.
+            return list(all_workflow_ids)
+
+    monkeypatch.setattr(
+        access_control,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        lambda **_kwargs: _WarmRegistry(),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_or_build_workflow_registry_inventory_snapshot",
+        lambda **_kwargs: {
+            "build_state": "ready",
+            "registry_workflow_ids": list(all_workflow_ids),
+            "graph_warnings_by_workflow_id": {
+                public_workflow_id: [],
+                private_workflow_id: ["private metadata"],
+            },
+            "summary_text": f"Includes {private_workflow_id}",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
+        lambda **kwargs: {
+            "workflow_id": kwargs["workflow_id"],
+            "description": f"Description for {kwargs['workflow_id']}",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_baseline_telemetry.get_workflow_baseline_telemetry_snapshot",
+        lambda: {
+            "recent_mutation_guardrail_events": [
+                {
+                    "workflow_id": private_workflow_id,
+                    "conversation_session_id": "private-session-2580",
+                    "turn_id": "private-turn-2580",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        catalogue_module,
+        "build_default_catalogue",
+        lambda: SimpleNamespace(list_methods=lambda: []),
+    )
+    monkeypatch.setattr(
+        catalogue_module,
+        "build_workflow_surface_capability_matrix",
+        lambda *, internal_method_names: {"surfaces": {}},
+    )
+
+    handler = build_default_catalogue().get("workflow_list_definitions").handler
+    with access_control.override_current_actor(
+        user_concept_id="#V#team_member",
+        organisation_concept_id="#V#team_org",
+    ):
+        result = handler(
+            limit=10,
+            # Caller-supplied identity hints must not override ambient authority.
+            user_concept_id="#V#private_owner",
+            organisation_concept_id="#V#other_org",
+        )
+
+    assert result["success"] is True
+    assert [item["workflow_id"] for item in result["definitions"]] == [
+        public_workflow_id,
+        team_workflow_id,
+    ]
+    assert result["count"] == 2
+    serialised = json.dumps(result, sort_keys=True)
+    assert private_workflow_id not in serialised
+    assert "private metadata" not in serialised
+    assert "private-session-2580" not in serialised
+    assert "private-turn-2580" not in serialised
+    assert result["baseline_telemetry"] == {
+        "available": False,
+        "scope": "trusted_operator_only",
+    }
+
+    untrusted_gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    forged = untrusted_gateway.invoke(
+        "workflow_list_definitions",
+        {
+            "limit": 10,
+            "user_id": "#V#private_owner",
+            "org_id": "#V#team_org",
+        },
+    ).payload
+
+    assert forged["success"] is True
+    assert [item["workflow_id"] for item in forged["definitions"]] == [
+        public_workflow_id,
+    ]
+    forged_serialised = json.dumps(forged, sort_keys=True)
+    assert private_workflow_id not in forged_serialised
+    assert team_workflow_id not in forged_serialised
+    assert "private metadata" not in forged_serialised
+    assert "private-session-2580" not in forged_serialised
+    assert "private-turn-2580" not in forged_serialised
+    assert forged["baseline_telemetry"] == {
+        "available": False,
+        "scope": "trusted_operator_only",
+    }
+
+
 def test_workflow_list_definitions_requests_pending_inventory_when_snapshot_absent(
     monkeypatch,
 ):
@@ -911,6 +1073,7 @@ def test_workflow_list_definitions_requests_pending_inventory_when_snapshot_abse
     assert calls["registry_kwargs"]["defer_parity_work"] is True
     assert calls["allow_sync_build"] is False
     assert result["parity_inventory"]["build_state"] == "pending_background_build"
+    assert result["baseline_telemetry"] == {}
 
 
 def test_workflow_list_definitions_does_not_resolve_lazy_definitions_for_summary(
@@ -1077,6 +1240,67 @@ def test_workflow_get_instance_exposes_failed_outputs(monkeypatch):
     }
 
 
+def test_workflow_instance_tools_are_exactly_scoped_to_preexisting_actor(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    own = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#shared_user",
+            "org_id": "#V#own_org",
+            "namespace": "#V#shared_user@own_org",
+        },
+    ).payload
+    foreign = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#shared_user",
+            "org_id": "#V#foreign_org",
+            "namespace": "#V#shared_user@foreign_org",
+        },
+    ).payload
+    own_id = own["instance_id"]
+    foreign_id = foreign["instance_id"]
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#shared_user",
+        organisation_concept_id="#V#own_org",
+    ):
+        listed = gateway.invoke("workflow_list_instances", {}).payload
+        denied = [
+            gateway.invoke(
+                "workflow_get_instance",
+                {"instance_id": foreign_id},
+            ).payload,
+            gateway.invoke(
+                "workflow_cancel_instance",
+                {"instance_id": foreign_id},
+            ).payload,
+            gateway.invoke(
+                "workflow_retry_instance",
+                {"instance_id": foreign_id},
+            ).payload,
+        ]
+
+    assert listed["success"] is True
+    assert [item["instance_id"] for item in listed["instances"]] == [own_id]
+    assert all(result["success"] is False for result in denied)
+    assert all(result["error_code"] == "not_found" for result in denied)
+    assert manager.instances[foreign_id].status == WorkflowInstanceStatus.PENDING
+
+
 def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
@@ -1152,7 +1376,7 @@ def test_workflow_create_instance_normalises_inputs(monkeypatch):
             "workflow_id": workflow_id,
             "user_id": "   ",
             "org_id": "  ",
-            "namespace": " #V#explicit_ns ",
+            "namespace": " #V#anonymous@default ",
             "inputs": None,
             "max_retries": 999,
         },
@@ -1162,11 +1386,224 @@ def test_workflow_create_instance_normalises_inputs(monkeypatch):
     assert isinstance(instance_id, str)
 
     instance = manager.instances[instance_id]
-    assert instance.user_id == "anonymous"
-    assert instance.org_id == "default"
-    assert instance.namespace == "#V#explicit_ns"
+    # An explicit canonical namespace is the actor claim on a trusted unscoped
+    # operator path; its actor components remain canonical and consistent.
+    assert instance.user_id == "#V#anonymous"
+    assert instance.org_id == "#V#default"
+    assert instance.namespace == "#V#anonymous@default"
     assert instance.inputs == {}
     assert instance.max_retries == 50
+
+
+def test_workflow_launch_tools_reject_forged_actor_against_ambient_authority():
+    from src.backend.security import access_control
+
+    gateway = _build_gateway()
+    submission_path = (
+        "src.backend.workflows.durable.workflow_instance_submission_service."
+        "submit_verified_workflow_instance"
+    )
+
+    with patch(submission_path) as submit:
+        with access_control.override_current_actor(
+            user_concept_id="#V#synthetic_outsider",
+            organisation_concept_id="#V#synthetic_outsider_org",
+        ):
+            expected_error_codes = {
+                "workflow_create_instance": "workflow_actor_scope_mismatch",
+                "workflow_execute": "workflow_actor_scope_mismatch",
+                "experiment_execute_target_workflow": (
+                    "workflow_global_admin_authority_required"
+                ),
+            }
+            for method_name, expected_error_code in expected_error_codes.items():
+                result = gateway.invoke(
+                    method_name,
+                    {
+                        "workflow_id": "#V#synthetic_restricted_workflow",
+                        "user_id": "#V#synthetic_owner",
+                        "org_id": "#V#synthetic_trusted_org",
+                        "namespace": "#V#synthetic_owner@synthetic_trusted_org",
+                    },
+                ).payload
+
+                assert result["success"] is False
+                assert result["error_code"] == expected_error_code
+                if expected_error_code == "workflow_actor_scope_mismatch":
+                    assert set(result["error_details"]["mismatch_fields"]) == {
+                        "user_id",
+                        "org_id",
+                        "namespace",
+                    }
+
+    submit.assert_not_called()
+
+
+def test_workflow_launch_tools_reject_untrusted_payload_only_actor():
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    submission_path = (
+        "src.backend.workflows.durable.workflow_instance_submission_service."
+        "submit_verified_workflow_instance"
+    )
+
+    with patch(submission_path) as submit:
+        expected_error_codes = {
+            "workflow_create_instance": "workflow_actor_authority_required",
+            "workflow_execute": "workflow_actor_authority_required",
+            "experiment_execute_target_workflow": (
+                "workflow_global_admin_authority_required"
+            ),
+        }
+        for method_name, expected_error_code in expected_error_codes.items():
+            result = gateway.invoke(
+                method_name,
+                {
+                    "workflow_id": "#V#synthetic_restricted_workflow",
+                    "user_id": "#V#synthetic_owner",
+                    "org_id": "#V#synthetic_trusted_org",
+                    "namespace": "#V#synthetic_owner@synthetic_trusted_org",
+                },
+            ).payload
+
+            assert result["success"] is False
+            assert result["error_code"] == expected_error_code
+
+    submit.assert_not_called()
+
+
+def test_honest_outsider_cannot_execute_restricted_workflow_or_persist_instance(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+
+    class _NoPersistenceManager:
+        def create_instance(self, *_args, **_kwargs):
+            raise AssertionError("denied outsider launch must not persist an instance")
+
+        def create_instance_for_event(self, *_args, **_kwargs):
+            raise AssertionError("denied outsider launch must not persist an instance")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: _NoPersistenceManager(),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.resolve_workflow_definition_from_authority",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            registry=None,
+            definition=None,
+            registration_source="unknown",
+            known_workflow_ids=(),
+            error_code="workflow_concept_not_accessible",
+        ),
+    )
+    gateway = _build_gateway()
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#honest_outsider",
+        organisation_concept_id="#V#outsider_org",
+    ):
+        result = gateway.invoke(
+            "workflow_execute",
+            {
+                "workflow_id": "#V#restricted_workflow_for_outsider_test",
+                "user_id": "#V#honest_outsider",
+                "org_id": "#V#outsider_org",
+                "namespace": "#V#honest_outsider@outsider_org",
+            },
+        ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "workflow_not_runnable"
+    assert result.get("instance_id") is None
+
+
+def test_workflow_schedule_create_requires_preexisting_actor_authority(monkeypatch):
+    from src.backend.security import access_control
+
+    class _UnexpectedManager:
+        def __init__(self):
+            raise AssertionError("unauthorised schedule must not reach persistence")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        _UnexpectedManager,
+    )
+    arguments = {
+        "workflow_id": "#V#synthetic_restricted_workflow",
+        "schedule_type": "interval",
+        "interval_seconds": 60,
+        "user_id": "#V#synthetic_owner",
+        "org_id": "#V#synthetic_trusted_org",
+        "namespace": "#V#synthetic_owner@synthetic_trusted_org",
+    }
+
+    untrusted_gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    untrusted_result = untrusted_gateway.invoke(
+        "workflow_create_schedule",
+        arguments,
+    ).payload
+
+    assert untrusted_result["success"] is False
+    assert untrusted_result["error_code"] == "workflow_actor_authority_required"
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#synthetic_outsider",
+        organisation_concept_id="#V#synthetic_outsider_org",
+    ):
+        forged_result = _build_gateway().invoke(
+            "workflow_create_schedule",
+            arguments,
+        ).payload
+
+    assert forged_result["success"] is False
+    assert forged_result["error_code"] == "workflow_actor_scope_mismatch"
+    assert set(forged_result["error_details"]["mismatch_fields"]) == {
+        "user_id",
+        "org_id",
+        "namespace",
+    }
+
+
+def test_workflow_launch_rejects_org_claim_when_ambient_actor_has_no_org():
+    from src.backend.security import access_control
+
+    gateway = _build_gateway()
+    submission_path = (
+        "src.backend.workflows.durable.workflow_instance_submission_service."
+        "submit_verified_workflow_instance"
+    )
+
+    with patch(submission_path) as submit:
+        with access_control.override_current_actor(
+            user_concept_id="#V#synthetic_outsider",
+            organisation_concept_id=None,
+        ):
+            result = gateway.invoke(
+                "workflow_execute",
+                {
+                    "workflow_id": "#V#synthetic_restricted_workflow",
+                    "user_id": "#V#synthetic_outsider",
+                    "org_id": "#V#synthetic_trusted_org",
+                    "namespace": "#V#synthetic_outsider@synthetic_trusted_org",
+                },
+            ).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "workflow_actor_scope_mismatch"
+    assert set(result["error_details"]["mismatch_fields"]) == {
+        "org_id",
+        "namespace",
+    }
+    submit.assert_not_called()
 
 
 def test_experiment_execute_target_workflow_uses_verified_submission_path(monkeypatch):
@@ -1393,7 +1830,10 @@ def test_workflow_get_execution_trace_resolves_instance_link(monkeypatch):
         lambda execution_id: (
             {
                 "execution_id": execution_id,
+                "instance_id": instance_id,
                 "workflow_id": "#V#enrichment_workflow",
+                "user_namespace": "#V#user/#V#org",
+                "org_id": "#V#org",
                 "status": "completed",
             }
             if execution_id == "trace-lookup-1"
@@ -1444,6 +1884,111 @@ def test_workflow_get_execution_trace_reports_unlinked_instance_state(monkeypatc
     assert details.get("workflow_id") == "#V#arxiv_paper_representation_workflow"
     assert details.get("status") == "pending"
     assert details.get("trace_missing_reason") == "instance_has_no_execution_trace_id"
+
+
+def test_workflow_get_execution_trace_hides_other_actor_trace(monkeypatch):
+    from src.backend.security import access_control
+
+    monkeypatch.setattr(
+        "src.backend.workflows.get_workflow_execution_trace",
+        lambda execution_id: {
+            "execution_id": execution_id,
+            "workflow_id": "#V#restricted_workflow",
+            "user_namespace": "#V#other_user@other_org",
+            "org_id": "#V#other_org",
+            "status": "completed",
+        },
+    )
+    gateway = _build_gateway()
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#own_user",
+        organisation_concept_id="#V#own_org",
+    ):
+        payload = gateway.invoke(
+            "workflow_get_execution_trace",
+            {"execution_id": "trace-foreign"},
+        ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "not_found"
+
+
+def test_workflow_get_execution_trace_rejects_cross_linked_foreign_trace(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#shared_user",
+            "org_id": "#V#org_a",
+            "namespace": "#V#shared_user/#V#org_a",
+        },
+    ).payload
+    instance_id = created["instance_id"]
+    manager.instances[instance_id].execution_trace_id = "trace-cross-linked"
+    monkeypatch.setattr(
+        "src.backend.workflows.get_workflow_execution_trace",
+        lambda _execution_id: {
+            "execution_id": "trace-cross-linked",
+            "instance_id": "foreign-instance",
+            "workflow_id": "#V#enrichment_workflow",
+            "user_namespace": "#V#shared_user/#V#org_b",
+            "org_id": "#V#org_b",
+            "status": "completed",
+        },
+    )
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#shared_user",
+        organisation_concept_id="#V#org_a",
+    ):
+        payload = gateway.invoke(
+            "workflow_get_execution_trace",
+            {"instance_id": instance_id},
+        ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "not_found"
+
+
+def test_workflow_get_execution_trace_rejects_ambiguous_legacy_actor_record(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+
+    monkeypatch.setattr(
+        "src.backend.workflows.get_workflow_execution_trace",
+        lambda execution_id: {
+            "execution_id": execution_id,
+            "workflow_id": "#V#restricted_workflow",
+            "user_namespace": "#V#same_user",
+            "status": "completed",
+        },
+    )
+    gateway = _build_gateway()
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#same_user",
+        organisation_concept_id="#V#current_org",
+    ):
+        payload = gateway.invoke(
+            "workflow_get_execution_trace",
+            {"execution_id": "trace-legacy-user-only"},
+        ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "not_found"
 
 
 def test_turn_execution_get_critic_bundle_invokes_service(monkeypatch):
@@ -1824,6 +2369,60 @@ def test_workflow_list_execution_traces_returns_bounded_summaries(monkeypatch):
     assert summary["instance_id"] == "wf-instance-1"
     assert summary["action_count"] == 1
     assert summary["step_count"] == 1
+
+
+def test_workflow_prediction_envelope_forces_preexisting_actor_namespace(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "src.backend.services.workflow_prediction_service.build_workflow_prediction_envelope",
+        lambda **kwargs: calls.append(dict(kwargs))
+        or {
+            "success": True,
+            "schema_version": "workflow_prediction_envelope.v1",
+            "workflow_id": kwargs["workflow_id"],
+            "filters": {},
+            "sample_window": {},
+            "prediction_envelope": {},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    gateway = _build_gateway()
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#prediction_user",
+        organisation_concept_id="#V#org_a",
+    ):
+        forged = gateway.invoke(
+            "workflow_build_prediction_envelope",
+            {
+                "workflow_id": "#V#prediction_workflow",
+                "namespace": "#V#prediction_user/#V#org_b",
+            },
+        ).payload
+        accepted = gateway.invoke(
+            "workflow_build_prediction_envelope",
+            {"workflow_id": "#V#prediction_workflow"},
+        ).payload
+
+    assert forged["success"] is False
+    assert forged["error_code"] == "workflow_actor_scope_mismatch"
+    assert accepted["success"] is True
+    assert calls == [
+        {
+            "workflow_id": "#V#prediction_workflow",
+            "namespace": "#V#prediction_user@org_a",
+            "model": None,
+            "provider": None,
+            "limit": 50,
+        }
+    ]
 
 
 def test_workflow_create_instance_preserves_event_idempotency_submission(monkeypatch):
@@ -2212,6 +2811,31 @@ def test_workflow_concept_parity_audit_gateway_invoke_success_path(monkeypatch):
     assert payload.get("concepts", [])[0]["diagnostic_state"] == "authority_drift"
 
 
+@pytest.mark.parametrize(
+    "tool_name,payload",
+    [
+        ("workflow_mcp_health_check", {"include_introspection": False}),
+        ("workflow_materialisation_diagnostics", {}),
+        ("workflow_concept_parity_audit", {}),
+    ],
+)
+def test_authenticated_actor_cannot_read_global_workflow_control_diagnostics(
+    tool_name,
+    payload,
+):
+    from src.backend.security import access_control
+
+    gateway = _build_gateway()
+    with access_control.override_current_actor(
+        user_concept_id="#V#ordinary_user",
+        organisation_concept_id="#V#ordinary_org",
+    ):
+        result = gateway.invoke(tool_name, payload).payload
+
+    assert result["success"] is False
+    assert result["error_code"] == "workflow_global_admin_authority_required"
+
+
 def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
     methods = set(build_default_catalogue().list_methods())
     tracked = set(tracked_workflow_surface_tool_names())
@@ -2377,6 +3001,63 @@ def test_workflow_event_binding_enable_disable_and_delete_gateway_paths(monkeypa
     assert missing.get("error_code") == "not_found"
 
 
+def test_authenticated_actor_cannot_inspect_or_mutate_global_event_bindings(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+
+    manager = _StubWorkflowManager()
+    _patch_read_only_registry(monkeypatch, "#V#shared_workflow")
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.get_instance_manager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+    created = gateway.invoke(
+        "workflow_bind_event",
+        {
+            "event_type": "shared.event",
+            "workflow_id": "#V#shared_workflow",
+        },
+    ).payload
+    binding_id = created["binding"]["binding_id"]
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#ordinary_user",
+        organisation_concept_id="#V#shared_org",
+    ):
+        results = [
+            gateway.invoke("workflow_list_event_bindings", {}).payload,
+            gateway.invoke(
+                "workflow_bind_event",
+                {
+                    "event_type": "other.event",
+                    "workflow_id": "#V#shared_workflow",
+                },
+            ).payload,
+            gateway.invoke(
+                "workflow_set_event_binding_enabled",
+                {"binding_id": binding_id, "enabled": False},
+            ).payload,
+            gateway.invoke(
+                "workflow_delete_event_binding",
+                {"binding_id": binding_id},
+            ).payload,
+        ]
+
+    assert all(result["success"] is False for result in results)
+    assert all(
+        result["error_code"] == "workflow_global_admin_authority_required"
+        for result in results
+    )
+    assert manager.get_event_binding(binding_id) is not None
+    assert manager.get_event_binding(binding_id).enabled is True
+
+
 def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     manager = _InMemoryScheduleWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
@@ -2424,6 +3105,270 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     assert trigger_result.get("schedule_id") == schedule_id
     assert trigger_result.get("status") == "triggered"
     assert len(manager.instances) == 2
+
+
+def test_ordinary_actor_cannot_access_unowned_experiment_or_turn_control_records():
+    from src.backend.security import access_control
+
+    catalogue = build_default_catalogue()
+    calls = [
+        ("testing_theory_create_slice", {"name": "guessed theory"}),
+        (
+            "testing_theory_import_canonical_context",
+            {"theory_id": "guessed-theory"},
+        ),
+        (
+            "testing_theory_assert_local_claims",
+            {"theory_id": "guessed-theory", "claims": []},
+        ),
+        ("testing_theory_compute_diff", {"theory_id": "guessed-theory"}),
+        (
+            "testing_theory_rollback_local_writes",
+            {"theory_id": "guessed-theory"},
+        ),
+        (
+            "testing_theory_promote_validated_claims",
+            {"theory_id": "guessed-theory"},
+        ),
+        ("testing_theory_gc_expired", {}),
+        ("experiment_run_list", {}),
+        ("experiment_run_get", {"run_id": "guessed-run"}),
+        ("experiment_create_spec", {"name": "guessed experiment"}),
+        ("experiment_start_run", {"experiment_spec_id": "guessed-spec"}),
+        ("experiment_record_observation", {"run_id": "guessed-run"}),
+        ("experiment_compute_verdict", {"run_id": "guessed-run"}),
+        ("experiment_emit_learning_signal", {"run_id": "guessed-run"}),
+        (
+            "experiment_execute_target_workflow",
+            {"workflow_id": "#V#guessed_workflow"},
+        ),
+        ("experiment_execute_regression_suite", {}),
+        ("testing_prepare_experiment_spec", {}),
+        ("testing_prepare_meeting_invitation_spec", {}),
+        ("testing_prepare_arxiv_paper_ingestion_fixture", {}),
+        ("testing_verify_arxiv_paper_ingestion_result", {}),
+        (
+            "testing_cleanup_arxiv_paper_ingestion_artifacts",
+            {"paper_concept_id": "#V#guessed_paper"},
+        ),
+        ("chat_history_get_segments", {"session_id": "guessed-session"}),
+        (
+            "chat_history_get_debug_entry",
+            {"session_id": "guessed-session", "history_index": 0},
+        ),
+        (
+            "conversation_telemetry_get_locator",
+            {"session_id": "guessed-session"},
+        ),
+        ("turn_execution_list", {}),
+        ("turn_execution_get", {"request_id": "guessed-turn"}),
+        ("turn_execution_get_diagnostics", {"request_id": "guessed-turn"}),
+        ("turn_execution_get_live_progress", {"request_id": "guessed-turn"}),
+        ("turn_execution_get_critic_bundle", {"request_id": "guessed-turn"}),
+        ("turn_execution_search_failures", {}),
+    ]
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#ordinary_user",
+        organisation_concept_id="#V#ordinary_org",
+    ):
+        results = [catalogue.get(name).handler(**arguments) for name, arguments in calls]
+
+    assert all(result["success"] is False for result in results)
+    assert {
+        result["error_code"] for result in results
+    } == {"workflow_global_admin_authority_required"}
+
+
+def test_trusted_operator_gateway_retains_testing_control_plane_access(monkeypatch):
+    from src.backend.services import (
+        arxiv_ingestion_testing_service,
+        experiment_run_service,
+        testing_theory_service,
+    )
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        testing_theory_service,
+        "create_testing_theory_slice",
+        lambda **_kwargs: calls.append("theory")
+        or {"success": True, "theory_id": "#V#operator_theory"},
+    )
+    monkeypatch.setattr(
+        experiment_run_service,
+        "create_experiment_spec",
+        lambda **_kwargs: calls.append("experiment")
+        or {"success": True, "experiment_spec_id": "#V#operator_spec"},
+    )
+    monkeypatch.setattr(
+        arxiv_ingestion_testing_service,
+        "cleanup_arxiv_paper_ingestion_test_artifacts",
+        lambda **_kwargs: calls.append("cleanup")
+        or {"success": True, "cleanup_passed": True},
+    )
+
+    gateway = _build_gateway()
+    results = [
+        gateway.invoke(
+            "testing_theory_create_slice",
+            {"name": "Operator theory"},
+        ).payload,
+        gateway.invoke(
+            "experiment_create_spec",
+            {"name": "Operator experiment"},
+        ).payload,
+        gateway.invoke(
+            "testing_cleanup_arxiv_paper_ingestion_artifacts",
+            {"paper_concept_id": "#V#operator_fixture"},
+        ).payload,
+    ]
+
+    assert all(result["success"] is True for result in results)
+    assert calls == ["theory", "experiment", "cleanup"]
+
+
+def test_revoked_workflow_visibility_hides_persisted_instances_and_schedules(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+
+    instance_manager = _StubWorkflowManager()
+    instance_id = instance_manager.create_instance(
+        "#V#revoked_workflow",
+        user_id="#V#actor",
+        org_id="#V#org",
+        namespace="#V#actor@org",
+    )
+    schedule_manager = _InMemoryScheduleWorkflowManager()
+    schedule = WorkflowSchedule.create_interval(
+        "#V#revoked_workflow",
+        interval_seconds=60,
+        user_id="#V#actor",
+        org_id="#V#org",
+        namespace="#V#actor@org",
+    )
+    schedule_manager.create_schedule(schedule)
+
+    managers = iter([instance_manager, instance_manager, schedule_manager, schedule_manager])
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: next(managers),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
+        lambda _workflow_ids: [],
+    )
+    catalogue = build_default_catalogue()
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#actor",
+        organisation_concept_id="#V#org",
+    ):
+        instance_list = catalogue.get("workflow_list_instances").handler()
+        instance_detail = catalogue.get("workflow_get_instance").handler(
+            instance_id=instance_id
+        )
+        schedule_list = catalogue.get("workflow_list_schedules").handler()
+        schedule_detail = catalogue.get("workflow_get_schedule").handler(
+            schedule_id=schedule.schedule_id
+        )
+
+    assert instance_list == {"success": True, "instances": [], "count": 0}
+    assert instance_detail["success"] is False
+    assert instance_detail["error_code"] == "not_found"
+    assert schedule_list == {"success": True, "schedules": [], "count": 0}
+    assert schedule_detail["success"] is False
+    assert schedule_detail["error_code"] == "not_found"
+
+
+def test_workflow_schedule_tools_are_exactly_scoped_to_preexisting_actor(monkeypatch):
+    from src.backend.security import access_control
+
+    manager = _InMemoryScheduleWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+    base_arguments = {
+        "workflow_id": "#V#enrichment_workflow",
+        "schedule_type": "interval",
+        "interval_seconds": 60,
+        "user_id": "#V#shared_user",
+    }
+    own_result = gateway.invoke(
+        "workflow_create_schedule",
+        {
+            **base_arguments,
+            "org_id": "#V#own_org",
+            "namespace": "#V#shared_user@own_org",
+        },
+    ).payload
+    foreign_result = gateway.invoke(
+        "workflow_create_schedule",
+        {
+            **base_arguments,
+            "org_id": "#V#foreign_org",
+            "namespace": "#V#shared_user@foreign_org",
+        },
+    ).payload
+
+    assert own_result["success"] is True
+    assert foreign_result["success"] is True
+    own_schedule_id = own_result["schedule_id"]
+    foreign_schedule_id = foreign_result["schedule_id"]
+
+    # Explicitly trusted, in-process operator calls retain their legacy
+    # payload-authority fallback for administrative schedule access.
+    trusted_detail = gateway.invoke(
+        "workflow_get_schedule",
+        {"schedule_id": foreign_schedule_id},
+    ).payload
+    assert trusted_detail["success"] is True
+    assert trusted_detail["schedule_id"] == foreign_schedule_id
+
+    submission_path = (
+        "src.backend.workflows.durable.workflow_instance_submission_service."
+        "submit_verified_workflow_instance"
+    )
+    with patch(submission_path) as submit:
+        with access_control.override_current_actor(
+            user_concept_id="#V#shared_user",
+            organisation_concept_id="#V#own_org",
+        ):
+            listed = gateway.invoke("workflow_list_schedules", {}).payload
+            denied_results = [
+                gateway.invoke(
+                    "workflow_get_schedule",
+                    {"schedule_id": foreign_schedule_id},
+                ).payload,
+                gateway.invoke(
+                    "workflow_set_schedule_enabled",
+                    {"schedule_id": foreign_schedule_id, "enabled": False},
+                ).payload,
+                gateway.invoke(
+                    "workflow_delete_schedule",
+                    {"schedule_id": foreign_schedule_id},
+                ).payload,
+                gateway.invoke(
+                    "workflow_trigger_schedule",
+                    {"schedule_id": foreign_schedule_id},
+                ).payload,
+            ]
+
+    assert listed["success"] is True
+    assert [item["schedule_id"] for item in listed["schedules"]] == [
+        own_schedule_id
+    ]
+    for result in denied_results:
+        assert result["success"] is False
+        assert result["error_code"] == "workflow_actor_scope_mismatch"
+        assert set(result["error_details"]["mismatch_fields"]) == {
+            "org_id",
+            "namespace",
+        }
+    submit.assert_not_called()
+    assert foreign_schedule_id in manager.schedules
 
 
 def test_workflow_schedule_execute_checkpoint_fail_retry_resume(monkeypatch):
@@ -2493,6 +3438,10 @@ def test_workflow_schedule_execute_checkpoint_fail_retry_resume(monkeypatch):
 
 def test_workflow_trigger_schedule_rejects_unrunnable_workflow(monkeypatch):
     manager = _InMemoryScheduleWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,

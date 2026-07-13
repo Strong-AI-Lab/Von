@@ -209,6 +209,84 @@ def test_workflow_mcp_action_strips_explicit_namespace_for_strict_schema():
     assert gateway.invocations == [("strict_tool", {"profile": "zhan-gmail"})]
 
 
+def test_workflow_mcp_action_overwrites_actor_claims_and_binds_ambient_actor():
+    observed_ambient: list[tuple[str | None, str | None]] = []
+
+    def _payload_factory(_tool_name, payload):
+        from src.backend.security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
+
+        observed_ambient.append(
+            (
+                get_effective_user_concept_id(),
+                get_effective_organisation_concept_id(),
+            )
+        )
+        return {"success": True, "payload": payload}
+
+    actor_schema = Schema(
+        required={},
+        optional={
+            "user_id": str,
+            "user_concept_id": str,
+            "org_id": str,
+            "organisation_concept_id": str,
+            "namespace": str,
+            "user_namespace": str,
+        },
+        allow_unknown=False,
+    )
+    gateway = _SchemaAwareGateway(
+        category="read",
+        input_schema=actor_schema,
+        payload_factory=_payload_factory,
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "strict_tool",
+            "tool_arguments": {
+                "user_id": "#V#forged_user",
+                "user_concept_id": "#V#forged_user",
+                "org_id": "#V#forged_org",
+                "organisation_concept_id": "#V#forged_org",
+                "namespace": "#V#forged_user@forged_org",
+                "user_namespace": "#V#forged_user@forged_org",
+            },
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#trusted_user@trusted_org",
+            user_concept_id="#V#trusted_user",
+            org_concept_id="#V#trusted_org",
+        ),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["workflow_actor_scope_enforced"] is True
+    assert gateway.invocations == [
+        (
+            "strict_tool",
+            {
+                "user_id": "#V#trusted_user",
+                "user_concept_id": "#V#trusted_user",
+                "org_id": "#V#trusted_org",
+                "organisation_concept_id": "#V#trusted_org",
+                "namespace": "#V#trusted_user@trusted_org",
+                "user_namespace": "#V#trusted_user@trusted_org",
+            },
+        )
+    ]
+    assert observed_ambient == [("#V#trusted_user", "#V#trusted_org")]
+
+
 def test_workflow_mcp_action_injects_default_gmail_profile_for_strict_schema():
     strict_schema = Schema(required={"profile": str}, optional={}, allow_unknown=False)
     gateway = _SchemaAwareGateway(
@@ -985,7 +1063,7 @@ def _patch_workflow_studio_runtime(monkeypatch, *, method_metadata):
 
     monkeypatch.setattr(
         studio_mod,
-        "_load_runtime_definition",
+        "_load_authoring_runtime_definition",
         lambda _workflow_id: (None, "unknown", object()),
     )
     monkeypatch.setattr(

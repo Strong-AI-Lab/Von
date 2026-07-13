@@ -1299,6 +1299,7 @@ def _build_source_neutral_execution_registry(
     *,
     parent_definition: WorkflowDefinition,
     item_definition: WorkflowDefinition,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[ActionRegistry, list[dict[str, Any]]]:
     calls: list[dict[str, Any]] = []
     child_definitions = {
@@ -1322,6 +1323,31 @@ def _build_source_neutral_execution_registry(
 
     def _loader(workflow_id: str) -> WorkflowDefinition | None:
         return child_definitions.get(workflow_id)
+
+    def _actor_scoped_resolver(
+        workflow_id: str,
+        **_kwargs: Any,
+    ) -> registry_factory.WorkflowDefinitionAuthorityResolution:
+        definition = child_definitions.get(workflow_id)
+        return registry_factory.WorkflowDefinitionAuthorityResolution(
+            workflow_id=workflow_id,
+            registry=None,
+            registration=None,
+            definition=definition,
+            registration_source="vontology" if definition is not None else "unknown",
+            known_workflow_ids=(),
+            error_code=None if definition is not None else "workflow_concept_not_accessible",
+            diagnostics={
+                "actor_scoped_authority_required": True,
+                "shared_registry_definition_trusted": False,
+            },
+        )
+
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_definition_from_authority",
+        _actor_scoped_resolver,
+    )
 
     registry = ActionRegistry()
     register_control_flow_actions(registry, definition_loader=_loader)
@@ -1388,12 +1414,14 @@ def _load_source_neutral_test_definitions() -> tuple[WorkflowDefinition, Workflo
 
 def test_source_neutral_paper_reference_workflow_fans_out_mixed_references_with_partial_success(
     _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
         item_definition=item_definition,
+        monkeypatch=monkeypatch,
     )
 
     result = WorkflowExecutor(registry=registry, max_transitions=10).run(
@@ -1469,12 +1497,14 @@ def test_source_neutral_paper_reference_workflow_fans_out_mixed_references_with_
 
 def test_source_neutral_paper_reference_workflow_preview_mode_does_not_delegate(
     _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
         item_definition=item_definition,
+        monkeypatch=monkeypatch,
     )
 
     result = WorkflowExecutor(registry=registry, max_transitions=10).run(
@@ -1510,12 +1540,14 @@ def test_source_neutral_paper_reference_workflow_preview_mode_does_not_delegate(
 
 def test_source_neutral_paper_reference_workflow_fails_closed_without_references(
     _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bootstrap_canonical_paper_representation_workflows()
     parent_definition, item_definition = _load_source_neutral_test_definitions()
     registry, _calls = _build_source_neutral_execution_registry(
         parent_definition=parent_definition,
         item_definition=item_definition,
+        monkeypatch=monkeypatch,
     )
 
     result = WorkflowExecutor(registry=registry, max_transitions=10).run(

@@ -929,7 +929,27 @@ def _discover_turn_workflows_for_durable_action(
     if not isinstance(discovery, Mapping) or not discovery:
         discovery = request.data.get("workflow_discovery")
     if isinstance(discovery, Mapping) and discovery:
-        reused = dict(discovery)
+        from ...services.workflow_discovery_access_service import (
+            WorkflowDiscoveryActorScopeError,
+            bind_workflow_discovery_actor,
+            build_workflow_discovery_actor_scope_failure,
+            project_workflow_discovery_payload_for_current_actor,
+        )
+
+        try:
+            with bind_workflow_discovery_actor(
+                request.environment.user_namespace
+            ):
+                reused = project_workflow_discovery_payload_for_current_actor(
+                    discovery
+                )
+        except WorkflowDiscoveryActorScopeError as exc:
+            reused = build_workflow_discovery_actor_scope_failure(
+                query=_build_turn_primary_discovery_query_text(request.data),
+                requested_query=_normalise_turn_prompt(request.data),
+                reason=exc.reason,
+                origin="durable_action_carried_workflow_discovery_actor_scope_rejected",
+            )
         prior_origin = reused.get("discovery_payload_origin")
         if isinstance(prior_origin, str) and prior_origin.strip():
             reused.setdefault("discovery_payload_origin_prior", prior_origin)

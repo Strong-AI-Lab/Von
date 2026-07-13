@@ -60,7 +60,7 @@ def create_durable_executor(
 
 def create_worker(
     registry: Any,  # ActionRegistry
-    definition_loader: Callable[[str], Any],  # WorkflowDefinitionLoader
+    definition_loader: Callable[..., Any],  # WorkflowDefinitionLoader
     *,
     instance_manager: WorkflowInstanceManager | None = None,
     worker_id: str | None = None,
@@ -110,7 +110,7 @@ def create_scheduler(
 
 def start_worker_and_scheduler(
     registry: Any,
-    definition_loader: Callable[[str], Any],
+    definition_loader: Callable[..., Any],
     *,
     instance_manager: WorkflowInstanceManager | None = None,
     enable_worker: bool = True,

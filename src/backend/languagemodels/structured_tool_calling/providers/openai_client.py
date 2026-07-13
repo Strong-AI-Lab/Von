@@ -79,12 +79,16 @@ class OpenAIClient(LLMClient):
                         model=request_model,
                     )
                 )
-            if tools and "reasoning_effort" in request_kwargs:
+            if (
+                tools
+                and "reasoning_effort" in request_kwargs
+                and request_kwargs.get("reasoning_effort") != "none"
+            ):
                 request_kwargs.pop("reasoning_effort", None)
                 logger.info(
-                    "Omitting reasoning_effort for OpenAI Chat Completions "
-                    "structured tool call; stored model effort remains available "
-                    "on compatible API surfaces."
+                    "Omitting non-zero reasoning_effort for OpenAI Chat "
+                    "Completions structured tool call; stored model effort "
+                    "remains available on compatible API surfaces."
                 )
 
             # Only pass temperature if the model supports it and a value is set

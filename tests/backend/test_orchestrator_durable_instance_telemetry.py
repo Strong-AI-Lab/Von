@@ -8,6 +8,7 @@ import pytest
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.security.access_control import override_current_actor
 from src.backend.workflows.durable.workflow_instance_submission_service import (
     WorkflowInstanceSubmissionResult,
 )
@@ -20,6 +21,14 @@ from src.backend.workflows.workflow_launch_input_contracts import (
     WORKFLOW_REQUIRED_ACTOR_CONTEXT_MISSING,
 )
 from src.backend.workflows.workflow_registry import WorkflowRegistration
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_workflow_actor():
+    """Direct execution tests model an authenticated parent actor."""
+
+    with override_current_actor("#V#user", "#V#org"):
+        yield
 
 
 class _DummyGateway:
@@ -68,7 +77,26 @@ class _FakeWorkflowInstanceManager:
 
 
 def _build_orchestrator() -> InternalMCPChatOrchestrator:
-    return InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+
+    def _resolve_registered_test_definition(
+        workflow_id: str | None,
+        **_kwargs: Any,
+    ):
+        if not isinstance(workflow_id, str):
+            return None, None
+        registration = orchestrator._workflow_registry.get_registration(workflow_id)
+        return (
+            registration,
+            registration.definition if registration is not None else None,
+        )
+
+    # These tests exercise durable telemetry around deliberately in-memory
+    # definitions. Production authority resolution is covered separately.
+    orchestrator._resolve_workflow_registration_and_definition = (  # type: ignore[method-assign]
+        _resolve_registered_test_definition
+    )
+    return orchestrator
 
 
 def _register_test_workflow(
@@ -1010,20 +1038,21 @@ def test_execute_workflow_fails_closed_when_actor_context_unresolved(
 
     monkeypatch.setattr(orchestrator._workflow_executor, "run", _unexpected_run)
 
-    result = orchestrator.execute_workflow(
-        workflow_id,
-        data={
-            "prompt": "Run the authenticated workflow without identity context.",
-            "conversation_session_id": "chat-actor-fail",
-            "turn_id": "turn-actor-fail",
-        },
-        llm_client=object(),
-        model="test-model",
-        user_namespace=None,
-        conversation_session_id="chat-actor-fail",
-        turn_id="turn-actor-fail",
-        episode_source="chat_turn_workflow",
-    )
+    with override_current_actor(None, None):
+        result = orchestrator.execute_workflow(
+            workflow_id,
+            data={
+                "prompt": "Run the authenticated workflow without identity context.",
+                "conversation_session_id": "chat-actor-fail",
+                "turn_id": "turn-actor-fail",
+            },
+            llm_client=object(),
+            model="test-model",
+            user_namespace=None,
+            conversation_session_id="chat-actor-fail",
+            turn_id="turn-actor-fail",
+            episode_source="chat_turn_workflow",
+        )
 
     assert result is not None
     assert result.completed is False
@@ -1070,22 +1099,23 @@ def test_execute_workflow_creates_durable_instance_for_user_only_namespace(
         ),
     )
 
-    result = orchestrator.execute_workflow(
-        "#V#user_only_namespace_workflow",
-        data={
-            "prompt": "Run in a user-only namespace.",
-            "user_concept_id": "#V#user_only",
-            "conversation_session_id": "chat-user-only",
-            "turn_id": "turn-user-only",
-            "aux_llm_calls": [],
-        },
-        llm_client=object(),
-        model="test-model",
-        user_namespace="#V#user_only",
-        conversation_session_id="chat-user-only",
-        turn_id="turn-user-only",
-        episode_source="chat_turn_workflow",
-    )
+    with override_current_actor("#V#user_only", None):
+        result = orchestrator.execute_workflow(
+            "#V#user_only_namespace_workflow",
+            data={
+                "prompt": "Run in a user-only namespace.",
+                "user_concept_id": "#V#user_only",
+                "conversation_session_id": "chat-user-only",
+                "turn_id": "turn-user-only",
+                "aux_llm_calls": [],
+            },
+            llm_client=object(),
+            model="test-model",
+            user_namespace="#V#user_only",
+            conversation_session_id="chat-user-only",
+            turn_id="turn-user-only",
+            episode_source="chat_turn_workflow",
+        )
 
     assert result is not None
     assert len(fake_manager.create_for_event_calls) == 1

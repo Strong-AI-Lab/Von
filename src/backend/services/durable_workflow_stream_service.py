@@ -72,12 +72,15 @@ class WorkflowSubscriber:
     workflow_id: str | None = None
     instance_id: str | None = None
     statuses: set[str] | None = None
+    allowed_workflow_ids: set[str] | None = None
     event_queue: "queue.Queue[Optional[WorkflowStatusEvent]]" = field(
         default_factory=lambda: queue.Queue(maxsize=200)
     )
     connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def matches(self, event: WorkflowStatusEvent) -> bool:
+        if not _workflow_currently_visible_to_subscriber(self, event.workflow_id):
+            return False
         if self.instance_id and self.instance_id != event.instance_id:
             return False
         if self.workflow_id and self.workflow_id != event.workflow_id:
@@ -91,6 +94,41 @@ class WorkflowSubscriber:
         if self.statuses and event.status not in self.statuses:
             return False
         return True
+
+
+def _workflow_currently_visible_to_subscriber(
+    subscriber: WorkflowSubscriber,
+    workflow_id: str,
+) -> bool:
+    """Revalidate workflow visibility for every emitted event.
+
+    ``allowed_workflow_ids`` is the subscription-time upper bound.  It must not
+    become a durable capability after visibility is revoked, so actor-scoped
+    concept authority is consulted again before each event is queued.  Any
+    authority-store failure is treated as non-visible for this derived stream.
+    """
+
+    if subscriber.allowed_workflow_ids is None:
+        return True
+    if workflow_id not in subscriber.allowed_workflow_ids:
+        return False
+    try:
+        from src.backend.security.access_control import override_current_actor
+        from src.backend.workflows.workflow_listing_service import (
+            filter_workflow_ids_for_current_actor,
+        )
+
+        with override_current_actor(subscriber.user_id, subscriber.org_id):
+            return workflow_id in set(
+                filter_workflow_ids_for_current_actor([workflow_id])
+            )
+    except Exception as exc:
+        logger.warning(
+            "[workflow_stream] Current workflow visibility unavailable for %s: %s",
+            workflow_id,
+            exc,
+        )
+        return False
 
 
 class DurableWorkflowStreamService:
@@ -152,6 +190,7 @@ class DurableWorkflowStreamService:
         workflow_id: str | None = None,
         instance_id: str | None = None,
         statuses: set[str] | None = None,
+        allowed_workflow_ids: set[str] | None = None,
     ) -> WorkflowSubscriber:
         subscriber = WorkflowSubscriber(
             subscriber_id=str(uuid.uuid4()),
@@ -161,6 +200,11 @@ class DurableWorkflowStreamService:
             workflow_id=workflow_id,
             instance_id=instance_id,
             statuses=statuses,
+            allowed_workflow_ids=(
+                set(allowed_workflow_ids)
+                if allowed_workflow_ids is not None
+                else None
+            ),
         )
         with self._subscribers_lock:
             self._subscribers.append(subscriber)

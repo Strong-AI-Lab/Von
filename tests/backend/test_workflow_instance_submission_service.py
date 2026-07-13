@@ -88,8 +88,9 @@ def _make_registry(
     registry.get.side_effect = lambda item: definitions.get(item)
     registry.all_workflow_ids.return_value = list(definitions.keys())
     registration = MagicMock()
-    registration.source = "vontology"
+    registration.source = "repo_seed_agent_test"
     registry.get_registration.return_value = registration
+    registry.peek_registration.return_value = registration
     return registry
 
 
@@ -1144,7 +1145,7 @@ def test_verify_workflow_runnable_reports_unresolved_subworkflow_contract() -> N
         "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.load_workflow_definition_from_vontology",
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
         return_value=None,
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
@@ -1238,7 +1239,7 @@ def test_verify_workflow_runnable_accepts_resolved_subworkflow_contract() -> Non
         "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.load_workflow_definition_from_vontology",
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
         side_effect=lambda workflow_id: definitions.get(workflow_id),
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
@@ -1260,6 +1261,9 @@ def test_submit_verified_workflow_instance_uses_event_idempotent_creation() -> N
     ) as mock_verify, patch(
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
+        return_value=definition,
     ):
         result = submit_verified_workflow_instance(
             manager=manager,
@@ -1305,6 +1309,9 @@ def test_submit_verified_workflow_instance_throttles_event_backlog(
     ), patch(
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
+        return_value=definition,
     ):
         result = submit_verified_workflow_instance(
             manager=manager,
@@ -1338,6 +1345,9 @@ def test_submit_verified_workflow_instance_preserves_idempotent_reuse_without_po
     ) as mock_verify, patch(
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
+        return_value=definition,
     ):
         result = submit_verified_workflow_instance(
             manager=manager,
@@ -1402,6 +1412,9 @@ def test_submit_verified_workflow_instance_supports_user_only_namespace() -> Non
     ), patch(
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
+        return_value=definition,
     ):
         result = submit_verified_workflow_instance(
             manager=manager,
@@ -1450,6 +1463,9 @@ def test_submit_verified_workflow_instance_applies_launch_input_contract() -> No
     ), patch(
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
+        return_value=definition,
     ):
         result = submit_verified_workflow_instance(
             manager=manager,
@@ -1516,6 +1532,9 @@ def test_submit_verified_workflow_instance_binds_authenticated_actor_context() -
     ), patch(
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
+        return_value=definition,
     ):
         result = submit_verified_workflow_instance(
             manager=manager,
@@ -1523,14 +1542,41 @@ def test_submit_verified_workflow_instance_binds_authenticated_actor_context() -
             user_id="#V#user_alice",
             org_id="#V#org_nao",
             namespace="#V#user_alice@org_nao",
-            inputs={"dry_run": True},
+            inputs={
+                "dry_run": True,
+                "user_concept_id": "#V#forged_user",
+                "org_concept_id": "#V#forged_org",
+                "organisation_concept_id": "#V#forged_org",
+                "namespace": "#V#forged_user@forged_org",
+                "user_namespace": "#V#forged_user@forged_org",
+            },
         )
 
     assert result.success is True
     create_inputs = manager.create_instance.call_args.kwargs["inputs"]
     assert create_inputs["actor_concept_id"] == "#V#user_alice"
     assert create_inputs["organisation_concept_id"] == "#V#org_nao"
+    assert create_inputs["user_concept_id"] == "#V#user_alice"
+    assert create_inputs["org_concept_id"] == "#V#org_nao"
     assert create_inputs["namespace"] == "#V#user_alice@org_nao"
+    assert create_inputs["user_namespace"] == "#V#user_alice@org_nao"
+    assert result.verification["workflow_actor_input_projection"] == {
+        "schema_version": "workflow_actor_input_projection.v1",
+        "authoritative_fields": [
+            "namespace",
+            "org_concept_id",
+            "organisation_concept_id",
+            "user_concept_id",
+            "user_namespace",
+        ],
+        "overridden_fields": [
+            "namespace",
+            "org_concept_id",
+            "organisation_concept_id",
+            "user_concept_id",
+            "user_namespace",
+        ],
+    }
     resolution = create_inputs["workflow_launch_input_resolution"]
     assert resolution["status"] == "resolved"
     assert resolution["actor_context_binding"] == {
@@ -1573,6 +1619,9 @@ def test_submit_verified_workflow_instance_rejects_unresolved_required_launch_in
     ), patch(
         "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.load_workflow_definition_from_vontology",
+        return_value=definition,
     ):
         result = submit_verified_workflow_instance(
             manager=manager,

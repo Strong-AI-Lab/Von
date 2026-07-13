@@ -24,12 +24,50 @@ _ACTOR_CONTEXT_SOURCE: ContextVar[str | None] = ContextVar(
     "internal_mcp_actor_context_source",
     default=None,
 )
+_PREEXISTING_ACTOR_CONTEXT: ContextVar[
+    tuple[str | None, str | None] | None
+] = ContextVar(
+    "internal_mcp_preexisting_actor_context",
+    default=None,
+)
 
 
 def get_internal_mcp_actor_context_source() -> str | None:
     """Return whether the active actor pre-existed or came from tool payload."""
 
     return _ACTOR_CONTEXT_SOURCE.get()
+
+
+def get_internal_mcp_preexisting_actor_context() -> (
+    tuple[str | None, str | None] | None
+):
+    """Return actor authority present before tool-payload fallback was applied."""
+
+    return _PREEXISTING_ACTOR_CONTEXT.get()
+
+
+@contextmanager
+def bind_internal_mcp_actor_context_source(
+    source: str,
+    *,
+    preexisting_actor_context: tuple[str | None, str | None] | None = None,
+) -> Iterator[None]:
+    """Mark a non-gateway proxy with the same bounded actor provenance.
+
+    Some compatibility surfaces call catalogue handlers directly. Sensitive
+    handlers still need to distinguish unauthenticated payload claims from an
+    actor that existed before the tool call, so those proxies must bind this
+    provenance explicitly rather than being mistaken for trusted in-process
+    calls.
+    """
+
+    source_token = _ACTOR_CONTEXT_SOURCE.set(str(source or "").strip() or None)
+    actor_token = _PREEXISTING_ACTOR_CONTEXT.set(preexisting_actor_context)
+    try:
+        yield
+    finally:
+        _PREEXISTING_ACTOR_CONTEXT.reset(actor_token)
+        _ACTOR_CONTEXT_SOURCE.reset(source_token)
 
 
 class GatewayDisabledError(RuntimeError):
@@ -154,11 +192,15 @@ class InternalMCPGateway:
         transport: InternalMCPTransport,
         enabled: bool = False,
         log_tag: str = _LOG_TAG,
+        trusted_actor_payload_fallback: bool = False,
     ) -> None:
         self._catalogue = catalogue
         self._transport = transport
         self._enabled = bool(enabled)
         self._log_tag = log_tag
+        self._trusted_actor_payload_fallback = bool(
+            trusted_actor_payload_fallback
+        )
         self._total_calls = 0
         self._total_failures = 0
         self._method_metrics: Dict[str, MethodMetrics] = {
@@ -291,14 +333,32 @@ class InternalMCPGateway:
             payload_user_id, payload_org_id = self._resolve_access_actor_context(
                 payload_dict
             )
-            user_id = existing_user_id or payload_user_id
-            org_id = existing_org_id or payload_org_id
+            preexisting_actor_context = (
+                (existing_user_id, existing_org_id)
+                if existing_user_id or existing_org_id
+                else None
+            )
+            if preexisting_actor_context is not None:
+                # Ambient authentication/workflow authority is one indivisible
+                # actor scope.  Do not let a tool payload fill a missing user or
+                # organisation component and thereby widen access for listing,
+                # discovery, or any other handler that consumes the context.
+                user_id, org_id = preexisting_actor_context
+            else:
+                user_id, org_id = payload_user_id, payload_org_id
             actor_source = (
                 "preexisting_authenticated_or_workflow_context"
-                if existing_user_id and existing_org_id
-                else "tool_payload_fallback"
+                if preexisting_actor_context is not None
+                else (
+                    "trusted_operator_payload_fallback"
+                    if self._trusted_actor_payload_fallback
+                    else "tool_payload_fallback"
+                )
             )
             actor_source_token = _ACTOR_CONTEXT_SOURCE.set(actor_source)
+            preexisting_actor_token = _PREEXISTING_ACTOR_CONTEXT.set(
+                preexisting_actor_context
+            )
             try:
                 with self._access_actor_context(user_id, org_id):
                     transport_result = self._transport.execute(
@@ -309,6 +369,7 @@ class InternalMCPGateway:
                         log_tag=self._log_tag,
                     )
             finally:
+                _PREEXISTING_ACTOR_CONTEXT.reset(preexisting_actor_token)
                 _ACTOR_CONTEXT_SOURCE.reset(actor_source_token)
         except Exception as exc:
             message = str(exc)

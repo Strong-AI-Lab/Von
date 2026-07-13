@@ -33,6 +33,15 @@ def _runtime_state(version: str) -> dict[str, Any]:
 def test_turn_workflow_discovery_memo_reuses_same_turn_query(
     monkeypatch,
 ) -> None:
+    mongomock = pytest.importorskip("mongomock")
+    collection = mongomock.MongoClient().db.concepts
+    collection.insert_one(
+        {"concept_id": "#V#represented_fact_workflow", "relationships": {}}
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_concepts_collection",
+        lambda: collection,
+    )
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
         lambda *, latency_sensitive=False: _runtime_state("v1"),
@@ -100,18 +109,18 @@ def test_turn_workflow_discovery_memo_separates_namespace(
 
     discover_workflows_for_turn_memoized(
         "Route this turn",
-        namespace="#V#user@org-a",
+        namespace="#V#user@org_a",
         turn_scope="turn-1",
         discovery_func=_discover,
     )
     discover_workflows_for_turn_memoized(
         "Route this turn",
-        namespace="#V#user@org-b",
+        namespace="#V#user@org_b",
         turn_scope="turn-1",
         discovery_func=_discover,
     )
 
-    assert calls == ["#V#user@org-a", "#V#user@org-b"]
+    assert calls == ["#V#user@org_a", "#V#user@org_b"]
 
 
 def test_turn_workflow_discovery_memo_invalidates_on_contract_change(

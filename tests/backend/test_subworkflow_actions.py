@@ -732,6 +732,15 @@ def test_subworkflow_action_uses_authority_resolver_with_actor_context(
 
     class _Resolution:
         definition = _child_success_definition()
+        error_code = None
+
+        @staticmethod
+        def to_dict():
+            return {
+                "workflow_id": "#V#child_success",
+                "success": True,
+                "registration_source": "vontology",
+            }
 
     def _resolve_from_authority(workflow_id: str, **kwargs):
         captured["workflow_id"] = workflow_id

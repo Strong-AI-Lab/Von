@@ -154,13 +154,23 @@ def main():
     logger.info("=" * 60)
 
     t0 = time.perf_counter()
-    result = orchestrator.execute_workflow(
-        TODO_REFRESH_WORKFLOW_ID,
-        data=data,
-        llm_client=llm_client,
-        model=model,
-        user_namespace=user_namespace,
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
     )
+
+    # This executable is an explicit local-operator gateway, not an
+    # authenticated user request. Mark that provenance rather than relying on
+    # execute_workflow to trust an unscoped namespace claim implicitly.
+    with bind_internal_mcp_actor_context_source(
+        "trusted_operator_payload_fallback"
+    ):
+        result = orchestrator.execute_workflow(
+            TODO_REFRESH_WORKFLOW_ID,
+            data=data,
+            llm_client=llm_client,
+            model=model,
+            user_namespace=user_namespace,
+        )
     elapsed = time.perf_counter() - t0
 
     # ---- Report ----

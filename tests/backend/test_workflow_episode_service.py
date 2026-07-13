@@ -310,6 +310,49 @@ def test_list_workflow_use_episodes_matches_equivalent_namespace_forms():
     assert episodes[0]["episode_id"] == created["episode_id"]
 
 
+def test_actor_scoped_episode_query_excludes_legacy_and_other_org_namespaces():
+    workflow_id = "#V#workflow_episode_strict_actor_scope"
+    namespaces = (
+        "#V#scope_user/#V#org_a",
+        "#V#scope_user/#V#org_b",
+        "#V#scope_user",
+        "#V#scope_user/default",
+    )
+    for index, namespace in enumerate(namespaces, start=1):
+        created = start_workflow_use_episode(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            stable_key=build_workflow_episode_stable_key(
+                workflow_id=workflow_id,
+                source="chat_turn_workflow",
+                turn_id=f"turn-strict-{index}",
+                stage="tool_calling",
+            ),
+            namespace=namespace,
+            turn_id=f"turn-strict-{index}",
+        )
+        assert created is not None
+
+    episodes = list_workflow_use_episodes(
+        workflow_ids=[workflow_id],
+        namespace="#V#scope_user@org_a",
+        strict_namespace_scope=True,
+        limit=20,
+    )
+    assert [episode["namespace"] for episode in episodes] == [
+        "#V#scope_user/#V#org_a"
+    ]
+    assert (
+        list_workflow_use_episodes(
+            workflow_ids=[],
+            namespace="#V#scope_user@org_a",
+            strict_namespace_scope=True,
+            limit=20,
+        )
+        == []
+    )
+
+
 def test_get_workflow_episode_counts_for_workflows_matches_namespace_equivalents():
     workflow_id = "#V#workflow_episode_counts_namespace_equivalence"
     stable_key = build_workflow_episode_stable_key(
@@ -336,6 +379,59 @@ def test_get_workflow_episode_counts_for_workflows_matches_namespace_equivalents
     )
     assert counts[workflow_id] == 1
     assert counts["#V#missing_workflow_id"] == 0
+
+
+def test_actor_scoped_usage_aggregates_do_not_use_global_workflow_totals():
+    workflow_id = "#V#workflow_actor_scoped_metrics"
+    episodes: list[tuple[str, str, bool]] = [
+        ("#V#same_user@org_a", "turn-org-a", True),
+        ("#V#same_user@org_b", "turn-org-b", False),
+    ]
+    for namespace, turn_id, completed in episodes:
+        stable_key = build_workflow_episode_stable_key(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            turn_id=turn_id,
+            session_id=f"session-{turn_id}",
+            stage="tool_calling",
+        )
+        created = start_workflow_use_episode(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            stable_key=stable_key,
+            namespace=namespace,
+            turn_id=turn_id,
+            session_id=f"session-{turn_id}",
+        )
+        assert created is not None
+        finalise_workflow_use_episode(
+            workflow_id=workflow_id,
+            stable_key=stable_key,
+            completed=completed,
+            terminal_stage="done",
+        )
+
+    aggregates = get_workflow_usage_aggregates_for_workflows(
+        [workflow_id],
+        namespace="#V#same_user@org_a",
+        strict_namespace_scope=True,
+    )
+    assert aggregates[workflow_id]["attempts"] == 1
+    assert aggregates[workflow_id]["completions"] == 1
+    assert aggregates[workflow_id]["completion_rate"] == 1.0
+
+    counts = get_workflow_episode_counts_for_workflows(
+        [workflow_id],
+        namespace="#V#same_user@org_a",
+        strict_namespace_scope=True,
+    )
+    assert counts[workflow_id] == 1
+
+    unscoped_strict = get_workflow_usage_aggregates_for_workflows(
+        [workflow_id],
+        strict_namespace_scope=True,
+    )
+    assert unscoped_strict[workflow_id]["attempts"] == 0
 
 
 def test_namespace_equivalence_includes_user_only_and_default_legacy_forms():

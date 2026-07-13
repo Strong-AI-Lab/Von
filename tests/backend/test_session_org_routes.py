@@ -86,6 +86,22 @@ def app_client(monkeypatch):
         "prompt_concept_health_status",
         lambda: {"available": True, "source_field": "stub"},
     )
+    import src.backend.services.organisation_membership_service as memberships
+
+    monkeypatch.setattr(
+        memberships,
+        "resolve_user_organisation_membership",
+        lambda user_concept_id, organisation_concept_id: {
+            "user_concept_id": user_concept_id,
+            "organisation_concept_id": organisation_concept_id,
+            "role": (
+                "admin"
+                if organisation_concept_id
+                == "#V#university_of_auckland_strong_ai_lab"
+                else "member"
+            ),
+        },
+    )
 
     app = utils_flask.create_flask_app(
         list_models_func=lambda: ["dummy-model"],
@@ -136,6 +152,33 @@ def test_set_organisation_updates_session_and_namespace(app_client):
         )
 
 
+def test_set_organisation_rejects_non_member_without_changing_session(
+    monkeypatch, app_client
+):
+    import src.backend.services.organisation_membership_service as memberships
+
+    _, client = app_client
+    monkeypatch.setattr(
+        memberships,
+        "resolve_user_organisation_membership",
+        lambda _user_concept_id, _organisation_concept_id: None,
+    )
+    with client.session_transaction() as sess:
+        sess["user_id"] = "outsider"
+        sess["user_concept_id"] = "#V#outsider"
+
+    resp = client.post(
+        "/von/api/session/set_organisation",
+        json={"organisation_concept_id": "university_of_auckland_strong_ai_lab"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.get_json()["error_code"] == "organisation_membership_required"
+    with client.session_transaction() as sess:
+        assert "organisation_concept_id" not in sess
+        assert "namespace" not in sess
+
+
 def test_set_organisation_validates_body(app_client):
     _, client = app_client
 
@@ -182,8 +225,22 @@ def test_get_session_context_derives_role_and_namespace_with_org(app_client):
     )
 
 
-def test_set_user_concept_updates_session_context_and_org_listing(app_client):
+def test_set_user_concept_updates_session_context_and_org_listing(
+    app_client,
+    monkeypatch,
+):
     _, client = app_client
+    import src.backend.services.settings_service as settings_service
+
+    monkeypatch.setattr(
+        settings_service,
+        "_find_user_concept_by_email",
+        lambda email: (
+            {"concept_id": "#V#lu_yunli"}
+            if email == "jeremyluyunli123@gmail.com"
+            else None
+        ),
+    )
 
     with client.session_transaction() as sess:
         sess["user_email"] = "jeremyluyunli123@gmail.com"
@@ -265,6 +322,33 @@ def test_set_user_concept_accepts_real_header_authenticated_identity(app_client)
     ctx_data = ctx.get_json()
     assert ctx_data["authenticated"] is True
     assert ctx_data["user_id"] == real_user_concept_id
+
+
+def test_set_user_concept_rejects_authenticated_actor_impersonation(app_client):
+    _, client = app_client
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = "user_a"
+        sess["user_concept_id"] = "#V#user_a"
+        sess["organisation_concept_id"] = "org_a"
+        sess["role_in_org"] = "owner"
+        sess["namespace"] = "#V#user_a@org_a"
+
+    response = client.post(
+        "/von/api/session/set_user_concept",
+        json={"user_concept_id": "#V#user_b"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "error": "authenticated_user_concept_mismatch",
+        "error_code": "authenticated_user_concept_mismatch",
+    }
+    with client.session_transaction() as sess:
+        assert sess["user_concept_id"] == "#V#user_a"
+        assert sess["organisation_concept_id"] == "org_a"
+        assert sess["role_in_org"] == "owner"
+        assert sess["namespace"] == "#V#user_a@org_a"
 
 
 def test_set_user_concept_preserves_window_scoped_org_namespace(app_client):

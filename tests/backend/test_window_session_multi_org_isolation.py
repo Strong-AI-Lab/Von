@@ -79,6 +79,22 @@ def app_client(monkeypatch):
         "prompt_concept_health_status",
         lambda: {"available": True, "source_field": "stub"},
     )
+    import src.backend.services.organisation_membership_service as memberships
+
+    monkeypatch.setattr(
+        memberships,
+        "resolve_user_organisation_membership",
+        lambda user_concept_id, organisation_concept_id: {
+            "user_concept_id": user_concept_id,
+            "organisation_concept_id": organisation_concept_id,
+            "role": (
+                "admin"
+                if organisation_concept_id
+                == "#V#university_of_auckland_strong_ai_lab"
+                else "member"
+            ),
+        },
+    )
 
     app = utils_flask.create_flask_app(
         list_models_func=lambda: ["dummy-model"],
@@ -673,6 +689,26 @@ class TestWindowSessionStoreIsolation:
         assert retrieved_b.organisation_concept_id == "org_b"
         assert retrieved_a.namespace != retrieved_b.namespace
 
+    def test_store_rejects_live_window_id_rebinding_between_users(self):
+        from src.backend.services.window_session_context_service import (
+            WindowSessionOwnershipError,
+            WindowSessionStore,
+        )
+
+        store = WindowSessionStore()
+        owner_ctx = store.get_or_create("shared_window", "#V#owner")
+        owner_ctx.organisation_concept_id = "owner_org"
+        owner_ctx.namespace = "#V#owner@owner_org"
+        store.set(owner_ctx)
+
+        with pytest.raises(WindowSessionOwnershipError):
+            store.get_or_create("shared_window", "#V#other_user")
+
+        preserved = store.get("shared_window")
+        assert preserved is not None
+        assert preserved.user_id == "#V#owner"
+        assert preserved.organisation_concept_id == "owner_org"
+
     def test_get_effective_context_prefers_window_session(self):
         """get_effective_context should prefer window session over Flask session."""
         from src.backend.services.window_session_context_service import (
@@ -707,6 +743,95 @@ class TestWindowSessionStoreIsolation:
         assert effective["namespace"] == "#V#user_1@window_org"
         assert effective["role"] == "admin"
         assert effective["source"] == "window_session"
+
+    def test_get_effective_context_treats_another_users_window_as_unknown(self):
+        from src.backend.services.window_session_context_service import (
+            WindowSessionContext,
+            get_effective_context,
+            get_window_session_store,
+        )
+
+        get_window_session_store().set(
+            WindowSessionContext(
+                window_session_id="other_users_window",
+                user_id="#V#owner",
+                organisation_concept_id="secret_org",
+                role_in_org="owner",
+                namespace="#V#owner@secret_org",
+                chat_session_id="secret_chat",
+            )
+        )
+        flask_session = {
+            "organisation_concept_id": "current_org",
+            "role_in_org": "member",
+            "namespace": "#V#other_user@current_org",
+            "session_id": "current_chat",
+        }
+
+        effective = get_effective_context(
+            "other_users_window",
+            flask_session,
+            "#V#other_user",
+        )
+
+        assert effective == {
+            "user_id": "#V#other_user",
+            "organisation_id": "current_org",
+            "role": "member",
+            "namespace": "#V#other_user@current_org",
+            "chat_session_id": "current_chat",
+            "source": "flask_session",
+        }
+
+
+def test_cross_user_window_token_cannot_read_or_replace_org_scope(app_client):
+    _, client = app_client
+    import src.backend.services.window_session_context_service as wscs
+
+    window_session_id = "ws_cross_user_collision"
+    with client.session_transaction() as sess:
+        sess["user_id"] = "owner"
+        sess["user_concept_id"] = "#V#owner"
+
+    created = client.post(
+        "/von/api/session/set_organisation",
+        json={"organisation_concept_id": "secret_org"},
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert created.status_code == 200
+
+    with client.session_transaction() as sess:
+        sess.clear()
+        sess["user_id"] = "other_user"
+        sess["user_concept_id"] = "#V#other_user"
+        sess["organisation_concept_id"] = "current_org"
+        sess["role_in_org"] = "member"
+        sess["namespace"] = "#V#other_user@current_org"
+
+    context_response = client.get(
+        "/von/api/session/context",
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert context_response.status_code == 200
+    context_payload = context_response.get_json()
+    assert context_payload["organisation_id"] == "#V#current_org"
+    assert context_payload["namespace"] == "#V#other_user@current_org"
+    assert context_payload["context_source"] == "flask_session"
+
+    mutation_response = client.post(
+        "/von/api/session/set_organisation",
+        json={"organisation_concept_id": "other_org"},
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert mutation_response.status_code == 403
+    assert mutation_response.get_json()["error_code"] == (
+        "window_session_actor_mismatch"
+    )
+
+    preserved = wscs.get_window_context(window_session_id)
+    assert preserved is not None
+    assert preserved.user_id == "#V#owner"
+    assert preserved.organisation_concept_id == "secret_org"
 
     def test_get_effective_context_falls_back_to_flask(self):
         """get_effective_context should fall back to Flask session when no window session."""

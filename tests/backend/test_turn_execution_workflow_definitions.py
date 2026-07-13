@@ -2,6 +2,8 @@ import re
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import pytest
+
 from representation_intent_regression_helpers import patch_representation_profile_loader
 from src.backend.services.synthesiser_context_framing_service import (
     SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
@@ -114,6 +116,18 @@ def _build_stub_kb_postcondition_critic_definition() -> WorkflowDefinition:
 def test_durable_turn_selector_prepare_discovers_and_projects_selector_context(
     monkeypatch,
 ) -> None:
+    mongomock = pytest.importorskip("mongomock")
+    collection = mongomock.MongoClient().db.concepts
+    collection.insert_one(
+        {
+            "concept_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
+            "relationships": {},
+        }
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_concepts_collection",
+        lambda: collection,
+    )
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
         lambda *args, **kwargs: {
@@ -534,6 +548,18 @@ def test_agent_test_turn_route_preserves_gmail_arxiv_selector_choice(
 def test_durable_turn_selector_prepare_reuses_turn_scoped_discovery_memo(
     monkeypatch,
 ) -> None:
+    mongomock = pytest.importorskip("mongomock")
+    collection = mongomock.MongoClient().db.concepts
+    collection.insert_one(
+        {
+            "concept_id": "#V#represented_retrieval_workflow",
+            "relationships": {},
+        }
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_concepts_collection",
+        lambda: collection,
+    )
     from src.backend.services.workflow_discovery_memo_service import (
         clear_turn_workflow_discovery_memo,
     )
@@ -1531,9 +1557,9 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     )
 
 
-def test_conversation_turn_critic_subworkflow_receives_selected_workflow_context() -> (
-    None
-):
+def test_conversation_turn_critic_subworkflow_receives_selected_workflow_context(
+    monkeypatch,
+) -> None:
     source = build_authoritative_test_workflow_definition(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
@@ -1575,6 +1601,36 @@ def test_conversation_turn_critic_subworkflow_receives_selected_workflow_context
             _build_stub_kb_postcondition_critic_definition()
         ),
     }
+    from src.backend.workflows.durable import registry_factory
+    from src.backend.workflows.durable.registry_factory import (
+        WorkflowDefinitionAuthorityResolution,
+    )
+
+    def _resolve_actor_visible_test_definition(workflow_id: str, **kwargs):
+        assert kwargs.get("actor_user_id") == "#V#user"
+        assert kwargs.get("actor_org_id") == "#V#org"
+        definition = definitions.get(workflow_id)
+        return WorkflowDefinitionAuthorityResolution(
+            workflow_id=workflow_id,
+            registry=None,
+            registration=None,
+            definition=definition,
+            registration_source="vontology_test_authority",
+            known_workflow_ids=tuple(definitions),
+            error_code=(
+                None if definition is not None else "workflow_concept_not_accessible"
+            ),
+            diagnostics={
+                "actor_scoped_authority_required": True,
+                "shared_registry_definition_trusted": False,
+            },
+        )
+
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_definition_from_authority",
+        _resolve_actor_visible_test_definition,
+    )
     registry = ActionRegistry()
     register_subworkflow_actions(
         registry,

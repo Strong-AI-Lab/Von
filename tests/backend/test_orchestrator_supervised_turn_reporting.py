@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from typing import Any, Mapping, cast
 
 import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
+from src.backend.integrations.internal_mcp.gateway import (
+    bind_internal_mcp_actor_context_source,
+)
 from src.backend.integrations.internal_mcp.orchestrator import (
     CancellationRequested,
     InternalMCPChatOrchestrator,
@@ -14,6 +17,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _WorkflowDispatchSelectionState,
     _WorkflowModelPolicyState,
 )
+from src.backend.security.access_control import override_current_actor
 from src.backend.services.agent_test_replay_mode_service import (
     AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
     AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
@@ -31,6 +35,7 @@ from src.backend.workflows import (
     WorkflowRegistration,
     WorkflowStateSpec,
 )
+from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
@@ -627,21 +632,25 @@ def test_agent_test_execute_workflow_skips_durable_persistence(monkeypatch) -> N
         _unexpected,
     )
 
-    result = orchestrator.execute_workflow(
-        workflow_id,
-        data={
-            "user_concept_id": "#V#michael_witbrock",
-            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
-            "conversation_session_id": "session-1",
-            "turn_id": "turn-1",
-            "workflow_episode_source": "conversation_turn_supervised",
-            "workflow_episode_stage": "conversation_turn",
-            "aux_llm_calls": aux_log,
-        },
-        llm_client=_DummyLLM(),
-        model="gemma4:e4b",
-        user_namespace="#V#michael_witbrock",
-    )
+    with override_current_actor(
+        "#V#michael_witbrock",
+        "#V#university_of_auckland_strong_ai_lab",
+    ):
+        result = orchestrator.execute_workflow(
+            workflow_id,
+            data={
+                "user_concept_id": "#V#michael_witbrock",
+                "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+                "workflow_episode_source": "conversation_turn_supervised",
+                "workflow_episode_stage": "conversation_turn",
+                "aux_llm_calls": aux_log,
+            },
+            llm_client=_DummyLLM(),
+            model="gemma4:e4b",
+            user_namespace="#V#michael_witbrock",
+        )
 
     assert result is not None
     assert result.completed is True
@@ -650,6 +659,164 @@ def test_agent_test_execute_workflow_skips_durable_persistence(monkeypatch) -> N
     )
     assert submission_event["status"] == "submission_skipped"
     assert submission_event["reason_code"] == "agent_test_instance"
+
+
+def test_execute_workflow_rejects_claims_conflicting_with_parent_actor(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=False,
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("actor-mismatched workflow must not execute")
+        ),
+    )
+    environment = WorkflowEnvironment(
+        llm_client=_DummyLLM(),
+        gateway=cast(Any, _DummyGateway()),
+        model="test-model",
+        user_namespace="#V#outsider@other_org",
+        user_concept_id="#V#outsider",
+        org_concept_id="#V#other_org",
+    )
+
+    with override_current_actor("#V#outsider", "#V#other_org"):
+        result = orchestrator.execute_workflow(
+            "#V#candidate_workflow",
+            data={
+                "user_concept_id": "#V#owner",
+                "org_concept_id": "#V#trusted_org",
+            },
+            llm_client=_DummyLLM(),
+            model="test-model",
+            user_namespace="#V#owner@trusted_org",
+            environment=environment,
+        )
+
+    assert result.completed is False
+    assert result.final_state == "workflow_actor_scope_validation"
+    assert result.error == "workflow_actor_scope_mismatch"
+    assert result.data["workflow_actor_scope"] == {
+        "schema_version": "workflow_actor_scope_resolution.v1",
+        "status": "rejected",
+        "reason": "workflow_actor_scope_mismatch",
+        "mismatch_fields": ["user_id", "org_id", "namespace"],
+    }
+
+
+def test_execute_workflow_rejects_untrusted_environment_actor_claims(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=False,
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("untrusted workflow actor must not execute")
+        ),
+    )
+    environment = WorkflowEnvironment(
+        llm_client=_DummyLLM(),
+        gateway=cast(Any, _DummyGateway()),
+        model="test-model",
+        user_namespace="#V#forged_user@forged_org",
+        user_concept_id="#V#forged_user",
+        org_concept_id="#V#forged_org",
+    )
+
+    with bind_internal_mcp_actor_context_source("tool_payload_fallback"):
+        result = orchestrator.execute_workflow(
+            "#V#candidate_workflow",
+            data={},
+            llm_client=_DummyLLM(),
+            model="test-model",
+            environment=environment,
+        )
+
+    assert result.completed is False
+    assert result.final_state == "workflow_actor_scope_validation"
+    assert result.error == "workflow_actor_authority_required"
+    assert result.data["workflow_actor_scope"] == {
+        "schema_version": "workflow_actor_scope_resolution.v1",
+        "status": "rejected",
+        "reason": "workflow_actor_authority_required",
+        "mismatch_fields": [],
+    }
+
+
+def test_execute_workflow_resolves_definition_under_parent_actor(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=False,
+    )
+    definition = WorkflowDefinition(
+        workflow_id="#V#candidate_workflow",
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+        purpose="Actor-scoped synchronous resolution regression workflow.",
+    )
+    registration = WorkflowRegistration(
+        workflow_id=definition.workflow_id,
+        definition=definition,
+        purpose=definition.purpose,
+        source="vontology",
+    )
+    resolution_calls: list[dict[str, Any]] = []
+
+    def _resolve(workflow_id: str | None, **kwargs: Any):
+        resolution_calls.append({"workflow_id": workflow_id, **kwargs})
+        return registration, definition
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_workflow_registration_and_definition",
+        _resolve,
+    )
+    environment = WorkflowEnvironment(
+        llm_client=_DummyLLM(),
+        gateway=cast(Any, _DummyGateway()),
+        model="test-model",
+        user_namespace="#V#cohort_member@trusted_org",
+        user_concept_id="#V#cohort_member",
+        org_concept_id="#V#trusted_org",
+    )
+
+    with override_current_actor("#V#cohort_member", "#V#trusted_org"):
+        result = orchestrator.execute_workflow(
+            definition.workflow_id,
+            data={
+                "user_concept_id": "#V#cohort_member",
+                "org_concept_id": "#V#trusted_org",
+                "workflow_episode_source": "conversation_turn_supervised",
+            },
+            llm_client=_DummyLLM(),
+            model="test-model",
+            user_namespace=environment.user_namespace,
+            environment=environment,
+            episode_source="conversation_turn_supervised",
+        )
+
+    assert result.completed is True
+    assert resolution_calls
+    assert all(
+        call.get("actor_user_id") == "#V#cohort_member"
+        and call.get("actor_org_id") == "#V#trusted_org"
+        for call in resolution_calls
+    )
 
 
 def test_conversation_turn_supervised_execute_workflow_skips_duplicate_durable_submission(
@@ -668,13 +835,25 @@ def test_conversation_turn_supervised_execute_workflow_skips_duplicate_durable_s
         termination_states=("done",),
         purpose="Conversation turn duplicate durable submission skip regression.",
     )
-    orchestrator._workflow_registry.register_or_replace(
-        WorkflowRegistration(
-            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-            definition=definition,
-            purpose=definition.purpose,
-            source="test",
-        )
+    registration = WorkflowRegistration(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        definition=definition,
+        purpose=definition.purpose,
+        source="vontology",
+    )
+    actor_user_id = "#V#michael_witbrock"
+    actor_org_id = "#V#university_of_auckland_strong_ai_lab"
+
+    def _resolve_for_actor(workflow_id: str | None, **kwargs: Any):
+        assert workflow_id == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+        assert kwargs.get("actor_user_id") == actor_user_id
+        assert kwargs.get("actor_org_id") == actor_org_id
+        return registration, definition
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_workflow_registration_and_definition",
+        _resolve_for_actor,
     )
     aux_log: list[dict[str, Any]] = []
 
@@ -687,22 +866,32 @@ def test_conversation_turn_supervised_execute_workflow_skips_duplicate_durable_s
         "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
         _unexpected_submit,
     )
-
-    result = orchestrator.execute_workflow(
-        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-        data={
-            "user_concept_id": "#V#michael_witbrock",
-            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
-            "conversation_session_id": "session-1",
-            "turn_id": "turn-1",
-            "workflow_episode_source": "conversation_turn_supervised",
-            "workflow_episode_stage": "conversation_turn",
-            "aux_llm_calls": aux_log,
-        },
+    environment = WorkflowEnvironment(
         llm_client=_DummyLLM(),
+        gateway=cast(Any, _DummyGateway()),
         model="gemma4:e4b",
-        user_namespace="#V#michael_witbrock",
+        user_namespace=actor_user_id,
+        user_concept_id=actor_user_id,
+        org_concept_id=actor_org_id,
     )
+
+    with override_current_actor(actor_user_id, actor_org_id):
+        result = orchestrator.execute_workflow(
+            CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            data={
+                "user_concept_id": actor_user_id,
+                "org_concept_id": actor_org_id,
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+                "workflow_episode_source": "conversation_turn_supervised",
+                "workflow_episode_stage": "conversation_turn",
+                "aux_llm_calls": aux_log,
+            },
+            llm_client=_DummyLLM(),
+            model="gemma4:e4b",
+            user_namespace=actor_user_id,
+            environment=environment,
+        )
 
     assert result is not None
     assert result.completed is True
@@ -729,13 +918,25 @@ def test_selected_workflow_execute_workflow_skips_in_process_persistence(
         termination_states=("done",),
         purpose="Selected workflow in-process persistence skip regression.",
     )
-    orchestrator._workflow_registry.register_or_replace(
-        WorkflowRegistration(
-            workflow_id=TOOL_CALLING_WORKFLOW_ID,
-            definition=definition,
-            purpose=definition.purpose,
-            source="test",
-        )
+    registration = WorkflowRegistration(
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        definition=definition,
+        purpose=definition.purpose,
+        source="vontology",
+    )
+    actor_user_id = "#V#michael_witbrock"
+    actor_org_id = "#V#university_of_auckland_strong_ai_lab"
+
+    def _resolve_for_actor(workflow_id: str | None, **kwargs: Any):
+        assert workflow_id == TOOL_CALLING_WORKFLOW_ID
+        assert kwargs.get("actor_user_id") == actor_user_id
+        assert kwargs.get("actor_org_id") == actor_org_id
+        return registration, definition
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_workflow_registration_and_definition",
+        _resolve_for_actor,
     )
     aux_log: list[dict[str, Any]] = []
 
@@ -757,22 +958,32 @@ def test_selected_workflow_execute_workflow_skips_in_process_persistence(
         "src.backend.services.workflow_episode_service.start_workflow_use_episode",
         _unexpected_episode_start,
     )
-
-    result = orchestrator.execute_workflow(
-        TOOL_CALLING_WORKFLOW_ID,
-        data={
-            "user_concept_id": "#V#michael_witbrock",
-            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
-            "conversation_session_id": "session-1",
-            "turn_id": "turn-1",
-            "workflow_episode_source": "conversation_turn_selected_workflow",
-            "workflow_episode_stage": "selected_workflow_execution",
-            "aux_llm_calls": aux_log,
-        },
+    environment = WorkflowEnvironment(
         llm_client=_DummyLLM(),
+        gateway=cast(Any, _DummyGateway()),
         model="gemma4:e4b",
-        user_namespace="#V#michael_witbrock",
+        user_namespace=actor_user_id,
+        user_concept_id=actor_user_id,
+        org_concept_id=actor_org_id,
     )
+
+    with override_current_actor(actor_user_id, actor_org_id):
+        result = orchestrator.execute_workflow(
+            TOOL_CALLING_WORKFLOW_ID,
+            data={
+                "user_concept_id": actor_user_id,
+                "org_concept_id": actor_org_id,
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+                "workflow_episode_source": "conversation_turn_selected_workflow",
+                "workflow_episode_stage": "selected_workflow_execution",
+                "aux_llm_calls": aux_log,
+            },
+            llm_client=_DummyLLM(),
+            model="gemma4:e4b",
+            user_namespace=actor_user_id,
+            environment=environment,
+        )
 
     assert result is not None
     assert result.completed is True

@@ -83,6 +83,90 @@ def test_get_effective_user_concept_id_caches_validated_header(monkeypatch) -> N
     assert calls == ["#V#michael_witbrock"]
 
 
+def test_header_identity_cache_is_request_local(monkeypatch) -> None:
+    import src.backend.security.access_control as access_control
+
+    app = Flask(__name__)
+    monkeypatch.setattr(
+        access_control,
+        "_validate_person_concept",
+        lambda concept_id: concept_id,
+    )
+
+    with app.test_request_context(
+        "/von/generate",
+        headers={"X-User-Concept-ID": "#V#actor_a"},
+    ):
+        assert access_control.get_effective_user_concept_id() == "#V#actor_a"
+
+    with app.test_request_context(
+        "/von/generate",
+        headers={"X-User-Concept-ID": "#V#actor_b"},
+    ):
+        assert access_control.get_effective_user_concept_id() == "#V#actor_b"
+
+
+def test_visibility_evaluator_is_rebuilt_for_each_request_after_revocation(
+    monkeypatch,
+) -> None:
+    import src.backend.security.access_control as access_control
+    from flask import session
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    collection = _FakeConceptCollection(
+        {
+            "concept_id": "#V#team_note",
+            "relationships": {"specific_to_org": ["#V#sail"]},
+        }
+    )
+    monkeypatch.setattr(access_control, "get_concepts_collection", lambda: collection)
+
+    with app.test_request_context("/first"):
+        session["user_concept_id"] = "#V#member"
+        session["organisation_concept_id"] = "sail"
+        assert access_control.can_access_concept("#V#team_note") is True
+
+    collection.docs["#V#team_note"]["relationships"] = {
+        "specific_to_org": ["#V#other_org"]
+    }
+
+    with app.test_request_context("/second"):
+        session["user_concept_id"] = "#V#member"
+        session["organisation_concept_id"] = "sail"
+        assert access_control.can_access_concept("#V#team_note") is False
+
+
+def test_visibility_evaluator_can_be_invalidated_within_one_request(
+    monkeypatch,
+) -> None:
+    import src.backend.security.access_control as access_control
+    from flask import session
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    collection = _FakeConceptCollection(
+        {
+            "concept_id": "#V#team_note",
+            "relationships": {"specific_to_org": ["#V#sail"]},
+        }
+    )
+    monkeypatch.setattr(access_control, "get_concepts_collection", lambda: collection)
+
+    with app.test_request_context("/same-turn"):
+        session["user_concept_id"] = "#V#member"
+        session["organisation_concept_id"] = "sail"
+        assert access_control.can_access_concept("#V#team_note") is True
+
+        collection.docs["#V#team_note"]["relationships"] = {
+            "specific_to_org": ["#V#other_org"]
+        }
+        assert access_control.can_access_concept("#V#team_note") is True
+
+        access_control.invalidate_current_access_evaluator()
+        assert access_control.can_access_concept("#V#team_note") is False
+
+
 def test_can_access_concept_respects_organisation_visibility(monkeypatch) -> None:
     import src.backend.security.access_control as access_control
 
