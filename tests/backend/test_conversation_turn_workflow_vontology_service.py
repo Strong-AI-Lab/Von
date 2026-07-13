@@ -6,9 +6,6 @@ from typing import Any
 import pytest
 
 from src.backend.services import concept_service
-from src.backend.services import (
-    conversation_turn_workflow_vontology_service as conversation_turn_service,
-)
 from src.backend.services.conversation_turn_workflow_vontology_service import (
     _ensure_conversation_turn_prompt_support,
     bootstrap_canonical_conversation_turn_workflows,
@@ -26,7 +23,10 @@ from src.backend.services.episode_evaluation_workflow_vontology_service import (
 from src.backend.services.gmail_tool_evidence_contract_vontology_service import (
     bootstrap_gmail_tool_evidence_contract,
 )
-from src.backend.services.text_value_service import get_texts_for_concept
+from src.backend.services.text_value_service import (
+    get_texts_for_concept,
+    upsert_singleton_text_relation,
+)
 from src.backend.services.workflow_policy_graph_service import resolve_policy_from_graph
 from src.backend.workflows import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -63,6 +63,9 @@ NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_repor
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
 TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID = "#V#tool_call_repair_prompt"
+WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID = (
+    "#V#workflow_step_structured_output_backfill_prompt"
+)
 POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_postcondition_critic"
 GENERAL_MAIL_REVIEW_WORKFLOW_ID = "#V#general_mail_review_workflow"
 GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID = "#V#gmail_message_detail_fetch_workflow"
@@ -93,7 +96,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 9
+    assert report.get("seeded_prompt_count") == 10
 
     expected_outcome_rows = get_texts_for_concept(
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -160,6 +163,12 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "with `#V#thing` as the parent, is not sufficient" in (expected_outcome_text)
     assert "Listing existing external-system labels" in expected_outcome_text
     assert "write-only required tool list is not sufficient" in (expected_outcome_text)
+    assert "mutually exclusive create" in expected_outcome_text
+    assert "Create-or-reuse entity example" in expected_outcome_text
+    assert '"required_tools":["workflow_execute"]' in expected_outcome_text
+    assert '"workflow_concept_ids":["#V#entity_representation_workflow"]' in (
+        expected_outcome_text
+    )
     assert "Do not invent tools such as `diary_create`" in expected_outcome_text
     assert "Use `task_create` only when the user asks for a task" in (
         expected_outcome_text
@@ -333,6 +342,28 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "gmail_get_auth_config" in tool_repair_text
     assert "Never emit placeholders such as `user_profile_123`" in tool_repair_text
 
+    workflow_step_backfill_rows = get_texts_for_concept(
+        WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    workflow_step_backfill_text = next(
+        (
+            (row or {}).get("text")
+            for row in workflow_step_backfill_rows
+            if (row or {}).get("text")
+        ),
+        "",
+    )
+    assert isinstance(workflow_step_backfill_text, str)
+    assert "active internal workflow step" in workflow_step_backfill_text
+    assert "{workflow_step_output_contract}" in workflow_step_backfill_text
+    assert (
+        "{original_authoritative_workflow_step_instructions}"
+        in workflow_step_backfill_text
+    )
+    assert "ordinary final answer to the user" in workflow_step_backfill_text
+
     selector_rows = get_texts_for_concept(
         SELECTOR_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -405,6 +436,11 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "excluded candidate merely because" in recovery_text
     assert "Recovery Retry Structurally Viable" in recovery_text
     assert "terminal_outcome_receipt.retryability` is exactly `now`" in recovery_text
+    assert "`turn_next_action.target_contracts`" in recovery_text
+    assert 'source = "tool_invocation_result"' in recovery_text
+    assert "complete target" in recovery_text
+    assert "relation-summary results as discovery evidence" in recovery_text
+    assert "Do not impose on the user" in recovery_text
     assert (
         '`"retry_execution"`, `"execute_tool_batch"`, '
         '`"respond_with_answer"`, or `"respond_with_follow_up"`'
@@ -433,53 +469,47 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "final-answer synthesis telemetry" in critic_text
     assert "final_answer_synthesis.tool_evidence_projection" in critic_text
     assert "operational status/ledger summary" in critic_text
+    assert "relation summaries as discovery evidence" in critic_text
+    assert "content-bearing relation read" in critic_text
 
 
-def test_expected_outcome_prompt_refresh_markers_cover_conditional_tools(
-    monkeypatch: pytest.MonkeyPatch,
+def test_conversation_prompt_bootstrap_preserves_live_authority_until_forced(
+    _reset_mock_db: Any,
 ) -> None:
-    captured_markers: dict[str, tuple[str, ...]] = {}
+    first_report = _ensure_conversation_turn_prompt_support()
+    assert first_report.get("success") is True
 
-    def _fake_needs_refresh(
-        prompt_concept_id: str,
-        *,
-        required_markers: tuple[str, ...],
-    ) -> bool:
-        if prompt_concept_id == EXPECTED_OUTCOME_PROMPT_CONCEPT_ID:
-            captured_markers[prompt_concept_id] = required_markers
-        return False
-
-    monkeypatch.setattr(
-        conversation_turn_service,
-        "ensure_prompt_concept_support",
-        lambda **_: {
-            "created_prompt_ids": [],
-            "validated_prompt_ids": [],
-            "missing_content_prompt_ids": [],
-            "linked_workflow_ids": [],
-            "errors_by_target": {},
-        },
+    custom_recovery_prompt = (
+        "Custom live recovery policy intentionally authored in Vontology."
     )
-    monkeypatch.setattr(
-        conversation_turn_service,
-        "prompt_concept_has_content",
-        lambda _prompt_concept_id: True,
-    )
-    monkeypatch.setattr(
-        conversation_turn_service,
-        "_prompt_seed_needs_refresh",
-        _fake_needs_refresh,
+    upsert_singleton_text_relation(
+        subject_concept_id=RECOVERY_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        text=custom_recovery_prompt,
+        lang="en-NZ",
+        context={"source": "human_vontology_author"},
+        garbage_collect=True,
     )
 
-    _ensure_conversation_turn_prompt_support()
-
-    markers = captured_markers[EXPECTED_OUTCOME_PROMPT_CONCEPT_ID]
-    assert "`conditional_required_tools`" in markers
-    assert "put `workflow_execute` in `conditional_required_tools`" in markers
-    assert (
-        "Do not substitute Gmail listing, reading, or label-modification tools"
-        in markers
+    normal_report = _ensure_conversation_turn_prompt_support()
+    assert normal_report.get("success") is True
+    assert normal_report.get("seeded_prompt_count") == 0
+    normal_rows = get_texts_for_concept(
+        RECOVERY_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
     )
+    assert [row.get("text") for row in normal_rows] == [custom_recovery_prompt]
+
+    forced_report = _ensure_conversation_turn_prompt_support(force_prompt_seed=True)
+    assert forced_report.get("success") is True
+    assert forced_report.get("seeded_prompt_count") == 10
+    forced_rows = get_texts_for_concept(
+        RECOVERY_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert [row.get("text") for row in forced_rows] != [custom_recovery_prompt]
 
 
 def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_links(
@@ -489,7 +519,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert report.get("success") is True
+    assert report.get("success") is True, publication.get(
+        "authority_readback_failures_by_workflow"
+    )
     assert counts.get("errors") == 0
     assert counts.get("workflows_published") == 9
 
@@ -1556,6 +1588,12 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert (recovery_validation_policy.get("json_field_defaults") or {}).get(
         "turn_next_action.response_text"
     )
+    assert (recovery_validation_policy.get("json_field_defaults") or {}).get(
+        "turn_next_action.target_contracts"
+    ) == []
+    assert "turn_next_action.target_contracts" in (
+        recovery_validation_policy.get("required_json_fields") or []
+    )
     recovery_prompt_contract = recovery_action.prompt_contract
     assert isinstance(recovery_prompt_contract, dict)
     assert recovery_prompt_contract.get("resolved_prompt_concept_id") == (
@@ -1590,6 +1628,16 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert any(
         isinstance(field, dict)
         and field.get("context_key") == "turn_recovery_last_reasoning"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_expected_target_contracts"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_recovery_target_contract_validation"
         for field in recovery_context_fields
     )
 
@@ -1633,6 +1681,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     recovery_tool_batch = turn_definition.states[recovery_tool_batch_step_id]
     recovery_tool_batch_action = recovery_tool_batch.actions[0]
     assert recovery_tool_batch_action.action_id == "turn_execution.execute_tool_batch"
+    assert (
+        recovery_tool_batch_action.inputs.get("target_contracts_context_key")
+        == "turn_recovery_target_contracts"
+    )
     recovery_tool_batch_targets = {
         transition.to_state for transition in recovery_tool_batch.transitions
     }
@@ -1657,6 +1709,13 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         mapping.get("context_key") == "turn_next_action_tool_calls"
         and mapping.get("tool_output_field")
         == "validated_json.turn_next_action.tool_calls"
+        for mapping in recovery_mappings
+        if isinstance(mapping, dict)
+    )
+    assert any(
+        mapping.get("context_key") == "turn_recovery_target_contracts"
+        and mapping.get("tool_output_field")
+        == "validated_json.turn_next_action.target_contracts"
         for mapping in recovery_mappings
         if isinstance(mapping, dict)
     )

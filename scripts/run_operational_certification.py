@@ -56,6 +56,9 @@ from src.backend.services.benchmark_suite_vontology_service import (  # noqa: E4
     OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID,
     load_operational_certification_contract,
 )
+from src.backend.services.agent_test_replay_mode_service import (  # noqa: E402
+    AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
+)
 from src.backend.services.experiment_run_service import (  # noqa: E402
     compute_experiment_verdict,
     create_experiment_spec,
@@ -88,6 +91,36 @@ AUTHENTICATED_MULTI_TURN_ADAPTER_ID = (
     "#V#authenticated_von_multi_turn_operational_adapter"
 )
 DURABLE_WORKFLOW_ADAPTER_ID = "#V#durable_workflow_execute_operational_adapter"
+_REQUIRED_REPRESENTED_SELECTOR_TELEMETRY_FIELDS = (
+    "prompt_present",
+    "candidate_list_present",
+    "response_present",
+    "candidate_entries_present",
+    "context_lineage_present",
+    "selector_prompt_event_present",
+    "selector_response_event_present",
+    "model_name_present",
+)
+_REPRESENTED_SELECTOR_SOURCES = frozenset(
+    {
+        "selector",
+        "selector_llm_verdict",
+        "workflow_selector",
+    }
+)
+_REPRESENTED_SELECTOR_RESOLUTIONS = frozenset(
+    {
+        "candidate_label_exact_match",
+        "raw_response_contains_candidate_id",
+    }
+)
+
+
+def _canonical_selector_source(value: Any) -> str:
+    source = _text(value).lower()
+    if source in _REPRESENTED_SELECTOR_SOURCES:
+        return "workflow_selector"
+    return source
 MIGRATION_FIXTURE_PATH = (
     PROJECT_ROOT
     / "src"
@@ -131,10 +164,295 @@ def _walk_mappings(value: Any) -> list[Mapping[str, Any]]:
     return mappings
 
 
+def _represented_selector_evidence(
+    turn_record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the evidence that AgentTest exercised the represented selector.
+
+    Operational certification is intended to exercise the user-equivalent
+    selector path. Merely requesting that path is insufficient: the persisted
+    turn record must prove that the represented prompt, candidate rendering,
+    model response, and inherited context lineage were all present, and that
+    the persisted final selection still has represented authority rather than
+    a later Python fallback or recovery override.
+    """
+
+    routing = _mapping(turn_record.get("workflow_routing_diagnostics"))
+    selector = _mapping(routing.get("selector"))
+    completeness = _mapping(selector.get("telemetry_completeness"))
+    workflow_selection = _mapping(turn_record.get("workflow_selection"))
+    selector_selection_metadata = _mapping(selector.get("selection_metadata"))
+    selector_selected_workflow_id = _text(
+        selector_selection_metadata.get("selected_workflow_id")
+    )
+    selector_prompt_id = _text(selector.get("prompt_id"))
+    selector_prompt_provenance = _mapping(selector.get("prompt_provenance"))
+    resolved_selector_prompt_id = _text(
+        selector_prompt_provenance.get("resolved_prompt_id")
+    )
+    selector_requested_prompt_ids = {
+        _text(item) for item in _sequence(selector.get("requested_prompt_ids")) if _text(item)
+    }
+    provenance_requested_prompt_ids = {
+        _text(item)
+        for item in _sequence(selector_prompt_provenance.get("requested_prompt_ids"))
+        if _text(item)
+    }
+    workflow_selection_id = _text(workflow_selection.get("selected_workflow_id"))
+    routing_selection_id = _text(routing.get("selected_workflow_id"))
+    workflow_selection_source = _text(
+        workflow_selection.get("selector_source")
+    ).lower()
+    routing_selector_source = _text(routing.get("selector_source")).lower()
+    selector_source = workflow_selection_source or routing_selector_source
+    canonical_workflow_selection_source = _canonical_selector_source(
+        workflow_selection_source
+    )
+    canonical_routing_selector_source = _canonical_selector_source(
+        routing_selector_source
+    )
+    workflow_selection_verdict = _text(
+        workflow_selection.get("selector_verdict")
+    ).lower()
+    routing_selector_verdict = _text(routing.get("selector_verdict")).lower()
+    selector_verdict = workflow_selection_verdict or routing_selector_verdict
+    selection_resolution = _text(selector.get("selection_resolution")).lower()
+    decision_attribution = _mapping(turn_record.get("decision_attribution"))
+    selection_attribution = next(
+        (
+            _mapping(item)
+            for item in _sequence(decision_attribution.get("decisions"))
+            if isinstance(item, Mapping)
+            and _text(item.get("decision_kind")).lower() == "selection"
+        ),
+        {},
+    )
+    selection_authority = _text(selection_attribution.get("authority")).lower()
+    selection_attribution_evidence = _mapping(selection_attribution.get("evidence"))
+    attribution_concept_ids = {
+        _text(item)
+        for item in _sequence(selection_attribution.get("concept_ids"))
+        if _text(item)
+    }
+    attribution_evidence_workflow_id = _text(
+        selection_attribution_evidence.get("selected_workflow_id")
+    )
+    attribution_workflow_ids = {
+        workflow_id
+        for workflow_id in (
+            *attribution_concept_ids,
+            attribution_evidence_workflow_id,
+        )
+        if workflow_id
+    }
+    final_workflow_ids = {
+        workflow_id
+        for workflow_id in (workflow_selection_id, routing_selection_id)
+        if workflow_id
+    }
+    selector_source_surfaces_bound = bool(
+        workflow_selection_source
+        and routing_selector_source
+        and canonical_workflow_selection_source == canonical_routing_selector_source
+    )
+    selector_verdict_surfaces_bound = bool(
+        workflow_selection_verdict
+        and routing_selector_verdict
+        and workflow_selection_verdict == routing_selector_verdict
+    )
+    selector_source_represented = bool(
+        selector_source_surfaces_bound
+        and canonical_workflow_selection_source == "workflow_selector"
+    )
+    selection_resolution_represented = (
+        selection_resolution in _REPRESENTED_SELECTOR_RESOLUTIONS
+    )
+    field_status = {
+        "prompt_present": completeness.get("prompt_present") is True,
+        "candidate_list_present": completeness.get("candidate_list_present") is True,
+        "response_present": completeness.get("response_present") is True,
+        "candidate_entries_present": completeness.get("candidate_entries_present")
+        is True,
+        "context_lineage_present": completeness.get("context_lineage_present") is True,
+        "selector_prompt_event_present": int(
+            completeness.get("selector_prompt_entry_count") or 0
+        )
+        >= 1,
+        "selector_response_event_present": int(
+            completeness.get("selector_response_entry_count") or 0
+        )
+        >= 1,
+        "model_name_present": bool(_text(selector.get("model_name"))),
+        "selector_prompt_id_present": bool(selector_prompt_id),
+        "selector_prompt_provenance_bound": bool(
+            selector_prompt_id
+            and resolved_selector_prompt_id == selector_prompt_id
+        ),
+        "selector_prompt_requested_id_bound": bool(
+            selector_prompt_id
+            and selector_prompt_id in selector_requested_prompt_ids
+            and selector_prompt_id in provenance_requested_prompt_ids
+        ),
+        "selector_source_represented": selector_source_represented,
+        "selector_source_surfaces_bound": selector_source_surfaces_bound,
+        "selector_verdict_present": bool(
+            workflow_selection_verdict and routing_selector_verdict
+        ),
+        "selector_verdict_surfaces_bound": selector_verdict_surfaces_bound,
+        "selection_resolution_represented": selection_resolution_represented,
+        "selection_attribution_represented": selection_authority == "represented",
+        "selector_selected_workflow_id_present": bool(
+            selector_selected_workflow_id
+        ),
+        "workflow_selection_id_present": bool(workflow_selection_id),
+        "routing_selection_id_present": bool(routing_selection_id),
+        "final_selection_identity_bound": bool(
+            selector_selected_workflow_id
+            and workflow_selection_id
+            and routing_selection_id
+            and final_workflow_ids == {selector_selected_workflow_id}
+        ),
+        "selection_attribution_identity_bound": bool(
+            selector_selected_workflow_id
+            and attribution_workflow_ids == {selector_selected_workflow_id}
+        ),
+        "selection_attribution_concept_identity_bound": bool(
+            selector_selected_workflow_id
+            and attribution_concept_ids == {selector_selected_workflow_id}
+        ),
+        "selection_attribution_evidence_identity_bound": bool(
+            selector_selected_workflow_id
+            and attribution_evidence_workflow_id
+            == selector_selected_workflow_id
+        ),
+    }
+    missing_fields = [field for field, present in field_status.items() if not present]
+    return {
+        "schema_version": "operational_selector_path_evidence.v1",
+        "requested_replay_mode": AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
+        "selector_prompt_id": selector_prompt_id or None,
+        "resolved_selector_prompt_id": resolved_selector_prompt_id or None,
+        "selector_source": selector_source or None,
+        "workflow_selection_source": workflow_selection_source or None,
+        "routing_selector_source": routing_selector_source or None,
+        "selector_verdict": selector_verdict or None,
+        "selection_resolution": selection_resolution or None,
+        "selection_authority": selection_authority or None,
+        "selector_selected_workflow_id": selector_selected_workflow_id or None,
+        "final_workflow_ids": sorted(final_workflow_ids),
+        "selection_attribution_workflow_ids": sorted(attribution_workflow_ids),
+        "field_status": field_status,
+        "missing_fields": missing_fields,
+        "complete": not missing_fields,
+    }
+
+
 def _find_schema_payload(value: Any, schema_version: str) -> dict[str, Any] | None:
     for mapping in _walk_mappings(value):
         if mapping.get("schema_version") == schema_version:
             return dict(mapping)
+    return None
+
+
+_ABSENCE_PROBE_RESOLUTION_LINEAGE_SCHEMA_VERSION = (
+    "operational_absence_probe_resolution_lineage.v1"
+)
+
+
+def _resolution_payload_from_action_outputs(
+    action_outputs: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Find the structured resolver/read result carried by one action output."""
+
+    candidates: list[Mapping[str, Any]] = []
+    for field_name in ("result", "mcp_result", "payload", "data"):
+        value = action_outputs.get(field_name)
+        if isinstance(value, Mapping):
+            candidates.append(value)
+    candidates.append(action_outputs)
+    for candidate in candidates:
+        if _text(candidate.get("status")):
+            return dict(candidate)
+    return None
+
+
+def _resolution_target_from_action_inputs(action_inputs: Mapping[str, Any]) -> str:
+    for field_name in (
+        "name",
+        "target_name",
+        "target_marker",
+        "isolation_id",
+        "concept_id",
+    ):
+        value = _text(action_inputs.get(field_name))
+        if value:
+            return value
+    return ""
+
+
+def _canonical_absence_probe_resolution_lineage(
+    *,
+    tool_name: Any,
+    target_name: Any,
+    result_payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Project the exact resolver facts that a represented probe must preserve."""
+
+    tool = _text(tool_name)
+    target = _text(target_name)
+    status = _text(result_payload.get("status")).lower()
+    if not tool or not target or not status:
+        return None
+    raw_candidates = result_payload.get("candidates")
+    candidates = _sequence(raw_candidates) if raw_candidates is not None else []
+    return {
+        "schema_version": _ABSENCE_PROBE_RESOLUTION_LINEAGE_SCHEMA_VERSION,
+        "tool": tool,
+        "target_name": target,
+        "status": status,
+        "resolved_concept_id": _text(result_payload.get("resolved_concept_id"))
+        or None,
+        "candidates": json_serialisable_projection(candidates),
+    }
+
+
+def _resolution_lineage_from_action(
+    *,
+    action_inputs: Mapping[str, Any],
+    action_outputs: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    result_payload = _resolution_payload_from_action_outputs(action_outputs)
+    if result_payload is None:
+        return None
+    return _canonical_absence_probe_resolution_lineage(
+        tool_name=(
+            action_outputs.get("mcp_resolved_tool")
+            or action_outputs.get("mcp_tool")
+            or action_inputs.get("tool_name")
+            or action_inputs.get("tool")
+        ),
+        target_name=_resolution_target_from_action_inputs(action_inputs),
+        result_payload=result_payload,
+    )
+
+
+def _resolution_lineage_from_probe_result(
+    probe_result: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    for raw_evidence in _sequence(probe_result.get("evidence")):
+        if not isinstance(raw_evidence, Mapping):
+            continue
+        if raw_evidence.get("schema_version") != (
+            _ABSENCE_PROBE_RESOLUTION_LINEAGE_SCHEMA_VERSION
+        ):
+            continue
+        lineage = _canonical_absence_probe_resolution_lineage(
+            tool_name=raw_evidence.get("tool"),
+            target_name=raw_evidence.get("target_name"),
+            result_payload=raw_evidence,
+        )
+        if lineage is not None:
+            return lineage
     return None
 
 
@@ -658,27 +976,34 @@ def _execute_represented_workflow_synchronously(
             for raw_action in trace.actions:
                 if not isinstance(raw_action, Mapping):
                     continue
+                action_inputs = _mapping(raw_action.get("inputs"))
                 action_outputs = _mapping(raw_action.get("outputs"))
                 state_probe_result = _find_schema_payload(
                     action_outputs,
                     "represented_operational_state_probe_result.v1",
                 )
-                workflow_action_evidence.append(
-                    {
-                        "action_id": _text(raw_action.get("action_id")) or None,
-                        "status": _text(raw_action.get("status")) or None,
-                        "call_id": _text(raw_action.get("call_id")) or None,
-                        "inputs_sha256": stable_payload_digest(
-                            _mapping(raw_action.get("inputs"))
-                        ),
-                        "outputs_sha256": stable_payload_digest(action_outputs),
-                        "state_probe_result_sha256": (
-                            stable_payload_digest(state_probe_result)
-                            if state_probe_result
-                            else None
-                        ),
-                    }
+                resolution_lineage = _resolution_lineage_from_action(
+                    action_inputs=action_inputs,
+                    action_outputs=action_outputs,
                 )
+                evidence_row = {
+                    "action_id": _text(raw_action.get("action_id")) or None,
+                    "status": _text(raw_action.get("status")) or None,
+                    "call_id": _text(raw_action.get("call_id")) or None,
+                    "inputs_sha256": stable_payload_digest(action_inputs),
+                    "outputs_sha256": stable_payload_digest(action_outputs),
+                    "state_probe_result_sha256": (
+                        stable_payload_digest(state_probe_result)
+                        if state_probe_result
+                        else None
+                    ),
+                    "resolution_lineage_sha256": (
+                        stable_payload_digest(resolution_lineage)
+                        if resolution_lineage
+                        else None
+                    ),
+                }
+                workflow_action_evidence.append(evidence_row)
             response["workflow_action_evidence"] = workflow_action_evidence
             if result.completed is not True or result.error:
                 error_code = "represented_workflow_execution_failed"
@@ -1243,6 +1568,46 @@ def _turn_record_evidence_projection(turn_record: Mapping[str, Any]) -> dict[str
     }
     return _bounded_safe_evidence(
         {key: value for key, value in turn_record.items() if key in allowed_keys}
+    )
+
+
+def _task_evidence_projection(task_evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep evaluator task evidence bounded to terminal status and locators.
+
+    The background-task status can embed the complete result and LLM debug
+    record. Passing that recursively into the represented evaluator duplicates
+    the separately projected turn record and can exceed local model context.
+    """
+
+    last_status = _mapping(task_evidence.get("last_task_status"))
+    allowed_status_keys = {
+        "status",
+        "current_status",
+        "final_status",
+        "state",
+        "phase",
+        "task_id",
+        "request_id",
+        "error_code",
+        "timed_out",
+        "completed",
+        "terminal",
+    }
+    last_status_projection = {
+        key: value for key, value in last_status.items() if key in allowed_status_keys
+    }
+    return _bounded_safe_evidence(
+        {
+            "last_task_status": last_status_projection,
+            "last_task_status_sha256": (
+                stable_payload_digest(last_status) if last_status else None
+            ),
+            "timed_out": task_evidence.get("timed_out"),
+            "task_status_count": len(_sequence(task_evidence.get("task_statuses"))),
+            "progress_snapshot_count": len(
+                _sequence(task_evidence.get("progress_snapshots"))
+            ),
+        }
     )
 
 
@@ -1900,6 +2265,14 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         probe_result_sha256 = (
             stable_payload_digest(probe_result) if probe_result else None
         )
+        probe_resolution_lineage = _resolution_lineage_from_probe_result(
+            probe_result
+        )
+        probe_resolution_lineage_sha256 = (
+            stable_payload_digest(probe_resolution_lineage)
+            if probe_resolution_lineage
+            else None
+        )
         action_evidence = [
             _mapping(item)
             for item in _sequence(payload.get("workflow_action_evidence"))
@@ -1917,6 +2290,15 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             and _text(item.get("status")).lower() == "success"
             and probe_result_sha256
             and item.get("state_probe_result_sha256") == probe_result_sha256
+        ]
+        matching_resolution_actions = [
+            item
+            for item in action_evidence
+            if _text(item.get("action_id")) in required_action_ids
+            and _text(item.get("status")).lower() == "success"
+            and probe_resolution_lineage_sha256
+            and item.get("resolution_lineage_sha256")
+            == probe_resolution_lineage_sha256
         ]
         checks = {
             "execution_succeeded": payload.get("success") is True,
@@ -1938,10 +2320,22 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 probe_result.get("target_absent") is True
             ),
             "evidence_present": bool(evidence),
+            "resolver_result_lineage_present": bool(probe_resolution_lineage),
+            "resolver_result_lineage_not_found": (
+                _text(
+                    _mapping(probe_resolution_lineage).get("status")
+                ).lower()
+                == "not_found"
+            ),
+            "resolver_target_binds_isolation": isolation_id
+            in _text(_mapping(probe_resolution_lineage).get("target_name")),
             "required_actions_executed": all(
                 action_id in successful_action_ids for action_id in required_action_ids
             ),
             "canonical_tool_output_exact": bool(matching_receipt_actions),
+            "resolver_output_causal_lineage_exact": bool(
+                matching_resolution_actions
+            ),
         }
         return {
             "verified": all(checks.values()),
@@ -1960,6 +2354,8 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             "workflow_output_sha256": payload.get("workflow_output_sha256"),
             "result_sha256": probe_result_sha256,
             "matching_action_evidence": matching_receipt_actions,
+            "resolution_lineage_sha256": probe_resolution_lineage_sha256,
+            "matching_resolution_action_evidence": matching_resolution_actions,
         }
 
     def reset_scenario(scenario: Any, trial_index: int) -> Mapping[str, Any]:
@@ -2199,6 +2595,9 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 model=args.model or None,
                 presenter_mode=False,
                 thinking_card_mode="on",
+                agent_test_selector_replay_mode=(
+                    AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
+                ),
             )
             task_id = _text(submission.get("task_id"))
             request_id = _text(submission.get("request_id")) or task_id
@@ -2239,6 +2638,16 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 raise RuntimeError(
                     "turn_execution_record_binding_mismatch:"
                     + ",".join(binding_mismatches)
+                )
+            selector_path_evidence = _represented_selector_evidence(turn_record)
+            if selector_path_evidence.get("complete") is not True:
+                missing_selector_evidence = ",".join(
+                    str(item)
+                    for item in _sequence(selector_path_evidence.get("missing_fields"))
+                )
+                raise RuntimeError(
+                    "represented_selector_evidence_incomplete:"
+                    + (missing_selector_evidence or "unknown")
                 )
             evidence_sources = [task_result, task_evidence, turn_record]
             observed_tools = _observed_tool_names(evidence_sources)
@@ -2305,6 +2714,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "selector_diagnostics": extract_selector_diagnostics(
                         *evidence_sources
                     ),
+                    "selector_path_evidence": selector_path_evidence,
                     "observed_tool_names": observed_tools,
                     "progress_fact_count": len(
                         extract_progress_facts(*evidence_sources)
@@ -2337,20 +2747,12 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         "task_id": task_id,
                         "request_id": request_id,
                         "client_request_id": client_request_id,
-                    }
-                ),
-                "task_evidence": _bounded_safe_evidence(
-                    {
-                        "last_task_status": task_evidence.get("last_task_status"),
-                        "timed_out": task_evidence.get("timed_out"),
-                        "task_status_count": len(
-                            _sequence(task_evidence.get("task_statuses"))
-                        ),
-                        "progress_snapshot_count": len(
-                            _sequence(task_evidence.get("progress_snapshots"))
+                        "agent_test_selector_replay_mode": (
+                            AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
                         ),
                     }
                 ),
+                "task_evidence": _task_evidence_projection(task_evidence),
                 "turn_execution_record": _turn_record_evidence_projection(turn_record),
                 "final_state_snapshot": {
                     "schema_version": "operational_state_snapshot.v1",

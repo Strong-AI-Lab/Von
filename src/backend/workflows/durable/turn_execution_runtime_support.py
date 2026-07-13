@@ -3540,12 +3540,18 @@ def run_turn_execution_completion_gate(
     response_text = _safe_str(data.get("response_text"))
     current_response = _safe_str(data.get("current_response"))
     final_response = (
-        _safe_str(data.get("final_response")) or current_response or response_text or ""
+        response_text
+        or _safe_str(data.get("final_response"))
+        or current_response
+        or selected_workflow_user_response
+        or ""
     )
-    if selected_workflow_user_response:
-        final_response = selected_workflow_user_response
-        response_text = selected_workflow_user_response
-        current_response = selected_workflow_user_response
+    # The represented conversation workflow maps the narration-stage output to
+    # ``response_text``. Keep the selected workflow response as its primary
+    # source candidate and fallback evidence, but do not let it overwrite the
+    # later authored answer that may have corrected or clarified that candidate.
+    response_text = response_text or final_response
+    current_response = current_response or final_response
 
     def _preservable_user_response(value: Any) -> str | None:
         candidate = _sanitise_user_response_candidate(value)
@@ -4013,13 +4019,13 @@ def run_turn_execution_completion_gate(
 
     def _completion_gate_ready_response_text() -> str | None:
         for value in (
-            selected_workflow_user_response,
-            preserved_user_response,
-            data.get("completion_gate_preserved_response"),
             final_response,
             current_response,
             response_text,
             data.get("llm_step_response"),
+            preserved_user_response,
+            data.get("completion_gate_preserved_response"),
+            selected_workflow_user_response,
         ):
             candidate = _ready_response_candidate(value)
             if candidate:

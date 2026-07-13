@@ -1422,6 +1422,9 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
             captured["shared_prefer_default_model"] = request.data.get(
                 "prefer_default_model"
             )
+            captured["workflow_step_output_contract"] = request.data.get(
+                "workflow_step_output_contract"
+            )
             request.data["model_for_stage"]("tool_call")
             return type(
                 "_Result",
@@ -1466,6 +1469,16 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
     assert result.status == "success"
     assert captured["shared_prefer_default_model"] is True
     assert captured["prefer_default_model"] is True
+    assert captured["workflow_step_output_contract"] == {
+        "schema_version": "workflow_step_output_contract.v1",
+        "output_format": "json_value",
+        "prompt_concept_id": None,
+        "workflow_id": None,
+        "workflow_state_id": None,
+        "response_contract_text": None,
+        "required_json_fields": [],
+        "json_field_defaults": {},
+    }
 
 
 def test_execute_llm_step_tool_mode_filters_turn_contract_tools_to_allowed_workflow_tools(

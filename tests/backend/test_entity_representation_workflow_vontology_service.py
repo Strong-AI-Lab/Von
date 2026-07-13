@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -15,7 +16,9 @@ from src.backend.services.text_value_service import get_texts_for_concept
 from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
-from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_discovery_exemplars,
@@ -48,6 +51,10 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
     _reset_mock_db: Any,
 ) -> None:
     report = bootstrap_canonical_entity_representation_workflows()
+
+    template_publication = report.get("template_publication") or {}
+    assert template_publication.get("repo_seed_version") == "3"
+    assert (template_publication.get("counts") or {}).get("persisted_templates") == 4
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
@@ -89,6 +96,60 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
         discovery_exemplars.get("keywords") or []
     )
 
+    dispatch_mapping_concept_ids: set[str] = set()
+    for state_suffix in (
+        "execute_person_workflow",
+        "execute_company_workflow",
+        "execute_event_workflow",
+        "execute_place_workflow",
+    ):
+        state = next(
+            state
+            for state_id, state in definition.states.items()
+            if state_id.endswith("_" + state_suffix)
+        )
+        assert state.metadata.get("writes_context_keys") in (None, [])
+        output_mappings = state.metadata.get("tool_output_context_mappings") or []
+        assert any(
+            isinstance(mapping, dict)
+            and mapping.get("context_key") == "child_workflow_failed"
+            for mapping in output_mappings
+        )
+        subworkflow_contract = state.metadata.get("subworkflow_contract") or {}
+        assert subworkflow_contract.get("failure_mode") == "capture_child_failure"
+        assert "prompt" in (state.metadata.get("reads_context_keys") or [])
+
+        state_mapping_ids = {
+            str(mapping.get("mapping_concept_id") or "").strip()
+            for mapping in [
+                *(subworkflow_contract.get("input_mappings") or []),
+                *output_mappings,
+            ]
+            if isinstance(mapping, dict)
+            and str(mapping.get("mapping_concept_id") or "").strip()
+        }
+        assert len(state_mapping_ids) == 8
+        assert dispatch_mapping_concept_ids.isdisjoint(state_mapping_ids)
+        dispatch_mapping_concept_ids.update(state_mapping_ids)
+
+    assert len(dispatch_mapping_concept_ids) == 32
+
+    discovery_state = next(
+        state
+        for state_id, state in definition.states.items()
+        if state_id.endswith("_discover_existing_workflows")
+    )
+    candidate_workflow_ids = discovery_state.actions[0].inputs.get(
+        "candidate_workflow_ids"
+    )
+    assert isinstance(candidate_workflow_ids, str)
+    assert json.loads(candidate_workflow_ids) == [
+        "#V#person_representation_workflow",
+        "#V#company_representation_workflow",
+        "#V#event_representation_workflow",
+        "#V#place_representation_workflow",
+    ]
+
     preflight_prompt_rows = get_texts_for_concept(
         ENTITY_REPRESENTATION_PREFLIGHT_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -112,6 +173,10 @@ def test_bootstrap_skips_republication_when_entity_workflow_family_is_current(
     ) == 1
 
     second_report = bootstrap_canonical_entity_representation_workflows()
+    second_template_publication = second_report.get("template_publication") or {}
+    assert (second_template_publication.get("counts") or {}).get(
+        "skipped_current_templates"
+    ) == 4
     second_publication = second_report.get("publication") or {}
     second_counts = second_publication.get("counts") or {}
 

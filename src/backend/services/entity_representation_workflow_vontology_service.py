@@ -28,6 +28,7 @@ from ..workflows.workflow_template_profile_service import (
     WORKFLOW_CREATION_EVENT_TEMPLATE_ID,
     WORKFLOW_CREATION_PERSON_TEMPLATE_ID,
     WORKFLOW_CREATION_PLACE_TEMPLATE_ID,
+    ensure_repo_seeded_workflow_template_bundle,
     resolve_workflow_spec_template,
 )
 
@@ -44,7 +45,7 @@ ENTITY_REPRESENTATION_PAYLOAD_PROMPT_CONCEPT_ID = (
 )
 
 _MANAGED_BY = "entity_representation_workflow_vontology_service"
-_SOURCE_TAG = "JVNAUTOSCI-1704"
+_SOURCE_TAG = "JVNAUTOSCI-2577"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -125,6 +126,9 @@ _CANONICAL_ENTITY_EXECUTION_WORKFLOW_SPECS: tuple[dict[str, str], ...] = (
             "place from text description in Vontology."
         ),
     },
+)
+_CANONICAL_ENTITY_TEMPLATE_IDS: tuple[str, ...] = tuple(
+    str(item["template_id"]) for item in _CANONICAL_ENTITY_EXECUTION_WORKFLOW_SPECS
 )
 
 
@@ -221,10 +225,12 @@ def _bootstrap_canonical_entity_execution_workflows() -> dict[str, Any]:
             },
         )
         definition = build_workflow_definition_from_authoring_spec(rendered_spec)
-        publication_report = authority_service.publish_workflow_definition_from_definition(
-            definition=definition,
-            create_missing=True,
-            purpose=str(workflow_spec["workflow_description"]),
+        publication_report = (
+            authority_service.publish_workflow_definition_from_definition(
+                definition=definition,
+                create_missing=True,
+                purpose=str(workflow_spec["workflow_description"]),
+            )
         )
         errors_by_workflow_id = publication_report.get("errors_by_workflow_id") or {}
         validation_failures = (
@@ -286,19 +292,44 @@ def _ensure_workflow_creation_dependency() -> dict[str, Any]:
     }
 
 
-def bootstrap_canonical_entity_representation_workflows() -> dict[str, Any]:
+def bootstrap_canonical_entity_representation_workflows(
+    *,
+    force_republish: bool = False,
+) -> dict[str, Any]:
     """Publish prompt support and the canonical conversational entity workflow."""
 
     profile_support = ensure_canonical_representation_contract_profiles()
     prompt_support = _ensure_entity_representation_prompt_support()
+    template_publication = ensure_repo_seeded_workflow_template_bundle(
+        template_ids=_CANONICAL_ENTITY_TEMPLATE_IDS,
+        migrate_older_seed_versions=True,
+    )
     workflow_creation_support = _ensure_workflow_creation_dependency()
-    domain_workflow_support = _bootstrap_canonical_entity_execution_workflows()
-    publication = bootstrap_repo_seed_workflow_bundle(asset_path=_REPO_SEED_ASSET_PATH)
+    domain_workflow_support = (
+        _bootstrap_canonical_entity_execution_workflows()
+        if bool(template_publication.get("success"))
+        else {
+            "success": False,
+            "workflow_ids": [
+                str(item["workflow_id"])
+                for item in _CANONICAL_ENTITY_EXECUTION_WORKFLOW_SPECS
+            ],
+            "reports": [],
+            "errors": ["entity_representation_template_publication_failed"],
+        }
+    )
+    publication = bootstrap_repo_seed_workflow_bundle(
+        asset_path=_REPO_SEED_ASSET_PATH,
+        force_republish=force_republish,
+    )
     return {
         "success": bool(prompt_support.get("success"))
+        and bool(template_publication.get("success"))
         and bool(workflow_creation_support.get("success"))
         and bool(domain_workflow_support.get("success"))
-        and not bool(publication.get("publication", {}).get("counts", {}).get("errors")),
+        and not bool(
+            publication.get("publication", {}).get("counts", {}).get("errors")
+        ),
         "workflow_ids": [
             WORKFLOW_CREATION_WORKFLOW_ID,
             PERSON_REPRESENTATION_WORKFLOW_ID,
@@ -309,6 +340,7 @@ def bootstrap_canonical_entity_representation_workflows() -> dict[str, Any]:
         ],
         "profile_support": profile_support,
         "prompt_support": prompt_support,
+        "template_publication": template_publication,
         "workflow_creation_support": workflow_creation_support,
         "domain_workflow_support": domain_workflow_support,
         "publication": publication.get("publication"),

@@ -182,7 +182,14 @@ def apply_runtime_defaults_to_mcp_payload(
     default_gmail_profile: str | None,
     strip_unknown_fields: bool = False,
 ) -> list[dict[str, Any]]:
-    """Apply generic runtime defaults and schema hygiene before MCP dispatch."""
+    """Apply generic runtime defaults and schema hygiene before MCP dispatch.
+
+    ``strip_unknown_fields`` is an explicit boundary chosen by callers that are
+    dispatching model-authored recovery payloads.  At that boundary, a declared
+    schema is the dispatch allowlist even when the legacy schema otherwise
+    permits unknown fields.  Ordinary callers keep the schema's native
+    ``allow_unknown`` behaviour by leaving the flag false.
+    """
 
     bindings: list[dict[str, Any]] = []
     schema_fields = _mcp_schema_fields(input_schema)
@@ -269,13 +276,7 @@ def apply_runtime_defaults_to_mcp_payload(
             )
 
     if strip_unknown_fields and input_schema is not None:
-        allow_unknown = bool(getattr(input_schema, "allow_unknown", False))
-        if isinstance(input_schema, Mapping):
-            allow_unknown = allow_unknown or bool(
-                input_schema.get("allow_unknown")
-                or input_schema.get("additionalProperties")
-            )
-        if not allow_unknown and schema_fields:
+        if schema_fields:
             for key in list(payload.keys()):
                 if key in schema_fields:
                     continue

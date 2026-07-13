@@ -1,7 +1,14 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "41",
+  "seed_version": "42",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#conversation_turn_execution_workflow": {
+      "41": [
+        "a4d93441a96ac832356c18eb1c4a54d84cf98b92fb98a8fa4c946a0ffbdca14d"
+      ]
+    }
+  },
   "support_concepts": [
     {
       "concept_id": "#V#default_workflow_model_policy",
@@ -5099,6 +5106,10 @@
                   "label": "Turn Expected Outcome Summary"
                 },
                 {
+                  "context_key": "turn_expected_target_contracts",
+                  "label": "Expected Target Contracts"
+                },
+                {
                   "context_key": "turn_expected_grounding_requirement",
                   "label": "Grounding Requirement"
                 },
@@ -5203,6 +5214,10 @@
                   "label": "Previous Recovery Tool Batch"
                 },
                 {
+                  "context_key": "turn_recovery_target_contract_validation",
+                  "label": "Previous Recovery Target Validation"
+                },
+                {
                   "context_key": "response_text",
                   "label": "Current User-Facing Response"
                 },
@@ -5266,6 +5281,16 @@
                 "tool_output_field": "validated_json.turn_next_action.tool_calls"
               },
               {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_target_contracts_to_turn_next_action_target_contracts",
+                "context_key": "turn_next_action_target_contracts",
+                "tool_output_field": "validated_json.turn_next_action.target_contracts"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_target_contracts_to_turn_recovery_target_contracts",
+                "context_key": "turn_recovery_target_contracts",
+                "tool_output_field": "validated_json.turn_next_action.target_contracts"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_reasoning_to_turn_next_action_reasoning",
                 "context_key": "turn_next_action_reasoning",
                 "tool_output_field": "validated_json.reasoning"
@@ -5295,12 +5320,14 @@
               "json_field_defaults": {
                 "turn_next_action.action_type": "respond_with_follow_up",
                 "turn_next_action.response_text": "I could not complete this reliably because the required evidence-producing action did not execute. The terminal outcome receipt records the exact cause and safe recovery options, but no further automated action remained applicable.",
+                "turn_next_action.target_contracts": [],
                 "reasoning": "The represented recovery output did not identify an applicable automated action with the fields required by the workflow transition."
               },
               "output_format": "json_value",
               "required_json_fields": [
                 "turn_next_action.action_type",
                 "turn_next_action.response_text",
+                "turn_next_action.target_contracts",
                 "reasoning"
               ]
             },
@@ -5310,9 +5337,11 @@
               "turn_next_action_target_workflow_id",
               "turn_next_action_response_text",
               "turn_next_action_tool_calls",
+              "turn_next_action_target_contracts",
               "turn_next_action_reasoning",
               "turn_recovery_decision",
               "turn_recovery_target_workflow_id",
+              "turn_recovery_target_contracts",
               "turn_recovery_reasoning",
               "turn_recovery_response_text"
             ],
@@ -5393,6 +5422,10 @@
               [
                 "tool_batch_cap",
                 4
+              ],
+              [
+                "target_contracts_context_key",
+                "turn_recovery_target_contracts"
               ]
             ],
             "writes_context_keys": [
@@ -5412,7 +5445,13 @@
               "turn_recovery_attempted",
               "turn_recovery_last_decision",
               "turn_recovery_last_reasoning",
-              "turn_recovery_last_target_workflow_id"
+              "turn_recovery_last_target_workflow_id",
+              "turn_recovery_target_contract_validation",
+              "turn_target_contract_resolution_validation",
+              "turn_expected_target_contracts",
+              "turn_expected_outcome_contract_state",
+              "turn_expected_outcome_profile",
+              "turn_expected_outcome_contract"
             ]
           },
           {

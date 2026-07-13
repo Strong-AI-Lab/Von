@@ -10,6 +10,8 @@ Tests cover:
 from __future__ import annotations
 
 import re
+import threading
+import time
 from typing import Any, cast
 
 import pytest
@@ -505,6 +507,58 @@ class TestIndexFromRegistry:
         assert results[0].workflow_id == "#V#generic_metadata_representation_workflow"
         assert results[0].metadata["workflow_action_ids"] == [
             "metadata.verify_representation"
+        ]
+
+    def test_indexes_llm_step_allowed_tools_as_workflow_capabilities(self):
+        from src.backend.workflows import (
+            WorkflowActionInvocation,
+            WorkflowDefinition,
+            WorkflowRegistry,
+            WorkflowStateSpec,
+        )
+        from src.backend.workflows.workflow_registry import WorkflowRegistration
+
+        registry = WorkflowRegistry()
+        definition = WorkflowDefinition(
+            workflow_id="#V#generic_resolution_workflow",
+            initial_state="resolve",
+            states={
+                "resolve": WorkflowStateSpec(
+                    state_id="resolve",
+                    actions=(
+                        WorkflowActionInvocation(
+                            action_id="llm.action",
+                            llm_policy={
+                                "tool_mode": "allowed",
+                                "allowed_tools": [
+                                    "search_concepts",
+                                    "fetch_concept",
+                                ],
+                            },
+                        ),
+                    ),
+                    terminal=True,
+                )
+            },
+            purpose="Resolve and verify a represented target.",
+        )
+        registry.register(
+            WorkflowRegistration(
+                workflow_id=definition.workflow_id,
+                definition=definition,
+                purpose=definition.purpose,
+                source="repo_seed_agent_test",
+            )
+        )
+
+        index = WorkflowCapabilityIndex()
+        assert index.index_from_registry(registry) == 1
+        results = index.search("search_concepts fetch_concept", max_results=1)
+
+        assert results
+        assert results[0].metadata["required_tools"] == [
+            "search_concepts",
+            "fetch_concept",
         ]
 
     def test_contract_resolution_matches_shared_tool_surface_without_rag_sync(self):
@@ -1566,6 +1620,102 @@ def test_startup_check_records_not_ready_report(
     assert readiness["footer_red_flag"] is True
 
 
+def test_reset_returns_promptly_when_builder_is_stuck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    build_started = threading.Event()
+    allow_build_to_finish = threading.Event()
+    build_finished = threading.Event()
+
+    def _delayed_build(**_kwargs: Any) -> WorkflowCapabilityIndex:
+        build_started.set()
+        try:
+            assert allow_build_to_finish.wait(2.0)
+            return get_workflow_capability_index()
+        finally:
+            build_finished.set()
+
+    monkeypatch.setattr(
+        capability_service,
+        "_perform_workflow_capability_index_build",
+        _delayed_build,
+    )
+    assert capability_service._start_background_workflow_capability_index_build(
+        force_refresh=True,
+        workflow_registry=object(),
+    )
+    assert build_started.wait(2.0)
+
+    started_at = time.perf_counter()
+    reset_workflow_capability_index()
+    elapsed_seconds = time.perf_counter() - started_at
+
+    assert elapsed_seconds < 0.25
+    assert get_workflow_capability_index().size == 0
+
+    allow_build_to_finish.set()
+    assert build_finished.wait(2.0)
+    assert get_workflow_capability_index().size == 0
+
+
+def test_reset_generation_prevents_delayed_builder_repopulating_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    build_started = threading.Event()
+    allow_build_to_finish = threading.Event()
+    build_finished = threading.Event()
+    stale_builder_indices: list[WorkflowCapabilityIndex] = []
+
+    def _delayed_build(**_kwargs: Any) -> WorkflowCapabilityIndex:
+        build_started.set()
+        try:
+            assert allow_build_to_finish.wait(2.0)
+            stale_index = get_workflow_capability_index()
+            stale_index.index_workflow(
+                "#V#stale_background_workflow",
+                "Workflow from the pre-reset background builder.",
+            )
+            stale_builder_indices.append(stale_index)
+            return stale_index
+        finally:
+            build_finished.set()
+
+    monkeypatch.setattr(
+        capability_service,
+        "_perform_workflow_capability_index_build",
+        _delayed_build,
+    )
+    assert capability_service._start_background_workflow_capability_index_build(
+        force_refresh=True,
+        workflow_registry=object(),
+    )
+    assert build_started.wait(2.0)
+
+    reset_workflow_capability_index()
+    current_index = get_workflow_capability_index()
+    current_index.index_workflow(
+        "#V#current_generation_workflow",
+        "Workflow from the current post-reset generation.",
+    )
+    allow_build_to_finish.set()
+    assert build_finished.wait(2.0)
+
+    assert stale_builder_indices
+    assert stale_builder_indices[0] is not current_index
+    assert stale_builder_indices[0].size == 1
+    assert get_workflow_capability_index() is current_index
+    assert current_index.size == 1
+    assert current_index.search("current post-reset generation", max_results=5)[
+        0
+    ].workflow_id == "#V#current_generation_workflow"
+
+
 def test_readiness_report_requires_query_surface_warmth() -> None:
     reset_workflow_capability_index()
     index = get_workflow_capability_index()
@@ -1722,6 +1872,311 @@ def test_invalidate_workflow_capability_index_records_reason_and_backend_reset(
     assert reset_calls == ["workflow_capabilities"]
     assert readiness["status"] == "rebuild_required"
     assert readiness["detail"] == "RAG embedder changed; rebuild required."
+
+
+def test_backend_invalidation_serialises_reset_before_current_generation_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    get_workflow_capability_index().index_workflow(
+        "#V#pre_invalidation_workflow",
+        "Capability from the generation being invalidated.",
+    )
+    backend_reset_started = threading.Event()
+    allow_backend_reset_to_finish = threading.Event()
+    build_started = threading.Event()
+    build_finished = threading.Event()
+    invalidation_finished = threading.Event()
+    event_order: list[str] = []
+    invalidation_results: list[dict[str, Any]] = []
+
+    class _BlockingRagService:
+        def reset_namespace(self, namespace: str) -> None:
+            assert namespace == "workflow_capabilities"
+            event_order.append("backend_reset_started")
+            runtime_state = capability_service.get_workflow_capability_index_runtime_state(
+                latency_sensitive=True
+            )
+            assert runtime_state["size"] == 0
+            assert runtime_state["query_surface_ready"] is False
+            assert runtime_state["last_invalidation_reason"] == (
+                "Embedding configuration changed."
+            )
+            backend_reset_started.set()
+            assert allow_backend_reset_to_finish.wait(2.0)
+            event_order.append("backend_reset_finished")
+
+        def upsert_documents(
+            self,
+            docs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+            *,
+            namespace: str | None = None,
+            allow_partial_failures: bool = True,
+        ) -> tuple[int, int]:
+            del namespace, allow_partial_failures
+            return len(docs), 0
+
+    def _current_generation_build(**_kwargs: Any) -> WorkflowCapabilityIndex:
+        event_order.append("current_generation_build_started")
+        build_started.set()
+        index = get_workflow_capability_index()
+        index.index_workflow(
+            "#V#current_generation_workflow",
+            "Capability built after the backend reset completed.",
+        )
+        capability_service._set_workflow_capability_query_surface_state(
+            ready=True,
+            error=None,
+            warmed_monotonic=time.monotonic(),
+        )
+        capability_service._set_workflow_capability_rebuild_state(
+            build_in_progress=False,
+            mode="background",
+            count=index.size,
+            success_monotonic=time.monotonic(),
+            clear_invalidation=True,
+        )
+        build_finished.set()
+        return index
+
+    monkeypatch.setattr(
+        capability_service,
+        "_get_workflow_capability_rag_service",
+        lambda: _BlockingRagService(),
+    )
+    monkeypatch.setattr(
+        capability_service,
+        "_perform_workflow_capability_index_build",
+        _current_generation_build,
+    )
+
+    def _invalidate() -> None:
+        invalidation_results.append(
+            invalidate_workflow_capability_index(
+                reason="Embedding configuration changed.",
+                reset_backend_namespace=True,
+            )
+        )
+        invalidation_finished.set()
+
+    invalidation_thread = threading.Thread(target=_invalidate)
+    invalidation_thread.start()
+    assert backend_reset_started.wait(2.0)
+
+    assert capability_service._start_background_workflow_capability_index_build(
+        force_refresh=True,
+        workflow_registry=object(),
+    )
+    assert not build_started.wait(0.1)
+
+    allow_backend_reset_to_finish.set()
+    assert invalidation_finished.wait(2.0)
+    assert build_finished.wait(2.0)
+    invalidation_thread.join(timeout=2.0)
+
+    assert invalidation_results[0]["backend_namespace_reset"] is True
+    assert event_order[:3] == [
+        "backend_reset_started",
+        "backend_reset_finished",
+        "current_generation_build_started",
+    ]
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state(
+        latency_sensitive=True
+    )
+    assert runtime_state["ready"] is True
+    assert runtime_state["last_invalidation_reason"] is None
+
+
+def test_backend_invalidation_defers_promptly_behind_stuck_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    build_finished = threading.Event()
+    event_order: list[str] = []
+
+    def _hold_rebuild_lock() -> None:
+        with capability_service._INDEX_REBUILD_LOCK:
+            lock_held.set()
+            assert release_lock.wait(2.0)
+
+    holder = threading.Thread(target=_hold_rebuild_lock, daemon=True)
+    holder.start()
+    assert lock_held.wait(2.0)
+
+    class _FakeRagService:
+        def reset_namespace(self, namespace: str) -> None:
+            assert namespace == "workflow_capabilities"
+            event_order.append("backend_reset")
+
+        def upsert_documents(
+            self,
+            docs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+            *,
+            namespace: str | None = None,
+            allow_partial_failures: bool = True,
+        ) -> tuple[int, int]:
+            del namespace, allow_partial_failures
+            return len(docs), 0
+
+    def _current_generation_build(**_kwargs: Any) -> WorkflowCapabilityIndex:
+        event_order.append("current_generation_build")
+        index = get_workflow_capability_index()
+        index.index_workflow(
+            "#V#post_deferred_reset_workflow",
+            "Capability built after deferred backend reset.",
+        )
+        build_finished.set()
+        return index
+
+    monkeypatch.setattr(
+        capability_service,
+        "_WORKFLOW_CAPABILITY_BACKEND_RESET_LOCK_TIMEOUT_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        capability_service,
+        "_get_workflow_capability_rag_service",
+        lambda: _FakeRagService(),
+    )
+    monkeypatch.setattr(
+        capability_service,
+        "_perform_workflow_capability_index_build",
+        _current_generation_build,
+    )
+
+    started_at = time.perf_counter()
+    result = invalidate_workflow_capability_index(
+        reason="Embedding configuration changed.",
+        reset_backend_namespace=True,
+    )
+    elapsed_seconds = time.perf_counter() - started_at
+
+    assert elapsed_seconds < 0.25
+    assert result["success"] is True
+    assert result["backend_namespace_reset"] is False
+    assert result["backend_namespace_reset_deferred"] is True
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state(
+        latency_sensitive=True
+    )
+    assert runtime_state["backend_namespace_reset_pending"] is True
+
+    process_reset = invalidate_workflow_capability_index(
+        reason="Represented workflow authority also changed."
+    )
+    assert process_reset["success"] is True
+    after_process_reset = (
+        capability_service.get_workflow_capability_index_runtime_state(
+            latency_sensitive=True
+        )
+    )
+    assert after_process_reset["backend_namespace_reset_pending"] is True
+
+    assert capability_service._start_background_workflow_capability_index_build(
+        force_refresh=True,
+        workflow_registry=object(),
+    )
+    assert not build_finished.wait(0.05)
+    release_lock.set()
+    holder.join(timeout=2.0)
+    assert build_finished.wait(2.0)
+
+    assert event_order[:2] == ["backend_reset", "current_generation_build"]
+    final_state = capability_service.get_workflow_capability_index_runtime_state(
+        latency_sensitive=True
+    )
+    assert final_state["backend_namespace_reset_pending"] is False
+
+
+def test_process_invalidation_does_not_clobber_completed_current_generation_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    generation_published = threading.Event()
+    allow_invalidation_to_return = threading.Event()
+    build_finished = threading.Event()
+    invalidation_results: list[dict[str, Any]] = []
+    original_reset_generation = (
+        capability_service._reset_workflow_capability_index_generation
+    )
+
+    def _pause_after_generation_publication(**kwargs: Any) -> int:
+        generation = original_reset_generation(**kwargs)
+        generation_published.set()
+        assert allow_invalidation_to_return.wait(2.0)
+        return generation
+
+    def _current_generation_build(**_kwargs: Any) -> WorkflowCapabilityIndex:
+        index = get_workflow_capability_index()
+        index.index_workflow(
+            "#V#current_generation_workflow",
+            "Capability built while invalidation is returning.",
+        )
+        capability_service._set_workflow_capability_query_surface_state(
+            ready=True,
+            error=None,
+            warmed_monotonic=time.monotonic(),
+        )
+        capability_service._set_workflow_capability_rebuild_state(
+            build_in_progress=False,
+            mode="background",
+            count=index.size,
+            success_monotonic=time.monotonic(),
+            clear_invalidation=True,
+        )
+        build_finished.set()
+        return index
+
+    monkeypatch.setattr(
+        capability_service,
+        "_reset_workflow_capability_index_generation",
+        _pause_after_generation_publication,
+    )
+    monkeypatch.setattr(
+        capability_service,
+        "_perform_workflow_capability_index_build",
+        _current_generation_build,
+    )
+
+    invalidation_thread = threading.Thread(
+        target=lambda: invalidation_results.append(
+            invalidate_workflow_capability_index(
+                reason="Represented workflow authority changed."
+            )
+        )
+    )
+    invalidation_thread.start()
+    assert generation_published.wait(2.0)
+    state_after_publication = (
+        capability_service.get_workflow_capability_index_runtime_state(
+            latency_sensitive=True
+        )
+    )
+    assert state_after_publication["last_invalidation_reason"] == (
+        "Represented workflow authority changed."
+    )
+
+    assert capability_service._start_background_workflow_capability_index_build(
+        force_refresh=True,
+        workflow_registry=object(),
+    )
+    assert build_finished.wait(2.0)
+    allow_invalidation_to_return.set()
+    invalidation_thread.join(timeout=2.0)
+
+    assert invalidation_results[0]["success"] is True
+    runtime_state = capability_service.get_workflow_capability_index_runtime_state(
+        latency_sensitive=True
+    )
+    assert runtime_state["ready"] is True
+    assert runtime_state["last_invalidation_reason"] is None
 
 
 def test_workflow_routing_text_relation_change_invalidates_projection(

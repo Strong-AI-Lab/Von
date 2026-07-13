@@ -297,6 +297,9 @@ ACTION_OUTCOME_SKIP_SCAN_KEYS = frozenset(
     }
 )
 INVENTORY_ONLY_TOOLS = frozenset({"list_papers"})
+DISCOVERY_SUMMARY_TO_CONTENT_TOOL = {
+    "get_text_relations_summary": "get_text_relations",
+}
 RELATIONSHIP_CLAIM_MARKERS = (
     "your papers",
     "papers of yours",
@@ -2545,6 +2548,64 @@ def _build_task_result_debug_payload(
     return debug_payload, provenance
 
 
+def _debug_value_is_present(value: Any) -> bool:
+    """Return whether a terminal debug value contains usable evidence."""
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (Mapping, Sequence)) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return bool(value)
+    return True
+
+
+def _is_debug_blob_ref(value: Any) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and value.get("schema_version") == "debug_payload_blob_ref.v1"
+        and isinstance(value.get("blob_ref"), Mapping)
+    )
+
+
+def _merge_terminal_task_debug_value(history_value: Any, task_value: Any) -> Any:
+    """Merge persisted history with the completed task's terminal debug value.
+
+    History persistence can be observed just before the background task result
+    receives its final telemetry enrichment.  The terminal task result is the
+    authoritative same-request projection for overlapping populated fields,
+    while history-only fields still need to survive.  Hydrated payloads also
+    take precedence over opaque blob references in either direction.
+    """
+
+    if not _debug_value_is_present(task_value):
+        return history_value
+    if not _debug_value_is_present(history_value):
+        return task_value
+    if _is_debug_blob_ref(history_value) and not _is_debug_blob_ref(task_value):
+        return task_value
+    if _is_debug_blob_ref(task_value) and not _is_debug_blob_ref(history_value):
+        return history_value
+    if isinstance(history_value, Mapping) and isinstance(task_value, Mapping):
+        merged = dict(history_value)
+        for key, value in task_value.items():
+            merged[key] = _merge_terminal_task_debug_value(merged.get(key), value)
+        return merged
+    return task_value
+
+
+def _merge_history_and_task_result_debug(
+    history_debug: Mapping[str, Any],
+    task_result_debug: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Preserve history-only evidence while applying terminal task enrichment."""
+
+    merged = _merge_terminal_task_debug_value(history_debug, task_result_debug)
+    return dict(merged) if isinstance(merged, Mapping) else dict(history_debug)
+
+
 def _resolve_turn_debug_data(
     *,
     session: requests.Session,
@@ -2581,12 +2642,10 @@ def _resolve_turn_debug_data(
             history_index=history_index_raw,
         )
         if task_result_debug:
-            history_debug = dict(history_debug)
-            for key, value in task_result_debug.items():
-                if key == "background_task_status":
-                    history_debug[key] = value
-                elif key not in history_debug:
-                    history_debug[key] = value
+            history_debug = _merge_history_and_task_result_debug(
+                history_debug,
+                task_result_debug,
+            )
         return (
             dict(history_location),
             history_debug,
@@ -2951,7 +3010,6 @@ def classify_replay_action_outcome(
     failure = _as_mapping(response.get("failure"))
     telemetry = _as_mapping(summary.get("telemetry"))
     evaluation = _as_mapping(summary.get("evaluation"))
-    prompt = _as_mapping(summary.get("prompt"))
     response_scan = {
         key: value for key, value in response.items() if key != "failure"
     }
@@ -3271,6 +3329,169 @@ def _workflow_tool_group_is_user_answer_required(
     return True
 
 
+def _terminal_container_has_evidence(container: Mapping[str, Any]) -> bool:
+    return any(
+        _debug_value_is_present(container.get(key))
+        for key in (
+            "completion_gate",
+            "completion_gate_verdict",
+            "critic_verdict",
+            "terminal_outcome_receipt",
+            "terminal_outcome_receipt_validation",
+        )
+    )
+
+
+def _terminal_container_state(container: Mapping[str, Any]) -> dict[str, Any]:
+    """Read one internally consistent terminal-evidence container."""
+
+    completion_gate = _as_mapping(container.get("completion_gate"))
+    if not completion_gate:
+        completion_gate = _as_mapping(container.get("completion_gate_verdict"))
+    completion_evidence = _as_mapping(completion_gate.get("evidence_payload"))
+    critic_verdict = _as_mapping(container.get("critic_verdict"))
+
+    receipt = _as_mapping(container.get("terminal_outcome_receipt"))
+    if not receipt:
+        receipt = _as_mapping(completion_evidence.get("terminal_outcome_receipt"))
+    if not receipt:
+        receipt = _as_mapping(critic_verdict.get("terminal_outcome_receipt"))
+
+    validation = _as_mapping(container.get("terminal_outcome_receipt_validation"))
+    if not validation:
+        validation = _as_mapping(
+            completion_evidence.get("terminal_outcome_receipt_validation")
+        )
+    return {
+        "completion_gate": completion_gate,
+        "receipt": receipt,
+        "validation": validation,
+    }
+
+
+def _terminal_outcome_receipt_state(
+    llm_debug_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project one canonical represented terminal receipt for the sampler.
+
+    A populated persisted Turn Execution Record is the canonical same-request
+    terminal container.  Falling back to the terminal task-result projection is
+    allowed only when that record has no terminal evidence at all; fields from
+    the two priority surfaces are never mixed into a synthetic success.
+    """
+
+    turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
+    if turn_record and _terminal_container_has_evidence(turn_record):
+        terminal_source = "turn_execution_record"
+        terminal_state = _terminal_container_state(turn_record)
+    else:
+        terminal_source = "terminal_task_result"
+        terminal_state = _terminal_container_state(llm_debug_data)
+
+    completion_gate = _as_mapping(terminal_state.get("completion_gate"))
+    receipt = _as_mapping(terminal_state.get("receipt"))
+    validation = _as_mapping(terminal_state.get("validation"))
+
+    outcome = _safe_text(receipt.get("outcome")).lower()
+    validation_outcome = _safe_text(validation.get("outcome")).lower()
+    valid_typed_terminal_outcome = bool(
+        outcome
+        and receipt.get("schema_version") == "terminal_outcome_receipt.v1"
+        and receipt.get("profile_concept_id") == "#V#terminal_outcome_receipt"
+        and validation.get("present") is True
+        and validation.get("valid") is True
+        and validation_outcome == outcome
+        and validation.get("decision_authority") == "represented_llm"
+    )
+    valid_typed_input_required = bool(
+        outcome == "input_required"
+        and valid_typed_terminal_outcome
+        and _safe_text(receipt.get("cause_code"))
+    )
+    return {
+        "source": terminal_source,
+        "completion_gate": completion_gate,
+        "outcome": outcome or None,
+        "receipt": receipt,
+        "validation": validation,
+        "valid_typed_terminal_outcome": valid_typed_terminal_outcome,
+        "valid_typed_input_required": valid_typed_input_required,
+    }
+
+
+def _successful_observed_tool_names(
+    tool_observations: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    return {
+        _safe_text(observation.get("tool")).lower()
+        for observation in tool_observations
+        if _safe_text(observation.get("tool"))
+        and _safe_text(observation.get("status")).lower()
+        in {"ok", "success", "succeeded", "completed", "true"}
+    }
+
+
+def _receipt_evidence_refers_to_tool(
+    receipt: Mapping[str, Any],
+    tool_name: str,
+) -> bool:
+    expected = tool_name.lower()
+    for evidence_ref in _as_list(receipt.get("evidence_refs")):
+        if not isinstance(evidence_ref, Mapping):
+            continue
+        for key in ("locator", "source", "summary", "tool"):
+            if expected in _safe_text(evidence_ref.get(key)).lower():
+                return True
+    return False
+
+
+def _input_required_evidence_exhaustion(
+    *,
+    terminal_outcome: Mapping[str, Any],
+    successful_observed_tools: set[str],
+) -> dict[str, Any]:
+    """Check that a represented ambiguity receipt did not stop at inventory evidence."""
+
+    if terminal_outcome.get("valid_typed_input_required") is not True:
+        return {
+            "status": "not_applicable",
+            "missing_content_tools": [],
+            "summary_tools_relied_on": [],
+        }
+    receipt = _as_mapping(terminal_outcome.get("receipt"))
+    cause_code = _safe_text(receipt.get("cause_code")).lower()
+    causal_stage = _safe_text(receipt.get("causal_stage")).lower()
+    if not cause_code.endswith("_ambiguous") or causal_stage not in {
+        "retrieval",
+        "verification",
+    }:
+        return {
+            "status": "not_applicable",
+            "missing_content_tools": [],
+            "summary_tools_relied_on": [],
+        }
+
+    missing_content_tools: list[str] = []
+    summary_tools_relied_on: list[str] = []
+    for summary_tool, content_tool in DISCOVERY_SUMMARY_TO_CONTENT_TOOL.items():
+        if summary_tool not in successful_observed_tools:
+            continue
+        if not _receipt_evidence_refers_to_tool(receipt, summary_tool):
+            continue
+        summary_tools_relied_on.append(summary_tool)
+        if content_tool not in successful_observed_tools:
+            missing_content_tools.append(content_tool)
+    if not summary_tools_relied_on:
+        status = "not_applicable"
+    else:
+        status = "incomplete" if missing_content_tools else "complete"
+    return {
+        "status": status,
+        "missing_content_tools": missing_content_tools,
+        "summary_tools_relied_on": summary_tools_relied_on,
+    }
+
+
 def _evaluate_user_happiness(
     *,
     prompt_entry: Mapping[str, Any],
@@ -3320,7 +3541,8 @@ def _evaluate_user_happiness(
     if dispatch_failure_detail:
         reasons.append(f"Dispatch failure detail: {dispatch_failure_detail}.")
 
-    completion_gate = _as_mapping(llm_debug_data.get("completion_gate_verdict"))
+    terminal_outcome = _terminal_outcome_receipt_state(llm_debug_data)
+    completion_gate = _as_mapping(terminal_outcome.get("completion_gate"))
     completion_gate_status = _safe_text(
         completion_gate.get("status")
         or completion_gate.get("verdict")
@@ -3340,9 +3562,61 @@ def _evaluate_user_happiness(
         "retrying",
     }:
         reasons.append(f"Completion gate reported {completion_gate_status}.")
-    if completion_gate.get("safe_to_claim_completion") is False:
+    valid_input_required_gate = bool(
+        terminal_outcome.get("valid_typed_input_required")
+        and completion_gate_status == "input_required"
+    )
+    valid_verified_success_gate = bool(
+        terminal_outcome.get("valid_typed_terminal_outcome")
+        and terminal_outcome.get("outcome") == "verified_success"
+        and completion_gate_status
+        in {
+            "allow",
+            "approved",
+            "completed",
+            "pass",
+            "passed",
+            "success",
+            "succeeded",
+        }
+        and completion_gate.get("safe_to_claim_completion") is not False
+        and completion_gate.get("requires_follow_up") is not True
+    )
+    terminal_outcome_gate_consistent = bool(
+        valid_input_required_gate or valid_verified_success_gate
+    )
+    background_task_status = _safe_text(
+        _as_mapping(generate_payload.get("background_task_status")).get("status")
+        or generate_payload.get("background_task_status")
+    ).lower()
+    terminalised = bool(
+        background_task_status in {"completed", "failed", "cancelled"}
+        or _terminal_container_has_evidence(
+            _as_mapping(llm_debug_data.get("turn_execution_record"))
+        )
+        or _terminal_container_has_evidence(llm_debug_data)
+    )
+    if terminalised and not terminal_outcome_gate_consistent:
+        reasons.append(
+            "Terminal outcome receipt was missing, invalid, or inconsistent with "
+            "the canonical completion gate."
+        )
+    if (
+        terminal_outcome.get("valid_typed_input_required")
+        and not valid_input_required_gate
+    ):
+        reasons.append(
+            "Typed input-required receipt was not confirmed by the completion gate."
+        )
+    if (
+        completion_gate.get("safe_to_claim_completion") is False
+        and not valid_input_required_gate
+    ):
         reasons.append("Completion gate reported safe_to_claim_completion=false.")
-    if completion_gate.get("requires_follow_up") is True:
+    if (
+        completion_gate.get("requires_follow_up") is True
+        and not valid_input_required_gate
+    ):
         reasons.append("Completion gate reported requires_follow_up=true.")
 
     critic_verdict = _as_mapping(llm_debug_data.get("critic_verdict"))
@@ -3369,15 +3643,7 @@ def _evaluate_user_happiness(
         },
         llm_debug_data=llm_debug_data,
     )
-    successful_observed_tools = {
-        _safe_text(observation.get("tool")).lower()
-        for observation in tool_observations
-        if _safe_text(observation.get("tool"))
-        and (
-            _safe_text(observation.get("status")).lower()
-            in {"ok", "success", "succeeded", "completed", "true"}
-        )
-    }
+    successful_observed_tools = _successful_observed_tool_names(tool_observations)
     for observation in tool_observations:
         tool_name = _safe_text(observation.get("tool"))
         if not tool_name:
@@ -3516,6 +3782,24 @@ def _evaluate_user_happiness(
             "Response made a relationship or ownership claim using inventory-only tool evidence."
         )
 
+    input_required_evidence = _input_required_evidence_exhaustion(
+        terminal_outcome=terminal_outcome,
+        successful_observed_tools=successful_observed_tools,
+    )
+    if input_required_evidence.get("status") == "incomplete":
+        reasons.append(
+            "Typed input-required outcome stopped at discovery-summary evidence; "
+            "content-bearing evidence was not successfully retrieved with: "
+            + ", ".join(
+                _safe_text(tool_name)
+                for tool_name in _as_list(
+                    input_required_evidence.get("missing_content_tools")
+                )
+                if _safe_text(tool_name)
+            )
+            + "."
+        )
+
     canonical_concept_id_fidelity = _evaluate_canonical_concept_id_fidelity(
         prompt_entry=prompt_entry,
         response_text=response_text,
@@ -3534,7 +3818,12 @@ def _evaluate_user_happiness(
             )
 
     should_user_be_happy = not reasons
-    verdict = "happy" if should_user_be_happy else "unhappy"
+    if not should_user_be_happy:
+        verdict = "unhappy"
+    elif terminal_outcome.get("valid_typed_input_required"):
+        verdict = "input_required"
+    else:
+        verdict = "happy"
     missing_answer_evidence = [
         entry for entry in missing_evidence if entry.get("user_answer_required") is True
     ]
@@ -3554,6 +3843,12 @@ def _evaluate_user_happiness(
         positive_evidence.append(f"tools={','.join(tool_names)}")
     if expected_tools:
         positive_evidence.append(f"expected_tools={','.join(expected_tools)}")
+    if terminal_outcome.get("valid_typed_input_required"):
+        positive_evidence.append("terminal_outcome=input_required")
+    elif terminal_outcome.get("valid_typed_terminal_outcome"):
+        positive_evidence.append(
+            f"terminal_outcome={terminal_outcome.get('outcome')}"
+        )
 
     return {
         "verdict": verdict,
@@ -3574,6 +3869,18 @@ def _evaluate_user_happiness(
         "missing_answer_evidence": missing_answer_evidence,
         "missing_diagnostic_evidence": missing_diagnostic_evidence,
         "canonical_concept_id_fidelity": canonical_concept_id_fidelity,
+        "terminal_outcome": {
+            "outcome": terminal_outcome.get("outcome"),
+            "valid_typed_input_required": terminal_outcome.get(
+                "valid_typed_input_required"
+            ),
+            "completion_gate_consistent": terminal_outcome_gate_consistent,
+            "evidence_exhaustion": input_required_evidence,
+            "accepted": bool(
+                should_user_be_happy
+                and terminal_outcome_gate_consistent
+            ),
+        },
         "positive_evidence": positive_evidence,
         "response_length": len(response_text),
         "response_preview": response_text[:400],
@@ -4860,10 +5167,45 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
 def _summary_meets_success_threshold(summary: Mapping[str, Any]) -> bool:
     repeat = _as_mapping(summary.get("repeat"))
     if repeat:
-        return bool(repeat.get("meets_minimum_success_rate"))
+        attempts = [
+            attempt
+            for attempt in _as_list(summary.get("attempts"))
+            if isinstance(attempt, Mapping)
+        ]
+        expected_attempt_count = _safe_int(repeat.get("attempt_count"))
+        minimum_success_rate = repeat.get("minimum_success_rate")
+        if (
+            not attempts
+            or expected_attempt_count != len(attempts)
+            or isinstance(minimum_success_rate, bool)
+            or not isinstance(minimum_success_rate, (int, float))
+        ):
+            return False
+        accepted_attempt_count = sum(
+            1
+            for attempt in attempts
+            if _safe_text(attempt.get("status")) == "ok"
+            and _as_mapping(attempt.get("evaluation")).get(
+                "should_user_be_happy"
+            )
+            is True
+            and _as_mapping(
+                _as_mapping(attempt.get("evaluation")).get("terminal_outcome")
+            ).get("accepted")
+            is True
+        )
+        accepted_success_rate = accepted_attempt_count / len(attempts)
+        return bool(
+            repeat.get("meets_minimum_success_rate") is True
+            and accepted_success_rate >= float(minimum_success_rate)
+        )
     if _safe_text(summary.get("status")) != "ok":
         return False
-    return bool(_as_mapping(summary.get("evaluation")).get("should_user_be_happy"))
+    evaluation = _as_mapping(summary.get("evaluation"))
+    return bool(
+        evaluation.get("should_user_be_happy") is True
+        and _as_mapping(evaluation.get("terminal_outcome")).get("accepted") is True
+    )
 
 
 def _run_sampler_subprocess_replay_suite(

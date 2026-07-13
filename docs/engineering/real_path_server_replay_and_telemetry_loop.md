@@ -451,6 +451,13 @@ For each replayed prompt:
    - `chat_history_get_debug_entry`
    - `conversation_telemetry_get_locator`
    - `workflow_get_execution_trace` for any referenced workflow traces
+   A background task's terminal result and its chat-history projection can
+   settle at slightly different times.  When they describe the same
+   `request_id`, merge the richer terminal diagnostics with history-only
+   fields instead of letting an earlier empty nested projection hide later
+   selector, dispatch, tool, or completion evidence.  Hydrate debug blob
+   references before treating a compact projection as evidence that a field
+   was absent.
 7. Compare the answer against the recorded expectation before deciding whether
    it was satisfactory, while allowing a clearly better grounded answer to pass
    on its own merits.

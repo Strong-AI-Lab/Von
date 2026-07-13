@@ -17,13 +17,21 @@ Important workflow context:
   this item-planning step; set extraction is handled by the parent workflow.
 
 Task:
-- Use available concept-search tools to check whether the named artefact, code,
-  parent type, or predicate already exists.
+- Use `resolve_concept_by_name` for the exact supplied artefact name before
+  deciding whether it already exists. Preserve its `resolved`, `ambiguous`, or
+  `not_found` distinction; do not turn a candidate into an exact match merely
+  because it is convenient.
+- Use `search_concepts` for broader code, parent-type, predicate, and alternative
+  discovery when exact name resolution is insufficient. Use `fetch_concept` to
+  verify the exact resolved concept before returning `reuse_existing`.
 - Classify the target as a type, individual, or predicate.
-- Resolve a grounded parent/type before any creation plan.
-- The workflow will assert the resolved parent/type membership with
-  `add_relationship` after a concept ID is resolved. Return `parent_id` for
-  both `create` and `reuse_existing` when the parent/type is grounded.
+- Resolve a grounded parent/type before any `create` plan.
+- For `create`, the workflow will assert the resolved parent/type membership
+  with `add_relationship` and attach the supplied description after the new
+  concept ID is resolved.
+- Reuse is read-only. For `reuse_existing`, return the verified
+  `existing_concept_id`; the workflow will read the concept and its text
+  relations back without adding relationships or replacing descriptions.
 - Return a JSON object only.
 
 Parent/type policy:
@@ -44,8 +52,9 @@ Parent/type policy:
 
 Existing concept policy:
 - If search verifies an exact existing represented artefact for the requested
-  name or code, set decision `reuse_existing` and provide `existing_concept_id`
-  plus the grounded `parent_id` needed for relationship verification.
+  name or code, set decision `reuse_existing` and provide
+  `existing_concept_id`. `parent_id` may preserve a parent/type shown by the
+  search evidence, but it is optional context and will not authorise a write.
 - Otherwise, set decision `create` only when `parent_id` and `concepts` are
   both fully grounded.
 
@@ -63,7 +72,7 @@ Return this exact JSON shape:
   "target_name": "human-readable supplied or inferred name",
   "target_code": "stable code if supplied, otherwise null (JSON null, not a string)",
   "target_kind": "individual | type | predicate",
-  "parent_id": "#V#specific_parent_type_or_predicate",
+  "parent_id": "#V#specific_parent_type_or_predicate for create, otherwise null if not evidenced",
   "existing_concept_id": "#V#existing_concept_id or null (JSON null, not a string)",
   "concepts": [
     {
@@ -78,7 +87,9 @@ Return this exact JSON shape:
 }
 
 Rules:
-- For `reuse_existing`, `concepts` may be [] and `blocking_reason` must be null.
+- For `reuse_existing`, `concepts` must be [], `parent_id` may be null, and
+  `blocking_reason` must be null. Do not propose relationship or description
+  writes for an existing concept.
 - For `create`, `parent_id` must be a concrete `#V#...` concept ID and
   `concepts` must contain one item.
 - For `escalate`, `parent_id` and `concepts` may be null/[] and

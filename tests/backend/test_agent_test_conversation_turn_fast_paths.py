@@ -34,7 +34,10 @@ from src.backend.workflows.durable.subworkflow_actions import (
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
 )
-from src.backend.workflows.llm_step_executor import execute_llm_step
+from src.backend.workflows.llm_step_executor import (
+    _request_uses_agent_test_local_model,
+    execute_llm_step,
+)
 from src.backend.services.agent_test_replay_mode_service import (
     AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
     AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
@@ -1310,6 +1313,7 @@ def test_agent_test_route_uses_represented_selector_decision_for_gmail_arxiv(
             workflow_state_id="selector_decision",
         )
     )
+    data.update(selector_result.outputs)
     data["selector_raw_response"] = selector_result.outputs["final_response"]
 
     route_result = orchestrator._action_turn_execution_route(
@@ -1449,6 +1453,25 @@ def test_agent_test_narration_fast_path_reuses_selected_workflow_response(
             "selected_workflow_user_response": "Michael Witbrock has relation evidence.",
             "requested_model": "gemma4:e4b",
             "selected_model_provider": "ollama",
+            "llm_calls": [
+                {
+                    "type": "llm.generate",
+                    "stage": "classifier",
+                    "model_name": "selector-model",
+                }
+            ],
+            "aux_llm_calls": [
+                {
+                    "type": "workflow_selector_prompt",
+                    "stage": "selector_preparation",
+                    "prompt_id": "#V#chat_turn_classifier_prompt",
+                },
+                {
+                    "type": "workflow_selector",
+                    "stage": "selector_decision",
+                    "workflow_id": "#V#chat_assistant_workflow",
+                },
+            ],
         },
         llm_policy={"policy_stage": "narration"},
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -1461,6 +1484,77 @@ def test_agent_test_narration_fast_path_reuses_selected_workflow_response(
     assert result.outputs["final_response"] == (
         "Michael Witbrock has relation evidence."
     )
+    assert [entry["type"] for entry in result.outputs["llm_calls"]] == [
+        "llm.generate",
+        "llm.generate_skipped",
+    ]
+    assert [entry["type"] for entry in result.outputs["aux_llm_calls"]] == [
+        "workflow_selector_prompt",
+        "workflow_selector",
+        "workflow_llm_step_skip",
+    ]
+
+
+def test_agent_test_does_not_assume_bare_hosted_model_is_local(monkeypatch) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=_ExplodingLLM(), model="gpt-5.6-luna"
+        ),
+        data={"requested_model": "gpt-5.6-luna"},
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="narration",
+    )
+
+    assert _request_uses_agent_test_local_model(request) is False
+
+
+def test_agent_test_infers_bare_ollama_model_is_local(monkeypatch) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+
+    class _OllamaTestClient(_ExplodingLLM):
+        pass
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=_OllamaTestClient(), model="gemma4:e4b"
+        ),
+        data={"requested_model": "gemma4:e4b"},
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="narration",
+    )
+
+    assert _request_uses_agent_test_local_model(request) is True
+
+
+def test_agent_test_locality_prefers_selected_over_requested_provider(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=_ExplodingLLM(), model="gpt-5.6-luna"
+        ),
+        data={
+            "requested_model": "gpt-5.6-luna",
+            "requested_client_type": "ollama",
+            "selected_model_provider": "openai",
+        },
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="narration",
+    )
+
+    assert _request_uses_agent_test_local_model(request) is False
+
+    request.data["requested_client_type"] = "openai"
+    request.data["selected_model_provider"] = "ollama"
+    assert _request_uses_agent_test_local_model(request) is True
 
 
 def test_agent_test_completion_gate_skips_episode_autotrigger(monkeypatch) -> None:

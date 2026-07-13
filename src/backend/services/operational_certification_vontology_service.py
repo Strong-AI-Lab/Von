@@ -29,6 +29,9 @@ from .operational_certification_contract_service import stable_payload_digest
 OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID = (
     "#V#operational_state_evidence_evaluator"
 )
+OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID = (
+    "#V#operational_marker_absence_probe_workflow"
+)
 OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID = (
     "#V#prompt_operational_certification_state_evaluator"
 )
@@ -217,9 +220,7 @@ def load_represented_operational_campaign_evidence(
         "pilot_envelopes_agreed": evidence.get("pilot_envelopes_agreed") is True,
         "completed_learning_loop_count": completed_learning_loop_count,
         "learning_release_receipt_ids": receipt_ids,
-        "evaluated_learning_release_candidate_bindings": (
-            evaluated_candidate_bindings
-        ),
+        "evaluated_learning_release_candidate_bindings": (evaluated_candidate_bindings),
         "evaluated_learning_release_candidate_ids": evaluated_candidate_ids,
     }
     if safe_envelope:
@@ -322,7 +323,10 @@ def bootstrap_operational_certification_authority(
         asset_path=_WORKFLOW_BUNDLE_PATH,
         publish_context_manager_factory=suspend_event_workflow_integration,
         force_republish=force_republish,
-        target_workflow_ids=(OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID,),
+        target_workflow_ids=(
+            OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID,
+            OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID,
+        ),
     )
     suite_support = ensure_canonical_benchmark_suites_from_seed_fixtures(
         suite_concept_ids=[
@@ -351,6 +355,9 @@ def bootstrap_operational_certification_authority(
         "managed_by": _MANAGED_BY,
         "source_tag": _SOURCE_TAG,
         "evaluator_workflow_id": OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID,
+        "marker_absence_probe_workflow_id": (
+            OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
+        ),
         "evaluator_prompt_id": OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID,
         "prompt_support": prompt_support,
         "workflow_publication": workflow_publication,
@@ -363,6 +370,7 @@ __all__ = [
     "OPERATIONAL_CERTIFICATION_CAMPAIGN_EVIDENCE_CONCEPT_ID",
     "OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID",
     "OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID",
+    "OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID",
     "REPRESENTED_OPERATIONAL_CAMPAIGN_EVIDENCE_SCHEMA_VERSION",
     "bootstrap_operational_certification_authority",
     "load_represented_operational_campaign_evidence",

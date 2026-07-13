@@ -413,7 +413,9 @@ def test_run_llm_with_fallbacks_passes_candidate_model_parameters(
             return "ok"
 
     client = _RecordingClient()
-    monkeypatch.setattr(orchestrator, "_stage_model_candidates", lambda **_kwargs: [candidate])
+    monkeypatch.setattr(
+        orchestrator, "_stage_model_candidates", lambda **_kwargs: [candidate]
+    )
     monkeypatch.setattr(
         orchestrator,
         "_create_client_for_candidate",
@@ -429,8 +431,12 @@ def test_run_llm_with_fallbacks_passes_candidate_model_parameters(
             },
         ),
     )
-    monkeypatch.setattr(orchestrator, "_probe_model_candidate_reachability", lambda **_kwargs: None)
-    monkeypatch.setattr(orchestrator, "_invoke_with_llm_heartbeat", lambda *, call, **_kwargs: call())
+    monkeypatch.setattr(
+        orchestrator, "_probe_model_candidate_reachability", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator, "_invoke_with_llm_heartbeat", lambda *, call, **_kwargs: call()
+    )
 
     progress_events: list[dict[str, Any]] = []
     aux_log: list[Mapping[str, Any]] = []
@@ -462,7 +468,9 @@ def test_run_llm_with_fallbacks_passes_candidate_model_parameters(
     assert model_name == "gpt-5.5"
     assert telemetry["model_parameters"] == {"reasoning_effort": "low"}
     assert client.calls[0]["llm_params"] == {"reasoning_effort": "low"}
-    end_event = next(event for event in progress_events if event.get("status") == "llm_call_end")
+    end_event = next(
+        event for event in progress_events if event.get("status") == "llm_call_end"
+    )
     assert end_event["effective_model_parameters"] == {"reasoning_effort": "low"}
     stage_summary = next(
         entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
@@ -496,8 +504,7 @@ def test_run_llm_with_fallbacks_tries_next_candidate_after_response_validation_f
     class _ValidJsonClient:
         def generate(self, *_args: Any, **_kwargs: Any) -> str:
             return (
-                '{"mode":"no_prior_context",'
-                '"summary":"Use only the current request."}'
+                '{"mode":"no_prior_context","summary":"Use only the current request."}'
             )
 
     monkeypatch.setattr(
@@ -1050,9 +1057,7 @@ def test_run_llm_with_fallbacks_ignores_browser_object_active_model(
 
 
 def test_raw_ollama_tag_policy_candidate_keeps_whole_model_name() -> None:
-    candidate = InternalMCPChatOrchestrator._parse_policy_model_candidate(
-        "qwen3:8b"
-    )
+    candidate = InternalMCPChatOrchestrator._parse_policy_model_candidate("qwen3:8b")
 
     assert candidate is not None
     assert candidate.provider == "ollama"
@@ -1899,6 +1904,77 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
         "recent-tool-5",
         "recent-tool-6",
     ]
+
+
+def test_tool_calling_backfill_prompt_preserves_structured_workflow_contract(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    captured: dict[str, Any] = {}
+
+    def _render_authoritative_prompt(
+        prompt_ids,
+        *,
+        variables,
+        max_chars,
+        error_context,
+        required=False,
+    ):
+        captured.update(
+            {
+                "prompt_ids": prompt_ids,
+                "variables": variables,
+                "max_chars": max_chars,
+                "error_context": error_context,
+                "required": required,
+            }
+        )
+        return SimpleNamespace(
+            prompt_id="#V#workflow_step_structured_output_backfill_prompt",
+            text=(
+                "represented continuation "
+                f"{variables['output_format']} "
+                f"{variables['workflow_step_output_contract']} "
+                f"{variables['original_authoritative_workflow_step_instructions']}"
+            ),
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_render_authoritative_prompt",
+        _render_authoritative_prompt,
+    )
+    prompt, preserves_contract, prompt_id = orchestrator._workflow_step_backfill_prompt(
+        {
+            "prompt": "Resolve the represented artefact and return JSON only.",
+            "workflow_step_output_contract": {
+                "schema_version": "workflow_step_output_contract.v1",
+                "output_format": "json_value",
+                "prompt_concept_id": "#V#prompt_represented_plan",
+                "workflow_id": "#V#represented_workflow",
+                "workflow_state_id": "plan",
+                "response_contract_text": (
+                    "Return JSON with decision and target_contracts."
+                ),
+                "required_json_fields": ["decision", "target_contracts"],
+                "json_field_defaults": {"target_contracts": []},
+            },
+        }
+    )
+
+    assert preserves_contract is True
+    assert prompt_id == "#V#workflow_step_structured_output_backfill_prompt"
+    assert captured["prompt_ids"] == (
+        "#V#workflow_step_structured_output_backfill_prompt",
+    )
+    assert captured["required"] is True
+    assert captured["error_context"] == "workflow_step_structured_output_backfill"
+    assert captured["variables"]["output_format"] == "json_value"
+    assert "represented continuation" in prompt
+    assert "json_value" in prompt
+    assert "#V#prompt_represented_plan" in prompt
+    assert "Resolve the represented artefact and return JSON only." in prompt
+    assert "Provide a final answer to the user now" not in prompt
 
 
 def test_tool_calling_backfill_injects_synthesiser_context_prep_messages(
@@ -2832,8 +2908,9 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
         "Tool-use limit reached: this turn reached "
         "`internal_mcp_max_tool_invocations=8` after 8 tool call(s)."
     )
-    assert "Partial final answer grounded in the completed tool results." in (
-        result.outputs["final_response"]
+    assert (
+        "Partial final answer grounded in the completed tool results."
+        in (result.outputs["final_response"])
     )
     assert len(prompts) == 2
     assert "internal_mcp_max_tool_invocations=8" in prompts[-1]

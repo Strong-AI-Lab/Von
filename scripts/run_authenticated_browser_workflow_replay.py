@@ -35,6 +35,9 @@ from scripts.live_test_server_defaults import (  # noqa: E402
     build_agent_test_server_requirement_error,
     get_default_agent_test_base_url,
 )
+from src.backend.services.agent_test_replay_mode_service import (  # noqa: E402
+    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
+)
 
 
 GMAIL_ARXIV_PROMPT = (
@@ -922,6 +925,7 @@ def submit_background_generate(
     model: str | None,
     presenter_mode: bool,
     thinking_card_mode: str,
+    agent_test_selector_replay_mode: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "prompt": case.prompt,
@@ -937,6 +941,10 @@ def submit_background_generate(
         payload["model"] = model
     if presenter_mode:
         payload["presenter_mode"] = True
+    if agent_test_selector_replay_mode and agent_test_selector_replay_mode.strip():
+        payload[AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY] = (
+            agent_test_selector_replay_mode.strip()
+        )
     if isinstance(case.workflow_inputs, Mapping) and case.workflow_inputs:
         payload["workflow_inputs"] = {
             str(key): value

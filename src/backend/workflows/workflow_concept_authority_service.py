@@ -469,6 +469,9 @@ _PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
 )
 
 REPO_SEED_WORKFLOW_BUNDLE_SCHEMA_VERSION = "repo_seed_workflow_bundle.v1"
+_KNOWN_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION_FIELD = (
+    "known_legacy_authority_payload_sha256_by_seed_version"
+)
 REPO_SEED_WORKFLOW_BUNDLE_DIR = Path(__file__).with_name("repo_seed_bundles")
 _CANONICAL_WORKFLOW_PUBLICATION_SEED_BUNDLE_PATH = (
     REPO_SEED_WORKFLOW_BUNDLE_DIR / "canonical_workflow_publication_seed_bundle.json"
@@ -495,6 +498,40 @@ def _normalise_seed_bundle_mapping_tuple(value: Any) -> tuple[dict[str, Any], ..
     if not isinstance(value, Sequence) or isinstance(value, str):
         return ()
     return tuple(dict(item) for item in value if isinstance(item, Mapping))
+
+
+def _normalise_known_legacy_workflow_authority_digests(
+    value: Any,
+) -> dict[str, dict[str, frozenset[str]]]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("repo_seed_workflow_known_legacy_digests_invalid")
+    normalised: dict[str, dict[str, frozenset[str]]] = {}
+    for raw_workflow_id, raw_versions in value.items():
+        workflow_id = _normalise_seed_bundle_text(raw_workflow_id)
+        if not workflow_id or not isinstance(raw_versions, Mapping):
+            raise ValueError("repo_seed_workflow_known_legacy_digests_invalid")
+        versions: dict[str, frozenset[str]] = {}
+        for raw_version, raw_digests in raw_versions.items():
+            version = (_normalise_seed_bundle_text(raw_version) or "").lower()
+            if (
+                not version
+                or not isinstance(raw_digests, Sequence)
+                or isinstance(raw_digests, (str, bytes, bytearray))
+            ):
+                raise ValueError("repo_seed_workflow_known_legacy_digests_invalid")
+            digests: set[str] = set()
+            for raw_digest in raw_digests:
+                digest = (_normalise_seed_bundle_text(raw_digest) or "").lower()
+                if len(digest) != 64 or any(
+                    character not in "0123456789abcdef" for character in digest
+                ):
+                    raise ValueError("repo_seed_workflow_known_legacy_digest_invalid")
+                digests.add(digest)
+            versions[version] = frozenset(digests)
+        normalised[workflow_id] = versions
+    return normalised
 
 
 def _parse_static_input_bindings_payload(
@@ -778,6 +815,14 @@ def _load_repo_seed_workflow_bundle_cached(
     ):
         raise ValueError("repo_seed_workflow_bundle_workflows_missing")
 
+    known_legacy_authority_digests = (
+        _normalise_known_legacy_workflow_authority_digests(
+            payload.get(
+                _KNOWN_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION_FIELD
+            )
+        )
+    )
+
     publication_specs: dict[str, _CanonicalWorkflowPublicationSpec] = {}
     publication_purposes: dict[str, str] = {}
     workflow_type_ids: dict[str, tuple[str, ...]] = {}
@@ -936,6 +981,9 @@ def _load_repo_seed_workflow_bundle_cached(
         ),
         "supported_action_ids": _normalise_seed_bundle_string_tuple(
             payload.get("supported_action_ids")
+        ),
+        "known_legacy_authority_payload_sha256_by_seed_version": (
+            known_legacy_authority_digests
         ),
         "publication_specs": publication_specs,
         "publication_purposes": publication_purposes,

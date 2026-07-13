@@ -149,7 +149,9 @@ def _find_verified_named_instance_concept_ids(
     return list(dict.fromkeys(verified_ids))
 
 
-def _resolve_actor_context(request: WorkflowActionRequest) -> tuple[str | None, str | None]:
+def _resolve_actor_context(
+    request: WorkflowActionRequest,
+) -> tuple[str | None, str | None]:
     explicit_user = _first_non_empty_text(
         request.inputs.get("user_concept_id"),
         request.data.get("user_concept_id"),
@@ -165,6 +167,34 @@ def _resolve_actor_context(request: WorkflowActionRequest) -> tuple[str | None, 
         or None,
     )
     return _clean_text(resolved_user) or None, _clean_text(resolved_org) or None
+
+
+def _read_only_existing_entity_result(
+    *,
+    concept_id: str,
+    entity_domain: str,
+    entity_type_id: str,
+    entity_name: str,
+) -> WorkflowActionResult:
+    """Return an idempotent handoff without changing an existing concept.
+
+    The represented workflow owns reuse/readback policy.  This guard only
+    closes the race between its read-only resolution step and this additive
+    create primitive.
+    """
+
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "entity_representation_materialised": False,
+            "entity_representation_verified": True,
+            "entity_representation_domain": entity_domain,
+            "entity_representation_type_id": entity_type_id,
+            "entity_representation_concept_id": concept_id,
+            "entity_representation_reused_existing": True,
+            "entity_representation_name": entity_name,
+        },
+    )
 
 
 def _handle_materialise_from_payload(
@@ -185,10 +215,13 @@ def _handle_materialise_from_payload(
             },
         )
 
-    entity_type_id = _first_non_empty_text(
-        request.inputs.get("entity_type_id"),
-        request.data.get("entity_type_id"),
-    ) or _ENTITY_DOMAIN_DEFAULT_TYPE_IDS[entity_domain]
+    entity_type_id = (
+        _first_non_empty_text(
+            request.inputs.get("entity_type_id"),
+            request.data.get("entity_type_id"),
+        )
+        or _ENTITY_DOMAIN_DEFAULT_TYPE_IDS[entity_domain]
+    )
 
     entity_name = _first_non_empty_text(
         request.inputs.get("entity_name"),
@@ -253,56 +286,61 @@ def _handle_materialise_from_payload(
             },
         )
 
-    user_concept_id, org_concept_id = _resolve_actor_context(request)
-    concept_id: str
-    reused_existing = False
     if verified_ids:
-        concept_id = verified_ids[0]
-        reused_existing = True
-    else:
-        concept_id = stable_named_instance_concept_id(
-            entity_name,
-            prefix=entity_domain,
+        return _read_only_existing_entity_result(
+            concept_id=verified_ids[0],
+            entity_domain=entity_domain,
+            entity_type_id=entity_type_id,
+            entity_name=entity_name,
         )
-        try:
-            concept_service.create_concept(
-                name=entity_name,
-                concept_id=concept_id,
-                description=entity_description,
-                parent_concept_ids=[entity_type_id],
-                create_as_instance=True,
-                created_by_concept_id=user_concept_id,
-                organisation_concept_id=org_concept_id,
-                event_namespace=_clean_text(
-                    getattr(request.environment, "user_namespace", None)
+
+    user_concept_id, org_concept_id = _resolve_actor_context(request)
+    concept_id = stable_named_instance_concept_id(
+        entity_name,
+        prefix=entity_domain,
+    )
+    try:
+        concept_service.create_concept(
+            name=entity_name,
+            concept_id=concept_id,
+            description=entity_description,
+            parent_concept_ids=[entity_type_id],
+            create_as_instance=True,
+            created_by_concept_id=user_concept_id,
+            organisation_concept_id=org_concept_id,
+            event_namespace=_clean_text(
+                getattr(request.environment, "user_namespace", None)
+            )
+            or None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[entity_representation] create concept failed for %s (%s): %s",
+            entity_name,
+            entity_type_id,
+            exc,
+        )
+        verified_ids = _find_verified_named_instance_concept_ids(
+            concept_name=entity_name,
+            instance_of_type_id=entity_type_id,
+        )
+        if len(verified_ids) == 1:
+            return _read_only_existing_entity_result(
+                concept_id=verified_ids[0],
+                entity_domain=entity_domain,
+                entity_type_id=entity_type_id,
+                entity_name=entity_name,
+            )
+        return WorkflowActionResult(
+            status="failed",
+            error=f"entity_representation_concept_create_failed:{exc}",
+            outputs={
+                "response_text": (
+                    f"I couldn't materialise the {entity_domain} "
+                    f"'{entity_name}' just now."
                 )
-                or None,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[entity_representation] create concept failed for %s (%s): %s",
-                entity_name,
-                entity_type_id,
-                exc,
-            )
-            verified_ids = _find_verified_named_instance_concept_ids(
-                concept_name=entity_name,
-                instance_of_type_id=entity_type_id,
-            )
-            if len(verified_ids) == 1:
-                concept_id = verified_ids[0]
-                reused_existing = True
-            else:
-                return WorkflowActionResult(
-                    status="failed",
-                    error=f"entity_representation_concept_create_failed:{exc}",
-                    outputs={
-                        "response_text": (
-                            f"I couldn't materialise the {entity_domain} "
-                            f"'{entity_name}' just now."
-                        )
-                    },
-                )
+            },
+        )
 
     ensure_instance_typing(concept_id=concept_id, type_ids=[entity_type_id])
 
@@ -346,8 +384,7 @@ def _handle_materialise_from_payload(
             },
         )
 
-    verb = "Updated" if reused_existing else "Represented"
-    response_text = f"{verb} {entity_domain} '{entity_name}' as {concept_id}."
+    response_text = f"Represented {entity_domain} '{entity_name}' as {concept_id}."
     return WorkflowActionResult(
         status="success",
         outputs={
@@ -356,7 +393,7 @@ def _handle_materialise_from_payload(
             "entity_representation_domain": entity_domain,
             "entity_representation_type_id": entity_type_id,
             "entity_representation_concept_id": concept_id,
-            "entity_representation_reused_existing": reused_existing,
+            "entity_representation_reused_existing": False,
             "entity_representation_name": entity_name,
             "response_text": response_text,
         },
@@ -369,8 +406,10 @@ def register_entity_representation_actions(registry: ActionRegistry) -> None:
             action_id=ENTITY_REPRESENTATION_MATERIALISE_ACTION_ID,
             handler=_handle_materialise_from_payload,
             description=(
-                "Materialise or reuse a typed entity concept from structured "
-                "entity-representation payload fields."
+                "Additively materialise a typed entity concept from structured "
+                "payload fields. If an exact existing instance is encountered, "
+                "return a read-only idempotence handoff for represented workflow "
+                "readback instead of mutating it."
             ),
             side_effects="write",
         ),

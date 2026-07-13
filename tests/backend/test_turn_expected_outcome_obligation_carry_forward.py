@@ -191,6 +191,124 @@ def test_in_turn_retrieve_then_act_activates_conditional_tool() -> None:
     assert projection["target_resolved_by_current_turn"] is True
 
 
+def test_resolved_existing_entity_satisfies_conditional_create_if_absent() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "conditional_required_tools": ["create_concepts", "fetch_concept"],
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#existing_entity"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        }
+    )
+
+    activated, projection = adjudicate_conditional_required_tool_activation(
+        contract=contract,
+        tool_invocations=[{"tool": "resolve_concept_by_name", "status": "ok"}],
+        obligation_carry_forward_permitted=None,
+    )
+
+    assert activated == ["fetch_concept"]
+    assert projection["conditional_tools_satisfied_without_execution"] == [
+        "create_concepts"
+    ]
+    assert projection["conditional_satisfaction_reason"] == (
+        "resolved_existing_entity_satisfies_create_if_absent_branch"
+    )
+
+
+def test_mixed_resolved_and_unresolved_entities_keep_conditional_create_active() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "conditional_required_tools": ["create_concepts"],
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#existing_entity"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                },
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "text": "another entity",
+                    "resolution_status": "unresolved",
+                    "matching_policy": "exact",
+                },
+            ],
+        }
+    )
+
+    activated, projection = adjudicate_conditional_required_tool_activation(
+        contract=contract,
+        tool_invocations=[{"tool": "resolve_concept_by_name", "status": "ok"}],
+        obligation_carry_forward_permitted=None,
+    )
+
+    assert activated == ["create_concepts"]
+    assert projection["resolved_entity_target_present"] is True
+    assert projection["unresolved_entity_target_present"] is True
+    assert projection["conditional_tools_satisfied_without_execution"] == []
+
+
+def test_executed_conditional_create_remains_activated_for_verification() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "conditional_required_tools": ["create_concepts"],
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#new_entity"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        }
+    )
+
+    activated, projection = adjudicate_conditional_required_tool_activation(
+        contract=contract,
+        tool_invocations=[{"tool": "create_concepts", "status": "ok"}],
+        obligation_carry_forward_permitted=None,
+    )
+
+    assert activated == ["create_concepts"]
+    assert projection["conditional_tools_satisfied_without_execution"] == []
+
+
+def test_resolved_type_keeps_conditional_create_active() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "conditional_required_tools": ["create_concepts"],
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "type",
+                    "concept_ids": ["#V#synthetic_type"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        }
+    )
+
+    activated, projection = adjudicate_conditional_required_tool_activation(
+        contract=contract,
+        tool_invocations=[{"tool": "resolve_concept_by_name", "status": "ok"}],
+        obligation_carry_forward_permitted=None,
+    )
+
+    assert activated == ["create_concepts"]
+    assert projection["resolved_entity_target_present"] is False
+
+
 def test_unresolved_target_leaves_conditional_tools_pending() -> None:
     # No symbolic target resolved yet: conditional tools stay dormant regardless
     # of carry-forward, and are surfaced as pending rather than suppressed.

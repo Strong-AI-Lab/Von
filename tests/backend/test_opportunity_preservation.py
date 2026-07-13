@@ -25,6 +25,10 @@ from src.backend.integrations.internal_mcp.catalogue import (
     _bool_input_normalisation_record,
     _coerce_bool_input,
 )
+from src.backend.integrations.internal_mcp.schemas import Schema
+from src.backend.workflows.mcp_tool_bridge import (
+    apply_runtime_defaults_to_mcp_payload,
+)
 from src.backend.workflows.terminal_success_contracts import (
     evaluate_workflow_terminal_success_contract,
 )
@@ -38,6 +42,10 @@ from src.backend.services.turn_expected_outcome_obligation_carry_forward import 
 from src.backend.services.rag_service import build_rag_retrieval_state
 from src.backend.services.required_tool_obligation_service import (
     build_required_tool_obligation_ledger,
+)
+from src.backend.services import tool_target_contract_validation as target_validation
+from src.backend.services.tool_metadata_service import (
+    ToolRequiredObligationMetadata,
 )
 from src.backend.services.operational_learning_release_service import (
     project_learning_release_recovery_affordances,
@@ -53,6 +61,39 @@ from src.backend.workflows.turn_expected_outcome_contract import (
 
 
 # --- retrieval barriers remain inspectable and recoverable ------------------
+
+
+def test_recovery_schema_hygiene_preserves_valid_verification_read_opportunity() -> (
+    None
+):
+    payload = {
+        "query": "synthetic target",
+        "contract_advisory": "exact",
+    }
+
+    bindings = apply_runtime_defaults_to_mcp_payload(
+        payload,
+        tool_name="synthetic_verification_lookup",
+        input_schema=Schema(
+            required={"query": str},
+            optional={"namespace": (str, type(None))},
+            allow_unknown=True,
+        ),
+        user_namespace="#V#tester@test_org",
+        default_gmail_profile=None,
+        strip_unknown_fields=True,
+    )
+
+    assert payload == {
+        "query": "synthetic target",
+        "namespace": "#V#tester@test_org",
+    }
+    assert {
+        (entry.get("field"), entry.get("source")) for entry in bindings
+    } >= {
+        ("namespace", "user_namespace"),
+        ("contract_advisory", "removed_for_strict_tool_schema"),
+    }
 
 
 def test_retrieval_incompatibility_is_not_collapsed_into_authoritative_empty() -> None:
@@ -106,6 +147,57 @@ def test_equivalent_execution_surface_is_not_erased_by_gateway_name_mismatch() -
     ]
     assert obligation["satisfied"] is True
     assert obligation["blocking_reason"] == ""
+
+
+def test_grounded_read_evidence_preserves_target_inspection_opportunity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        target_validation,
+        "get_tool_required_obligation_metadata",
+        lambda _tool_name: ToolRequiredObligationMetadata(
+            operation_class="verification_read",
+            target_argument_names=("target_id",),
+        ),
+    )
+
+    result = target_validation.validate_tool_target_contract(
+        tool_name="synthetic.verify_target",
+        payload={"target_id": "#V#synthetic_grounded_target"},
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the target named in the request",
+                    "resolution_status": "unresolved",
+                }
+            ]
+        },
+        prior_tool_invocations=[
+            {
+                "tool": "synthetic.resolve_target",
+                "status": "ok",
+                "effective_payload": {
+                    "result": {
+                        "resolved_concept_id": "#V#synthetic_grounded_target"
+                    }
+                },
+            }
+        ],
+    )
+
+    assert result.ok is True
+    assert result.resolution_evidence[0]["resolution_scope"] == (
+        "verification_read_only"
+    )
+    assert result.resolution_evidence[0]["evidence"] == [
+        {
+            "concept_id": "#V#synthetic_grounded_target",
+            "tool": "synthetic.resolve_target",
+            "result_path": "effective_payload.result.resolved_concept_id",
+        }
+    ]
 
 
 def test_rejected_learning_release_preserves_active_pointer_and_recovery_options() -> (
@@ -366,3 +458,34 @@ def test_stale_prior_obligations_do_not_remove_a_narrow_answer_opportunity() -> 
         "some_prior_readback_tool",
     ]
     assert projection["suppression_reason"]
+
+
+def test_verified_existing_entity_does_not_force_duplicate_creation() -> None:
+    contract = TurnExpectedOutcomeContract.from_mapping(
+        {
+            "conditional_required_tools": ["create_concepts", "fetch_concept"],
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#synthetic_existing_entity"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ],
+        }
+    )
+
+    activated, projection = adjudicate_conditional_required_tool_activation(
+        contract=contract,
+        tool_invocations=[{"tool": "resolve_concept_by_name", "status": "ok"}],
+        obligation_carry_forward_permitted=None,
+    )
+
+    assert activated == ["fetch_concept"]
+    assert projection["conditional_tools_satisfied_without_execution"] == [
+        "create_concepts"
+    ]
+    assert projection["conditional_satisfaction_reason"] == (
+        "resolved_existing_entity_satisfies_create_if_absent_branch"
+    )

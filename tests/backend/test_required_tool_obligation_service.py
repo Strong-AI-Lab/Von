@@ -673,6 +673,129 @@ def test_wrong_symbolic_target_contract_evidence_does_not_satisfy_required_tool(
     assert ledger["unsatisfied_required_tools"] == ["get_predicate_incidence"]
 
 
+def test_verification_read_cannot_use_its_own_result_as_grounding_evidence() -> None:
+    ledger = build_required_tool_obligation_ledger(
+        required_tools=["fetch_concept"],
+        invocations=[
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#self_grounded_candidate"},
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#self_grounded_candidate",
+                },
+            }
+        ],
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the entity named by the user",
+                    "resolution_status": "unresolved",
+                }
+            ]
+        },
+        allowed_tools=["fetch_concept"],
+        method_catalogue=_catalogue(["fetch_concept"]),
+    )
+
+    obligation = _obligation_for_tool(ledger, "fetch_concept")
+    assert obligation["successful_count"] == 0
+    assert obligation["last_attempt_status"] == (
+        "target_contract_unresolved_for_symbolic_tool"
+    )
+    assert obligation["satisfied"] is False
+
+
+def test_later_resolution_cannot_retroactively_ground_earlier_read() -> None:
+    ledger = build_required_tool_obligation_ledger(
+        required_tools=["fetch_concept"],
+        invocations=[
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#future_grounded_candidate"},
+                "effective_payload": {"success": True},
+            },
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "arguments": {"query": "the entity named by the user"},
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {"concept_id": "#V#future_grounded_candidate"}
+                    ],
+                },
+            },
+        ],
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the entity named by the user",
+                    "resolution_status": "unresolved",
+                }
+            ]
+        },
+        allowed_tools=["search_concepts", "fetch_concept"],
+        method_catalogue=_catalogue(["search_concepts", "fetch_concept"]),
+    )
+
+    obligation = _obligation_for_tool(ledger, "fetch_concept")
+    assert obligation["successful_count"] == 0
+    assert obligation["last_attempt_status"] == (
+        "target_contract_unresolved_for_symbolic_tool"
+    )
+    assert obligation["satisfied"] is False
+
+
+def test_prior_resolution_result_can_ground_later_verification_read() -> None:
+    ledger = build_required_tool_obligation_ledger(
+        required_tools=["fetch_concept"],
+        invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "arguments": {"query": "the entity named by the user"},
+                "effective_payload": {
+                    "success": True,
+                    "results": [{"concept_id": "#V#grounded_candidate"}],
+                },
+            },
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#grounded_candidate"},
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#grounded_candidate",
+                },
+            },
+        ],
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the entity named by the user",
+                    "resolution_status": "unresolved",
+                }
+            ]
+        },
+        allowed_tools=["search_concepts", "fetch_concept"],
+        method_catalogue=_catalogue(["search_concepts", "fetch_concept"]),
+    )
+
+    obligation = _obligation_for_tool(ledger, "fetch_concept")
+    assert obligation["successful_count"] == 1
+    assert obligation["last_attempt_status"] == "ok"
+    assert obligation["satisfied"] is True
+
+
 def test_url_target_alias_closes_when_canonical_identifier_later_succeeds() -> None:
     ledger = build_required_tool_obligation_ledger(
         required_tools_by_source={

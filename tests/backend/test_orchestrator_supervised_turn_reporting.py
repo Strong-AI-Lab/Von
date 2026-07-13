@@ -3,18 +3,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Mapping, cast
 
 import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.orchestrator import (
     CancellationRequested,
     InternalMCPChatOrchestrator,
     ProgressTracker,
+    _CustomWorkflowDispatchSupport,
+    _WorkflowDispatchSelectionState,
     _WorkflowModelPolicyState,
 )
 from src.backend.services.agent_test_replay_mode_service import (
     AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
     AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
+)
+from src.backend.services.turn_execution_record_service import (
+    build_workflow_routing_diagnostics,
 )
 from src.backend.workflows.conversation_turn_llm_timeout import (
     DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
@@ -705,9 +710,7 @@ def test_conversation_turn_supervised_execute_workflow_skips_duplicate_durable_s
         item for item in aux_log if item.get("type") == "workflow_instance_submission"
     )
     assert submission_event["status"] == "submission_skipped"
-    assert (
-        submission_event["reason_code"] == "conversation_turn_supervised_in_process"
-    )
+    assert submission_event["reason_code"] == "conversation_turn_supervised_in_process"
 
 
 def test_selected_workflow_execute_workflow_skips_in_process_persistence(
@@ -1312,7 +1315,7 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
         gateway=cast(Any, _DummyGateway()),
         selector_enabled=True,
     )
-    aux_llm_calls: list[dict[str, Any]] = []
+    aux_llm_calls: list[dict[str, Any]] = [{"type": "prior_selector_evidence"}]
 
     result = orchestrator._action_turn_execution_prepare_selector_context(
         SimpleNamespace(
@@ -1374,6 +1377,8 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
     )
 
     assert result.status == "success"
+    assert aux_llm_calls == [{"type": "prior_selector_evidence"}]
+    output_aux_llm_calls = result.outputs["aux_llm_calls"]
     assert result.outputs["selector_prompt_available"] is True
     selector_context = result.outputs["selector_context_messages"]
     assert any(
@@ -1398,14 +1403,14 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
     )
     prepare_entry = next(
         entry
-        for entry in aux_llm_calls
+        for entry in output_aux_llm_calls
         if isinstance(entry, dict)
         and entry.get("type") == "workflow_dispatch_prepare_step"
     )
     assert prepare_entry["step_id"] == "selector_candidate_preparation"
     prompt_entry = next(
         entry
-        for entry in aux_llm_calls
+        for entry in output_aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
     )
     assert prompt_entry["stage"] == "selector_preparation"
@@ -1413,6 +1418,7 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
     assert "#V#chat_assistant_workflow" in (
         ((prompt_entry.get("candidate_list") or {}).get("text")) or ""
     )
+    assert result.outputs["aux_llm_calls"][0] == {"type": "prior_selector_evidence"}
     contract_state = result.outputs["turn_expected_outcome_contract_state"]
     assert contract_state["schema_version"] == "turn_expected_outcome_contract.v1"
     assert contract_state["fields"]["summary"] == (
@@ -1420,6 +1426,46 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
     )
     assert contract_state["fields"]["grounding_requirement"] == (
         "Only mention papers when authorship or ownership is grounded."
+    )
+
+
+def test_prepare_selector_context_creates_explicit_aux_output_without_input_bucket(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+
+    result = orchestrator._action_turn_execution_prepare_selector_context(
+        SimpleNamespace(
+            data={
+                "user_prompt": "Who am I?",
+                "workflow_discovery_result": {"matches": [], "candidates": []},
+                "augmented_context": [
+                    {"role": "user", "content": "Who am I?"},
+                ],
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_DummyLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert [entry["type"] for entry in result.outputs["aux_llm_calls"]] == [
+        "workflow_dispatch_prepare_step",
+        "workflow_selector_prompt",
+    ]
+    prompt_entry = result.outputs["aux_llm_calls"][-1]
+    assert prompt_entry["prompt"]["text"]
+    assert prompt_entry["candidate_list"]["text"]
+    assert prompt_entry["candidate_entries"]
+    assert prompt_entry["context_lineage"]["base_context_source"] == (
+        "augmented_context"
     )
 
 
@@ -1559,6 +1605,35 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
         ]
         == "augmented_context"
     )
+    selector_entry = next(
+        entry
+        for entry in result.outputs["aux_llm_calls"]
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
+    )
+    assert selector_entry["workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
+    assert selector_entry["model_name"] == "test-model"
+    assert selector_entry["response"]["text"] == CHAT_ASSISTANT_WORKFLOW_ID
+    assert selector_entry["context_lineage"]["base_context_source"] == (
+        "augmented_context"
+    )
+    selector_diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery=result.outputs["workflow_discovery_result"],
+        workflow_routing=result.outputs["workflow_routing"],
+        turn_execution_diagnostics=None,
+        aux_llm_calls=result.outputs["aux_llm_calls"],
+    )["selector"]
+    assert selector_diagnostics["model_name"] == "test-model"
+    assert selector_diagnostics["telemetry_completeness"] == {
+        "prompt_present": True,
+        "candidate_list_present": True,
+        "response_present": True,
+        "candidate_entries_present": True,
+        "context_lineage_present": True,
+        "selector_prompt_entry_count": 0,
+        "selector_response_entry_count": 1,
+        "missing_fields": [],
+        "response_absence_reason": None,
+    }
 
 
 def test_prepare_selector_context_compacts_bloated_augmented_context(
@@ -2070,6 +2145,11 @@ def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_
     def _raise_if_called(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("selector LLM should not be called on prepared route data")
 
+    route_environment = SimpleNamespace(
+        user_namespace="#V#user",
+        llm_client=SimpleNamespace(generate=_raise_if_called),
+        model="test-model",
+    )
     result = orchestrator._action_turn_execution_route(
         SimpleNamespace(
             data={
@@ -2128,7 +2208,21 @@ def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_
                     "base_context_source": "augmented_context",
                     "stage_added_message_count": 1,
                 },
-                "selector_raw_response": CHAT_ASSISTANT_WORKFLOW_ID,
+                "selector_raw_response": json.dumps(
+                    {
+                        "workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "confidence": 0.99,
+                        "reasoning": "Authenticated identity evidence is in context.",
+                    }
+                ),
+                "llm_step_envelope": {
+                    "selected_model": "gpt-5.6-luna",
+                    "workflow_state_id": "selector_decision",
+                    "selected_model_candidate": {
+                        "provider": "openai",
+                        "model": "gpt-5.6-luna",
+                    },
+                },
                 "policy_state": None,
                 "registry_snapshot": None,
                 "llm_calls": [],
@@ -2137,11 +2231,7 @@ def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_
                     {"role": "user", "content": "Who am I?"},
                 ],
             },
-            environment=SimpleNamespace(
-                user_namespace="#V#user",
-                llm_client=SimpleNamespace(generate=_raise_if_called),
-                model="test-model",
-            ),
+            environment=route_environment,
         )
     )
 
@@ -2150,6 +2240,61 @@ def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_
     assert result.outputs["selected_workflow_trace"]["selector_prompt_id"] == (
         "#V#chat_turn_classifier_prompt"
     )
+    selector_entry = next(
+        entry
+        for entry in result.outputs["aux_llm_calls"]
+        if entry.get("type") == "workflow_selector"
+    )
+    assert selector_entry["model_name"] == "gpt-5.6-luna"
+    assert selector_entry["candidate"] == {
+        "provider": "openai",
+        "model": "gpt-5.6-luna",
+    }
+    assert json.loads(selector_entry["response"]["text"])["workflow_id"] == (
+        CHAT_ASSISTANT_WORKFLOW_ID
+    )
+    assert selector_entry["selection_metadata"]["raw_response_format"] == (
+        "json_object"
+    )
+    selector_diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery=result.outputs["workflow_discovery_result"],
+        workflow_routing=result.outputs["workflow_routing"],
+        turn_execution_diagnostics=None,
+        aux_llm_calls=result.outputs["aux_llm_calls"],
+    )["selector"]
+    assert selector_diagnostics["model_name"] == "gpt-5.6-luna"
+    assert selector_diagnostics["telemetry_completeness"]["missing_fields"] == []
+    assert (
+        selector_diagnostics["telemetry_completeness"]["selector_response_entry_count"]
+        == 1
+    )
+
+    retry_data = dict(result.outputs)
+    retry_data.update(
+        {
+            "user_prompt": "Who am I?",
+            "selector_raw_response": selector_entry["response"]["text"],
+            "llm_step_envelope": {
+                "selected_model": "stale-planner-model",
+                "workflow_state_id": "expected_outcome_inference",
+            },
+            "policy_state": None,
+            "registry_snapshot": None,
+            "llm_calls": [],
+            "aux_llm_calls": result.outputs["aux_llm_calls"],
+            "augmented_context": [{"role": "user", "content": "Who am I?"}],
+        }
+    )
+    retry_result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(data=retry_data, environment=route_environment)
+    )
+    retry_selector_entries = [
+        entry
+        for entry in retry_result.outputs["aux_llm_calls"]
+        if entry.get("type") == "workflow_selector"
+    ]
+    assert len(retry_selector_entries) == 2
+    assert retry_selector_entries[-1]["model_name"] is None
 
 
 def test_turn_execution_route_passes_conversation_turn_timeout_override_to_selector_llm(
@@ -2332,14 +2477,41 @@ def test_turn_execution_route_preserves_non_default_selector_intent_with_safe_ge
 def test_turn_execution_route_recovers_launchable_requested_workflow_after_discovery_timeout(
     monkeypatch,
 ) -> None:
-    # This test exercises recovery from a discovery that found nothing before
-    # its budget ran out. A capability index left warm by an earlier test would
-    # let the refresh path surface candidates and bypass the recovery entirely.
-    from src.backend.services.workflow_capability_service import (
-        reset_workflow_capability_index,
+    # The retry finds only an unrelated, explicitly excluded candidate. That
+    # diagnostic noise must not erase the earlier timeout or suppress direct
+    # launch recovery of the selector-requested workflow.
+    refreshed_excluded_discovery = {
+        "requested_query": (
+            "What research interests of mine are explicitly represented here?"
+        ),
+        "query": "What research interests of mine are explicitly represented here?",
+        "discovery_query_input": (
+            "What research interests of mine are explicitly represented here?"
+        ),
+        "search_sources": ["capability_index"],
+        "matches": [],
+        "candidates": [
+            {
+                "concept_id": "#V#unrelated_excluded_workflow",
+                "name": "Unrelated Excluded Workflow",
+                "description": "An unrelated non-executable discovery result.",
+                "routing_eligible": False,
+                "routing_exclusion_reason": "non_executable_design_artifact",
+                "is_executable": False,
+                "executability_reason": "non_executable_design_artifact",
+            }
+        ],
+        "routing_matches": [],
+        "match_count": 0,
+        "candidate_count": 1,
+        "budget_exhausted": False,
+        "match_absence_reason": "all_discovery_candidates_excluded",
+    }
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_memo_service."
+        "discover_workflows_for_turn_memoized",
+        lambda *_args, **_kwargs: dict(refreshed_excluded_discovery),
     )
-
-    reset_workflow_capability_index()
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=cast(Any, _DummyGateway()),
@@ -2362,6 +2534,14 @@ def test_turn_execution_route_recovers_launchable_requested_workflow_after_disco
                         ),
                         terminal=True,
                     )
+                },
+                metadata={
+                    "publication_lifecycle": {
+                        "schema_version": "workflow_publication_lifecycle.v1",
+                        "phase": "published",
+                        "published": True,
+                        "routing_eligible": True,
+                    }
                 },
             ),
             purpose=(
@@ -2444,6 +2624,12 @@ def test_turn_execution_route_recovers_launchable_requested_workflow_after_disco
 
     assert result.status == "success"
     assert result.outputs["selected_workflow_id"] == selected_workflow_id
+    refreshed_discovery = result.outputs["workflow_discovery_result"]
+    assert refreshed_discovery["candidate_count"] == 1
+    assert refreshed_discovery["routing_matches"] == []
+    assert refreshed_discovery["budget_exhausted"] is True
+    assert refreshed_discovery["prior_discovery_budget_exhausted"] is True
+    assert refreshed_discovery["refresh_discovery_budget_exhausted"] is False
     workflow_routing = result.outputs["workflow_routing"]
     assert workflow_routing["workflow_id"] == selected_workflow_id
     assert workflow_routing["verdict"] == "rag_selected"
@@ -2472,6 +2658,242 @@ def test_turn_execution_route_recovers_launchable_requested_workflow_after_disco
         and entry.get("step_id") == "selector_unmatched_candidate_recovery"
     )
     assert recovery_prepare_step["workflow_id"] == selected_workflow_id
+    authority_entry = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_recovery_authority_check"
+    )
+    assert authority_entry["workflow_id"] == selected_workflow_id
+    assert authority_entry["routing_eligible"] is True
+    assert authority_entry["publication_lifecycle"]["published"] is True
+
+
+def test_timeout_recovery_rejects_launchable_workflow_with_ineligible_authority(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    prompt = "Inspect the represented entity."
+    authority_cases = {
+        "#V#draft_absent_workflow": {
+            "publication_lifecycle": {
+                "schema_version": "workflow_publication_lifecycle.v1",
+                "phase": "draft",
+                "published": False,
+                "routing_eligible": False,
+            }
+        },
+        "#V#routing_disabled_absent_workflow": {
+            "publication_lifecycle": {
+                "schema_version": "workflow_publication_lifecycle.v1",
+                "phase": "published",
+                "published": True,
+                "routing_eligible": True,
+            },
+            "routing_profile": {
+                "schema_version": "workflow_routing_profile.v1",
+                "role": "execution",
+                "routing_eligible": False,
+            },
+        },
+    }
+
+    for workflow_id, metadata in authority_cases.items():
+        orchestrator._workflow_registry.register_or_replace(
+            WorkflowRegistration(
+                workflow_id=workflow_id,
+                definition=WorkflowDefinition(
+                    workflow_id=workflow_id,
+                    initial_state="complete",
+                    states={
+                        "complete": WorkflowStateSpec(
+                            state_id="complete",
+                            actions=(
+                                WorkflowActionInvocation(
+                                    action_id="tool.prepare_custom"
+                                ),
+                            ),
+                            terminal=True,
+                        )
+                    },
+                    metadata=metadata,
+                ),
+                purpose="Launchable workflow excluded by represented authority.",
+                source="test",
+            )
+        )
+        launchability_probe = orchestrator._probe_workflow_launchability_for_inputs(
+            workflow_id,
+            available_inputs={"user_prompt": prompt},
+        )
+        assert launchability_probe["launchable"] is True
+
+        aux_llm_calls: list[Mapping[str, Any]] = []
+        support = _CustomWorkflowDispatchSupport(
+            orchestrator=orchestrator,
+            prompt=prompt,
+            discovered_matches=(),
+            aux_llm_calls=aux_llm_calls,
+            trace_enabled=False,
+            trace=None,
+            build_live_workflow_routing_payload=lambda: {},
+            build_custom_workflow_dispatch_data=lambda _workflow_id=None: {
+                "user_prompt": prompt
+            },
+            resolve_selected_workflow_name=lambda selected_id: selected_id,
+            record_dispatch_prepare_note=lambda **_kwargs: None,
+            emit_progress_local=lambda _payload: None,
+        )
+        state = _WorkflowDispatchSelectionState(
+            selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+            selected_workflow_id_text=CHAT_ASSISTANT_WORKFLOW_ID,
+            selector_verdict="rag_default",
+            selector_requests_narration=False,
+            selector_requests_custom_workflow=False,
+            selected_uses_narration_contract=False,
+            selected_prefers_direct_response=True,
+            selected_uses_tool_pipeline_contract=False,
+            routing_info=None,
+        )
+
+        recovered = (
+            support.maybe_recover_selector_unmatched_candidate_after_discovery_timeout(
+                state,
+                selector_safe_general_fallback_payload={
+                    "requested_candidate_workflow_id": workflow_id,
+                },
+                workflow_discovery_result={
+                    "budget_exhausted": True,
+                    "candidate_count": 0,
+                    "match_count": 0,
+                    "routing_matches": [],
+                    "candidates": [],
+                },
+            )
+        )
+
+        assert recovered is False
+        assert state.selected_workflow_id_text == CHAT_ASSISTANT_WORKFLOW_ID
+        authority_entry = next(
+            entry
+            for entry in aux_llm_calls
+            if entry.get("type") == "workflow_selector_recovery_authority_check"
+        )
+        assert authority_entry["workflow_id"] == workflow_id
+        assert authority_entry["routing_eligible"] is False
+        assert authority_entry["routing_exclusion_reason"] == (
+            "routing_explicitly_disabled"
+        )
+
+
+def test_routing_match_count_ignores_excluded_candidate_count() -> None:
+    assert (
+        InternalMCPChatOrchestrator._workflow_discovery_routing_match_count(
+            {
+                "candidate_count": 2,
+                "candidates": [
+                    {
+                        "concept_id": "#V#excluded_one",
+                        "routing_eligible": False,
+                    },
+                    {
+                        "concept_id": "#V#excluded_two",
+                        "routing_eligible": False,
+                    },
+                ],
+                "match_count": 0,
+                "matches": [],
+                "routing_matches": [],
+            }
+        )
+        == 0
+    )
+    assert (
+        InternalMCPChatOrchestrator._workflow_discovery_routing_match_count(
+            {
+                "candidate_count": 3,
+                "match_count": 1,
+                "matches": [],
+                "routing_matches": [],
+            }
+        )
+        == 1
+    )
+    assert (
+        InternalMCPChatOrchestrator._workflow_discovery_routing_match_count(
+            {
+                "candidate_count": 1,
+                "matches": [{"concept_id": "#V#legacy_match"}],
+            }
+        )
+        == 1
+    )
+
+
+def test_timeout_recovery_rejects_explicitly_excluded_requested_candidate() -> None:
+    aux_llm_calls: list[Mapping[str, Any]] = []
+    support = _CustomWorkflowDispatchSupport(
+        orchestrator=cast(
+            Any,
+            SimpleNamespace(
+                _workflow_discovery_routing_match_count=(
+                    InternalMCPChatOrchestrator._workflow_discovery_routing_match_count
+                )
+            ),
+        ),
+        prompt="Inspect the represented entity.",
+        discovered_matches=(),
+        aux_llm_calls=aux_llm_calls,
+        trace_enabled=False,
+        trace=None,
+        build_live_workflow_routing_payload=lambda: {},
+        build_custom_workflow_dispatch_data=lambda _workflow_id=None: {},
+        resolve_selected_workflow_name=lambda workflow_id: workflow_id,
+        record_dispatch_prepare_note=lambda **_kwargs: None,
+        emit_progress_local=lambda _payload: None,
+    )
+    state = _WorkflowDispatchSelectionState(
+        selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+        selected_workflow_id_text=CHAT_ASSISTANT_WORKFLOW_ID,
+        selector_verdict="rag_default",
+        selector_requests_narration=False,
+        selector_requests_custom_workflow=False,
+        selected_uses_narration_contract=False,
+        selected_prefers_direct_response=True,
+        selected_uses_tool_pipeline_contract=False,
+        routing_info=None,
+    )
+    requested_workflow_id = "#V#explicitly_excluded_workflow"
+
+    recovered = (
+        support.maybe_recover_selector_unmatched_candidate_after_discovery_timeout(
+            state,
+            selector_safe_general_fallback_payload={
+                "requested_candidate_workflow_id": requested_workflow_id,
+            },
+            workflow_discovery_result={
+                "budget_exhausted": True,
+                "candidate_count": 1,
+                "match_count": 0,
+                "routing_matches": [],
+                "candidates": [
+                    {
+                        "concept_id": requested_workflow_id,
+                        "routing_eligible": False,
+                        "routing_exclusion_reason": "not_executable",
+                    }
+                ],
+            },
+        )
+    )
+
+    assert recovered is False
+    assert state.selected_workflow_id_text == CHAT_ASSISTANT_WORKFLOW_ID
+    assert aux_llm_calls == []
 
 
 def test_turn_execution_route_recovers_single_discovered_execution_workflow_after_selector_default(

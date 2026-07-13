@@ -1262,6 +1262,12 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert "turn_next_action.response_text" in (
         recovery_validation_policy.get("required_json_fields") or []
     )
+    assert (recovery_validation_policy.get("json_field_defaults") or {}).get(
+        "turn_next_action.target_contracts"
+    ) == []
+    assert "turn_next_action.target_contracts" in (
+        recovery_validation_policy.get("required_json_fields") or []
+    )
     prompt_contract = recovery_action.prompt_contract
     assert isinstance(prompt_contract, dict)
     assert prompt_contract.get("requested_prompt_concept_ids") == [
@@ -1312,6 +1318,16 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         and field.get("context_key") == "turn_recovery_tool_batch_execution"
         for field in recovery_context_fields
     )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_expected_target_contracts"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_recovery_target_contract_validation"
+        for field in recovery_context_fields
+    )
 
     recovery_mappings = (
         recovery_decision.metadata.get("tool_output_context_mappings") or []
@@ -1335,6 +1351,20 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         and mapping.get("context_key") == "turn_next_action_tool_calls"
         and mapping.get("tool_output_field")
         == "validated_json.turn_next_action.tool_calls"
+        for mapping in recovery_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_next_action_target_contracts"
+        and mapping.get("tool_output_field")
+        == "validated_json.turn_next_action.target_contracts"
+        for mapping in recovery_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_recovery_target_contracts"
+        and mapping.get("tool_output_field")
+        == "validated_json.turn_next_action.target_contracts"
         for mapping in recovery_mappings
     )
     assert any(
@@ -1425,6 +1455,13 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
         tool_batch_inputs.get("tool_calls_context_key") == "turn_next_action_tool_calls"
     )
     assert tool_batch_inputs.get("tool_batch_cap") == 4
+    assert (
+        tool_batch_inputs.get("target_contracts_context_key")
+        == "turn_recovery_target_contracts"
+    )
+    assert "turn_recovery_target_contract_validation" in (
+        recovery_tool_batch.metadata.get("writes_context_keys") or []
+    )
     assert any(
         t.to_state == "critic" and t.reason == "recovery_tool_batch_executed"
         for t in recovery_tool_batch.transitions
@@ -2203,6 +2240,336 @@ def test_conversation_turn_recovery_can_execute_direct_tool_batch() -> None:
     assert completion_report["action_type"] == "execute_tool_batch"
     assert completion_report["executed_tool_call_count"] == 1
     assert result.data["invocations"][0]["tool"] == "test.lookup_current_user"
+
+
+def test_conversation_turn_recovery_refines_grounded_target_and_reads_it() -> None:
+    workflow = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    recovery_definition = WorkflowDefinition(
+        workflow_id=workflow.workflow_id,
+        initial_state="recovery_decision",
+        states={
+            "recovery_decision": WorkflowStateSpec(
+                state_id="recovery_decision",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs=workflow.states["recovery_decision"].actions[0].inputs,
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                        prompt_contract={
+                            "prompt_text": "Return JSON only with a turn_next_action."
+                        },
+                        llm_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .llm_policy,
+                        validation_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .validation_policy,
+                    ),
+                ),
+                transitions=workflow.states["recovery_decision"].transitions,
+                terminal=workflow.states["recovery_decision"].terminal,
+                metadata=workflow.states["recovery_decision"].metadata,
+            ),
+            **{
+                state_id: workflow.states[state_id]
+                for state_id in (
+                    "apply_recovery_tool_batch",
+                    "narration",
+                    "critic",
+                    "completion_gate",
+                    "completed",
+                    "failed",
+                )
+            },
+        },
+        termination_states=workflow.termination_states,
+        purpose=workflow.purpose,
+        metadata=workflow.metadata,
+    )
+
+    captured_payloads: list[dict[str, object]] = []
+
+    def _handle_fetch_concept(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        captured_payloads.append(dict(request.inputs))
+        return WorkflowActionResult(
+            outputs={
+                "result": {
+                    "success": True,
+                    "concept_id": "#V#grounded_candidate",
+                    "name": "Grounded Candidate",
+                    "response_text": "Read back Grounded Candidate.",
+                }
+            }
+        )
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _wid: None)
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            _build_stub_kb_postcondition_critic_definition()
+            if workflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+            else None
+        ),
+    )
+    register_turn_execution_actions(registry)
+    registry.register_if_absent(
+        ActionSpec(
+            action_id="fetch_concept",
+            handler=_handle_fetch_concept,
+            description="Fetch an evidenced concept for testing.",
+        )
+    )
+
+    llm_client = MagicMock()
+    llm_client.generate.side_effect = [
+        (
+            '{"turn_next_action":{"action_type":"execute_tool_batch",'
+            '"target_workflow_id":null,"response_text":null,'
+            '"tool_calls":[{"tool":"fetch_concept","arguments":'
+            '{"concept_id":"#V#grounded_candidate"}}],'
+            '"target_contracts":[{"kind":"symbolic",'
+            '"binding_kind":"entity",'
+            '"concept_ids":["#V#grounded_candidate"],'
+            '"resolution_status":"resolved","matching_policy":"exact",'
+            '"resolution_lineage":[{"source":"tool_invocation_result",'
+            '"tool":"wrong_tool","call_id":"wrong-call",'
+            '"result_path":"wrong.path"}]}]},'
+            '"reasoning":"The successful search grounded the exact read target."}'
+        ),
+        "Grounded Candidate was read back successfully.",
+    ]
+    unresolved_contract = {
+        "kind": "hybrid",
+        "binding_kind": "entity",
+        "text": "the entity named by the user",
+        "candidate_concept_ids": ["#V#grounded_candidate"],
+        "resolution_status": "candidate_only",
+    }
+    unrelated_contract = {
+        "kind": "natural_language",
+        "binding_kind": "entity",
+        "text": "the other entity that still needs resolution",
+        "resolution_status": "unresolved",
+    }
+
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        recovery_definition,
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={
+            "user_prompt": "read back the entity named by the user",
+            "turn_expected_target_contracts": [
+                unresolved_contract,
+                unrelated_contract,
+            ],
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {"summary": "Read back both requested entities."},
+                "target_contracts": [unresolved_contract, unrelated_contract],
+            },
+            "invocations": [
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "call_id": "call-search-1",
+                    "effective_payload": {
+                        "results": [{"concept_id": "#V#grounded_candidate"}]
+                    },
+                }
+            ],
+        },
+    )
+
+    assert captured_payloads == [{"concept_id": "#V#grounded_candidate"}]
+    assert result.data["turn_recovery_target_contract_validation"]["status"] == (
+        "valid"
+    )
+    assert result.data["turn_expected_target_contracts"][0]["concept_ids"] == [
+        "#V#grounded_candidate"
+    ]
+    assert result.data["turn_expected_target_contracts"][0]["resolution_lineage"] == [
+        {
+            "source": "tool_invocation_result",
+            "concept_id": "#V#grounded_candidate",
+            "tool": "search_concepts",
+            "call_id": "call-search-1",
+            "result_path": "effective_payload.results[0].concept_id",
+        }
+    ]
+    assert result.data["turn_expected_target_contracts"][1]["text"] == (
+        "the other entity that still needs resolution"
+    )
+    assert (
+        result.data["turn_expected_outcome_contract_state"]["target_contracts"][0][
+            "resolution_status"
+        ]
+        == "resolved"
+    )
+    assert (
+        result.data["turn_expected_outcome_contract_state"]["target_contracts"][1][
+            "resolution_status"
+        ]
+        == "unresolved"
+    )
+    assert result.data["turn_target_contract_resolution_validation"]["evidence"] == [
+        {
+            "concept_id": "#V#grounded_candidate",
+            "tool": "search_concepts",
+            "result_path": "effective_payload.results[0].concept_id",
+            "call_id": "call-search-1",
+        }
+    ]
+
+
+def test_recovery_target_agreement_without_result_evidence_fails_closed() -> None:
+    calls: list[dict[str, object]] = []
+
+    def _handle_fetch_concept(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        calls.append(dict(request.inputs))
+        return WorkflowActionResult(outputs={"result": {"success": True}})
+
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    registry.register_if_absent(
+        ActionSpec(
+            action_id="fetch_concept",
+            handler=_handle_fetch_concept,
+            description="Fetch an evidenced concept for testing.",
+        )
+    )
+    proposed_contract = {
+        "kind": "symbolic",
+        "binding_kind": "entity",
+        "concept_ids": ["#V#unsupported_candidate"],
+        "resolution_status": "resolved",
+        "matching_policy": "exact",
+        "resolution_lineage": [
+            {
+                "source": "tool_invocation_result",
+                "tool": "search_concepts",
+                "result_path": "effective_payload.results[0].concept_id",
+            }
+        ],
+    }
+
+    action_result = registry.execute(
+        "turn_execution.execute_tool_batch",
+        inputs={
+            "tool_calls": [
+                {
+                    "tool": "fetch_concept",
+                    "arguments": {"concept_id": "#V#unsupported_candidate"},
+                }
+            ],
+            "target_contracts_context_key": "turn_recovery_target_contracts",
+        },
+        context={
+            "turn_recovery_target_contracts": [proposed_contract],
+            "turn_expected_target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the entity named by the user",
+                    "resolution_status": "unresolved",
+                }
+            ],
+            "invocations": [
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "payload": {"concept_id": "#V#unsupported_candidate"},
+                    "result_summary": "Found #V#unsupported_candidate",
+                    "effective_payload": {
+                        "results": [{"concept_id": "#V#different_candidate"}]
+                    },
+                }
+            ],
+        },
+        env=WorkflowEnvironment(llm_client=MagicMock()),
+    )
+
+    assert calls == []
+    validation = action_result.outputs["turn_recovery_target_contract_validation"]
+    assert validation["status"] == "invalid"
+    assert validation["error_code"] == "recovery_target_contract_evidence_missing"
+    invocation = action_result.outputs["invocations"][-1]
+    assert invocation["status"] == "failed"
+    assert invocation["error"] == "target_contract_unresolved_for_symbolic_tool"
+
+
+def test_recovery_tool_batch_preserves_boundary_from_state_only_input() -> None:
+    registry = ActionRegistry()
+    register_turn_execution_actions(registry)
+    registry.register_if_absent(
+        ActionSpec(
+            action_id="test.state_only_lookup",
+            handler=lambda _request: WorkflowActionResult(
+                outputs={"result": {"success": True, "response_text": "Found it."}}
+            ),
+            description="Return one bounded read result for testing.",
+        )
+    )
+    target_contract = {
+        "schema_version": "turn_target_contract.v1",
+        "kind": "natural_language",
+        "binding_kind": "entity",
+        "text": "the entity named by the user",
+        "resolution_status": "unresolved",
+    }
+    state_only_contract = {
+        "schema_version": "turn_expected_outcome_contract.v1",
+        "fields": {
+            "summary": "Read back the requested entity.",
+            "grounding_requirement": "Use represented evidence.",
+        },
+        "field_count": 2,
+        "sources": ["expected_outcome_inference"],
+        "target_contracts": [target_contract],
+    }
+
+    action_result = registry.execute(
+        "turn_execution.execute_tool_batch",
+        inputs={
+            "tool_calls": [
+                {
+                    "tool": "test.state_only_lookup",
+                    "arguments": {},
+                }
+            ]
+        },
+        context={"turn_expected_outcome_contract_state": state_only_contract},
+        env=WorkflowEnvironment(llm_client=MagicMock()),
+    )
+
+    assert action_result.ok
+    assert action_result.outputs["turn_expected_outcome_summary"] == (
+        "Read back the requested entity."
+    )
+    assert action_result.outputs["turn_expected_outcome_contract"] == {
+        "summary": "Read back the requested entity.",
+        "grounding_requirement": "Use represented evidence.",
+    }
+    assert action_result.outputs["turn_expected_outcome_profile"]["summary"] == (
+        "Read back the requested entity."
+    )
+    assert action_result.outputs["turn_expected_outcome_contract_state"]["fields"][
+        "grounding_requirement"
+    ] == "Use represented evidence."
+    assert (
+        action_result.outputs["turn_expected_outcome_profile"]["target_contracts"][0][
+            "text"
+        ]
+        == "the entity named by the user"
+    )
+    assert action_result.outputs["turn_expected_target_contracts"][0]["text"] == (
+        "the entity named by the user"
+    )
 
 
 def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targets(

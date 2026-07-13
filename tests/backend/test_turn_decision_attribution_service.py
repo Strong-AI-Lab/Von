@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.backend.services.turn_decision_attribution_service import (
     AUTHORITY_ABSENT,
     AUTHORITY_PYTHON_FALLBACK,
@@ -56,6 +58,48 @@ def _dispatch_preflight_event(*, override: bool) -> dict:
     }
 
 
+def _completion_gate_event(*, reason_code: str = "retrying") -> dict:
+    return {
+        "decision_authority_origin": "python",
+        "stage": "completion_gate",
+        "component": "internal_mcp_orchestrator",
+        "function": "_action_turn_execution_completion_gate",
+        "decision_class": "turn_completion_gate",
+        "decision_source": "execution_postcondition_check",
+        "changed_outcome": True,
+        "reason_code": reason_code,
+    }
+
+
+def _represented_terminal_success_gate(
+    *,
+    validation_valid: bool = True,
+    decision_authority: str = "represented_llm",
+) -> dict:
+    return {
+        "decision": "completed",
+        "safe_to_claim_completion": True,
+        "requires_follow_up": False,
+        "evidence_payload": {
+            "terminal_outcome_receipt": {
+                "schema_version": "terminal_outcome_receipt.v1",
+                "profile_concept_id": "#V#terminal_outcome_receipt",
+                "outcome": "verified_success",
+                "provenance": {
+                    "decision_source": "represented_llm",
+                    "workflow_id": "#V#test_postcondition_critic_workflow",
+                    "prompt_concept_id": "#V#test_postcondition_critic_prompt",
+                },
+            },
+            "terminal_outcome_receipt_validation": {
+                "present": True,
+                "valid": validation_valid,
+                "decision_authority": decision_authority,
+            },
+        },
+    }
+
+
 def test_fully_represented_turn_scores_one():
     payload = build_turn_decision_attribution(
         diagnostics=_fully_represented_diagnostics(),
@@ -81,6 +125,139 @@ def test_fully_represented_turn_scores_one():
     ]
 
 
+def test_represented_terminal_success_supersedes_historical_python_retry():
+    diagnostics = _fully_represented_diagnostics()
+    diagnostics["completion_gate_verdict"] = _represented_terminal_success_gate()
+    diagnostics.pop("completion_gate")
+
+    payload = build_turn_decision_attribution(
+        diagnostics=diagnostics,
+        aux_entries=[_completion_gate_event()],
+    )
+
+    by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
+    acceptance = by_kind["acceptance"]
+    assert acceptance["authority"] == AUTHORITY_REPRESENTED
+    assert acceptance["authority_surface"] == "#V#test_postcondition_critic_workflow"
+    assert acceptance["python_decision_events"][0]["reason_code"] == "retrying"
+    assert acceptance["evidence"]["superseded_python_guardrail_event_count"] == 1
+    assert acceptance["evidence"]["terminal_outcome"] == "verified_success"
+
+
+def test_final_unsafe_follow_up_gate_remains_python_fallback():
+    diagnostics = _fully_represented_diagnostics()
+    gate = _represented_terminal_success_gate()
+    gate["decision"] = "follow_up_required"
+    gate["safe_to_claim_completion"] = False
+    gate["requires_follow_up"] = True
+    diagnostics["completion_gate_verdict"] = gate
+    diagnostics.pop("completion_gate")
+
+    payload = build_turn_decision_attribution(
+        diagnostics=diagnostics,
+        aux_entries=[_completion_gate_event(reason_code="follow_up_required")],
+    )
+
+    by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
+    acceptance = by_kind["acceptance"]
+    assert acceptance["authority"] == AUTHORITY_PYTHON_FALLBACK
+    assert acceptance["evidence"]["python_changed_outcome_event_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("validation_valid", "decision_authority"),
+    [
+        (False, "represented_llm"),
+        (True, "python"),
+    ],
+)
+def test_invalid_or_unrepresented_receipt_cannot_override_python_fallback(
+    validation_valid: bool,
+    decision_authority: str,
+):
+    diagnostics = _fully_represented_diagnostics()
+    diagnostics["completion_gate_verdict"] = _represented_terminal_success_gate(
+        validation_valid=validation_valid,
+        decision_authority=decision_authority,
+    )
+    diagnostics.pop("completion_gate")
+
+    payload = build_turn_decision_attribution(
+        diagnostics=diagnostics,
+        aux_entries=[_completion_gate_event()],
+    )
+
+    by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
+    assert by_kind["acceptance"]["authority"] == AUTHORITY_PYTHON_FALLBACK
+
+
+def test_canonical_turn_record_gate_precedes_stale_retry_projection():
+    diagnostics = _fully_represented_diagnostics()
+    diagnostics["completion_gate_verdict"] = {
+        "decision": "retrying",
+        "safe_to_claim_completion": False,
+        "requires_follow_up": True,
+    }
+    diagnostics["turn_execution_record"] = {
+        "completion_gate": _represented_terminal_success_gate()
+    }
+    diagnostics.pop("completion_gate")
+
+    payload = build_turn_decision_attribution(
+        diagnostics=diagnostics,
+        aux_entries=[_completion_gate_event()],
+    )
+
+    by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
+    acceptance = by_kind["acceptance"]
+    assert acceptance["authority"] == AUTHORITY_REPRESENTED
+    assert (
+        acceptance["evidence"]["completion_gate_source"]
+        == "turn_execution_record.completion_gate"
+    )
+
+
+def test_canonical_gate_does_not_borrow_stale_lower_priority_receipt():
+    diagnostics = _fully_represented_diagnostics()
+    diagnostics["turn_execution_record"] = {
+        "completion_gate": {
+            "decision": "completed",
+            "safe_to_claim_completion": True,
+            "requires_follow_up": False,
+        }
+    }
+    diagnostics["llm_debug"] = {
+        "terminal_outcome_receipt": {
+            "schema_version": "terminal_outcome_receipt.v1",
+            "profile_concept_id": "#V#terminal_outcome_receipt",
+            "outcome": "verified_success",
+            "provenance": {
+                "decision_source": "represented_llm",
+                "workflow_id": "#V#stale_postcondition_critic_workflow",
+            },
+        },
+        "terminal_outcome_receipt_validation": {
+            "present": True,
+            "valid": True,
+            "decision_authority": "represented_llm",
+        },
+    }
+    diagnostics.pop("completion_gate")
+
+    payload = build_turn_decision_attribution(
+        diagnostics=diagnostics,
+        aux_entries=[_completion_gate_event()],
+    )
+
+    by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
+    acceptance = by_kind["acceptance"]
+    assert acceptance["authority"] == AUTHORITY_PYTHON_FALLBACK
+    assert acceptance["evidence"]["completion_gate_source"] == (
+        "turn_execution_record.completion_gate"
+    )
+    assert "terminal_outcome" not in acceptance["evidence"]
+
+
 def test_python_fallback_selection_drops_score_and_names_location():
     diagnostics = _fully_represented_diagnostics()
     diagnostics["workflow_routing"] = {
@@ -89,9 +266,7 @@ def test_python_fallback_selection_drops_score_and_names_location():
         "selection_rationale": "first_routing_match",
     }
 
-    payload = build_turn_decision_attribution(
-        diagnostics=diagnostics, aux_entries=[]
-    )
+    payload = build_turn_decision_attribution(diagnostics=diagnostics, aux_entries=[])
 
     by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
     assert by_kind["selection"]["authority"] == AUTHORITY_PYTHON_FALLBACK
@@ -150,9 +325,7 @@ def test_model_policy_telemetry_found_in_nested_containers():
         "metadata": {"workflow_model_policy": telemetry}
     }
 
-    payload = build_turn_decision_attribution(
-        diagnostics=diagnostics, aux_entries=[]
-    )
+    payload = build_turn_decision_attribution(diagnostics=diagnostics, aux_entries=[])
     by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
     assert by_kind["model_choice"]["authority"] == AUTHORITY_REPRESENTED
 
@@ -163,9 +336,7 @@ def test_recovery_markers_classified_python_fallback():
         "single_specialised_candidate_recovery_from_selector_fallback"
     )
 
-    payload = build_turn_decision_attribution(
-        diagnostics=diagnostics, aux_entries=[]
-    )
+    payload = build_turn_decision_attribution(diagnostics=diagnostics, aux_entries=[])
     by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
     assert by_kind["recovery"]["authority"] == AUTHORITY_PYTHON_FALLBACK
     # The recovery rationale also makes the selection python-attributed.
@@ -180,9 +351,7 @@ def test_no_match_discovery_is_absent_not_fallback():
         "match_absence_reason": "durable_workflow_discovery_no_match",
     }
 
-    payload = build_turn_decision_attribution(
-        diagnostics=diagnostics, aux_entries=[]
-    )
+    payload = build_turn_decision_attribution(diagnostics=diagnostics, aux_entries=[])
     by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
     assert by_kind["discovery"]["authority"] == AUTHORITY_ABSENT
 
@@ -205,9 +374,7 @@ def test_unclassified_values_report_unknown_not_guess():
             "selected_workflow_id": "#V#paper_workflow",
         },
     }
-    payload = build_turn_decision_attribution(
-        diagnostics=diagnostics, aux_entries=[]
-    )
+    payload = build_turn_decision_attribution(diagnostics=diagnostics, aux_entries=[])
     by_kind = {d["decision_kind"]: d for d in payload["decisions"]}
     assert by_kind["selection"]["authority"] == AUTHORITY_UNKNOWN
     assert by_kind["dispatch"]["authority"] == AUTHORITY_UNKNOWN
@@ -276,9 +443,7 @@ def test_embedded_debug_shape_is_recognised():
             "selector_source": "selector_llm_verdict",
         },
         "workflow_discovery": {
-            "discovery_payload_origin": (
-                "durable_action_discover_workflows_for_turn"
-            ),
+            "discovery_payload_origin": ("durable_action_discover_workflows_for_turn"),
             "candidate_count": 2,
         },
         "llm_debug": {
@@ -294,9 +459,7 @@ def test_embedded_debug_shape_is_recognised():
         },
     }
 
-    payload = build_turn_decision_attribution(
-        diagnostics=diagnostics, aux_entries=[]
-    )
+    payload = build_turn_decision_attribution(diagnostics=diagnostics, aux_entries=[])
     breakdown = payload["summary"]["decision_kind_breakdown"]
     assert breakdown["selection"] == AUTHORITY_REPRESENTED
     assert breakdown["model_choice"] == AUTHORITY_REPRESENTED

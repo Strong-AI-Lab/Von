@@ -1,14 +1,15 @@
 """Focused workflow selector routing tests split from the shared orchestrator harness."""
 
+# ruff: noqa: F405
+
 from __future__ import annotations
+
+import pytest
 
 from tests.backend.test_orchestrator_workflow_selector_routing import *  # noqa: F401,F403
 from tests.backend.test_orchestrator_workflow_selector_routing import (
     _CapturingLLM,
-    _ModelCandidate,
     _build_orchestrator,
-    _build_structured_turn_contract_payload,
-    _dispatch_surface,
     _register_terminal_custom_workflow,
     _stub_execute_workflow_result,
 )
@@ -427,8 +428,10 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     assert result.response_text == "Custom analysis complete."
 
 
-def test_required_tool_contract_excludes_direct_selector_defaults(monkeypatch):
-    """Required-tool turns should not offer no-tool defaults to the selector."""
+def test_required_tool_contract_preserves_represented_candidate_and_excludes_direct_defaults(
+    monkeypatch,
+):
+    """Tool agreements inform represented selection but still exclude no-tool defaults."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
@@ -445,10 +448,8 @@ def test_required_tool_contract_excludes_direct_selector_defaults(monkeypatch):
                         "is_policy_safe": True,
                         "routing_eligible": True,
                         "candidate_source": "workflow_discovery",
+                        "routing_profile": {"role": "execution"},
                     }
-                ],
-                "candidates": [
-                    {"concept_id": "#V#missing_tool_call_workflow"},
                 ],
                 "match_count": 1,
                 "contract_projection": {
@@ -459,11 +460,26 @@ def test_required_tool_contract_excludes_direct_selector_defaults(monkeypatch):
         )
     )
 
-    assert discovered == []
-    assert [candidate.get("concept_id") for candidate in selector_candidates] == [
-        TOOL_CALLING_WORKFLOW_ID
+    assert [candidate.get("concept_id") for candidate in discovered] == [
+        "#V#missing_tool_call_workflow"
     ]
-    tool_candidate = selector_candidates[0]
+    assert [candidate.get("concept_id") for candidate in selector_candidates] == [
+        "#V#missing_tool_call_workflow",
+        TOOL_CALLING_WORKFLOW_ID,
+    ]
+    represented_candidate = selector_candidates[0]
+    assert represented_candidate["routing_eligible"] is True
+    assert represented_candidate["candidate_reason"] == (
+        "discovered_workflow_candidate"
+    )
+    assert represented_candidate["selector_fast_path_eligible"] is False
+    assert represented_candidate["required_tool_coverage"] == {
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": [],
+        "remaining_turn_level_required_tools": ["jira_get_issue"],
+    }
+
+    tool_candidate = selector_candidates[1]
     assert tool_candidate["candidate_source"] == "selector_default"
     assert tool_candidate["candidate_reason"] == "required_turn_tools"
     assert tool_candidate["routing_profile_role"] == "execution"
@@ -478,30 +494,248 @@ def test_required_tool_contract_excludes_direct_selector_defaults(monkeypatch):
 
     excluded_by_id = {candidate["concept_id"]: candidate for candidate in excluded}
     assert set(excluded_by_id) == {
-        "#V#missing_tool_call_workflow",
         CHAT_ASSISTANT_WORKFLOW_ID,
         CHAT_NARRATION_WORKFLOW_ID,
     }
     for workflow_id, candidate in excluded_by_id.items():
         assert candidate["routing_eligible"] is False
         assert candidate["required_tools"] == ["jira_get_issue"]
-        if workflow_id == "#V#missing_tool_call_workflow":
-            assert candidate["candidate_source"] == "workflow_discovery"
-            assert candidate["candidate_reason"] == "discovered_workflow_excluded"
-            assert (
-                candidate["routing_exclusion_reason"]
-                == "required_tool_contract_not_satisfied"
-            )
-        else:
-            assert candidate["candidate_source"] == "selector_default"
-            assert candidate["candidate_reason"] == "selector_default_excluded"
-            assert candidate["routing_exclusion_reason"] == (
-                "direct_response_route_cannot_satisfy_required_turn_tools"
-            )
+        assert candidate["candidate_source"] == "selector_default"
+        assert candidate["candidate_reason"] == "selector_default_excluded"
+        assert candidate["routing_exclusion_reason"] == (
+            "direct_response_route_cannot_satisfy_required_turn_tools"
+        )
+
+
+def test_related_resolution_workflow_stays_visible_with_exact_coverage_gap(monkeypatch):
+    """Related represented affordances remain selectable without becoming aliases."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#generic_resolution_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose="Resolve and verify a represented target.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": "Generic Resolution Workflow",
+                        "description": "Resolve and verify a represented target.",
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": True,
+                        "candidate_source": "workflow_discovery",
+                        "routing_profile": {"role": "execution"},
+                        "routing_index_metadata": {
+                            "required_tools": [
+                                "search_concepts",
+                                "fetch_concept",
+                            ]
+                        },
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {
+                    "required_tools": [
+                        "resolve_concept_by_name",
+                        "fetch_concept",
+                    ]
+                },
+            },
+            prompt="Resolve the named target, then read it back.",
+        )
+    )
+
+    assert [item["concept_id"] for item in discovered] == [workflow_id]
+    assert selector_candidates[0]["concept_id"] == workflow_id
+    assert selector_candidates[0]["candidate_reason"] == (
+        "discovered_workflow_candidate"
+    )
+    assert selector_candidates[0]["selector_fast_path_eligible"] is False
+    assert selector_candidates[0]["required_tool_coverage"] == {
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": ["fetch_concept"],
+        "remaining_turn_level_required_tools": ["resolve_concept_by_name"],
+    }
+    assert not any(item.get("concept_id") == workflow_id for item in excluded)
+
+
+@pytest.mark.parametrize(
+    "candidate_tool",
+    [
+        "search_web",
+        "jira_search",
+        "gmail_list_profiles",
+        "search_arxiv",
+    ],
+)
+def test_cross_surface_workflow_stays_visible_without_false_tool_coverage(
+    monkeypatch,
+    candidate_tool,
+):
+    """Unrelated search surfaces remain candidates but do not cover KB resolution."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = f"#V#{candidate_tool}_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose=f"Use {candidate_tool} on its represented surface.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": f"{candidate_tool} Workflow",
+                        "description": f"Use {candidate_tool}.",
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": True,
+                        "candidate_source": "workflow_discovery",
+                        "routing_profile": {"role": "execution"},
+                        "routing_index_metadata": {"required_tools": [candidate_tool]},
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {"required_tools": ["resolve_concept_by_name"]},
+            },
+            prompt="Resolve the named represented concept.",
+        )
+    )
+
+    assert [item["concept_id"] for item in discovered] == [workflow_id]
+    represented_candidate = next(
+        item for item in selector_candidates if item.get("concept_id") == workflow_id
+    )
+    assert represented_candidate["required_tool_coverage"] == {
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": [],
+        "remaining_turn_level_required_tools": ["resolve_concept_by_name"],
+    }
+    assert represented_candidate["selector_fast_path_eligible"] is False
+    assert not any(item.get("concept_id") == workflow_id for item in excluded)
+
+
+@pytest.mark.parametrize("required_tool", ["fetch_concept", "add_relationship"])
+def test_resolution_workflow_stays_visible_without_covering_exact_other_operation(
+    monkeypatch,
+    required_tool,
+):
+    """A launchable workflow stays visible while exact operation gaps remain clear."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#resolution_only_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose="Resolve a represented target without verifying or mutating it.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": "Resolution Only Workflow",
+                        "description": "Resolve a represented target.",
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": True,
+                        "candidate_source": "workflow_discovery",
+                        "routing_profile": {"role": "execution"},
+                        "routing_index_metadata": {
+                            "required_tools": ["search_concepts"]
+                        },
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {"required_tools": [required_tool]},
+            },
+            prompt="Complete the exact required represented operation.",
+        )
+    )
+
+    assert [item["concept_id"] for item in discovered] == [workflow_id]
+    represented_candidate = next(
+        item for item in selector_candidates if item.get("concept_id") == workflow_id
+    )
+    assert represented_candidate["required_tool_coverage"] == {
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": [],
+        "remaining_turn_level_required_tools": [required_tool],
+    }
+    assert represented_candidate["selector_fast_path_eligible"] is False
+    assert not any(item.get("concept_id") == workflow_id for item in excluded)
+
+
+def test_exact_required_tool_coverage_does_not_disable_represented_fast_path(
+    monkeypatch,
+):
+    """Only exact declared coverage can retain pre-existing fast-path eligibility."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#exact_jira_read_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        purpose="Read one Jira issue through the represented integration.",
+    )
+
+    discovered, excluded, selector_candidates = (
+        orchestrator._prepare_selector_candidates(
+            workflow_discovery_result={
+                "matches": [
+                    {
+                        "concept_id": workflow_id,
+                        "name": "Exact Jira Read Workflow",
+                        "description": "Read one Jira issue.",
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "turn_launchable": True,
+                        "candidate_source": "workflow_discovery",
+                        "selector_fast_path_eligible": True,
+                        "routing_index_metadata": {
+                            "required_tools": ["jira_get_issue"]
+                        },
+                    }
+                ],
+                "match_count": 1,
+                "contract_projection": {"required_tools": ["jira_get_issue"]},
+            },
+            prompt="Read JVNAUTOSCI-2577.",
+        )
+    )
+
+    assert [item["concept_id"] for item in discovered] == [workflow_id]
+    represented_candidate = selector_candidates[0]
+    assert represented_candidate["required_tool_coverage"] == {
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": ["jira_get_issue"],
+        "remaining_turn_level_required_tools": [],
+    }
+    assert represented_candidate["selector_fast_path_eligible"] is True
+    assert not any(item.get("concept_id") == workflow_id for item in excluded)
 
 
 def test_workflow_execute_contract_keeps_launchable_discovered_workflow(monkeypatch):
-    """workflow_execute is satisfied by a launchable represented workflow target."""
+    """A launchable represented workflow stays visible for workflow_execute."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     workflow_id = "#V#arxiv_paper_representation_workflow"
@@ -545,6 +779,13 @@ def test_workflow_execute_contract_keeps_launchable_discovered_workflow(monkeypa
     assert [candidate["concept_id"] for candidate in selector_candidates][:1] == [
         workflow_id
     ]
+    represented_candidate = selector_candidates[0]
+    assert represented_candidate["required_tool_coverage"] == {
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": [],
+        "remaining_turn_level_required_tools": ["workflow_execute"],
+    }
+    assert represented_candidate["selector_fast_path_eligible"] is False
     assert not any(candidate.get("concept_id") == workflow_id for candidate in excluded)
 
 
@@ -606,15 +847,17 @@ def test_workflow_execute_with_readback_tools_keeps_discovered_workflow_candidat
     ]
     represented_candidate = selector_candidates[0]
     assert represented_candidate["required_tool_coverage"] == {
-        "coverage_basis": "workflow_execute_primary_obligation",
-        "covered_required_tools": ["workflow_execute"],
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": [],
         "remaining_turn_level_required_tools": [
+            "workflow_execute",
             "workflow_get_execution_trace",
             "workflow_get_instance",
             "rag_list_indexed",
             "rag_get_item",
         ],
     }
+    assert represented_candidate["selector_fast_path_eligible"] is False
     assert not any(candidate.get("concept_id") == workflow_id for candidate in excluded)
 
 
@@ -675,17 +918,18 @@ def test_contract_named_launchable_workflow_survives_internal_tool_contract_shap
     ]
     represented_candidate = selector_candidates[0]
     assert represented_candidate["candidate_reason"] == (
-        "contract_named_launchable_workflow_preserved"
+        "discovered_workflow_candidate"
     )
     assert represented_candidate["required_tool_coverage"] == {
-        "coverage_basis": "contract_named_launchable_workflow",
-        "covered_workflow_concept_ids": [workflow_id],
+        "coverage_basis": "exact_declared_tool_identity_advisory",
+        "covered_required_tools": [],
         "remaining_turn_level_required_tools": [
             "paper:download_source",
             "paper:finalise_cached_source",
             "vontology:read_file_copy",
         ],
     }
+    assert represented_candidate["selector_fast_path_eligible"] is False
     assert not any(candidate.get("concept_id") == workflow_id for candidate in excluded)
 
 
@@ -736,7 +980,9 @@ def test_contract_named_nonlaunchable_workflow_still_fails_required_tool_gate(
         )
     )
 
-    assert not any(candidate.get("concept_id") == workflow_id for candidate in discovered)
+    assert not any(
+        candidate.get("concept_id") == workflow_id for candidate in discovered
+    )
     assert not any(
         candidate.get("concept_id") == workflow_id for candidate in selector_candidates
     )
@@ -868,7 +1114,8 @@ def test_top_level_selector_applies_represented_fast_path_before_llm(monkeypatch
     fast_path_entry = next(
         e
         for e in result.aux_llm_calls
-        if isinstance(e, dict) and e.get("type") == "workflow_selector_represented_fast_path"
+        if isinstance(e, dict)
+        and e.get("type") == "workflow_selector_represented_fast_path"
     )
     assert fast_path_entry["applied"] is True
     assert fast_path_entry["selected_workflow_id"] == custom_workflow_id
@@ -902,7 +1149,9 @@ def test_agent_test_top_level_selector_reuses_authoritative_discovery_candidate(
         monkeypatch,
         orchestrator,
         expected_workflow_id=custom_workflow_id,
-        data={"final_response": "AgentTest authoritative discovery workflow completed."},
+        data={
+            "final_response": "AgentTest authoritative discovery workflow completed."
+        },
     )
 
     candidate = {
@@ -935,7 +1184,9 @@ def test_agent_test_top_level_selector_reuses_authoritative_discovery_candidate(
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == custom_workflow_id
     assert result.workflow_routing.source == "agent_test_authoritative_discovery"
-    assert result.response_text == "AgentTest authoritative discovery workflow completed."
+    assert (
+        result.response_text == "AgentTest authoritative discovery workflow completed."
+    )
 
     fast_path_entry = next(
         e

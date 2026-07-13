@@ -2,8 +2,15 @@
   "family_id": "entity_representation_workflow_seed_bundle",
   "managed_by": "entity_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
-  "source_tag": "JVNAUTOSCI-2192",
+  "seed_version": "4",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#entity_representation_workflow": {
+      "2": [
+        "9b56e670b765e5589b7aa70a25a2fe5b4d6724182e28a81e44e8dc18aee46a9e"
+      ]
+    }
+  },
+  "source_tag": "JVNAUTOSCI-2577",
   "supported_action_ids": [
     "workflow_authoring.emit_marker",
     "workflow_authoring.discover_existing_workflows",
@@ -56,7 +63,7 @@
         "initial_state": "set_autonomy_policy",
         "steps": [
           {
-            "action_concept_id": null,
+            "action_concept_id": "#V#workflow_authoring_action_emit_marker",
             "action_id": "workflow_authoring.emit_marker",
             "concept_id": null,
             "conditional_transitions": [],
@@ -95,7 +102,7 @@
             ]
           },
           {
-            "action_concept_id": null,
+            "action_concept_id": "#V#workflow_authoring_action_emit_marker",
             "action_id": "workflow_authoring.emit_marker",
             "concept_id": null,
             "conditional_transitions": [],
@@ -155,13 +162,17 @@
             "on_unknown_state": null,
             "prompt_concept_ids": [],
             "state_id": "discover_existing_workflows",
-            "static_input_bindings": [
-              [
-                "max_results",
-                "8"
-              ],
-              [
-                "exclude_workflow_ids",
+        "static_input_bindings": [
+          [
+            "max_results",
+            "8"
+          ],
+          [
+            "candidate_workflow_ids",
+            "[\"#V#person_representation_workflow\", \"#V#company_representation_workflow\", \"#V#event_representation_workflow\", \"#V#place_representation_workflow\"]"
+          ],
+          [
+            "exclude_workflow_ids",
                 "[\"#V#entity_representation_workflow\", \"#V#workflow_repair_or_create_workflow\", \"#V#workflow_authoring_repair_workflow\", \"#V#von_workflow_creation_workflow\"]"
               ]
             ],
@@ -302,7 +313,7 @@
             ]
           },
           {
-            "action_concept_id": null,
+            "action_concept_id": "#V#workflow_authoring_action_emit_marker",
             "action_id": "workflow_authoring.emit_marker",
             "concept_id": null,
             "conditional_transitions": [],
@@ -408,7 +419,7 @@
             ]
           },
           {
-            "action_concept_id": null,
+            "action_concept_id": "#V#workflow_authoring_action_emit_marker",
             "action_id": "workflow_authoring.emit_marker",
             "concept_id": null,
             "conditional_transitions": [
@@ -513,13 +524,13 @@
             ],
             "context_input_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_prompt_to_prompt_parameter",
                 "context_key": "prompt",
                 "required": true,
                 "tool_param": "prompt"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_request_text_to_request_text_parameter",
                 "context_key": "workflow_authoring_request_text",
                 "required": false,
                 "tool_param": "request_text"
@@ -550,45 +561,38 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_result_to_response_text",
                 "context_key": "response_text",
                 "tool_output_field": "result.response_text"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_result_to_entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id",
                 "tool_output_field": "result.entity_representation_concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_result_to_entity_representation_verified",
                 "context_key": "entity_representation_verified",
                 "tool_output_field": "result.entity_representation_verified"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_result_to_requires_user_affirmation",
                 "context_key": "requires_user_affirmation",
                 "tool_output_field": "result.requires_user_affirmation"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_result_to_child_workflow_failed",
                 "context_key": "child_workflow_failed",
                 "tool_output_field": "child_workflow_failed"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_person_result_to_subworkflow_error",
                 "context_key": "subworkflow_error",
                 "tool_output_field": "subworkflow_error"
               }
             ],
             "validation_policy": null,
-            "writes_context_keys": [
-              "response_text",
-              "entity_representation_concept_id",
-              "entity_representation_verified",
-              "requires_user_affirmation",
-              "child_workflow_failed",
-              "subworkflow_error"
-            ]
+            "writes_context_keys": []
           },
           {
             "action_concept_id": null,
@@ -613,13 +617,13 @@
             ],
             "context_input_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_prompt_to_prompt_parameter",
                 "context_key": "prompt",
                 "required": true,
                 "tool_param": "prompt"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_request_text_to_request_text_parameter",
                 "context_key": "workflow_authoring_request_text",
                 "required": false,
                 "tool_param": "request_text"
@@ -650,45 +654,38 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_result_to_response_text",
                 "context_key": "response_text",
                 "tool_output_field": "result.response_text"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_result_to_entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id",
                 "tool_output_field": "result.entity_representation_concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_result_to_entity_representation_verified",
                 "context_key": "entity_representation_verified",
                 "tool_output_field": "result.entity_representation_verified"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_result_to_requires_user_affirmation",
                 "context_key": "requires_user_affirmation",
                 "tool_output_field": "result.requires_user_affirmation"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_result_to_child_workflow_failed",
                 "context_key": "child_workflow_failed",
                 "tool_output_field": "child_workflow_failed"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_company_result_to_subworkflow_error",
                 "context_key": "subworkflow_error",
                 "tool_output_field": "subworkflow_error"
               }
             ],
             "validation_policy": null,
-            "writes_context_keys": [
-              "response_text",
-              "entity_representation_concept_id",
-              "entity_representation_verified",
-              "requires_user_affirmation",
-              "child_workflow_failed",
-              "subworkflow_error"
-            ]
+            "writes_context_keys": []
           },
           {
             "action_concept_id": null,
@@ -713,13 +710,13 @@
             ],
             "context_input_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_prompt_to_prompt_parameter",
                 "context_key": "prompt",
                 "required": true,
                 "tool_param": "prompt"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_request_text_to_request_text_parameter",
                 "context_key": "workflow_authoring_request_text",
                 "required": false,
                 "tool_param": "request_text"
@@ -750,45 +747,38 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_result_to_response_text",
                 "context_key": "response_text",
                 "tool_output_field": "result.response_text"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_result_to_entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id",
                 "tool_output_field": "result.entity_representation_concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_result_to_entity_representation_verified",
                 "context_key": "entity_representation_verified",
                 "tool_output_field": "result.entity_representation_verified"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_result_to_requires_user_affirmation",
                 "context_key": "requires_user_affirmation",
                 "tool_output_field": "result.requires_user_affirmation"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_result_to_child_workflow_failed",
                 "context_key": "child_workflow_failed",
                 "tool_output_field": "child_workflow_failed"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_event_result_to_subworkflow_error",
                 "context_key": "subworkflow_error",
                 "tool_output_field": "subworkflow_error"
               }
             ],
             "validation_policy": null,
-            "writes_context_keys": [
-              "response_text",
-              "entity_representation_concept_id",
-              "entity_representation_verified",
-              "requires_user_affirmation",
-              "child_workflow_failed",
-              "subworkflow_error"
-            ]
+            "writes_context_keys": []
           },
           {
             "action_concept_id": null,
@@ -813,13 +803,13 @@
             ],
             "context_input_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_prompt_to_prompt_parameter",
                 "context_key": "prompt",
                 "required": true,
                 "tool_param": "prompt"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_request_text_to_request_text_parameter",
                 "context_key": "workflow_authoring_request_text",
                 "required": false,
                 "tool_param": "request_text"
@@ -850,45 +840,38 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_result_to_response_text",
                 "context_key": "response_text",
                 "tool_output_field": "result.response_text"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_result_to_entity_representation_concept_id",
                 "context_key": "entity_representation_concept_id",
                 "tool_output_field": "result.entity_representation_concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_result_to_entity_representation_verified",
                 "context_key": "entity_representation_verified",
                 "tool_output_field": "result.entity_representation_verified"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_result_to_requires_user_affirmation",
                 "context_key": "requires_user_affirmation",
                 "tool_output_field": "result.requires_user_affirmation"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_result_to_child_workflow_failed",
                 "context_key": "child_workflow_failed",
                 "tool_output_field": "child_workflow_failed"
               },
               {
-                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_place_result_to_subworkflow_error",
                 "context_key": "subworkflow_error",
                 "tool_output_field": "subworkflow_error"
               }
             ],
             "validation_policy": null,
-            "writes_context_keys": [
-              "response_text",
-              "entity_representation_concept_id",
-              "entity_representation_verified",
-              "requires_user_affirmation",
-              "child_workflow_failed",
-              "subworkflow_error"
-            ]
+            "writes_context_keys": []
           },
           {
             "action_concept_id": null,
