@@ -12,6 +12,11 @@ from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 
+from ..integrations.internal_mcp.schemas import SchemaValidationError
+from ..services.tool_target_contract_validation import (
+    target_contract_state_from_context,
+    validate_tool_target_contract,
+)
 from .action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -31,11 +36,6 @@ from .write_tool_policy import (
     normalise_workflow_execution_side_effect_policy,
     normalise_workflow_step_mutation_authority_spec,
 )
-from ..services.tool_target_contract_validation import (
-    target_contract_state_from_context,
-    validate_tool_target_contract,
-)
-
 logger = logging.getLogger(__name__)
 
 WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID = "workflow_mcp.invoke_tool"
@@ -344,6 +344,7 @@ def _handle_workflow_mcp_invoke_tool(
         )
 
     payload = _normalise_tool_payload(inputs)
+    resolved_tool_name = requested_tool_name
 
     try:
         gateway = _resolve_gateway(request)
@@ -483,6 +484,41 @@ def _handle_workflow_mcp_invoke_tool(
             tool_name=resolved_tool_name,
             payload=result.payload,
             duration_ms=result.duration_ms,
+        )
+        action_result.outputs["mcp_requested_tool"] = requested_tool_name
+        action_result.outputs["mcp_resolved_tool"] = resolved_tool_name
+        action_result.outputs["workflow_actor_scope_enforced"] = True
+        return action_result
+    except SchemaValidationError as exc:
+        # Schema validation is a hard interface boundary, but workflows still
+        # need a typed, inspectable failure in order to choose a represented
+        # recovery path. Do not include the raw validation message because it
+        # can echo user-provided values.
+        validation_stage = getattr(exc, "stage", "unknown")
+        if validation_stage == "input_schema":
+            error_code = "schema_validation_failed"
+            error_type = "invalid_arguments"
+            error_message = "Internal MCP arguments failed schema validation."
+        elif validation_stage == "output_schema":
+            error_code = "output_schema_validation_failed"
+            error_type = "invalid_tool_output"
+            error_message = "Internal MCP output failed schema validation."
+        else:
+            validation_stage = "gateway"
+            error_code = "gateway_schema_validation_failed"
+            error_type = "schema_contract_violation"
+            error_message = "Internal MCP payload failed schema validation."
+        action_result = workflow_action_result_from_mcp_payload(
+            tool_name=resolved_tool_name,
+            payload={
+                "success": False,
+                "error": error_message,
+                "error_code": error_code,
+                "error_type": error_type,
+                "retryable": False,
+                "validation_stage": validation_stage,
+            },
+            duration_ms=None,
         )
         action_result.outputs["mcp_requested_tool"] = requested_tool_name
         action_result.outputs["mcp_resolved_tool"] = resolved_tool_name

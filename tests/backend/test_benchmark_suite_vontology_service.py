@@ -22,7 +22,7 @@ def _operational_certification_fixture_path() -> Path:
 
 
 def _seed_v3_operational_definition() -> dict[str, Any]:
-    """Reconstruct the exact reviewed seed-v3 authority from the v4 fixture."""
+    """Reconstruct the exact reviewed seed-v3 authority from the current fixture."""
 
     definition = service.load_benchmark_suite_definition_from_seed_fixture(
         _operational_certification_fixture_path(),
@@ -55,6 +55,8 @@ def _seed_v3_operational_definition() -> dict[str, Any]:
             "arxiv_mcp_family_pass_three_minimum",
             "jira_mcp_family_pass_three_minimum",
             "multi_tool_briefing_family_pass_three_minimum",
+            "degraded_partial_success_family_pass_three_minimum",
+            "durable_checkpoint_interruption_family_pass_three_minimum",
         }
     ]
     return definition
@@ -355,7 +357,7 @@ def test_operational_suite_preserves_unregistered_numeric_older_authority(
         _operational_certification_fixture_path(),
         suite_concept_id=(service.OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID),
     )
-    assert fixture_definition["seed_version"] == 4
+    assert fixture_definition["seed_version"] == 5
     legacy_definition = dict(fixture_definition)
     legacy_definition["seed_version"] = legacy_seed_version
     legacy_scenario_ids = {
@@ -422,7 +424,7 @@ def test_operational_suite_migrates_an_exact_registered_numeric_legacy_payload(
     assert report["migrated_older_suite_concept_ids"] == [concept_id]
     assert report["migrated_known_legacy_suite_concept_ids"] == [concept_id]
     assert report["migration_readback_by_concept_id"][concept_id]["verified"] is True
-    assert json.loads(str(state["text"]))["seed_version"] == 4
+    assert json.loads(str(state["text"]))["seed_version"] == 5
     assert len(upserts) == 3
     assert state["context"][service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY][
         "status"
@@ -455,7 +457,7 @@ def test_operational_suite_migrates_exact_origin_main_unversioned_authority(
     assert report["migrated_older_suite_concept_ids"] == [concept_id]
     assert report["migrated_known_legacy_suite_concept_ids"] == [concept_id]
     assert report["migration_readback_by_concept_id"][concept_id]["verified"] is True
-    assert json.loads(str(state["text"]))["seed_version"] == 4
+    assert json.loads(str(state["text"]))["seed_version"] == 5
     assert len(upserts) == 3
     assert upserts[0]["context"][service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY][
         "status"
@@ -554,7 +556,7 @@ def test_interrupted_operational_suite_migration_self_heals_from_pending_receipt
     assert "simulated_receipt_verification_interruption" in first_report[
         "errors_by_concept_id"
     ][concept_id]
-    assert json.loads(str(state["text"]))["seed_version"] == 4
+    assert json.loads(str(state["text"]))["seed_version"] == 5
     assert state["context"][service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY][
         "status"
     ] == "pending"
@@ -622,7 +624,7 @@ def test_pending_operational_suite_receipt_cannot_authorise_a_human_edit(
     assert len(upserts) == writes_before_retry
 
 
-@pytest.mark.parametrize("live_seed_version", [4, 5])
+@pytest.mark.parametrize("live_seed_version", [5, 6])
 def test_operational_suite_preserves_equal_or_newer_live_authority(
     monkeypatch: pytest.MonkeyPatch,
     live_seed_version: int,

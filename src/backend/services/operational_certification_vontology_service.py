@@ -38,6 +38,12 @@ OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID = (
 OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID = (
     "#V#operational_mcp_fault_recovery_probe_workflow"
 )
+OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID = (
+    "#V#operational_degraded_fault_matrix_probe_workflow"
+)
+OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID = (
+    "#V#operational_checkpoint_interruption_probe_workflow"
+)
 OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID = (
     "#V#prompt_operational_certification_state_evaluator"
 )
@@ -334,6 +340,8 @@ def bootstrap_operational_certification_authority(
             OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID,
             OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID,
             OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID,
+            OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID,
+            OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID,
         ),
     )
     suite_support = ensure_canonical_benchmark_suites_from_seed_fixtures(
@@ -372,6 +380,12 @@ def bootstrap_operational_certification_authority(
         "mcp_fault_recovery_probe_workflow_id": (
             OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID
         ),
+        "degraded_fault_matrix_probe_workflow_id": (
+            OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID
+        ),
+        "checkpoint_interruption_probe_workflow_id": (
+            OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID
+        ),
         "evaluator_prompt_id": OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID,
         "prompt_support": prompt_support,
         "workflow_publication": workflow_publication,
@@ -384,6 +398,8 @@ __all__ = [
     "OPERATIONAL_CERTIFICATION_CAMPAIGN_EVIDENCE_CONCEPT_ID",
     "OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID",
     "OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID",
+    "OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID",
+    "OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID",
     "OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID",
     "OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID",
     "OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID",

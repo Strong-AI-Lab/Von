@@ -17238,6 +17238,105 @@ def _workflow_cancel_instance(**kwargs):
         return make_error_response("cancel_failed", "Failed to cancel instance")
 
 
+def _workflow_control_safe_value(value: Any) -> Any:
+    """Copy lifecycle evidence while dropping raw worker claim credentials."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _workflow_control_safe_value(item)
+            for key, item in value.items()
+            if str(key) != "claim_token"
+        }
+    if isinstance(value, list):
+        return [_workflow_control_safe_value(item) for item in value]
+    return value
+
+
+def _workflow_instance_control_status(instance: Any) -> dict[str, Any]:
+    """Build a bounded control-plane readback without exposing worker claims."""
+
+    raw_status = instance.to_status_dict()
+    return {
+        "schema_version": "workflow_instance_control_status.v1",
+        "instance_id": raw_status.get("instance_id"),
+        "workflow_id": raw_status.get("workflow_id"),
+        "status": raw_status.get("status"),
+        "current_state": raw_status.get("current_state"),
+        "step_index": raw_status.get("step_index"),
+        "manual_resume_required": bool(
+            raw_status.get("manual_resume_required", False)
+        ),
+        "checkpoint_pause_receipt": _workflow_control_safe_value(
+            raw_status.get("checkpoint_pause_receipt")
+        ),
+        "checkpoint_resume_receipt": _workflow_control_safe_value(
+            raw_status.get("checkpoint_resume_receipt")
+        ),
+        "checkpoint_resume_count": int(
+            raw_status.get("checkpoint_resume_count", 0) or 0
+        ),
+        "execution_trace_id": raw_status.get("execution_trace_id"),
+    }
+
+
+def _workflow_resume_instance(**kwargs):
+    """Explicitly resume an actor-owned paused workflow on the same instance."""
+
+    from ...workflows.durable import WorkflowInstanceManager, WorkflowInstanceStatus
+
+    instance_id = kwargs.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "instance_id is required",
+            details={"missing": ["instance_id"]},
+        )
+    instance_id = instance_id.strip()
+
+    manager = WorkflowInstanceManager()
+    instance = manager.get_instance(instance_id)
+    if not instance or not _workflow_persisted_record_matches_internal_actor(instance):
+        return make_error_response(
+            "not_found",
+            f"Workflow instance not found: {instance_id}",
+        )
+    if instance.status != WorkflowInstanceStatus.PAUSED:
+        return make_error_response(
+            "not_paused",
+            f"Instance is not in paused status: {instance.status.value}",
+        )
+
+    resume_receipt_raw = manager.resume_instance(instance_id)
+    if not isinstance(resume_receipt_raw, dict):
+        return make_error_response(
+            "resume_failed",
+            "Failed to resume the paused workflow instance.",
+        )
+
+    resumed_instance = manager.get_instance(instance_id)
+    if (
+        resumed_instance is None
+        or not _workflow_persisted_record_matches_internal_actor(resumed_instance)
+        or resumed_instance.status != WorkflowInstanceStatus.PENDING
+    ):
+        return make_error_response(
+            "resume_readback_failed",
+            "Workflow resume was not confirmed by persisted status readback.",
+        )
+    instance_status = _workflow_instance_control_status(resumed_instance)
+    resume_receipt = _workflow_control_safe_value(resume_receipt_raw)
+    return {
+        "success": True,
+        "schema_version": "workflow_instance_control_result.v1",
+        "operation": "resume",
+        "instance_id": instance_id,
+        "status": WorkflowInstanceStatus.PENDING.value,
+        "same_instance_resume": bool(resume_receipt.get("same_instance_resume")),
+        "checkpoint_resume_receipt": resume_receipt,
+        "instance_status": instance_status,
+    }
+
+
 def _workflow_retry_instance(**kwargs):
     """Reset a failed workflow instance for retry."""
     from ...workflows.durable import WorkflowInstanceManager, WorkflowInstanceStatus
@@ -34683,6 +34782,37 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             description=(
                 "Cancel a running or pending workflow instance. The worker will stop "
                 "execution at the next checkpoint. Cannot cancel already-terminal instances."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_resume_instance",
+            handler=_workflow_resume_instance,
+            input_schema=Schema(
+                required={"instance_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Resume an explicitly paused workflow instance.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "schema_version": str,
+                    "operation": str,
+                    "instance_id": str,
+                    "status": str,
+                    "same_instance_resume": bool,
+                    "checkpoint_resume_receipt": dict,
+                    "instance_status": dict,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Typed same-instance resume receipt and status readback.",
+            ),
+            category="write",
+            description=(
+                "Release an explicit pause hold on an actor-owned workflow instance. "
+                "The durable instance identity and saved checkpoint are preserved."
             ),
         ),
         MethodDefinition(

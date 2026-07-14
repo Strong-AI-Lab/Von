@@ -135,6 +135,7 @@ _DEFAULT_TOOL_RISK_CLASSES: dict[str, str] = {
     "workflow_create_schedule": "additive_low_risk",
     "workflow_delete_event_binding": "destructive",
     "workflow_delete_schedule": "destructive",
+    "workflow_resume_instance": "mutative_non_destructive",
     "workflow_retry_instance": "mutative_non_destructive",
     "workflow_set_event_binding_enabled": "mutative_non_destructive",
     "workflow_set_schedule_enabled": "mutative_non_destructive",

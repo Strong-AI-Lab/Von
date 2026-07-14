@@ -218,6 +218,15 @@ Validation semantics:
 
 - `tool_name` MUST be statically declared, or the step MUST fail Workflow Studio contract validation;
 - the named tool MUST resolve to a registered internal MCP method;
+- gateway input-schema rejection is returned as a failed action with a bounded
+  `mcp_result` (`error_code=schema_validation_failed`,
+  `error_type=invalid_arguments`, `retryable=false`) so represented failure
+  transitions can inspect and recover without exposing the raw validation
+  message or user values;
+- output-schema rejection is distinguished as
+  `error_code=output_schema_validation_failed` and
+  `error_type=invalid_tool_output`; do not treat a broken tool response as an
+  argument error;
 - read-only tools may be published without write metadata;
 - write or destructive tools MUST declare an explicit represented write policy such as step `mutation_authority` or `workflow_execution_side_effect_policy`;
 - domain sequencing, extraction, filtering, and user-facing policy MUST remain in VWL, prompt, KB, or Vontology artefacts rather than in the generic action implementation.
@@ -921,6 +930,7 @@ Control-flow action IDs:
 - `workflow_control.join`
 - `workflow_control.for_each`
 - `workflow_control.context_set`
+- `workflow_control.pause_at_checkpoint`
 
 ### 10.1 Break/Continue
 
@@ -1042,7 +1052,44 @@ Usage pattern:
 }
 ```
 
-### 10.3b Variable Declarations (JVNAUTOSCI-1440)
+### 10.3b Deterministic Durable Checkpoint Pause
+
+`workflow_control.pause_at_checkpoint` is the represented, cooperative
+interruption primitive for a durable workflow. Put it in the state after whose
+successful actions execution may stop. The executor selects the state's normal
+transition, then atomically persists the successor state, accumulated context,
+manual pause hold, and typed pause receipt under the live worker claim. This
+means resume continues the same instance from the named successor checkpoint;
+the interrupted state and its side effects are not replayed.
+
+Optional input:
+
+- `reason_code`: a non-empty represented reason of at most 160 characters.
+
+Runtime semantics:
+
+- direct or synchronous execution fails closed because it has no fenced
+  durable claim;
+- launch inputs and restored workflow context cannot forge pause requests or
+  manager-owned pause/resume receipts;
+- a manually held checkpoint is not worker-claimable until
+  `workflow_resume_instance` releases it;
+- resume changes the same instance from `paused` to `pending`, preserving its
+  checkpoint state and step index, and emits a typed receipt linked to the
+  pause receipt;
+- status/read-back surfaces expose the checkpoint, receipt digests, and
+  available recovery operations, but never a raw worker claim token;
+- the legacy HTTP `pause` endpoint is an immediate administrative status
+  control and is not evidence of deterministic checkpoint interruption. Use
+  the represented action and explicit resume for replay or certification.
+
+The v1 checkpoint attestation binds saved state. If pre-pause model-produced
+authority output is resumed under a new worker claim, the executor correctly
+marks exact-authority eligibility as degraded until producer lineage across
+claims is itself represented. Workflows that need exact interruption evidence
+should therefore place this action before the authority-producing LLM step.
+
+### 10.3c Variable Declarations (JVNAUTOSCI-1440)
 
 Workflow-level variable declarations provide deterministic default initialisation for workflow context keys before execution begins.
 

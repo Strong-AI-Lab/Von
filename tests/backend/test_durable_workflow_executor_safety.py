@@ -25,6 +25,9 @@ from src.backend.workflows.durable.durable_executor import (
     DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
     DurableWorkflowExecutor,
 )
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
 from src.backend.workflows.durable.checkpoint_context_projection import (
     CHECKPOINT_CONTEXT_PROJECTION_KEY,
     CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
@@ -41,6 +44,11 @@ from src.backend.workflows.engine import (
 )
 from src.backend.workflows.workflow_definition_identity_service import (
     build_workflow_definition_identity,
+)
+from src.backend.workflows.execution_contracts import (
+    WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY,
+    WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY,
 )
 
 
@@ -63,6 +71,195 @@ def _build_instance(workflow_id: str) -> WorkflowInstance:
         created_at=datetime.now(timezone.utc),
         inputs={},
     )
+
+
+def test_durable_executor_atomically_pauses_at_successor_checkpoint() -> None:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+    condition_spec, condition = build_transition_condition({"kind": "always"})
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_checkpoint_pause_probe",
+        initial_state="pause_here",
+        states={
+            "pause_here": WorkflowStateSpec(
+                state_id="pause_here",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="workflow_control.pause_at_checkpoint",
+                        inputs={"reason_code": "certification_interruption"},
+                    ),
+                ),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=condition,
+                        condition_spec=condition_spec,
+                        reason="pause_before_resume",
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+        termination_states=("done",),
+    )
+    instance = _build_instance(definition.workflow_id)
+    instance.locked_by = "worker-pause"
+    instance.claim_token = "claim-pause"
+
+    pause_receipt = {
+        "schema_version": "workflow_checkpoint_pause_receipt.v1",
+        "instance_id": instance.instance_id,
+        "workflow_id": definition.workflow_id,
+        "status": "paused",
+        "checkpoint_state": "done",
+        "checkpoint_step_index": 1,
+        "request_sha256": "a" * 64,
+        "manual_resume_required": True,
+    }
+    manager = MagicMock()
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.pause_claim_at_checkpoint.return_value = pause_receipt
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            instance.instance_id,
+            definition,
+            worker_id="worker-pause",
+            claim_token="claim-pause",
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is False
+    assert result.error == "paused_at_checkpoint"
+    assert result.final_state == "done"
+    assert result.data[WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY] == pause_receipt
+    assert result.data[WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY][-1]["status"] == (
+        "paused"
+    )
+    manager.checkpoint.assert_not_called()
+    pause_call = manager.pause_claim_at_checkpoint.call_args
+    assert pause_call.args == (instance.instance_id,)
+    assert pause_call.kwargs["prior_state"] == ""
+    assert pause_call.kwargs["prior_step_index"] == 0
+    assert pause_call.kwargs["request_state"] == "pause_here"
+    assert pause_call.kwargs["checkpoint_state"] == "done"
+    assert pause_call.kwargs["checkpoint_step_index"] == 1
+    assert pause_call.kwargs["workflow_data"][
+        WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY
+    ][-1]["status"] == "requested"
+    assert pause_call.kwargs["worker_id"] == "worker-pause"
+    assert pause_call.kwargs["claim_token"] == "claim-pause"
+
+
+def test_durable_executor_injects_manager_receipts_on_same_instance_resume() -> None:
+    pause_receipt = {
+        "schema_version": "workflow_checkpoint_pause_receipt.v1",
+        "instance_id": "instance-1",
+        "status": "paused",
+        "checkpoint_state": "after_pause",
+        "checkpoint_step_index": 1,
+        "manual_resume_required": True,
+    }
+    resume_receipt = {
+        "schema_version": "workflow_checkpoint_resume_receipt.v1",
+        "instance_id": "instance-1",
+        "status": "pending",
+        "checkpoint_state": "after_pause",
+        "checkpoint_step_index": 1,
+        "resume_count": 1,
+        "same_instance_resume": True,
+    }
+
+    def _observe_receipts(request: WorkflowActionRequest) -> WorkflowActionResult:
+        assert request.data[WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY] == pause_receipt
+        assert request.data[WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY] == resume_receipt
+        return WorkflowActionResult(
+            outputs={
+                "same_instance_resume_seen": request.data[
+                    WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY
+                ]["same_instance_resume"]
+            }
+        )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(action_id="lifecycle.observe", handler=_observe_receipts)
+    )
+    condition_spec, condition = build_transition_condition({"kind": "always"})
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_checkpoint_resume_probe",
+        initial_state="pause_here",
+        states={
+            "pause_here": WorkflowStateSpec(state_id="pause_here"),
+            "after_pause": WorkflowStateSpec(
+                state_id="after_pause",
+                actions=(WorkflowActionInvocation(action_id="lifecycle.observe"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=condition,
+                        condition_spec=condition_spec,
+                        reason="resume_completed",
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+        termination_states=("done",),
+    )
+    instance = _build_instance(definition.workflow_id)
+    instance.current_state = "after_pause"
+    instance.step_index = 1
+    instance.workflow_data = {"checkpoint_fact": "preserved"}
+    instance.checkpoint_pause_receipt = pause_receipt
+    instance.checkpoint_resume_receipt = resume_receipt
+    instance.checkpoint_resume_count = 1
+    instance.locked_by = "worker-resume"
+    instance.claim_token = "claim-resume"
+
+    manager = MagicMock()
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            instance.instance_id,
+            definition,
+            worker_id="worker-resume",
+            claim_token="claim-resume",
+            resume_from_checkpoint=True,
+        )
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert result.data["checkpoint_fact"] == "preserved"
+    assert result.data["same_instance_resume_seen"] is True
+    assert result.data[WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY] == pause_receipt
+    assert result.data[WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY] == resume_receipt
 
 
 def test_checkpoint_context_projection_bounds_diagnostic_payloads() -> None:

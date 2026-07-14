@@ -1046,7 +1046,7 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
 
     contract = parse_operational_certification_contract(seed)
 
-    assert seed["seed_version"] == 4
+    assert seed["seed_version"] == 5
     assert contract.case_set == "trusted_sail_pilot_v1"
     assert {scenario.scenario_id for scenario in contract.scenarios} == {
         "pilot_kb_relation_rag_read_only",
@@ -1057,6 +1057,8 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
         "pilot_durable_workflow_resume_and_idempotence",
         "pilot_unique_state_marker_create_and_read_back",
         "pilot_typed_missing_entity_recovery",
+        "pilot_represented_degraded_fault_matrix",
+        "pilot_durable_checkpoint_interruption_and_resume",
     }
     assert all(not scenario.depends_on for scenario in contract.scenarios)
     assert all(
@@ -1154,6 +1156,60 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
     )
     assert marker_probe["expected_cardinality"] == 1
 
+    degraded = scenarios["pilot_represented_degraded_fault_matrix"]
+    assert degraded.execution["inputs"]["workflow_id"] == (
+        "#V#operational_degraded_fault_matrix_probe_workflow"
+    )
+    assert degraded.reset_policy["isolation_binding_paths"] == [
+        "/workflow_inputs/isolation_id"
+    ]
+    assert degraded.permitted_effects[0]["cardinality"] == 1
+    degraded_matchers = {check["matcher_id"]: check for check in degraded.checks}
+    assert degraded_matchers["authoritative_empty_has_zero_candidates"][
+        "expected"
+    ] == []
+    assert degraded_matchers["invalid_argument_type_exact"]["expected"] == (
+        "invalid_arguments"
+    )
+    assert degraded_matchers["invalid_argument_stage_exact"]["expected"] == (
+        "input_schema"
+    )
+    assert degraded_matchers["invalid_argument_not_retryable"]["expected"] is False
+    assert degraded_matchers["read_only_mutation_guard_reason_exact"][
+        "expected"
+    ] == "insufficient_mutation_authority"
+    assert degraded_matchers["wrong_target_contract_error_exact"]["expected"] == (
+        "target_contract_symbolic_mismatch"
+    )
+
+    interrupted = scenarios["pilot_durable_checkpoint_interruption_and_resume"]
+    assert interrupted.execution["inputs"]["workflow_id"] == (
+        "#V#operational_checkpoint_interruption_probe_workflow"
+    )
+    assert [
+        step.get("operation", "execute")
+        for step in interrupted.execution["inputs"]["submission_plan"]
+    ] == ["execute", "await_status", "resume", "execute"]
+    interruption_matchers = {
+        check["matcher_id"]: check for check in interrupted.checks
+    }
+    assert interruption_matchers["pause_claim_fence_digest_observed"]["path"] == (
+        "/path_analysis/checkpoint_pause_receipts/0/claim_token_sha256"
+    )
+    assert interruption_matchers[
+        "represented_checkpoint_resume_stage_reached"
+    ]["expected"] is True
+    assert interruption_matchers[
+        "represented_same_instance_resume_confirmed"
+    ]["expected"] is True
+    assert interruption_matchers[
+        "represented_pause_checkpoint_state_exact"
+    ]["expected"] == "mark_resumed"
+    assert interruption_matchers[
+        "represented_resume_checkpoint_state_exact"
+    ]["expected"] == "mark_resumed"
+    assert interruption_matchers["represented_resume_count_exact"]["expected"] == 1
+
 
 def test_repo_seed_declares_generic_transient_mcp_fault_recovery_case() -> None:
     seed = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
@@ -1212,5 +1268,5 @@ def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> Non
 
     assert definition_contract.contract_sha256 == selected_contract.contract_sha256
     assert selected_contract.source == "seed_bundle_import_fixture"
-    assert definition["seed_version"] == 4
-    assert selected_case_set["seed_version"] == 4
+    assert definition["seed_version"] == 5
+    assert selected_case_set["seed_version"] == 5

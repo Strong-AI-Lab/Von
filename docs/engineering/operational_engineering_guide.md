@@ -521,6 +521,37 @@ If the key is lost or suspected compromised before that support exists, fail
 closed and run a new trusted certification campaign rather than treating the
 old aggregate as verified.
 
+### 5.4 Composing deterministic interruption certification cases
+
+The operational-certification runner supports a represented scenario
+`submission_plan` for durable lifecycle composition. Its operations are:
+
+- `execute`: launch the exact durable workflow, or submit the same pinned
+  instance again after resume;
+- `await_status`: bounded polling through `workflow_get_instance` for an
+  authored status and, optionally, checkpoint state;
+- `resume`: explicit release through `workflow_resume_instance`.
+
+The first `execute` response pins the instance ID. Every later operation must
+read, resume, or execute that same ID; an ID mismatch fails the scenario. A
+certifying interruption plan should use this sequence:
+
+1. `execute` the represented workflow whose first state invokes
+   `workflow_control.pause_at_checkpoint`;
+2. `await_status` `paused` at the authored successor checkpoint;
+3. `resume` and require the typed same-instance resume receipt;
+4. `execute` the pinned instance to a terminal state;
+5. match the final represented result plus path-analysis fields for the pause
+   and resume receipts, exact instance IDs, and
+   `pause_resume_continuity_observed`.
+
+Do not use repeated idempotent submission as a proxy for interruption: it can
+show instance reuse without proving a checkpoint was observed or resumed.
+Likewise, the legacy HTTP `pause` endpoint is not a deterministic checkpoint
+primitive. Certification evidence must come from the represented pause action,
+manager-owned typed receipts, and persisted read-back. Raw worker claim tokens
+must never appear in scenario evidence.
+
 ## 6. Preferred Tool and Access Pathways
 
 ### 6.1 Vontology and workflow behaviour

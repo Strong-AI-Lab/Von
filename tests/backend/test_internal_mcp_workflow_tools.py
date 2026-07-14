@@ -166,6 +166,10 @@ class _StubInstance:
         self.source_event_id: str | None = None
         self.event_idempotency_key: str | None = None
         self.execution_trace_id: str | None = None
+        self.manual_resume_required = False
+        self.checkpoint_pause_receipt: dict[str, object] | None = None
+        self.checkpoint_resume_receipt: dict[str, object] | None = None
+        self.checkpoint_resume_count = 0
         self.created_at = datetime.now(timezone.utc)
 
     def to_status_dict(self) -> dict[str, object]:
@@ -177,6 +181,10 @@ class _StubInstance:
             "step_index": self.step_index,
             "error": self.error,
             "execution_trace_id": self.execution_trace_id,
+            "manual_resume_required": self.manual_resume_required,
+            "checkpoint_pause_receipt": self.checkpoint_pause_receipt,
+            "checkpoint_resume_receipt": self.checkpoint_resume_receipt,
+            "checkpoint_resume_count": self.checkpoint_resume_count,
         }
 
 
@@ -360,6 +368,30 @@ class _StubWorkflowManager:
             return False
         instance.status = WorkflowInstanceStatus.CANCELLED
         return True
+
+    def resume_instance(self, instance_id: str) -> dict[str, object] | None:
+        instance = self.instances.get(instance_id)
+        if (
+            instance is None
+            or instance.status != WorkflowInstanceStatus.PAUSED
+            or not instance.manual_resume_required
+        ):
+            return None
+        instance.status = WorkflowInstanceStatus.PENDING
+        instance.manual_resume_required = False
+        instance.checkpoint_resume_count += 1
+        instance.checkpoint_resume_receipt = {
+            "schema_version": "workflow_checkpoint_resume_receipt.v1",
+            "instance_id": instance_id,
+            "workflow_id": instance.workflow_id,
+            "status": "pending",
+            "checkpoint_state": instance.current_state,
+            "checkpoint_step_index": instance.step_index,
+            "resume_count": instance.checkpoint_resume_count,
+            "same_instance_resume": True,
+            "claim_token": getattr(instance, "claim_token", None),
+        }
+        return dict(instance.checkpoint_resume_receipt)
 
     def reset_for_retry(self, instance_id: str) -> bool:
         instance = self.instances.get(instance_id)
@@ -2597,6 +2629,122 @@ def test_workflow_cancel_instance_gateway_paths(monkeypatch):
     ).payload
     assert repeated.get("success") is False
     assert repeated.get("error_code") == "already_terminal"
+
+
+def test_workflow_resume_instance_preserves_identity_and_bounded_receipts(
+    monkeypatch,
+):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "inputs": {"seed": "value"},
+        },
+    ).payload
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+    assert manager.checkpoint(
+        instance_id,
+        state="checkpoint_after_first_step",
+        step_index=2,
+        workflow_data={"persisted": True},
+    )
+    raw_claim_secret = "raw-worker-claim-must-not-escape"
+    instance = manager.instances[instance_id]
+    instance.claim_token = raw_claim_secret
+    instance.status = WorkflowInstanceStatus.PAUSED
+    instance.manual_resume_required = True
+    instance.checkpoint_pause_receipt = {
+        "schema_version": "workflow_checkpoint_pause_receipt.v1",
+        "instance_id": instance_id,
+        "workflow_id": instance.workflow_id,
+        "status": "paused",
+        "checkpoint_state": instance.current_state,
+        "checkpoint_step_index": instance.step_index,
+        "pause_mode": "cooperative_checkpoint",
+        "manual_resume_required": True,
+        "claim_token_sha256": "safe-digest",
+        "claim_token": raw_claim_secret,
+    }
+
+    resumed = gateway.invoke(
+        "workflow_resume_instance",
+        {"instance_id": instance_id},
+    ).payload
+
+    assert resumed["success"] is True
+    assert resumed["schema_version"] == "workflow_instance_control_result.v1"
+    assert resumed["operation"] == "resume"
+    assert resumed["instance_id"] == instance_id
+    assert resumed["status"] == "pending"
+    assert resumed["same_instance_resume"] is True
+    assert resumed["checkpoint_resume_receipt"] == {
+        "schema_version": "workflow_checkpoint_resume_receipt.v1",
+        "instance_id": instance_id,
+        "workflow_id": "#V#enrichment_workflow",
+        "status": "pending",
+        "checkpoint_state": "checkpoint_after_first_step",
+        "checkpoint_step_index": 2,
+        "resume_count": 1,
+        "same_instance_resume": True,
+    }
+    assert resumed["instance_status"]["current_state"] == (
+        "checkpoint_after_first_step"
+    )
+    assert resumed["instance_status"]["step_index"] == 2
+    assert resumed["instance_status"]["manual_resume_required"] is False
+    assert raw_claim_secret not in json.dumps(resumed, sort_keys=True)
+
+    repeated = gateway.invoke(
+        "workflow_resume_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert repeated["success"] is False
+    assert repeated["error_code"] == "not_paused"
+
+
+def test_workflow_resume_instance_hides_other_actor_records(monkeypatch):
+    from src.backend.security import access_control
+
+    manager = _StubWorkflowManager()
+    paused_id = manager.create_instance(
+        "#V#enrichment_workflow",
+        user_id="#V#shared_user",
+        org_id="#V#foreign_org",
+        namespace="#V#shared_user@foreign_org",
+    )
+    manager.instances[paused_id].status = WorkflowInstanceStatus.PAUSED
+    manager.instances[paused_id].manual_resume_required = True
+    manager.instances[paused_id].checkpoint_pause_receipt = {
+        "schema_version": "workflow_checkpoint_pause_receipt.v1"
+    }
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#shared_user",
+        organisation_concept_id="#V#own_org",
+    ):
+        resume_denied = gateway.invoke(
+            "workflow_resume_instance", {"instance_id": paused_id}
+        ).payload
+
+    assert resume_denied["success"] is False
+    assert resume_denied["error_code"] == "not_found"
+    assert manager.instances[paused_id].status == WorkflowInstanceStatus.PAUSED
 
 
 def test_workflow_retry_instance_restores_pending_and_keeps_checkpoint_state(

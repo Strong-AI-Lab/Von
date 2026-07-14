@@ -52,9 +52,17 @@ def test_bootstrap_publishes_every_operational_workflow(
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID,
         service.OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID,
         service.OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID,
+        service.OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID,
+        service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID,
     )
     assert report["mcp_fault_recovery_probe_workflow_id"] == (
         service.OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID
+    )
+    assert report["degraded_fault_matrix_probe_workflow_id"] == (
+        service.OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID
+    )
+    assert report["checkpoint_interruption_probe_workflow_id"] == (
+        service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID
     )
 
 
@@ -62,7 +70,7 @@ def test_operational_absence_probe_seed_is_read_only_and_deterministic() -> None
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert bundle["seed_version"] == "9"
+    assert bundle["seed_version"] == "10"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
     ] == {
@@ -292,6 +300,167 @@ def test_operational_absence_probe_projects_actual_resolver_result_lineage() -> 
     action_ids = [action["action_id"] for action in trace.actions]
     assert "workflow_mcp.invoke_tool" in action_ids
     assert "workflow_control.context_project" in action_ids
+
+
+def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence() -> (
+    None
+):
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[service._WORKFLOW_BUNDLE_PATH],
+        target_workflow_ids=[
+            service.OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID
+        ],
+    )[service.OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID]
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+    observed_states: list[str] = []
+
+    def _invoke_tool(request) -> WorkflowActionResult:
+        state_id = str(request.workflow_state_id or "")
+        observed_states.append(state_id)
+        if state_id == "create_committed_marker":
+            return WorkflowActionResult(
+                status="success",
+                outputs={"result": {"successful": 1}},
+            )
+        if state_id == "resolve_committed_marker":
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "status": "resolved",
+                    "resolved_concept_id": "#V#marker_isolation_matrix",
+                },
+            )
+        if state_id == "invoke_invalid_argument":
+            return WorkflowActionResult(
+                status="failed",
+                error="schema_validation_failed",
+                outputs={
+                    "mcp_result": {
+                        "success": False,
+                        "error_code": "schema_validation_failed",
+                        "error_type": "invalid_arguments",
+                        "retryable": False,
+                        "validation_stage": "input_schema",
+                    }
+                },
+            )
+        if state_id == "resolve_authoritative_empty":
+            return WorkflowActionResult(
+                status="success",
+                outputs={"status": "not_found", "candidates": []},
+            )
+        if state_id == "attempt_read_only_guarded_write":
+            return WorkflowActionResult(
+                status="failed",
+                error="mutation_guardrail_blocked:create_concepts",
+                outputs={
+                    "mutation_guardrail_blocked": True,
+                    "write_policy_reason": "insufficient_mutation_authority",
+                },
+            )
+        if state_id == "attempt_wrong_target_read":
+            contracts = request.data["turn_expected_target_contracts"]
+            assert contracts[0]["concept_ids"] == [
+                "#V#marker_isolation_matrix"
+            ]
+            return WorkflowActionResult(
+                status="failed",
+                error="target_contract_symbolic_mismatch",
+                outputs={
+                    "target_contract_validation_failed": True,
+                    "target_contract_validation_error_code": (
+                        "target_contract_symbolic_mismatch"
+                    ),
+                },
+            )
+        if state_id == "read_exact_committed_target":
+            assert request.inputs["concept_id"] == "#V#marker_isolation_matrix"
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "concept_id": "#V#marker_isolation_matrix",
+                    "names": ["Operational certification isolation-matrix"],
+                    "content": (
+                        "Trusted SAIL pilot certification marker isolation-matrix"
+                    ),
+                },
+            )
+        raise AssertionError(state_id)
+
+    registry.register(
+        ActionSpec(action_id="workflow_mcp.invoke_tool", handler=_invoke_tool)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=20).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            model="none",
+            user_namespace="test-namespace",
+        ),
+        data={
+            "isolation_id": "isolation-matrix",
+            "namespace": "test-namespace",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "completed"
+    projected = result.data[
+        "represented_operational_degraded_fault_matrix_result"
+    ]
+    assert projected["outcome"] == "partial_success_with_committed_effect"
+    assert projected["committed_effect_count"] == 1
+    assert projected["committed_marker_concept_id"] == (
+        "#V#marker_isolation_matrix"
+    )
+    assert projected["authoritative_empty_status"] == "not_found"
+    assert projected["invalid_argument_evidence"]["mcp_result"][
+        "error_code"
+    ] == "schema_validation_failed"
+    assert projected["mutation_guard_evidence"]["mutation_guardrail_blocked"] is True
+    assert projected["wrong_target_evidence"][
+        "target_contract_validation_failed"
+    ] is True
+    assert projected["readback_concept_id"] == "#V#marker_isolation_matrix"
+    assert observed_states == [
+        "create_committed_marker",
+        "resolve_committed_marker",
+        "invoke_invalid_argument",
+        "resolve_authoritative_empty",
+        "attempt_read_only_guarded_write",
+        "attempt_wrong_target_read",
+        "read_exact_committed_target",
+    ]
+
+
+def test_operational_checkpoint_interruption_seed_authors_pause_before_resume() -> (
+    None
+):
+    bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
+    workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
+    probe = workflows[service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID]
+    steps = probe["publication_spec"]["steps"]
+
+    assert bundle["seed_version"] == "10"
+    assert "workflow_control.pause_at_checkpoint" in bundle["supported_action_ids"]
+    assert steps[0]["state_id"] == "request_checkpoint_pause"
+    assert steps[0]["action_id"] == "workflow_control.pause_at_checkpoint"
+    assert steps[0]["next_state"] == "mark_resumed"
+    assert all(step.get("action_id") != "llm.action" for step in steps)
+    project = next(
+        step for step in steps if step["state_id"] == "project_interruption_result"
+    )
+    fields = dict(project["static_input_bindings"])["field_sources"]
+    assert fields["checkpoint_pause_receipt"] == {
+        "$context_key": "workflow_checkpoint_pause_receipt"
+    }
+    assert fields["checkpoint_resume_receipt"] == {
+        "$context_key": "workflow_checkpoint_resume_receipt"
+    }
+    assert fields["same_instance_resume"] == {
+        "$context_key": "workflow_checkpoint_resume_receipt.same_instance_resume"
+    }
 
 
 def test_operational_mcp_fault_recovery_probe_retries_one_typed_failure() -> None:

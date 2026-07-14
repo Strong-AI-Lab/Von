@@ -152,7 +152,11 @@ class Schema:
 
 
 class SchemaValidationError(Exception):
-    """Raised when payload validation fails."""
+    """Raised when a gateway input or output payload violates its schema."""
+
+    def __init__(self, message: str, *, stage: str = "unknown") -> None:
+        super().__init__(message)
+        self.stage = str(stage or "unknown").strip() or "unknown"
 
 
 def _normalise_expected(expected: JsonCompatibleType) -> Tuple[type, ...]:

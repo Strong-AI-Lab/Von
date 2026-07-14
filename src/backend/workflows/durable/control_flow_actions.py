@@ -9,6 +9,7 @@ JVNAUTOSCI-1311:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import json
 import os
 from typing import Any, Callable, Dict, Mapping, Sequence
@@ -31,6 +32,7 @@ from ..execution_contracts import (
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
+    WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
     WORKFLOW_CONTROL_SIGNAL_BREAK,
     WORKFLOW_CONTROL_SIGNAL_CONTINUE,
     WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
@@ -41,6 +43,8 @@ from ..execution_contracts import (
     WORKFLOW_FORK_FAILURE_POLICY_COLLECT_ERRORS,
     WORKFLOW_FORK_FAILURE_POLICY_FAIL_FAST,
     WORKFLOW_FORK_MERGE_POLICY_LAST_WRITER_WINS,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
     append_runtime_event,
     increment_runtime_metric,
@@ -335,6 +339,66 @@ def _build_continue_handler() -> Callable[[WorkflowActionRequest], WorkflowActio
         )
 
     return _handle
+
+
+def _handle_pause_at_checkpoint(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    """Request one cooperative durable pause after the next saved checkpoint.
+
+    The action authors *where* a durable workflow may pause.  The durable
+    executor owns the checkpoint/claim fencing and consumes this request once;
+    synchronous workflow execution fails closed because it cannot provide the
+    same-instance resume guarantee.
+    """
+
+    instance_id = _normalise_text(getattr(request.trace, "instance_id", None))
+    trace_metadata = getattr(request.trace, "metadata", None)
+    workflow_id = _normalise_text(request.workflow_id)
+    state_id = _normalise_text(request.workflow_state_id)
+    if (
+        not instance_id
+        or not isinstance(trace_metadata, Mapping)
+        or trace_metadata.get("durable_claim_fenced") is not True
+    ):
+        return WorkflowActionResult(
+            status="failed",
+            error="workflow_checkpoint_pause_requires_durable_instance",
+        )
+
+    reason_code = _normalise_text(request.inputs.get("reason_code"))
+    if not reason_code:
+        reason_code = "represented_checkpoint_pause"
+    if len(reason_code) > 160:
+        return WorkflowActionResult(
+            status="failed",
+            error="workflow_checkpoint_pause_reason_too_long",
+        )
+
+    request_identity = {
+        "instance_id": instance_id,
+        "workflow_id": workflow_id or None,
+        "state_id": state_id or None,
+        "reason_code": reason_code,
+    }
+    request_sha256 = hashlib.sha256(
+        json.dumps(
+            request_identity,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    pause_request = {
+        "schema_version": WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
+        **request_identity,
+        "request_sha256": request_sha256,
+        "resume_mode": "explicit_same_instance",
+    }
+    return WorkflowActionResult(
+        status="success",
+        outputs={WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY: pause_request},
+    )
 
 
 def _build_fork_handler(
@@ -1408,6 +1472,30 @@ def register_control_flow_actions(
             description=(
                 "Emit loop continue control signal for explicit on_continue routing."
             ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
+            handler=_handle_pause_at_checkpoint,
+            description=(
+                "Request one cooperative durable pause after the current state "
+                "has transitioned and the next-state checkpoint is durably saved. "
+                "A later explicit resume continues the same instance."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"reason_code": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "required": [WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY],
+                "properties": {
+                    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY: {"type": "object"}
+                },
+            },
+            side_effects="durable_execution_control",
         )
     )
     registry.register_if_absent(

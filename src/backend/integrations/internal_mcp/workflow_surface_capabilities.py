@@ -27,6 +27,7 @@ WORKFLOW_MANAGEMENT_TOOL_NAMES: tuple[str, ...] = (
     "workflow_get_instance",
     "workflow_get_execution_trace",
     "workflow_cancel_instance",
+    "workflow_resume_instance",
     "workflow_retry_instance",
     "workflow_create_schedule",
     "workflow_list_schedules",

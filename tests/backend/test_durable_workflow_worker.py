@@ -333,6 +333,49 @@ def test_worker_cleanup_removes_tracking_even_if_release_lock_fails() -> None:
     assert manager.mark_failed_calls[0]["increment_retry"] is False
 
 
+def test_worker_leaves_checkpoint_paused_result_out_of_terminal_failure_lane() -> None:
+    manager = _WorkerManagerStub()
+    instance = _build_instance("worker-checkpoint-pause")
+    definition = WorkflowDefinition(
+        workflow_id=instance.workflow_id,
+        initial_state="after_pause",
+        states={
+            "after_pause": WorkflowStateSpec(
+                state_id="after_pause",
+                terminal=True,
+            )
+        },
+        termination_states=("after_pause",),
+    )
+    worker = DurableWorkflowWorker(
+        worker_id="worker-checkpoint-pause",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id, **_actor: definition,
+    )
+    worker._executor = cast(
+        Any,
+        SimpleNamespace(
+            run_durable=lambda *_args, **_kwargs: DurableWorkflowResult(
+                instance_id=instance.instance_id,
+                data={},
+                completed=False,
+                final_state="after_pause",
+                error="paused_at_checkpoint",
+                execution_trace_id="trace-pause",
+            )
+        ),
+    )
+
+    worker._process_instance(instance)
+
+    assert manager.mark_completed_calls == []
+    assert manager.mark_failed_calls == []
+    assert manager.release_lock_calls == [
+        (instance.instance_id, "worker-checkpoint-pause")
+    ]
+
+
 def test_worker_loads_definition_under_persisted_instance_actor_scope() -> None:
     manager = _WorkerManagerStub()
     loader_calls: list[dict[str, Any]] = []

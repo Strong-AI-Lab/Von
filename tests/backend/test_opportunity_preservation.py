@@ -77,6 +77,10 @@ from src.backend.workflows.turn_expected_outcome_contract import (
 from src.backend.workflows.durable.registry_factory import (
     resolve_workflow_definition_from_authority,
 )
+from src.backend.workflows.durable.models import (
+    WorkflowInstance,
+    WorkflowInstanceStatus,
+)
 from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
 from src.backend.workflows.workflow_registry import (
     WorkflowRegistration,
@@ -662,6 +666,45 @@ def test_absent_active_release_preserves_inspection_and_candidate_opportunities(
 
 
 # --- terminal receipts retain represented recovery opportunities ------------
+
+
+def test_checkpoint_pause_keeps_explicit_same_instance_recovery_visible() -> None:
+    instance = WorkflowInstance.create(
+        "#V#synthetic_checkpoint_workflow",
+        user_id="#V#synthetic_user",
+        org_id="#V#synthetic_org",
+        namespace="#V#synthetic_user/#V#synthetic_org",
+    )
+    instance.status = WorkflowInstanceStatus.PAUSED
+    instance.current_state = "represented_successor"
+    instance.step_index = 3
+    instance.manual_resume_required = True
+    instance.checkpoint_pause_receipt = {
+        "schema_version": "workflow_checkpoint_pause_receipt.v1",
+        "instance_id": instance.instance_id,
+        "status": "paused",
+        "checkpoint_state": "represented_successor",
+        "checkpoint_step_index": 3,
+        "manual_resume_required": True,
+        "available_operations": [
+            "workflow_get_instance",
+            "workflow_resume_instance",
+            "workflow_cancel_instance",
+        ],
+    }
+
+    status = instance.to_status_dict()
+
+    assert status["manual_resume_required"] is True
+    assert status["checkpoint_pause_receipt"]["checkpoint_state"] == (
+        "represented_successor"
+    )
+    assert status["checkpoint_pause_receipt"]["available_operations"] == [
+        "workflow_get_instance",
+        "workflow_resume_instance",
+        "workflow_cancel_instance",
+    ]
+    assert "claim_token" not in json.dumps(status, sort_keys=True)
 
 
 def test_terminal_receipt_preserves_recovery_affordances_and_committed_effects() -> (

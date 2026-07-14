@@ -2244,6 +2244,221 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
     assert observed_execution["final_state_snapshot"]["submission_count"] == 2
 
 
+def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.integrations.internal_mcp import catalogue
+
+    base_contract = _contract()
+    durable_scenario = replace(
+        base_contract.scenarios[0],
+        execution={
+            "adapter_id": certification_script.DURABLE_WORKFLOW_ADAPTER_ID,
+            "inputs": {
+                "workflow_id": "#V#unit_checkpoint_pause_workflow",
+                "workflow_inputs": {"probe": "represented"},
+                "submission_plan": [
+                    {
+                        "operation": "execute",
+                        "await_terminal": False,
+                        "timeout_seconds": 10_000.0,
+                    },
+                    {
+                        "operation": "await_status",
+                        "expected_status": "paused",
+                        "expected_state": "after_pause",
+                        "timeout_seconds": 1.0,
+                        "poll_interval_seconds": 0.0,
+                    },
+                    {"operation": "resume", "timeout_seconds": 0.0},
+                    {
+                        "operation": "execute",
+                        "await_terminal": True,
+                        "timeout_seconds": 5.0,
+                    },
+                ],
+            },
+        },
+        reset_policy={"mode": "read_only"},
+        metadata={"read_only": True},
+    )
+    contract = replace(base_contract, scenarios=(durable_scenario,))
+    _patch_live_preflight(monkeypatch, actor_contract=contract)
+    workflow_calls: list[dict[str, Any]] = []
+    status_poll_calls: list[str] = []
+    sleep_calls: list[float] = []
+    observed_execution: dict[str, Any] = {}
+    pause_receipt = {
+        "schema_version": "workflow_checkpoint_pause_receipt.v1",
+        "instance_id": "checkpoint-instance-1",
+        "workflow_id": "#V#unit_checkpoint_pause_workflow",
+        "status": "paused",
+        "checkpoint_state": "after_pause",
+        "checkpoint_step_index": 1,
+        "pause_mode": "cooperative_checkpoint",
+        "manual_resume_required": True,
+        "claim_token_sha256": "b" * 64,
+    }
+    resume_receipt = {
+        "schema_version": "workflow_checkpoint_resume_receipt.v1",
+        "instance_id": "checkpoint-instance-1",
+        "workflow_id": "#V#unit_checkpoint_pause_workflow",
+        "status": "pending",
+        "checkpoint_state": "after_pause",
+        "checkpoint_step_index": 1,
+        "pause_receipt_sha256": certification_script.stable_payload_digest(
+            pause_receipt
+        ),
+        "same_instance_resume": True,
+        "resume_count": 1,
+    }
+
+    def workflow_execute(**kwargs: Any) -> dict[str, Any]:
+        workflow_calls.append(dict(kwargs))
+        terminal = kwargs["await_terminal"] is True
+        return {
+            "success": True,
+            "instance_id": "checkpoint-instance-1",
+            "created_new": not terminal,
+            "status": "reused" if terminal else "pending",
+            "final_status": "completed" if terminal else None,
+            "timed_out": False,
+            "workflow_instance": {
+                "instance_id": "checkpoint-instance-1",
+                "namespace": "unit-namespace",
+                "user_id": "#V#unit_user",
+                "org_id": "#V#unit_org",
+                "status": "completed" if terminal else "pending",
+                "checkpoint_pause_receipt": pause_receipt if terminal else None,
+                "checkpoint_resume_receipt": resume_receipt if terminal else None,
+            },
+            "workflow_execution": {
+                "instance_id": "checkpoint-instance-1",
+                "final_status": "completed" if terminal else None,
+            },
+        }
+
+    def workflow_get_instance(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs == {"instance_id": "checkpoint-instance-1"}
+        status_poll_calls.append("poll")
+        if len(status_poll_calls) % 2 == 1:
+            return {
+                "success": True,
+                "instance_id": "checkpoint-instance-1",
+                "workflow_id": "#V#unit_checkpoint_pause_workflow",
+                "namespace": "unit-namespace",
+                "user_id": "#V#unit_user",
+                "org_id": "#V#unit_org",
+                "status": "running",
+                "current_state": "request_checkpoint_pause",
+                "step_index": 0,
+            }
+        return {
+            "success": True,
+            "instance_id": "checkpoint-instance-1",
+            "workflow_id": "#V#unit_checkpoint_pause_workflow",
+            "namespace": "unit-namespace",
+            "user_id": "#V#unit_user",
+            "org_id": "#V#unit_org",
+            "status": "paused",
+            "current_state": "after_pause",
+            "step_index": 1,
+            "checkpoint_pause_receipt": pause_receipt,
+        }
+
+    def workflow_resume_instance(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs == {"instance_id": "checkpoint-instance-1"}
+        return {
+            "success": True,
+            "instance_id": "checkpoint-instance-1",
+            "status": "pending",
+            "same_instance_resume": True,
+            "checkpoint_resume_receipt": resume_receipt,
+            "instance_status": {
+                "instance_id": "checkpoint-instance-1",
+                "status": "pending",
+                "current_state": "after_pause",
+                "checkpoint_pause_receipt": pause_receipt,
+                "checkpoint_resume_receipt": resume_receipt,
+            },
+        }
+
+    def inspect_execution(
+        run_contract,
+        *,
+        reset_scenario,
+        execute_scenario,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        scenario = run_contract.scenarios[0]
+        reset = reset_scenario(scenario, 1)
+        observed_execution.update(execute_scenario(scenario, 1, reset))
+        return {
+            "campaign_result": {
+                "certified": False,
+                "experiment_persistence_complete": False,
+            }
+        }
+
+    monkeypatch.setattr(catalogue, "_workflow_execute", workflow_execute)
+    monkeypatch.setattr(catalogue, "_workflow_get_instance", workflow_get_instance)
+    monkeypatch.setattr(
+        catalogue,
+        "_workflow_resume_instance",
+        workflow_resume_instance,
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "run_operational_certification_campaign",
+        inspect_execution,
+    )
+    monkeypatch.setattr(
+        certification_script.time,
+        "sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    certification_script._live_execution(_args(), contract)
+
+    assert len(workflow_calls) == 2
+    assert workflow_calls[0]["timeout_seconds"] == 600.0
+    assert sleep_calls == [0.05]
+    assert observed_execution["terminal_state"] == "completed"
+    path = observed_execution["path_analysis"]
+    assert path["submission_operations"] == [
+        "execute",
+        "await_status",
+        "resume",
+        "execute",
+    ]
+    assert path["workflow_instance_ids"] == [
+        "checkpoint-instance-1",
+        "checkpoint-instance-1",
+        "checkpoint-instance-1",
+        "checkpoint-instance-1",
+    ]
+    assert path["pause_resume_continuity_observed"] is True
+    assert path["idempotent_instance_reuse_observed"] is True
+    assert path["checkpoint_pause_receipts"]
+    assert path["checkpoint_pause_receipts"][0]["claim_token_sha256"] == "b" * 64
+    assert path["checkpoint_resume_receipts"]
+    assert observed_execution["final_state_snapshot"][
+        "pause_resume_continuity_observed"
+    ] is True
+
+    workflow_calls.clear()
+    observed_execution.clear()
+    resume_receipt["pause_receipt_sha256"] = "0" * 64
+
+    certification_script._live_execution(_args(), contract)
+
+    assert len(workflow_calls) == 2
+    assert sleep_calls == [0.05, 0.05]
+    assert observed_execution["path_analysis"][
+        "pause_resume_continuity_observed"
+    ] is False
+
+
 def test_synchronous_scenario_binds_and_records_represented_agent_test_fault_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2540,7 +2755,14 @@ def test_redacted_evidence_can_be_written_to_a_safe_default_artifact(
         {
             "Authorization": "Bearer do-not-write-this",
             "message_body": "private message contents",
-            "nested": {"api_token": "also-secret"},
+            "nested": {
+                "api_token": "also-secret",
+                "claim_token": "raw-worker-claim",
+                "claim_token_sha256": "a" * 64,
+            },
+            "malformed_digest": {
+                "claim_token_sha256": "not-a-digest-secret"
+            },
         }
     )
     encoded = json.dumps(safe_evidence)
@@ -2548,6 +2770,13 @@ def test_redacted_evidence_can_be_written_to_a_safe_default_artifact(
     assert "do-not-write-this" not in encoded
     assert "private message contents" not in encoded
     assert "also-secret" not in encoded
+    assert "raw-worker-claim" not in encoded
+    assert "not-a-digest-secret" not in encoded
+    assert safe_evidence["nested"]["claim_token_sha256"] == "a" * 64
+    assert safe_evidence["malformed_digest"]["claim_token_sha256"] == {
+        "redacted": True,
+        "value_present": True,
+    }
     assert safe_evidence["Authorization"] == {
         "redacted": True,
         "value_present": True,

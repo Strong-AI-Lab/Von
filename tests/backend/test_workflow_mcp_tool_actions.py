@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from src.backend.integrations.internal_mcp.catalogue import build_default_catalogue
+from src.backend.integrations.internal_mcp.gateway import (
+    InternalMCPGateway,
+    MethodCatalogue,
+    MethodDefinition,
+)
 from src.backend.integrations.internal_mcp.schemas import Schema
+from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -142,6 +149,84 @@ def test_workflow_mcp_action_invokes_read_tool_and_maps_structured_output():
     assert gateway.invocations == [
         ("demo_echo", {"message": "hello", "namespace": "#V#tester"})
     ]
+
+
+def test_workflow_mcp_action_preserves_typed_gateway_schema_failure() -> None:
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={"tool_name": "resolve_concept_by_name"},
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#tester",
+            user_concept_id="#V#tester",
+            org_concept_id="#V#test_org",
+        ),
+        workflow_id="#V#schema_failure_probe",
+        workflow_state_id="invoke_invalid_argument",
+    )
+
+    assert result.status == "failed"
+    assert result.outputs["mcp_result"] == {
+        "success": False,
+        "error": "Internal MCP arguments failed schema validation.",
+        "error_code": "schema_validation_failed",
+        "error_type": "invalid_arguments",
+        "retryable": False,
+        "validation_stage": "input_schema",
+    }
+    assert result.outputs["mcp_resolved_tool"] == "resolve_concept_by_name"
+    assert result.outputs["workflow_actor_scope_enforced"] is True
+
+
+def test_workflow_mcp_action_distinguishes_output_schema_failure() -> None:
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="broken_output_tool",
+            handler=lambda **_kwargs: {"success": True, "value": 42},
+            input_schema=Schema(required={}, optional={}, allow_unknown=False),
+            output_schema=Schema(
+                required={"success": bool, "value": str},
+                optional={},
+                allow_unknown=False,
+            ),
+            category="read",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={"tool_name": "broken_output_tool"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None, gateway=gateway),
+    )
+
+    assert result.status == "failed"
+    assert result.outputs["mcp_result"] == {
+        "success": False,
+        "error": "Internal MCP output failed schema validation.",
+        "error_code": "output_schema_validation_failed",
+        "error_type": "invalid_tool_output",
+        "retryable": False,
+        "validation_stage": "output_schema",
+    }
 
 
 def test_workflow_mcp_action_omits_namespace_for_strict_schema_without_namespace():

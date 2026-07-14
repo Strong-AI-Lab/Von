@@ -6,6 +6,8 @@ durable workflow instances.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import uuid
@@ -84,6 +86,10 @@ _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "min_worker_build": 1,
     "claim_ineligible_reason": 1,
     "claim_ineligible_detected_at": 1,
+    "manual_resume_required": 1,
+    "checkpoint_pause_receipt": 1,
+    "checkpoint_resume_receipt": 1,
+    "checkpoint_resume_count": 1,
     "progress_current": 1,
     "progress_total": 1,
     "progress_message": 1,
@@ -1607,7 +1613,11 @@ class WorkflowInstanceManager:
             worker_id=worker_id_clean,
         )
 
-        # Query: pending instances OR running with expired lock.
+        # Query: pending instances, automatically resumable pauses, or running
+        # instances with an expired lock.  A cooperative/manual checkpoint
+        # pause is deliberately sticky until ``resume_instance`` clears its
+        # explicit hold; otherwise a worker could reclaim it before the actor
+        # or certification harness had observed the interruption.
         # Mirror/telemetry instances (auto_claim_enabled=False) are executed
         # and finalised by their submitting path; claiming them here would
         # re-execute the same turn (JVNAUTOSCI-2503).
@@ -1615,7 +1625,10 @@ class WorkflowInstanceManager:
             "auto_claim_enabled": {"$ne": False},
             "$or": [
                 {"status": WorkflowInstanceStatus.PENDING.value},
-                {"status": WorkflowInstanceStatus.PAUSED.value},
+                {
+                    "status": WorkflowInstanceStatus.PAUSED.value,
+                    "manual_resume_required": {"$ne": True},
+                },
                 {
                     "status": WorkflowInstanceStatus.RUNNING.value,
                     "lock_expires_at": {"$lt": now},
@@ -2064,6 +2077,7 @@ class WorkflowInstanceManager:
                 "completed_at": now,
                 "locked_by": None,
                 "lock_expires_at": None,
+                "manual_resume_required": False,
                 "progress_message": "completed",
                 "progress_updated_at": now,
             }
@@ -2109,6 +2123,7 @@ class WorkflowInstanceManager:
                 completed_at=now,
                 locked_by=None,
                 lock_expires_at=None,
+                manual_resume_required=False,
                 progress_message="completed",
                 progress_updated_at=now,
                 current_state=final_state or instance_before.current_state,
@@ -2180,6 +2195,7 @@ class WorkflowInstanceManager:
                 "error_written_by": caller_frames[-4:],
                 "locked_by": None,
                 "lock_expires_at": None,
+                "manual_resume_required": False,
                 "progress_message": "failed",
                 "progress_updated_at": now,
             }
@@ -2236,6 +2252,7 @@ class WorkflowInstanceManager:
                 error_step=error_step or instance_before.error_step,
                 locked_by=None,
                 lock_expires_at=None,
+                manual_resume_required=False,
                 progress_message="failed",
                 progress_updated_at=now,
                 retry_count=(
@@ -2288,6 +2305,7 @@ class WorkflowInstanceManager:
                     "completed_at": now,
                     "locked_by": None,
                     "lock_expires_at": None,
+                    "manual_resume_required": False,
                     "progress_message": "cancelled",
                     "progress_updated_at": now,
                 }
@@ -2310,6 +2328,7 @@ class WorkflowInstanceManager:
                 completed_at=now,
                 locked_by=None,
                 lock_expires_at=None,
+                manual_resume_required=False,
                 progress_message="cancelled",
                 progress_updated_at=now,
             )
@@ -2323,6 +2342,213 @@ class WorkflowInstanceManager:
             )
             return True
         return False
+
+    @staticmethod
+    def _checkpoint_pause_receipt(
+        *,
+        instance_id: str,
+        workflow_id: str,
+        current_state: str,
+        step_index: int,
+        reason_code: str,
+        request_sha256: str | None,
+        pause_mode: str,
+        paused_at: datetime,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
+        execution_trace_id: str | None = None,
+    ) -> dict[str, Any]:
+        claim_token_sha256 = (
+            hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+            if isinstance(claim_token, str) and claim_token
+            else None
+        )
+        return {
+            "schema_version": "workflow_checkpoint_pause_receipt.v1",
+            "instance_id": instance_id,
+            "workflow_id": workflow_id,
+            "status": WorkflowInstanceStatus.PAUSED.value,
+            "checkpoint_state": current_state,
+            "checkpoint_step_index": max(0, int(step_index)),
+            "reason_code": reason_code,
+            "request_sha256": request_sha256,
+            "pause_mode": pause_mode,
+            "paused_at": paused_at.isoformat(),
+            "worker_id": worker_id,
+            "claim_token_sha256": claim_token_sha256,
+            "execution_trace_id": execution_trace_id,
+            "manual_resume_required": True,
+            "available_operations": [
+                "workflow_get_instance",
+                "workflow_resume_instance",
+                "workflow_cancel_instance",
+            ],
+        }
+
+    def pause_claim_at_checkpoint(
+        self,
+        instance_id: str,
+        *,
+        prior_state: str,
+        prior_step_index: int,
+        request_state: str,
+        checkpoint_state: str,
+        checkpoint_step_index: int,
+        workflow_data: dict[str, Any],
+        pause_request: Mapping[str, Any],
+        worker_id: str,
+        claim_token: str,
+        workflow_id: str,
+        progress_current: int | None = None,
+        progress_total: int | None = None,
+        progress_message: str | None = None,
+        execution_trace_id: str | None = None,
+        authority_checkpoint_attestation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically checkpoint and hold one live claim for explicit resume.
+
+        The checkpoint and pause acknowledgement are one compare-and-swap.
+        There is therefore no crash window in which a successor can execute
+        the next state without the represented pause having been acknowledged.
+        """
+
+        if (
+            pause_request.get("schema_version")
+            != "workflow_checkpoint_pause_request.v1"
+        ):
+            return None
+        reason_code = str(
+            pause_request.get("reason_code") or "represented_checkpoint_pause"
+        ).strip()
+        request_sha256 = str(pause_request.get("request_sha256") or "").strip()
+        request_identity = {
+            "instance_id": instance_id,
+            "workflow_id": workflow_id,
+            "state_id": request_state,
+            "reason_code": reason_code,
+        }
+        expected_request_sha256 = hashlib.sha256(
+            json.dumps(
+                request_identity,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            not reason_code
+            or len(reason_code) > 160
+            or request_sha256 != expected_request_sha256
+            or pause_request.get("instance_id") != instance_id
+            or pause_request.get("workflow_id") != workflow_id
+            or pause_request.get("state_id") != request_state
+        ):
+            return None
+
+        now = datetime.now(timezone.utc)
+        compacted_workflow_data = self._compact_instance_payload_field(
+            workflow_data,
+            field="workflow_data",
+            instance_id=instance_id,
+            namespace=(
+                workflow_data.get("namespace")
+                or workflow_data.get("user_namespace")
+            ),
+            workflow_id=workflow_id,
+        )
+        projected_attestation: dict[str, Any] | None = None
+        if authority_checkpoint_attestation is not None:
+            projected_attestation, _ = validate_authority_checkpoint_attestation(
+                authority_checkpoint_attestation,
+                instance_id=instance_id,
+                workflow_id=workflow_id,
+                current_state=checkpoint_state,
+                step_index=max(0, int(checkpoint_step_index)),
+                workflow_data=compacted_workflow_data,
+                expected_claim_token=claim_token,
+                expected_worker_id=worker_id,
+            )
+        receipt = self._checkpoint_pause_receipt(
+            instance_id=instance_id,
+            workflow_id=workflow_id,
+            current_state=checkpoint_state,
+            step_index=checkpoint_step_index,
+            reason_code=reason_code,
+            request_sha256=request_sha256,
+            pause_mode="cooperative_checkpoint",
+            paused_at=now,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            execution_trace_id=execution_trace_id,
+        )
+        query = self._claim_fence_query(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            require_unexpired=True,
+        )
+        query.update(
+            {
+                "workflow_id": workflow_id,
+                "current_state": prior_state,
+                "step_index": max(0, int(prior_step_index)),
+            }
+        )
+        if projected_attestation is not None:
+            query.update(
+                {
+                    "claimed_by_build.schema_version": (
+                        DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION
+                    ),
+                    "claimed_by_build.worker_id": worker_id,
+                    "claimed_by_build.capabilities": (
+                        EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY
+                    ),
+                    "claimed_by_build.match_tokens": (
+                        EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY
+                    ),
+                }
+            )
+        set_fields: dict[str, Any] = {
+            "status": WorkflowInstanceStatus.PAUSED.value,
+            "current_state": checkpoint_state,
+            "step_index": max(0, int(checkpoint_step_index)),
+            "workflow_data": compacted_workflow_data,
+            "locked_by": None,
+            "lock_expires_at": None,
+            "manual_resume_required": True,
+            "checkpoint_pause_receipt": receipt,
+            "progress_message": progress_message or "paused at checkpoint",
+            "progress_updated_at": now,
+            "execution_trace_id": execution_trace_id,
+        }
+        if progress_current is not None:
+            set_fields["progress_current"] = progress_current
+        if progress_total is not None:
+            set_fields["progress_total"] = progress_total
+        update: dict[str, Any] = {
+            "$set": set_fields,
+            "$unset": {DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD: ""},
+        }
+        if projected_attestation is not None:
+            set_fields[DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD] = (
+                projected_attestation
+            )
+            update.pop("$unset", None)
+        updated_instance = self._find_one_and_update_instance(
+            query,
+            update,
+        )
+        if updated_instance is None:
+            return None
+        logger.info(
+            "[durable_workflow] Instance %s paused at checkpoint %s/%s",
+            instance_id,
+            checkpoint_state,
+            checkpoint_step_index,
+        )
+        self._broadcast_instance(updated_instance)
+        return receipt
 
     def pause_instance(self, instance_id: str) -> bool:
         """Pause a running instance for later resumption.
@@ -2353,6 +2579,105 @@ class WorkflowInstanceManager:
             self._broadcast_instance(updated_instance)
             return True
         return False
+
+    def resume_instance(self, instance_id: str) -> dict[str, Any] | None:
+        """Release an explicit pause hold without changing instance identity."""
+
+        instance = self.get_instance(instance_id)
+        if (
+            instance is None
+            or instance.status != WorkflowInstanceStatus.PAUSED
+            or not instance.manual_resume_required
+            or not isinstance(instance.checkpoint_pause_receipt, Mapping)
+        ):
+            return None
+        pause_receipt = dict(instance.checkpoint_pause_receipt)
+        pause_request_sha256 = str(
+            pause_receipt.get("request_sha256") or ""
+        ).strip()
+        try:
+            pause_checkpoint_step_index = int(
+                pause_receipt.get("checkpoint_step_index") or 0
+            )
+        except (TypeError, ValueError):
+            return None
+        if (
+            pause_receipt.get("schema_version")
+            != "workflow_checkpoint_pause_receipt.v1"
+            or pause_receipt.get("instance_id") != instance_id
+            or pause_receipt.get("workflow_id") != instance.workflow_id
+            or pause_receipt.get("status")
+            != WorkflowInstanceStatus.PAUSED.value
+            or pause_receipt.get("pause_mode") != "cooperative_checkpoint"
+            or pause_receipt.get("manual_resume_required") is not True
+            or pause_receipt.get("checkpoint_state") != instance.current_state
+            or pause_checkpoint_step_index
+            != max(0, int(instance.step_index))
+            or len(pause_request_sha256) != 64
+        ):
+            return None
+        now = datetime.now(timezone.utc)
+        pause_receipt_sha256 = hashlib.sha256(
+            json.dumps(
+                pause_receipt,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            .encode("utf-8")
+        ).hexdigest()
+        next_resume_count = max(0, int(instance.checkpoint_resume_count)) + 1
+        receipt = {
+            "schema_version": "workflow_checkpoint_resume_receipt.v1",
+            "instance_id": instance_id,
+            "workflow_id": instance.workflow_id,
+            "status": WorkflowInstanceStatus.PENDING.value,
+            "checkpoint_state": instance.current_state,
+            "checkpoint_step_index": max(0, int(instance.step_index)),
+            "pause_receipt_sha256": pause_receipt_sha256,
+            "resumed_at": now.isoformat(),
+            "resume_count": next_resume_count,
+            "same_instance_resume": True,
+        }
+        updated_instance = self._find_one_and_update_instance(
+            {
+                "instance_id": instance_id,
+                "status": WorkflowInstanceStatus.PAUSED.value,
+                "manual_resume_required": True,
+                "workflow_id": instance.workflow_id,
+                "checkpoint_pause_receipt.schema_version": (
+                    "workflow_checkpoint_pause_receipt.v1"
+                ),
+                "checkpoint_pause_receipt.instance_id": instance_id,
+                "checkpoint_pause_receipt.workflow_id": instance.workflow_id,
+                "checkpoint_pause_receipt.pause_mode": "cooperative_checkpoint",
+                "checkpoint_pause_receipt.request_sha256": pause_request_sha256,
+                "current_state": instance.current_state,
+                "step_index": instance.step_index,
+            },
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.PENDING.value,
+                    "manual_resume_required": False,
+                    "locked_by": None,
+                    "lock_expires_at": None,
+                    "checkpoint_resume_receipt": receipt,
+                    "checkpoint_resume_count": next_resume_count,
+                    "progress_message": "queued: explicit same-instance resume",
+                    "progress_updated_at": now,
+                }
+            },
+        )
+        if updated_instance is None:
+            return None
+        logger.info(
+            "[durable_workflow] Instance %s explicitly resumed from %s/%s",
+            instance_id,
+            instance.current_state,
+            instance.step_index,
+        )
+        self._broadcast_instance(updated_instance)
+        return receipt
 
     def is_cancelled(self, instance_id: str) -> bool:
         """Check if an instance has been cancelled.

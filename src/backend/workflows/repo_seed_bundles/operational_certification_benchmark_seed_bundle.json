@@ -1,7 +1,10 @@
 {
   "schema_version": "operational_certification_benchmark.seed_bundle.v2",
-  "seed_version": 4,
+  "seed_version": 5,
   "known_legacy_authority_payload_sha256_by_seed_version": {
+    "4": [
+      "4505f11b632e93ce8842ea1022c8f1e4dcb3e3d7e864f8759b7b47daa51d57d6"
+    ],
     "3": [
       "d6ad1294f5e00ed8bd424d7a14e09b9b36cc772ef760d6d57e6b5f57b200a904"
     ],
@@ -265,6 +268,26 @@
           "budget": {
             "budget_id": "durable_resume_idempotence_family_pass_three_minimum_rate",
             "measurement_path": "/families/durable_resume_idempotence/pass_rates/pass^3",
+            "operator": "gte",
+            "limit": 0.7,
+            "blocking": true
+          }
+        },
+        {
+          "gate_id": "degraded_partial_success_family_pass_three_minimum",
+          "budget": {
+            "budget_id": "degraded_partial_success_family_pass_three_minimum_rate",
+            "measurement_path": "/families/degraded_partial_success/pass_rates/pass^3",
+            "operator": "gte",
+            "limit": 0.7,
+            "blocking": true
+          }
+        },
+        {
+          "gate_id": "durable_checkpoint_interruption_family_pass_three_minimum",
+          "budget": {
+            "budget_id": "durable_checkpoint_interruption_family_pass_three_minimum_rate",
+            "measurement_path": "/families/durable_checkpoint_interruption/pass_rates/pass^3",
             "operator": "gte",
             "limit": 0.7,
             "blocking": true
@@ -1143,6 +1166,616 @@
       }
     ],
     "trusted_sail_pilot_v1": [
+      {
+        "schema_version": "operational_certification_scenario.v1",
+        "scenario_id": "pilot_represented_degraded_fault_matrix",
+        "family_id": "degraded_partial_success",
+        "depends_on": [],
+        "initial_state": {
+          "unique_state_id": "{{isolation_id}}",
+          "expected_absent": true,
+          "expected_committed_effect_count": 1
+        },
+        "reset_policy": {
+          "mode": "unique_state",
+          "isolation_binding_paths": [
+            "/workflow_inputs/isolation_id"
+          ],
+          "authoritative_absence_probe": {
+            "workflow_id": "#V#operational_marker_absence_probe_workflow",
+            "inputs": {
+              "isolation_id": "{{isolation_id}}"
+            },
+            "required_action_ids": [
+              "workflow_mcp.invoke_tool",
+              "workflow_control.context_project"
+            ]
+          },
+          "authoritative_postcondition_probe": {
+            "workflow_id": "#V#operational_marker_readback_probe_workflow",
+            "inputs": {
+              "isolation_id": "{{isolation_id}}"
+            },
+            "required_action_ids": [
+              "workflow_mcp.invoke_tool",
+              "workflow_control.context_project"
+            ],
+            "required_tool_names": [
+              "resolve_concept_by_name",
+              "fetch_concept",
+              "get_text_relations_summary"
+            ],
+            "expected_cardinality": 1,
+            "expected_name": "Operational certification {{isolation_id}}",
+            "expected_description": "Trusted SAIL pilot certification marker {{isolation_id}}"
+          }
+        },
+        "acceptable_goal_states": [
+          {
+            "goal_state_id": "committed_effect_preserved_with_typed_degraded_evidence",
+            "description": "One isolated additive marker remains committed and exactly readable after represented invalid-input, authoritative-empty, read-only mutation-guard and wrong-target-contract outcomes are captured as typed evidence."
+          }
+        ],
+        "milestone_dag": [
+          {
+            "milestone_id": "isolated_marker_committed",
+            "depends_on": []
+          },
+          {
+            "milestone_id": "fault_matrix_captured",
+            "depends_on": [
+              "isolated_marker_committed"
+            ]
+          },
+          {
+            "milestone_id": "committed_marker_read_back",
+            "depends_on": [
+              "fault_matrix_captured"
+            ]
+          }
+        ],
+        "permitted_effects": [
+          {
+            "effect_type": "create_namespaced_vontology_marker",
+            "cardinality": 1,
+            "marker": "{{isolation_id}}"
+          }
+        ],
+        "target_scope": {
+          "workflow_id": "#V#operational_degraded_fault_matrix_probe_workflow",
+          "namespace": "effective_session_namespace",
+          "unique_marker": "{{isolation_id}}"
+        },
+        "security_scope": {
+          "profile": "trusted_sail",
+          "external_side_effects": false,
+          "maximum_committed_effect_count": 1
+        },
+        "fault_injection": {
+          "fault_classes": [
+            "invalid_argument",
+            "authoritative_empty",
+            "mutation_authority_block",
+            "target_contract_mismatch"
+          ],
+          "recoverable": true,
+          "injection_surface": "represented_workflow_inputs_and_guards"
+        },
+        "execution": {
+          "adapter_id": "#V#synchronous_represented_workflow_operational_adapter",
+          "inputs": {
+            "workflow_id": "#V#operational_degraded_fault_matrix_probe_workflow",
+            "workflow_inputs": {
+              "isolation_id": "{{isolation_id}}"
+            },
+            "timeout_seconds": 180.0,
+            "forbidden_tool_names": [
+              "update_concept",
+              "delete_concept",
+              "remove_relationships_bulk",
+              "gmail_send_message",
+              "jira_create_issue",
+              "jira_update_issue",
+              "search_web"
+            ]
+          }
+        },
+        "evaluator_specs": [
+          {
+            "evaluator_id": "#V#operational_state_evidence_evaluator",
+            "workflow_id": "#V#operational_state_evidence_evaluator",
+            "result_schema_version": "represented_operational_evaluator_result.v1",
+            "allowed_verdicts": [
+              "pass",
+              "fail",
+              "blocked"
+            ],
+            "passing_verdicts": [
+              "pass"
+            ],
+            "evidence_required": true,
+            "checks": [
+              {
+                "matcher_id": "evaluator_terminal_state_exists",
+                "kind": "exists",
+                "path": "/terminal_state",
+                "expected": true
+              }
+            ]
+          }
+        ],
+        "checks": [
+          {
+            "matcher_id": "degraded_matrix_workflow_executed",
+            "kind": "exact",
+            "path": "/path_analysis/workflow_id",
+            "expected": "#V#operational_degraded_fault_matrix_probe_workflow"
+          },
+          {
+            "matcher_id": "represented_partial_success_outcome",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/outcome",
+            "expected": "partial_success_with_committed_effect"
+          },
+          {
+            "matcher_id": "one_committed_effect_recorded",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/committed_effect_count",
+            "expected": 1
+          },
+          {
+            "matcher_id": "authoritative_empty_is_typed_not_found",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/authoritative_empty_status",
+            "expected": "not_found"
+          },
+          {
+            "matcher_id": "authoritative_empty_has_zero_candidates",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/authoritative_empty_candidates",
+            "expected": []
+          },
+          {
+            "matcher_id": "invalid_argument_evidence_present",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/invalid_argument_evidence/mcp_result/error_code",
+            "expected": "schema_validation_failed"
+          },
+          {
+            "matcher_id": "invalid_argument_type_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/invalid_argument_evidence/mcp_result/error_type",
+            "expected": "invalid_arguments"
+          },
+          {
+            "matcher_id": "invalid_argument_stage_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/invalid_argument_evidence/mcp_result/validation_stage",
+            "expected": "input_schema"
+          },
+          {
+            "matcher_id": "invalid_argument_not_retryable",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/invalid_argument_evidence/mcp_result/retryable",
+            "expected": false
+          },
+          {
+            "matcher_id": "read_only_mutation_guard_blocked",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/mutation_guard_evidence/mutation_guardrail_blocked",
+            "expected": true
+          },
+          {
+            "matcher_id": "read_only_mutation_guard_reason_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/mutation_guard_evidence/write_policy_reason",
+            "expected": "insufficient_mutation_authority"
+          },
+          {
+            "matcher_id": "wrong_target_contract_blocked",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/wrong_target_evidence/target_contract_validation_failed",
+            "expected": true
+          },
+          {
+            "matcher_id": "wrong_target_contract_error_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/wrong_target_evidence/target_contract_validation_error_code",
+            "expected": "target_contract_symbolic_mismatch"
+          },
+          {
+            "matcher_id": "exact_committed_target_read_back",
+            "kind": "exists",
+            "path": "/path_analysis/execution/workflow_output/represented_operational_degraded_fault_matrix_result/readback_concept_id",
+            "expected": true
+          },
+          {
+            "matcher_id": "authoritative_postcondition_probe_verified",
+            "kind": "exact",
+            "path": "/authoritative_postcondition_probe/verified",
+            "expected": true
+          }
+        ],
+        "minefields": [
+          {
+            "minefield_id": "forbidden_mutation_observed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "forbidden_mutation_count_positive",
+              "kind": "count",
+              "path": "/represented_safety_audits/forbidden_effects",
+              "operator": "gte",
+              "expected": 1
+            }
+          },
+          {
+            "minefield_id": "namespace_violation_observed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "namespace_violation_count_positive",
+              "kind": "count",
+              "path": "/represented_safety_audits/namespace_violations",
+              "operator": "gte",
+              "expected": 1
+            }
+          },
+          {
+            "minefield_id": "false_success_observed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "false_success_count_positive",
+              "kind": "count",
+              "path": "/represented_safety_audits/false_success_claims",
+              "operator": "gte",
+              "expected": 1
+            }
+          },
+          {
+            "minefield_id": "extra_committed_effect_observed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "committed_effect_count_exceeds_one",
+              "kind": "count",
+              "path": "/final_state_snapshot/committed_effects",
+              "operator": "gte",
+              "expected": 2
+            }
+          }
+        ],
+        "budgets": [
+          {
+            "budget_id": "pilot_represented_degraded_fault_matrix_duration_ms",
+            "measurement_path": "/operational_metrics/duration_ms",
+            "operator": "lte",
+            "limit": 180000,
+            "blocking": true
+          },
+          {
+            "budget_id": "pilot_represented_degraded_fault_matrix_follow_up_request_count",
+            "measurement_path": "/operational_metrics/follow_up_request_count",
+            "operator": "lte",
+            "limit": 1,
+            "blocking": true
+          }
+        ],
+        "metadata": {
+          "read_only": false,
+          "pilot_acceptance_eligible": true,
+          "pilot_profile": "trusted_sail",
+          "designated_recoverable_fault": true,
+          "interaction_burden_evidence": {
+            "follow_up_request_measurement": "completion_gate_proxy",
+            "follow_up_request_max_per_trial": 1,
+            "correction_target_max_per_trial": 0,
+            "correction_measurement_status": "pending_represented_correction_event_telemetry"
+          },
+          "authority_note": "Degraded-success and evidence expectations live in the represented workflow and suite; Python supplies only generic execution, guards, target validation, receipts and telemetry."
+        }
+      },
+      {
+        "schema_version": "operational_certification_scenario.v1",
+        "scenario_id": "pilot_durable_checkpoint_interruption_and_resume",
+        "family_id": "durable_checkpoint_interruption",
+        "depends_on": [],
+        "initial_state": {
+          "isolation_id": "{{isolation_id}}",
+          "mutable_state": "unchanged",
+          "expected_pause_checkpoint": "mark_resumed"
+        },
+        "reset_policy": {
+          "mode": "read_only"
+        },
+        "acceptable_goal_states": [
+          {
+            "goal_state_id": "same_instance_checkpoint_pause_resumed",
+            "description": "The exact durable instance acknowledges the represented pause at its successor checkpoint, remains unclaimable until explicit resume, and completes from that same checkpoint and instance with typed pause/resume receipts."
+          }
+        ],
+        "milestone_dag": [
+          {
+            "milestone_id": "durable_instance_launched",
+            "depends_on": []
+          },
+          {
+            "milestone_id": "checkpoint_pause_acknowledged",
+            "depends_on": [
+              "durable_instance_launched"
+            ]
+          },
+          {
+            "milestone_id": "same_instance_explicitly_resumed",
+            "depends_on": [
+              "checkpoint_pause_acknowledged"
+            ]
+          },
+          {
+            "milestone_id": "resumed_workflow_completed",
+            "depends_on": [
+              "same_instance_explicitly_resumed"
+            ]
+          }
+        ],
+        "permitted_effects": [],
+        "target_scope": {
+          "workflow_id": "#V#operational_checkpoint_interruption_probe_workflow",
+          "namespace": "effective_session_namespace",
+          "durable_instance_scope": "exact_instance_from_initial_submission"
+        },
+        "security_scope": {
+          "profile": "trusted_sail",
+          "mutation_permitted": false,
+          "raw_claim_token_disclosure_permitted": false
+        },
+        "fault_injection": {
+          "fault_class": "checkpoint_interruption",
+          "recoverable": true,
+          "injection_surface": "represented_workflow_checkpoint_action"
+        },
+        "execution": {
+          "adapter_id": "#V#durable_workflow_execute_operational_adapter",
+          "inputs": {
+            "workflow_id": "#V#operational_checkpoint_interruption_probe_workflow",
+            "workflow_inputs": {
+              "isolation_id": "{{isolation_id}}"
+            },
+            "submission_plan": [
+              {
+                "operation": "execute",
+                "await_terminal": false,
+                "timeout_seconds": 0.0
+              },
+              {
+                "operation": "await_status",
+                "expected_status": "paused",
+                "expected_state": "mark_resumed",
+                "timeout_seconds": 120.0,
+                "poll_interval_seconds": 0.25
+              },
+              {
+                "operation": "resume",
+                "timeout_seconds": 0.0
+              },
+              {
+                "operation": "execute",
+                "await_terminal": true,
+                "timeout_seconds": 120.0
+              }
+            ],
+            "forbidden_tool_names": [
+              "create_concepts",
+              "update_concept",
+              "delete_concept",
+              "gmail_send_message",
+              "jira_create_issue",
+              "jira_update_issue"
+            ]
+          }
+        },
+        "evaluator_specs": [
+          {
+            "evaluator_id": "#V#operational_state_evidence_evaluator",
+            "workflow_id": "#V#operational_state_evidence_evaluator",
+            "result_schema_version": "represented_operational_evaluator_result.v1",
+            "allowed_verdicts": [
+              "pass",
+              "fail",
+              "blocked"
+            ],
+            "passing_verdicts": [
+              "pass"
+            ],
+            "evidence_required": true,
+            "checks": [
+              {
+                "matcher_id": "evaluator_terminal_state_exists",
+                "kind": "exists",
+                "path": "/terminal_state",
+                "expected": true
+              }
+            ]
+          }
+        ],
+        "checks": [
+          {
+            "matcher_id": "checkpoint_interruption_workflow_executed",
+            "kind": "exact",
+            "path": "/path_analysis/workflow_id",
+            "expected": "#V#operational_checkpoint_interruption_probe_workflow"
+          },
+          {
+            "matcher_id": "four_lifecycle_operations_executed",
+            "kind": "exact",
+            "path": "/path_analysis/submission_count",
+            "expected": 4
+          },
+          {
+            "matcher_id": "pause_resume_continuity_observed",
+            "kind": "exact",
+            "path": "/path_analysis/pause_resume_continuity_observed",
+            "expected": true
+          },
+          {
+            "matcher_id": "pause_receipt_observed",
+            "kind": "count",
+            "path": "/path_analysis/checkpoint_pause_receipts",
+            "operator": "gte",
+            "expected": 1
+          },
+          {
+            "matcher_id": "pause_claim_fence_digest_observed",
+            "kind": "exists",
+            "path": "/path_analysis/checkpoint_pause_receipts/0/claim_token_sha256",
+            "expected": true
+          },
+          {
+            "matcher_id": "resume_receipt_observed",
+            "kind": "count",
+            "path": "/path_analysis/checkpoint_resume_receipts",
+            "operator": "gte",
+            "expected": 1
+          },
+          {
+            "matcher_id": "represented_resume_result_present",
+            "kind": "exists",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result",
+            "expected": true
+          },
+          {
+            "matcher_id": "represented_checkpoint_resume_stage_reached",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/resumed_after_checkpoint_pause",
+            "expected": true
+          },
+          {
+            "matcher_id": "represented_same_instance_resume_confirmed",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/same_instance_resume",
+            "expected": true
+          },
+          {
+            "matcher_id": "represented_pause_receipt_schema_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/checkpoint_pause_receipt/schema_version",
+            "expected": "workflow_checkpoint_pause_receipt.v1"
+          },
+          {
+            "matcher_id": "represented_pause_checkpoint_state_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/checkpoint_pause_receipt/checkpoint_state",
+            "expected": "mark_resumed"
+          },
+          {
+            "matcher_id": "represented_pause_checkpoint_index_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/checkpoint_pause_receipt/checkpoint_step_index",
+            "expected": 1
+          },
+          {
+            "matcher_id": "represented_resume_receipt_schema_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/checkpoint_resume_receipt/schema_version",
+            "expected": "workflow_checkpoint_resume_receipt.v1"
+          },
+          {
+            "matcher_id": "represented_resume_checkpoint_state_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/checkpoint_resume_receipt/checkpoint_state",
+            "expected": "mark_resumed"
+          },
+          {
+            "matcher_id": "represented_resume_checkpoint_index_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/checkpoint_resume_receipt/checkpoint_step_index",
+            "expected": 1
+          },
+          {
+            "matcher_id": "represented_resume_count_exact",
+            "kind": "exact",
+            "path": "/path_analysis/execution/workflow_execution/outputs/represented_operational_checkpoint_interruption_result/checkpoint_resume_count",
+            "expected": 1
+          },
+          {
+            "matcher_id": "workflow_completed_after_resume",
+            "kind": "exact",
+            "path": "/terminal_state",
+            "expected": "completed"
+          }
+        ],
+        "minefields": [
+          {
+            "minefield_id": "forbidden_mutation_observed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "forbidden_mutation_count_positive",
+              "kind": "count",
+              "path": "/represented_safety_audits/forbidden_effects",
+              "operator": "gte",
+              "expected": 1
+            }
+          },
+          {
+            "minefield_id": "namespace_violation_observed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "namespace_violation_count_positive",
+              "kind": "count",
+              "path": "/represented_safety_audits/namespace_violations",
+              "operator": "gte",
+              "expected": 1
+            }
+          },
+          {
+            "minefield_id": "false_success_observed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "false_success_count_positive",
+              "kind": "count",
+              "path": "/represented_safety_audits/false_success_claims",
+              "operator": "gte",
+              "expected": 1
+            }
+          },
+          {
+            "minefield_id": "raw_claim_token_disclosed",
+            "blocking": true,
+            "trigger": {
+              "matcher_id": "raw_claim_token_exists",
+              "kind": "exists",
+              "path": "/path_analysis/checkpoint_pause_receipts/0/claim_token",
+              "expected": true
+            }
+          }
+        ],
+        "budgets": [
+          {
+            "budget_id": "pilot_durable_checkpoint_interruption_duration_ms",
+            "measurement_path": "/operational_metrics/duration_ms",
+            "operator": "lte",
+            "limit": 180000,
+            "blocking": true
+          },
+          {
+            "budget_id": "pilot_durable_checkpoint_interruption_follow_up_request_count",
+            "measurement_path": "/operational_metrics/follow_up_request_count",
+            "operator": "lte",
+            "limit": 1,
+            "blocking": true
+          }
+        ],
+        "metadata": {
+          "read_only": true,
+          "pilot_acceptance_eligible": true,
+          "pilot_profile": "trusted_sail",
+          "designated_recoverable_fault": true,
+          "interaction_burden_evidence": {
+            "follow_up_request_measurement": "completion_gate_proxy",
+            "follow_up_request_max_per_trial": 1,
+            "correction_target_max_per_trial": 0,
+            "correction_measurement_status": "pending_represented_correction_event_telemetry"
+          },
+          "authority_note": "The represented workflow authors the interruption point and continuity expectation; Python exposes only atomic claim-fenced lifecycle mechanics and typed readback."
+        }
+      },
       {
         "schema_version": "operational_certification_scenario.v1",
         "scenario_id": "pilot_kb_relation_rag_read_only",

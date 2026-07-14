@@ -319,7 +319,7 @@ class InternalMCPGateway:
         if not ok:
             error_message = "; ".join(errors)
             self._record_failure(method_name, error_message)
-            raise SchemaValidationError(error_message)
+            raise SchemaValidationError(error_message, stage="input_schema")
 
         timeout = definition.resolved_timeout(self._transport)
         try:
@@ -416,7 +416,7 @@ class InternalMCPGateway:
                     "Output schema provided but handler returned non-mapping payload."
                 )
                 self._record_failure(method_name, message)
-                raise SchemaValidationError(message)
+                raise SchemaValidationError(message, stage="output_schema")
             # Skip output schema validation for error responses (MCPErrorResponse)
             # Error responses follow a different standardised schema with success=False
             is_error_response = result_payload.get("success") is False
@@ -425,7 +425,7 @@ class InternalMCPGateway:
                 if not ok:
                     message = "; ".join(errors)
                     self._record_failure(method_name, message)
-                    raise SchemaValidationError(message)
+                    raise SchemaValidationError(message, stage="output_schema")
 
         self._record_success(method_name, transport_result.duration_ms)
         return transport_result

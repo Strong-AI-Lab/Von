@@ -17,6 +17,7 @@ from dataclasses import replace
 from datetime import datetime
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -2050,7 +2051,15 @@ def _bounded_safe_evidence(value: Any, *, key_name: str = "") -> Any:
         "version",
         "workflow_authority_source",
     }
-    if any(marker in lowered for marker in sensitive_markers):
+    safe_sensitive_digest = bool(
+        lowered == "claim_token_sha256"
+        and isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{64}", value)
+    )
+    if (
+        not safe_sensitive_digest
+        and any(marker in lowered for marker in sensitive_markers)
+    ):
         return {"redacted": True, "value_present": value not in (None, "", [], {})}
     if lowered in private_content_keys and value not in (None, "", [], {}):
         redaction: dict[str, Any] = {
@@ -4143,6 +4152,8 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         if adapter_id == DURABLE_WORKFLOW_ADAPTER_ID:
             from src.backend.integrations.internal_mcp.catalogue import (
                 _workflow_execute,
+                _workflow_get_instance,
+                _workflow_resume_instance,
             )
 
             workflow_id = _text(inputs.get("workflow_id"))
@@ -4187,8 +4198,15 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 raise RuntimeError(
                     "durable_workflow_required_worker_build_unavailable"
                 )
+            payload_operations: list[str] = []
+            active_instance_id: str | None = None
             for step_index, raw_step in enumerate(submission_plan, start=1):
                 step = dict(raw_step)
+                operation = _text(step.get("operation") or "execute").lower()
+                if operation not in {"execute", "await_status", "resume"}:
+                    raise ValueError(
+                        f"represented_durable_operation_invalid:{step_index}"
+                    )
                 await_terminal = step.get("await_terminal", True)
                 if not isinstance(await_terminal, bool):
                     raise ValueError(
@@ -4202,8 +4220,14 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     raise ValueError(
                         f"represented_durable_timeout_invalid:{step_index}"
                     )
-                payloads.append(
-                    _mapping(
+                timeout_value = float(raw_timeout)
+                if not math.isfinite(timeout_value):
+                    raise ValueError(
+                        f"represented_durable_timeout_invalid:{step_index}"
+                    )
+                timeout_seconds = min(max(0.0, timeout_value), 600.0)
+                if operation == "execute":
+                    step_payload = _mapping(
                         _workflow_execute(
                             workflow_id=workflow_id,
                             inputs=workflow_inputs,
@@ -4213,14 +4237,123 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                             await_terminal=await_terminal,
                             include_step_result_envelopes=True,
                             include_trace=True,
-                            timeout_seconds=float(raw_timeout),
+                            timeout_seconds=timeout_seconds,
                             source_event_type="operational_certification_trial",
                             source_event_id=correlation_id,
                             event_idempotency_key=correlation_id,
                             required_worker_build=required_worker_build,
                         )
                     )
-                )
+                    step_instance_id = _text(step_payload.get("instance_id"))
+                    if not step_instance_id:
+                        raise RuntimeError(
+                            f"durable_workflow_instance_id_missing:step_{step_index}"
+                        )
+                    if (
+                        active_instance_id is not None
+                        and step_instance_id != active_instance_id
+                    ):
+                        raise RuntimeError(
+                            "durable_workflow_same_instance_violation:"
+                            f"step_{step_index}"
+                        )
+                    active_instance_id = step_instance_id
+                elif operation == "await_status":
+                    if active_instance_id is None:
+                        raise ValueError(
+                            "represented_durable_instance_required:"
+                            f"{step_index}:await_status"
+                        )
+                    expected_status_values = step.get(
+                        "expected_statuses",
+                        step.get("expected_status"),
+                    )
+                    if isinstance(expected_status_values, str):
+                        expected_statuses = {
+                            expected_status_values.strip().lower()
+                        }
+                    elif isinstance(expected_status_values, Sequence) and not isinstance(
+                        expected_status_values,
+                        (str, bytes, bytearray),
+                    ):
+                        expected_statuses = {
+                            _text(item).lower()
+                            for item in expected_status_values
+                            if _text(item)
+                        }
+                    else:
+                        expected_statuses = set()
+                    if not expected_statuses:
+                        raise ValueError(
+                            "represented_durable_expected_status_missing:"
+                            f"{step_index}"
+                        )
+                    expected_state = _text(step.get("expected_state")) or None
+                    raw_poll_interval = step.get("poll_interval_seconds", 0.25)
+                    if isinstance(raw_poll_interval, bool) or not isinstance(
+                        raw_poll_interval,
+                        (int, float),
+                    ):
+                        raise ValueError(
+                            "represented_durable_poll_interval_invalid:"
+                            f"{step_index}"
+                        )
+                    poll_interval_value = float(raw_poll_interval)
+                    if not math.isfinite(poll_interval_value):
+                        raise ValueError(
+                            "represented_durable_poll_interval_invalid:"
+                            f"{step_index}"
+                        )
+                    poll_interval_seconds = min(
+                        max(0.05, poll_interval_value),
+                        5.0,
+                    )
+                    deadline = time.monotonic() + timeout_seconds
+                    while True:
+                        step_payload = _mapping(
+                            _workflow_get_instance(instance_id=active_instance_id)
+                        )
+                        observed_status = _text(
+                            step_payload.get("status")
+                        ).lower()
+                        observed_state = _text(step_payload.get("current_state"))
+                        if (
+                            step_payload.get("success") is True
+                            and observed_status in expected_statuses
+                            and (
+                                expected_state is None
+                                or observed_state == expected_state
+                            )
+                        ):
+                            break
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                "durable_workflow_await_status_timed_out:"
+                                f"step_{step_index}:"
+                                f"status={observed_status or 'missing'}:"
+                                f"state={observed_state or 'missing'}"
+                            )
+                        time.sleep(poll_interval_seconds)
+                else:
+                    if active_instance_id is None:
+                        raise ValueError(
+                            "represented_durable_instance_required:"
+                            f"{step_index}:resume"
+                        )
+                    step_payload = _mapping(
+                        _workflow_resume_instance(instance_id=active_instance_id)
+                    )
+                    if (
+                        step_payload.get("success") is not True
+                        or _text(step_payload.get("instance_id"))
+                        != active_instance_id
+                        or step_payload.get("same_instance_resume") is not True
+                    ):
+                        raise RuntimeError(
+                            f"durable_workflow_resume_failed:step_{step_index}"
+                        )
+                payloads.append(step_payload)
+                payload_operations.append(operation)
             payload = payloads[-1]
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             observed_tools = _observed_tool_names(payloads)
@@ -4237,10 +4370,26 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             workflow_instance_ids = [
                 _text(step_payload.get("instance_id")) for step_payload in payloads
             ]
+            if (
+                not all(workflow_instance_ids)
+                or len(set(workflow_instance_ids)) != 1
+            ):
+                raise RuntimeError("durable_workflow_same_instance_violation")
             durable_binding_mismatches: list[str] = []
             durable_worker_build_mismatches: list[str] = []
-            for step_index, step_payload in enumerate(payloads, start=1):
-                instance = _mapping(step_payload.get("workflow_instance"))
+            for step_index, (operation, step_payload) in enumerate(
+                zip(payload_operations, payloads, strict=True),
+                start=1,
+            ):
+                if operation == "execute":
+                    instance = _mapping(step_payload.get("workflow_instance"))
+                elif operation == "await_status":
+                    instance = step_payload
+                else:
+                    # Pause/resume control methods enforce the persisted actor
+                    # scope before mutation and intentionally return a bounded
+                    # status without duplicating actor identifiers.
+                    continue
                 for field_name, expected, observed in (
                     (
                         "namespace",
@@ -4285,19 +4434,133 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "durable_workflow_claim_build_mismatch:"
                     + ",".join(durable_worker_build_mismatches)
                 )
+            execute_payloads = [
+                step_payload
+                for operation, step_payload in zip(
+                    payload_operations,
+                    payloads,
+                    strict=True,
+                )
+                if operation == "execute"
+            ]
             created_new_flags = [
-                step_payload.get("created_new") for step_payload in payloads
+                step_payload.get("created_new") for step_payload in execute_payloads
             ]
             submission_statuses = [
-                _text(step_payload.get("status")).lower() for step_payload in payloads
+                _text(step_payload.get("status")).lower()
+                for step_payload in execute_payloads
             ]
             idempotent_instance_reuse_observed = bool(
-                len(payloads) > 1
-                and all(workflow_instance_ids)
-                and len(set(workflow_instance_ids)) == 1
+                len(execute_payloads) > 1
                 and created_new_flags[0] is True
                 and all(flag is False for flag in created_new_flags[1:])
                 and all(status == "reused" for status in submission_statuses[1:])
+            )
+            pause_receipts = [
+                receipt
+                for step_payload in payloads
+                for receipt in (
+                    _mapping(step_payload.get("checkpoint_pause_receipt")),
+                    _mapping(
+                        _mapping(step_payload.get("instance_status")).get(
+                            "checkpoint_pause_receipt"
+                        )
+                    ),
+                    _mapping(
+                        _mapping(step_payload.get("workflow_instance")).get(
+                            "checkpoint_pause_receipt"
+                        )
+                    ),
+                )
+                if receipt.get("schema_version")
+                == "workflow_checkpoint_pause_receipt.v1"
+            ]
+            resume_receipts = [
+                receipt
+                for step_payload in payloads
+                for receipt in (
+                    _mapping(step_payload.get("checkpoint_resume_receipt")),
+                    _mapping(
+                        _mapping(step_payload.get("instance_status")).get(
+                            "checkpoint_resume_receipt"
+                        )
+                    ),
+                    _mapping(
+                        _mapping(step_payload.get("workflow_instance")).get(
+                            "checkpoint_resume_receipt"
+                        )
+                    ),
+                )
+                if receipt.get("schema_version")
+                == "workflow_checkpoint_resume_receipt.v1"
+            ]
+            checkpoint_sequence_is_canonical = payload_operations == [
+                "execute",
+                "await_status",
+                "resume",
+                "execute",
+            ]
+            await_status_payload = (
+                payloads[1] if checkpoint_sequence_is_canonical else {}
+            )
+            resume_payload = payloads[2] if checkpoint_sequence_is_canonical else {}
+            observed_pause_receipt = _mapping(
+                await_status_payload.get("checkpoint_pause_receipt")
+            )
+            observed_resume_receipt = _mapping(
+                resume_payload.get("checkpoint_resume_receipt")
+            )
+            try:
+                pause_checkpoint_step_index = int(
+                    observed_pause_receipt.get("checkpoint_step_index")
+                )
+                resume_checkpoint_step_index = int(
+                    observed_resume_receipt.get("checkpoint_step_index")
+                )
+                observed_status_step_index = int(
+                    await_status_payload.get("step_index")
+                )
+                resume_count = int(observed_resume_receipt.get("resume_count"))
+                observed_pause_receipt_sha256 = stable_payload_digest(
+                    observed_pause_receipt
+                )
+            except (TypeError, ValueError):
+                pause_checkpoint_step_index = -1
+                resume_checkpoint_step_index = -2
+                observed_status_step_index = -3
+                resume_count = 0
+                observed_pause_receipt_sha256 = ""
+            pause_resume_continuity_observed = bool(
+                checkpoint_sequence_is_canonical
+                and active_instance_id
+                and observed_pause_receipt.get("schema_version")
+                == "workflow_checkpoint_pause_receipt.v1"
+                and observed_pause_receipt.get("status") == "paused"
+                and observed_pause_receipt.get("pause_mode")
+                == "cooperative_checkpoint"
+                and observed_pause_receipt.get("manual_resume_required") is True
+                and _text(observed_pause_receipt.get("instance_id"))
+                == active_instance_id
+                and _text(observed_pause_receipt.get("workflow_id")) == workflow_id
+                and _text(await_status_payload.get("status")).lower() == "paused"
+                and _text(await_status_payload.get("current_state"))
+                == _text(observed_pause_receipt.get("checkpoint_state"))
+                and observed_status_step_index == pause_checkpoint_step_index
+                and observed_resume_receipt.get("schema_version")
+                == "workflow_checkpoint_resume_receipt.v1"
+                and observed_resume_receipt.get("status") == "pending"
+                and observed_resume_receipt.get("same_instance_resume") is True
+                and resume_count >= 1
+                and _text(observed_resume_receipt.get("instance_id"))
+                == active_instance_id
+                and _text(observed_resume_receipt.get("workflow_id")) == workflow_id
+                and _text(observed_resume_receipt.get("checkpoint_state"))
+                == _text(observed_pause_receipt.get("checkpoint_state"))
+                and resume_checkpoint_step_index == pause_checkpoint_step_index
+                and observed_resume_receipt.get("pause_receipt_sha256")
+                == observed_pause_receipt_sha256
+                and _text(resume_payload.get("status")).lower() == "pending"
+                and resume_payload.get("same_instance_resume") is True
             )
             timed_out = any(
                 mapping.get("timed_out") is True for mapping in _walk_mappings(payloads)
@@ -4320,6 +4583,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "execution": _bounded_safe_evidence(payload),
                     "submissions": _bounded_safe_evidence(payloads),
                     "submission_count": len(payloads),
+                    "submission_operations": payload_operations,
                     "workflow_instance_ids": workflow_instance_ids,
                     "submission_created_new_flags": created_new_flags,
                     "submission_statuses": submission_statuses,
@@ -4327,6 +4591,15 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         idempotent_instance_reuse_observed
                     ),
                     "required_worker_build": required_worker_build,
+                    "checkpoint_pause_receipts": _bounded_safe_evidence(
+                        pause_receipts
+                    ),
+                    "checkpoint_resume_receipts": _bounded_safe_evidence(
+                        resume_receipts
+                    ),
+                    "pause_resume_continuity_observed": (
+                        pause_resume_continuity_observed
+                    ),
                     "agent_test_fault_events": json_serialisable_projection(
                         fault_events
                     ),
@@ -4367,6 +4640,10 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "workflow_id": workflow_id,
                     "workflow_instance_ids": workflow_instance_ids,
                     "submission_count": len(payloads),
+                    "submission_operations": payload_operations,
+                    "pause_resume_continuity_observed": (
+                        pause_resume_continuity_observed
+                    ),
                     "agent_test_fault_event_sha256": (
                         stable_payload_digest(fault_events) if fault_events else None
                     ),

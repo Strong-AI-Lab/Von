@@ -26,7 +26,13 @@ from ..action_registry import (
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..execution_contracts import (
+    LAST_WORKFLOW_CHECKPOINT_PAUSE_EVENT_KEY,
     WORKFLOW_CONTROL_SIGNAL_RETURN,
+    WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
+    WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY,
     WORKFLOW_RETURN_PAYLOAD_KEY,
     build_workflow_result_envelope,
     clear_control_signal_context,
@@ -508,6 +514,28 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             context = dict(instance.inputs)
             current_state = definition.initial_state
             step_index = 0
+        persisted_checkpoint_state = instance.current_state
+        persisted_checkpoint_step_index = instance.step_index
+        lifecycle_context_keys = (
+            WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY,
+            LAST_WORKFLOW_CHECKPOINT_PAUSE_EVENT_KEY,
+            WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY,
+            WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY,
+        )
+        if not resuming_persisted_checkpoint:
+            for lifecycle_key in lifecycle_context_keys:
+                context.pop(lifecycle_key, None)
+        else:
+            # These receipts come from manager-side compare-and-swap state,
+            # never from workflow inputs or action-authored context.
+            if isinstance(instance.checkpoint_pause_receipt, Mapping):
+                context[WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY] = dict(
+                    instance.checkpoint_pause_receipt
+                )
+            if isinstance(instance.checkpoint_resume_receipt, Mapping):
+                context[WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY] = dict(
+                    instance.checkpoint_resume_receipt
+                )
         # Persisted instance actor scope is execution authority. Neither launch
         # inputs nor a restored checkpoint may replace it. The executed
         # definition identity and authority outputs have the same trust boundary.
@@ -613,6 +641,10 @@ class DurableWorkflowExecutor(WorkflowExecutor):
 
         _reassert_executed_definition_identity()
         clear_control_signal_context(context)
+        # Pause requests are executor-owned, single-use control values.  A
+        # launch input or restored checkpoint must not be able to forge a new
+        # pause acknowledgement.
+        context.pop(WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY, None)
 
         # Create execution environment
         from ...languagemodels.llm_interface import (
@@ -662,6 +694,17 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             user_namespace=instance.namespace,
             org_id=instance.org_id,
         )
+        trace.metadata["durable_claim_fenced"] = bool(
+            worker_id is not None and claim_token is not None
+        )
+        if isinstance(instance.checkpoint_pause_receipt, Mapping):
+            trace.metadata[WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY] = dict(
+                instance.checkpoint_pause_receipt
+            )
+        if isinstance(instance.checkpoint_resume_receipt, Mapping):
+            trace.metadata[WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY] = dict(
+                instance.checkpoint_resume_receipt
+            )
         if executed_definition_identity is not None:
             trace.metadata[DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY] = dict(
                 executed_definition_identity
@@ -1137,6 +1180,47 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                 )
 
             resolved_next_state = str(transition_decision.next_state)
+            raw_pause_request = context.pop(
+                WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
+                None,
+            )
+            pause_request: dict[str, Any] | None = None
+            pause_event: dict[str, Any] | None = None
+            if raw_pause_request is not None:
+                if (
+                    not isinstance(raw_pause_request, Mapping)
+                    or raw_pause_request.get("schema_version")
+                    != WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION
+                    or not str(
+                        raw_pause_request.get("request_sha256") or ""
+                    ).strip()
+                ):
+                    error = "workflow_checkpoint_pause_request_invalid"
+                    trace.finish_failed(error)
+                    return _build_result(
+                        completed=False,
+                        final_state=current_state,
+                        error=error,
+                        checkpoint=True,
+                    )
+                pause_request = dict(raw_pause_request)
+                pause_event = {
+                    "schema_version": "workflow_checkpoint_pause_event.v1",
+                    "status": "requested",
+                    "instance_id": instance_id,
+                    "workflow_id": definition.workflow_id,
+                    "request_state": current_state,
+                    "checkpoint_state": resolved_next_state,
+                    "checkpoint_step_index": step_index,
+                    "reason_code": pause_request.get("reason_code"),
+                    "request_sha256": pause_request.get("request_sha256"),
+                }
+                pause_events = context.get(WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY)
+                if not isinstance(pause_events, list):
+                    pause_events = []
+                    context[WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY] = pause_events
+                pause_events.append(pause_event)
+                context[LAST_WORKFLOW_CHECKPOINT_PAUSE_EVENT_KEY] = pause_event
             progress_current_value, progress_total_value, progress_message_value = (
                 compute_plan_state_progress(
                     context=context,
@@ -1149,6 +1233,69 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                 checkpoint_state=resolved_next_state,
                 checkpoint_step_index=step_index,
             )
+            if pause_request is not None:
+                if not worker_id or not claim_token or pause_event is None:
+                    error = "workflow_checkpoint_pause_requires_durable_claim"
+                    trace.finish_failed(error)
+                    return _build_result(
+                        completed=False,
+                        final_state=current_state,
+                        error=error,
+                        checkpoint=True,
+                    )
+
+                trace.record_state_transition(
+                    current_state,
+                    resolved_next_state,
+                    reason=transition_decision.reason,
+                    verdict=pause_event,
+                )
+                trace.finish_paused()
+                pause_receipt = _retry_store_call(
+                    "pause_claim_at_checkpoint",
+                    lambda: self._instance_manager.pause_claim_at_checkpoint(
+                        instance_id,
+                        prior_state=persisted_checkpoint_state,
+                        prior_step_index=persisted_checkpoint_step_index,
+                        request_state=current_state,
+                        checkpoint_state=resolved_next_state,
+                        checkpoint_step_index=step_index,
+                        workflow_data=checkpoint_data,
+                        pause_request=pause_request,
+                        worker_id=worker_id,
+                        claim_token=claim_token,
+                        workflow_id=definition.workflow_id,
+                        progress_current=progress_current_value,
+                        progress_total=progress_total_value,
+                        progress_message=progress_message_value,
+                        execution_trace_id=trace.execution_id,
+                        authority_checkpoint_attestation=checkpoint_attestation,
+                    ),
+                )
+                if not isinstance(pause_receipt, Mapping):
+                    trace.finish_failed("durable_lock_lost")
+                    return _build_result(
+                        completed=False,
+                        final_state=current_state,
+                        error="durable_lock_lost",
+                        checkpoint=False,
+                    )
+
+                pause_receipt_dict = dict(pause_receipt)
+                pause_event["status"] = "paused"
+                pause_event["receipt"] = pause_receipt_dict
+                context[WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY] = pause_receipt_dict
+                trace.metadata[WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY] = (
+                    pause_receipt_dict
+                )
+                current_state = resolved_next_state
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error="paused_at_checkpoint",
+                    checkpoint=False,
+                )
+
             checkpoint_saved = _retry_store_call(
                 "checkpoint_transition",
                 lambda: self._instance_manager.checkpoint(
@@ -1173,6 +1320,9 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                     error="durable_lock_lost",
                     checkpoint=False,
                 )
+            if checkpoint_saved is True:
+                persisted_checkpoint_state = resolved_next_state
+                persisted_checkpoint_step_index = step_index
 
             trace.record_state_transition(
                 current_state,

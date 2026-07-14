@@ -172,6 +172,7 @@ if TYPE_CHECKING:
         _workflow_concept_parity_audit,
         _workflow_materialisation_diagnostics,
         _workflow_mcp_health_check,
+        _workflow_resume_instance,
         _workflow_retry_instance,
         _workflow_set_event_binding_enabled,
         _workflow_set_schedule_enabled,
@@ -447,6 +448,7 @@ _bind_imports(
         "_workflow_concept_parity_audit",
         "_workflow_materialisation_diagnostics",
         "_workflow_mcp_health_check",
+        "_workflow_resume_instance",
         "_workflow_retry_instance",
         "_workflow_set_event_binding_enabled",
         "_workflow_set_schedule_enabled",
@@ -3817,6 +3819,15 @@ async def _handle_workflow_cancel_instance(
     )
 
 
+async def _handle_workflow_resume_instance(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_untrusted_workflow_proxy_handler(
+        _workflow_resume_instance,
+        arguments,
+    )
+
+
 async def _handle_workflow_retry_instance(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4649,6 +4660,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "workflow_get_instance": _handle_workflow_get_instance,
     "workflow_get_execution_trace": _handle_workflow_get_execution_trace,
     "workflow_cancel_instance": _handle_workflow_cancel_instance,
+    "workflow_resume_instance": _handle_workflow_resume_instance,
     "workflow_retry_instance": _handle_workflow_retry_instance,
     "workflow_concept_parity_audit": _handle_workflow_concept_parity_audit,
     "workflow_create_schedule": _handle_workflow_create_schedule,

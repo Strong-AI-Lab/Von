@@ -675,6 +675,15 @@ class DurableWorkflowWorker:
                 # Already marked as cancelled
                 logger.info("[durable_worker] Instance %s was cancelled", instance_id)
 
+            elif result.error == "paused_at_checkpoint":
+                # The executor atomically persisted the successor checkpoint,
+                # manual hold, and typed receipt under this worker's claim.
+                # Explicit resume is now the only path back to PENDING.
+                logger.info(
+                    "[durable_worker] Instance %s paused at a represented checkpoint",
+                    instance_id,
+                )
+
             elif result.error == "durable_lock_lost":
                 logger.warning(
                     "[durable_worker] Lease lost while processing %s; "

@@ -169,7 +169,7 @@ class WorkflowExecutionTrace:
     execution_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     start_time: datetime = field(default_factory=_utcnow)
     end_time: Optional[datetime] = None
-    status: str = "running"  # running|completed|failed|timeout|cancelled
+    status: str = "running"  # running|completed|failed|paused|timeout|cancelled
     instance_id: Optional[str] = None
     user_namespace: Optional[str] = None
     org_id: Optional[str] = None
@@ -264,6 +264,12 @@ class WorkflowExecutionTrace:
         failed_step = WorkflowStepTrace(step_id="_workflow_failed", inputs={})
         failed_step.finish_failed(error)
         self.steps.append(failed_step)
+
+    def finish_paused(self) -> None:
+        """Close this execution attempt at an explicit durable checkpoint."""
+
+        self.end_time = _utcnow()
+        self.status = "paused"
 
     def to_storage_document(self) -> Dict[str, Any]:
         doc: Dict[str, Any] = {

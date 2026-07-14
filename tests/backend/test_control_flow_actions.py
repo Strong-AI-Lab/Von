@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -14,6 +16,9 @@ from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
+    WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
+    WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
 )
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
@@ -120,6 +125,55 @@ def test_join_action_fails_without_matching_fork() -> None:
 
     assert result.status == "failed"
     assert "join_without_matching_fork" in str(result.error or "")
+
+
+def test_pause_at_checkpoint_fails_closed_without_fenced_durable_claim() -> None:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
+        inputs={"reason_code": "certification_interruption"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+        trace=SimpleNamespace(instance_id="instance-1", metadata={}),
+        workflow_id="#V#pause_probe",
+        workflow_state_id="pause_here",
+    )
+
+    assert result.status == "failed"
+    assert result.error == "workflow_checkpoint_pause_requires_durable_instance"
+
+
+def test_pause_at_checkpoint_emits_bound_single_use_request() -> None:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
+        inputs={"reason_code": "certification_interruption"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+        trace=SimpleNamespace(
+            instance_id="instance-1",
+            metadata={"durable_claim_fenced": True},
+        ),
+        workflow_id="#V#pause_probe",
+        workflow_state_id="pause_here",
+    )
+
+    assert result.status == "success"
+    request = result.outputs[WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY]
+    assert request == {
+        "schema_version": WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
+        "instance_id": "instance-1",
+        "workflow_id": "#V#pause_probe",
+        "state_id": "pause_here",
+        "reason_code": "certification_interruption",
+        "request_sha256": request["request_sha256"],
+        "resume_mode": "explicit_same_instance",
+    }
+    assert len(request["request_sha256"]) == 64
 
 
 def test_for_each_action_executes_child_workflow_per_item() -> None:

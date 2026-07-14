@@ -33,6 +33,17 @@ WORKFLOW_CONTROL_ACTION_FOR_EACH_ID = "workflow_control.for_each"
 WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID = "workflow_control.context_set"
 WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID = "workflow_control.context_template"
 WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID = "workflow_control.context_project"
+WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID = (
+    "workflow_control.pause_at_checkpoint"
+)
+WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION = (
+    "workflow_checkpoint_pause_request.v1"
+)
+WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY = "workflow_checkpoint_pause_request"
+WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY = "workflow_checkpoint_pause_events"
+LAST_WORKFLOW_CHECKPOINT_PAUSE_EVENT_KEY = "last_workflow_checkpoint_pause_event"
+WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY = "workflow_checkpoint_pause_receipt"
+WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY = "workflow_checkpoint_resume_receipt"
 
 WORKFLOW_CONTROL_BREAK_ACTION_IDS: tuple[str, ...] = (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,

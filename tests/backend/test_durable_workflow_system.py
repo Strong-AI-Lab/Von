@@ -6,6 +6,8 @@ DurableWorkflowExecutor, and scheduling components.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1174,6 +1176,184 @@ class TestWorkflowInstanceManager:
         assert claimed.locked_by == "worker-1"
         assert claimed.lock_expires_at is not None
         assert claimed.claim_token
+
+    def test_checkpoint_pause_is_sticky_and_resumes_same_instance(self) -> None:
+        manager = WorkflowInstanceManager()
+        workflow_id = "#V#checkpoint_pause_workflow"
+        instance_id = manager.create_instance(
+            workflow_id,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        claimed = manager.find_and_claim_instance("worker-pause")
+        assert claimed is not None
+        assert claimed.claim_token
+
+        request_identity = {
+            "instance_id": instance_id,
+            "workflow_id": workflow_id,
+            "state_id": "pause_here",
+            "reason_code": "certification_interruption",
+        }
+        request_sha256 = hashlib.sha256(
+            json.dumps(
+                request_identity,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        rejected = manager.pause_claim_at_checkpoint(
+            instance_id,
+            prior_state="",
+            prior_step_index=0,
+            request_state="pause_here",
+            checkpoint_state="after_pause",
+            checkpoint_step_index=1,
+            workflow_data={"checkpoint_fact": "must_not_persist"},
+            pause_request={
+                "schema_version": "workflow_checkpoint_pause_request.v1",
+                **request_identity,
+                "request_sha256": "0" * 64,
+                "resume_mode": "explicit_same_instance",
+            },
+            worker_id="worker-pause",
+            claim_token=claimed.claim_token,
+            workflow_id=workflow_id,
+        )
+        assert rejected is None
+        still_running = manager.get_instance(instance_id)
+        assert still_running is not None
+        assert still_running.status == WorkflowInstanceStatus.RUNNING
+        assert still_running.current_state == ""
+        assert still_running.step_index == 0
+        assert "checkpoint_fact" not in still_running.workflow_data
+
+        receipt = manager.pause_claim_at_checkpoint(
+            instance_id,
+            prior_state="",
+            prior_step_index=0,
+            request_state="pause_here",
+            checkpoint_state="after_pause",
+            checkpoint_step_index=1,
+            workflow_data={
+                "namespace": "user-1/org-1",
+                "checkpoint_fact": "committed",
+            },
+            pause_request={
+                "schema_version": "workflow_checkpoint_pause_request.v1",
+                **request_identity,
+                "request_sha256": request_sha256,
+                "resume_mode": "explicit_same_instance",
+            },
+            worker_id="worker-pause",
+            claim_token=claimed.claim_token,
+            workflow_id=workflow_id,
+            progress_current=1,
+            progress_total=2,
+            progress_message="after_pause",
+            execution_trace_id="trace-pause",
+        )
+
+        assert receipt is not None
+        assert receipt["checkpoint_state"] == "after_pause"
+        assert receipt["checkpoint_step_index"] == 1
+        assert receipt["claim_token_sha256"] == hashlib.sha256(
+            claimed.claim_token.encode("utf-8")
+        ).hexdigest()
+        assert claimed.claim_token not in json.dumps(receipt, sort_keys=True)
+        paused = manager.get_instance(instance_id)
+        assert paused is not None
+        assert paused.status == WorkflowInstanceStatus.PAUSED
+        assert paused.manual_resume_required is True
+        assert paused.current_state == "after_pause"
+        assert paused.step_index == 1
+        assert paused.workflow_data["checkpoint_fact"] == "committed"
+
+        assert manager.find_and_claim_instance("worker-too-early") is None
+
+        resume_receipt = manager.resume_instance(instance_id)
+        assert resume_receipt is not None
+        assert resume_receipt["instance_id"] == instance_id
+        assert resume_receipt["same_instance_resume"] is True
+        assert resume_receipt["checkpoint_state"] == "after_pause"
+        assert resume_receipt["pause_receipt_sha256"] == hashlib.sha256(
+            json.dumps(
+                receipt,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        queued = manager.get_instance(instance_id)
+        assert queued is not None
+        assert queued.status == WorkflowInstanceStatus.PENDING
+        assert queued.manual_resume_required is False
+        assert queued.current_state == "after_pause"
+        assert queued.step_index == 1
+        assert manager.resume_instance(instance_id) is None
+
+        reclaimed = manager.find_and_claim_instance("worker-resume")
+        assert reclaimed is not None
+        assert reclaimed.instance_id == instance_id
+        assert reclaimed.current_state == "after_pause"
+        assert reclaimed.step_index == 1
+        assert reclaimed.claim_token != claimed.claim_token
+
+    def test_cancelling_checkpoint_pause_clears_hold_and_retains_history(self) -> None:
+        manager = WorkflowInstanceManager()
+        workflow_id = "#V#checkpoint_pause_cancel_workflow"
+        instance_id = manager.create_instance(
+            workflow_id,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        claimed = manager.find_and_claim_instance("worker-pause-cancel")
+        assert claimed is not None
+        assert claimed.claim_token
+        request_identity = {
+            "instance_id": instance_id,
+            "workflow_id": workflow_id,
+            "state_id": "pause_here",
+            "reason_code": "cancel_after_pause",
+        }
+        request_sha256 = hashlib.sha256(
+            json.dumps(
+                request_identity,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        receipt = manager.pause_claim_at_checkpoint(
+            instance_id,
+            prior_state="",
+            prior_step_index=0,
+            request_state="pause_here",
+            checkpoint_state="after_pause",
+            checkpoint_step_index=1,
+            workflow_data={"checkpoint_fact": "retained"},
+            pause_request={
+                "schema_version": "workflow_checkpoint_pause_request.v1",
+                **request_identity,
+                "request_sha256": request_sha256,
+                "resume_mode": "explicit_same_instance",
+            },
+            worker_id="worker-pause-cancel",
+            claim_token=claimed.claim_token,
+            workflow_id=workflow_id,
+        )
+        assert receipt is not None
+
+        assert manager.mark_cancelled(instance_id) is True
+        cancelled = manager.get_instance(instance_id)
+        assert cancelled is not None
+        assert cancelled.status == WorkflowInstanceStatus.CANCELLED
+        assert cancelled.manual_resume_required is False
+        assert cancelled.checkpoint_pause_receipt == receipt
+        assert manager.resume_instance(instance_id) is None
 
     def test_find_and_claim_stamps_worker_build_identity(
         self,
