@@ -333,6 +333,36 @@ def test_support_concept_authority_requires_declared_ontology_typing(
     assert resumable is False
 
 
+def test_explicit_workflow_target_scopes_support_concepts_transitively() -> None:
+    support_specs = [
+        {
+            "concept_id": "#V#target_support",
+            "relationships": {"#V#usesSupport": ["#V#transitive_support"]},
+        },
+        {"concept_id": "#V#transitive_support"},
+        {"concept_id": "#V#unrelated_support"},
+    ]
+
+    scoped = seed_bootstrap._scope_support_concepts_to_authority_payloads(
+        support_specs,
+        {
+            "#V#target_workflow": {
+                "workflow_text_relations": [
+                    {
+                        "predicate": "#V#hasPolicy",
+                        "text": "Use #V#target_support for this workflow.",
+                    }
+                ]
+            }
+        },
+    )
+
+    assert [spec["concept_id"] for spec in scoped] == [
+        "#V#target_support",
+        "#V#transitive_support",
+    ]
+
+
 def test_repo_seed_workflow_definitions_include_gmail_arxiv_discovery_metadata() -> (
     None
 ):

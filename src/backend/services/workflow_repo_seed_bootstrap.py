@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -79,6 +80,67 @@ def _normalise_support_concept_targets(raw_value: Any) -> list[str]:
         if cleaned and cleaned not in targets:
             targets.append(cleaned)
     return targets
+
+
+def _scope_support_concepts_to_authority_payloads(
+    raw_specs: Any,
+    authority_payloads: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    """Return support concepts referenced by explicitly targeted workflows.
+
+    A bundle can contain shared support concepts for many workflows.  A narrow
+    ``target_workflow_ids`` repair must not acquire authority to rewrite every
+    unrelated support concept in that bundle.  Keep directly referenced
+    concepts plus their transitive support-concept dependencies; full-family
+    bootstrap still receives the complete list.
+    """
+
+    if not isinstance(raw_specs, Sequence) or isinstance(
+        raw_specs, (str, bytes, bytearray)
+    ):
+        return []
+    specs = [spec for spec in raw_specs if isinstance(spec, Mapping)]
+    by_id = {
+        str(spec.get("concept_id") or "").strip(): spec
+        for spec in specs
+        if str(spec.get("concept_id") or "").strip()
+    }
+    if not by_id:
+        return []
+
+    def _referenced_support_ids(value: Any) -> set[str]:
+        try:
+            serialised = json.dumps(
+                value,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except (TypeError, ValueError):
+            serialised = str(value)
+        return {
+            concept_id
+            for concept_id in by_id
+            if re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(concept_id)}(?![A-Za-z0-9_])",
+                serialised,
+            )
+        }
+
+    selected_ids = _referenced_support_ids(authority_payloads)
+    pending = list(selected_ids)
+    while pending:
+        concept_id = pending.pop()
+        spec = by_id.get(concept_id)
+        if spec is None:
+            continue
+        for dependency_id in _referenced_support_ids(spec):
+            if dependency_id in selected_ids:
+                continue
+            selected_ids.add(dependency_id)
+            pending.append(dependency_id)
+    return [spec for spec in specs if str(spec.get("concept_id")) in selected_ids]
 
 
 def _merge_support_relationship_targets(
@@ -2691,8 +2753,17 @@ def bootstrap_repo_seed_workflow_bundle(
         )
     ]
     if support_candidate_workflow_ids:
+        support_concept_specs = bundle.get("support_concepts")
+        if requested_workflow_ids:
+            support_concept_specs = _scope_support_concepts_to_authority_payloads(
+                support_concept_specs,
+                {
+                    workflow_id: target_authority_payload_by_workflow[workflow_id]
+                    for workflow_id in support_candidate_workflow_ids
+                },
+            )
         support_concept_report = _materialise_support_concepts(
-            bundle.get("support_concepts"),
+            support_concept_specs,
             source_tag=source_tag,
             managed_by=managed_by,
             update_existing=False,
