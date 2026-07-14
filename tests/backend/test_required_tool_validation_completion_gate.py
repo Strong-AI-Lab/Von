@@ -347,6 +347,7 @@ def test_completion_gate_rebuilds_stale_zero_effect_record_with_required_tools()
     )
     assert any(
         entry.get("type") == "completion_gate_record_rebuilt"
+        and entry.get("reason") == "stale_zero_required_effects_with_required_tools"
         for entry in data["aux_llm_calls"]
     )
 

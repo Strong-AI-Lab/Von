@@ -765,6 +765,62 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     assert any(t.to_state == "completed" for t in completion_gate.transitions)
 
 
+def test_tool_calling_critic_context_matches_outer_turn_critic() -> None:
+    tool_calling = build_authoritative_test_workflow_definition(
+        TOOL_CALLING_WORKFLOW_ID
+    )
+    conversation_turn = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+
+    tool_critic = tool_calling.states["postcondition_critic"]
+    turn_critic = conversation_turn.states["critic"]
+    tool_contract = tool_critic.metadata.get("subworkflow_contract") or {}
+    turn_contract = turn_critic.metadata.get("subworkflow_contract") or {}
+
+    def _mapping_pairs(contract: dict[str, Any]) -> set[tuple[str, str]]:
+        return {
+            (
+                str(mapping.get("parent_context_key") or ""),
+                str(mapping.get("child_input_key") or ""),
+            )
+            for mapping in contract.get("input_mappings") or []
+            if isinstance(mapping, dict)
+        }
+
+    expected_context_keys = {
+        "prompt",
+        "user_prompt",
+        "conversation_session_id",
+        "turn_id",
+        "user_concept_id",
+        "org_concept_id",
+        "actor_concept_id",
+        "response_text",
+        "final_response",
+        "current_response",
+        "workflow_discovery_result",
+        "workflow_routing",
+        "turn_execution_diagnostics",
+        "aux_llm_calls",
+        "invocations",
+        "selected_workflow_trace",
+        "turn_expected_outcome_contract_state",
+        "turn_expected_outcome_contract",
+        "completion_report",
+        "required_prompt_tools",
+    }
+    expected_pairs = {(key, key) for key in expected_context_keys}
+
+    assert _mapping_pairs(tool_contract) == expected_pairs
+    assert _mapping_pairs(tool_contract) == _mapping_pairs(turn_contract)
+    for context_key in expected_context_keys:
+        assert (
+            tool_critic.actions[0].inputs.get(context_key, {}).get("$context_key")
+            == context_key
+        )
+
+
 def test_chat_assistant_workflow_executes_via_tool_calling_contract() -> None:
     workflow = build_authoritative_test_workflow_definition(CHAT_ASSISTANT_WORKFLOW_ID)
     assert workflow.initial_state == "respond"

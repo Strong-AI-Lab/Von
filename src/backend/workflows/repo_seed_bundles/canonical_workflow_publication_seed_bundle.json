@@ -1,11 +1,16 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "42",
+  "seed_version": "43",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#conversation_turn_execution_workflow": {
       "41": [
         "a4d93441a96ac832356c18eb1c4a54d84cf98b92fb98a8fa4c946a0ffbdca14d"
+      ]
+    },
+    "#V#tool_calling_workflow": {
+      "42": [
+        "77e8896562063743a980c1700c43a5edf1d451b1a90c1e0b489f9c3838cc7b87"
       ]
     }
   },
@@ -1607,7 +1612,128 @@
                 "to_state": "completion_gate"
               }
             ],
-            "context_input_mapping_specs": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_prompt_to_prompt_parameter",
+                "context_key": "prompt",
+                "required": false,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_user_prompt_to_user_prompt_parameter",
+                "context_key": "user_prompt",
+                "required": false,
+                "tool_param": "user_prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_conversation_session_id_to_conversation_session_id_parameter",
+                "context_key": "conversation_session_id",
+                "required": false,
+                "tool_param": "conversation_session_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_turn_id_to_turn_id_parameter",
+                "context_key": "turn_id",
+                "required": false,
+                "tool_param": "turn_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_user_concept_id_to_user_concept_id_parameter",
+                "context_key": "user_concept_id",
+                "required": false,
+                "tool_param": "user_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_org_concept_id_to_org_concept_id_parameter",
+                "context_key": "org_concept_id",
+                "required": false,
+                "tool_param": "org_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_actor_concept_id_to_actor_concept_id_parameter",
+                "context_key": "actor_concept_id",
+                "required": false,
+                "tool_param": "actor_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_response_text_to_response_text_parameter",
+                "context_key": "response_text",
+                "required": false,
+                "tool_param": "response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_final_response_to_final_response_parameter",
+                "context_key": "final_response",
+                "required": false,
+                "tool_param": "final_response"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_current_response_to_current_response_parameter",
+                "context_key": "current_response",
+                "required": false,
+                "tool_param": "current_response"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_workflow_discovery_result_to_workflow_discovery_result_parameter",
+                "context_key": "workflow_discovery_result",
+                "required": false,
+                "tool_param": "workflow_discovery_result"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_workflow_routing_to_workflow_routing_parameter",
+                "context_key": "workflow_routing",
+                "required": false,
+                "tool_param": "workflow_routing"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_turn_execution_diagnostics_to_turn_execution_diagnostics_parameter",
+                "context_key": "turn_execution_diagnostics",
+                "required": false,
+                "tool_param": "turn_execution_diagnostics"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_aux_llm_calls_to_aux_llm_calls_parameter",
+                "context_key": "aux_llm_calls",
+                "required": false,
+                "tool_param": "aux_llm_calls"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_invocations_to_invocations_parameter",
+                "context_key": "invocations",
+                "required": false,
+                "tool_param": "invocations"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_selected_workflow_trace_to_selected_workflow_trace_parameter",
+                "context_key": "selected_workflow_trace",
+                "required": false,
+                "tool_param": "selected_workflow_trace"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_turn_expected_outcome_contract_state_to_turn_expected_outcome_contract_state_parameter",
+                "context_key": "turn_expected_outcome_contract_state",
+                "required": false,
+                "tool_param": "turn_expected_outcome_contract_state"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_turn_expected_outcome_contract_to_turn_expected_outcome_contract_parameter",
+                "context_key": "turn_expected_outcome_contract",
+                "required": false,
+                "tool_param": "turn_expected_outcome_contract"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_completion_report_to_completion_report_parameter",
+                "context_key": "completion_report",
+                "required": false,
+                "tool_param": "completion_report"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_required_prompt_tools_to_required_prompt_tools_parameter",
+                "context_key": "required_prompt_tools",
+                "required": false,
+                "tool_param": "required_prompt_tools"
+              }
+            ],
             "context_input_mappings": [],
             "effects": [],
             "execution_mode": "subworkflow",

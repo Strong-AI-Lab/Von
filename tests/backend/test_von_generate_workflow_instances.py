@@ -404,7 +404,9 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
     return flask_app
 
 
-def test_generate_materialises_conversation_turn_instance_in_monitor(app: Flask) -> None:
+def test_generate_materialises_conversation_turn_instance_in_monitor(
+    app: Flask,
+) -> None:
     client = app.test_client()
 
     response = client.post(
@@ -455,3 +457,34 @@ def test_generate_materialises_conversation_turn_instance_in_monitor(app: Flask)
     assert stored_instance.inputs["conversation_session_id"] == "session-monitor-test"
     assert stored_instance.inputs["turn_id"]
     assert manager.auto_claim_enabled[stored_instance.instance_id] is False
+
+
+def test_generate_canonicalises_window_session_org_slug_before_orchestration(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {
+            # Window-session persistence uses the slug on this path.
+            "organisation_id": "sail_lab",
+            "chat_session_id": "session-org-normalisation-test",
+            "role": "member",
+        },
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Exercise the canonical organisation boundary."},
+    )
+
+    assert response.status_code == 200
+    orchestrator = app.config["_TEST_ORCHESTRATOR"]
+    assert orchestrator.calls[-1]["org_concept_id"] == "#V#sail_lab"
+    manager = app.config["_TEST_MANAGER"]
+    stored_instance = next(
+        instance
+        for instance in manager.instances.values()
+        if instance.workflow_id == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    assert stored_instance.org_id == "#V#sail_lab"

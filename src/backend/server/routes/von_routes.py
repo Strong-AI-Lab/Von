@@ -11106,7 +11106,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         effective = get_effective_context(
             request_window_session_id, dict(session), user_concept_id
         )
-        org_concept_id = effective.get("organisation_id")
+        # Window-session storage uses the organisation slug in some paths.
+        # Canonicalise it at the authenticated request boundary so downstream
+        # workflow instances, telemetry, and exact authority checks all see the
+        # same concept ID rather than a mix of ``slug`` and ``#V#slug``.
+        org_concept_id = _normalise_concept_id(effective.get("organisation_id"))
 
         # Store user_concept_id in session for history tracking
         if user_concept_id:
