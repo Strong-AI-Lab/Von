@@ -1307,6 +1307,7 @@ def submit_verified_workflow_instance(
     event_idempotency_key: str | None = None,
     action_registry_override: Any | None = None,
     auto_claim_enabled: bool = True,
+    required_worker_build: str | None = None,
 ) -> WorkflowInstanceSubmissionResult:
     """Create a durable workflow instance only when runnable verification passes.
 
@@ -1496,6 +1497,11 @@ def submit_verified_workflow_instance(
         )
     )
     created_new = True
+    worker_build_kwargs = (
+        {"required_worker_build": required_worker_build}
+        if isinstance(required_worker_build, str) and required_worker_build.strip()
+        else {}
+    )
     if use_event_idempotency_submission:
         throttled = _event_backlog_throttle_result(
             manager=manager,
@@ -1518,6 +1524,7 @@ def submit_verified_workflow_instance(
             schedule_id=schedule_id,
             max_retries=max_retries,
             auto_claim_enabled=auto_claim_enabled,
+            **worker_build_kwargs,
         )
     else:
         instance_id = manager.create_instance(
@@ -1532,6 +1539,7 @@ def submit_verified_workflow_instance(
             source_event_id=source_event_id,
             event_idempotency_key=event_idempotency_key,
             auto_claim_enabled=auto_claim_enabled,
+            **worker_build_kwargs,
         )
 
     # Idempotent event reuse should not retroactively fail a previously created

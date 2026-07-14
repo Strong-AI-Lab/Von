@@ -912,6 +912,8 @@ def _patch_live_preflight(
             "schema_version": "operational_certification_runtime_alignment.v1",
             "verified": True,
             "alignment_sha256": "runtime-alignment-digest",
+            "server_git_commit": "a" * 40,
+            "local_git_commit": "a" * 40,
         },
     )
     monkeypatch.setattr(
@@ -2159,6 +2161,10 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
                 "user_id": "#V#unit_user",
                 "org_id": "#V#unit_org",
                 "status": "completed" if terminal else "pending",
+                "min_worker_build": "a" * 40,
+                "claimed_by_build": (
+                    {"git_commit": "a" * 40} if terminal else None
+                ),
             },
             "workflow_execution": {
                 "instance_id": "shared-instance-1",
@@ -2197,6 +2203,7 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
 
     assert [call["await_terminal"] for call in workflow_calls] == [False, True]
     assert [call["timeout_seconds"] for call in workflow_calls] == [0.0, 5.0]
+    assert all(call["required_worker_build"] == "a" * 40 for call in workflow_calls)
     assert all(
         call["inputs"]
         == {
@@ -2208,6 +2215,7 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
     assert len({call["event_idempotency_key"] for call in workflow_calls}) == 1
     assert observed_execution["terminal_state"] == "completed"
     assert observed_execution["path_analysis"]["submission_count"] == 2
+    assert observed_execution["path_analysis"]["required_worker_build"] == "a" * 40
     assert observed_execution["path_analysis"]["workflow_instance_ids"] == [
         "shared-instance-1",
         "shared-instance-1",

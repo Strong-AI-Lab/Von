@@ -1257,6 +1257,105 @@ class TestWorkflowInstanceManager:
         assert claimed is not None
         assert claimed.instance_id == instance_id
 
+    def test_create_instance_explicit_worker_build_overrides_process_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A launch-bound build must be persisted, not inferred by the worker."""
+        monkeypatch.setenv(
+            "VON_DURABLE_MIN_WORKER_BUILD",
+            "durable_exact_workflow_authority_snapshot.v1",
+        )
+        manager = WorkflowInstanceManager()
+        exact_commit = "abcdef1234567890abcdef1234567890abcdef12"
+
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            required_worker_build=exact_commit,
+        )
+
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.min_worker_build == exact_commit
+        assert (
+            manager.find_and_claim_instance(
+                "worker-capability-only",
+                worker_build_identity={
+                    "git_commit": "123456789abc123456789abc123456789abc1234",
+                    "capabilities": [
+                        "durable_exact_workflow_authority_snapshot.v1"
+                    ],
+                },
+            )
+            is None
+        )
+        claimed = manager.find_and_claim_instance(
+            "worker-exact-build",
+            worker_build_identity={
+                "git_commit": exact_commit,
+                "capabilities": [
+                    "durable_exact_workflow_authority_snapshot.v1"
+                ],
+            },
+        )
+        assert claimed is not None
+        assert claimed.instance_id == instance_id
+
+    def test_event_instance_reuse_rejects_different_required_worker_build(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Idempotent reuse must not silently weaken exact-build provenance."""
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_BUILD", raising=False)
+        monkeypatch.delenv(
+            "VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT",
+            raising=False,
+        )
+        manager = WorkflowInstanceManager()
+        first_commit = "a" * 40
+
+        instance_id, created_new = manager.create_instance_for_event(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            event_idempotency_key="event:exact-build",
+            source_event_type="test.event",
+            source_event_id="event-1",
+            required_worker_build=first_commit,
+        )
+
+        assert created_new is True
+        reused_id, reused_new = manager.create_instance_for_event(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            event_idempotency_key="event:exact-build",
+            source_event_type="test.event",
+            source_event_id="event-1",
+            required_worker_build=first_commit,
+        )
+        assert (reused_id, reused_new) == (instance_id, False)
+
+        with pytest.raises(
+            ValueError,
+            match="event_instance_required_worker_build_mismatch",
+        ):
+            manager.create_instance_for_event(
+                "#V#test_workflow",
+                user_id="user-1",
+                org_id="org-1",
+                namespace="user-1/org-1",
+                event_idempotency_key="event:exact-build",
+                source_event_type="test.event",
+                source_event_id="event-1",
+                required_worker_build="b" * 40,
+            )
+
     def test_find_and_claim_skips_unmatched_min_worker_build(
         self,
         monkeypatch: pytest.MonkeyPatch,

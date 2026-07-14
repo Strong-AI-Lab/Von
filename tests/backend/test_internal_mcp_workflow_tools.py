@@ -80,6 +80,7 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
                 inputs=dict(inputs) if isinstance(inputs, dict) else {},
                 schedule_id=kwargs.get("schedule_id"),
                 max_retries=max_retries,
+                required_worker_build=kwargs.get("required_worker_build"),
             )
             status = "created" if created_new else "reused"
         else:
@@ -94,6 +95,7 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
                 source_event_type=source_event_type,
                 source_event_id=source_event_id,
                 event_idempotency_key=event_idempotency_key,
+                required_worker_build=kwargs.get("required_worker_build"),
             )
             status = "created"
 
@@ -1774,6 +1776,54 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
     assert boolean_fields["include_step_result_envelopes"]["raw_type"] == "str"
     assert boolean_fields["include_trace"]["normalised"] is True
     assert boolean_fields["include_trace"]["raw_type"] == "int"
+
+
+def test_workflow_execute_forwards_exact_required_worker_build(monkeypatch):
+    from src.backend.workflows.durable.workflow_instance_submission_service import (
+        WorkflowInstanceSubmissionResult,
+    )
+
+    manager = _StubWorkflowManager()
+    captured: dict[str, Any] = {}
+
+    def _submit(**kwargs: Any) -> WorkflowInstanceSubmissionResult:
+        captured.update(kwargs)
+        return WorkflowInstanceSubmissionResult(
+            success=True,
+            workflow_id=str(kwargs["workflow_id"]),
+            status="pending",
+            instance_id=None,
+            verification={
+                "preflight_passed": True,
+                "postflight_passed": True,
+                "runnable_verification_success": True,
+            },
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service."
+        "submit_verified_workflow_instance",
+        _submit,
+    )
+    exact_commit = "abcdef1234567890abcdef1234567890abcdef12"
+
+    payload = _build_gateway().invoke(
+        "workflow_execute",
+        {
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+            "required_worker_build": exact_commit,
+        },
+    ).payload
+
+    assert payload.get("success") is True
+    assert captured["required_worker_build"] == exact_commit
 
 
 def test_workflow_execute_reports_queued_timeout_as_not_started(monkeypatch):

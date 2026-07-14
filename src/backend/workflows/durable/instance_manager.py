@@ -779,6 +779,7 @@ class WorkflowInstanceManager:
         source_event_id: str | None = None,
         event_idempotency_key: str | None = None,
         auto_claim_enabled: bool = True,
+        required_worker_build: str | None = None,
     ) -> str:
         """Create a new workflow instance.
 
@@ -799,6 +800,10 @@ class WorkflowInstanceManager:
                 supervised conversation-turn path finalises them itself);
                 worker auto-claim of such instances re-executes the same turn
                 and produces duplicate user-visible outputs (JVNAUTOSCI-2503).
+            required_worker_build: Optional exact build token that a worker
+                must advertise before it may claim this instance. This is
+                persisted atomically with the pending instance so foreign or
+                stale workers cannot win the queue race.
 
         Returns:
             The generated instance_id.
@@ -838,11 +843,20 @@ class WorkflowInstanceManager:
         # only inside a worker process is insufficient on a shared queue: a
         # foreign or stale worker without the setting could otherwise claim
         # the pending instance before an eligible worker sees it.
+        explicit_required_worker_build = (
+            required_worker_build.strip()
+            if isinstance(required_worker_build, str)
+            and required_worker_build.strip()
+            else None
+        )
         configured_min_worker_build = get_configured_min_worker_build()
-        if configured_min_worker_build:
+        persisted_min_worker_build = (
+            explicit_required_worker_build or configured_min_worker_build
+        )
+        if persisted_min_worker_build:
             instance = replace(
                 instance,
-                min_worker_build=configured_min_worker_build,
+                min_worker_build=persisted_min_worker_build,
             )
 
         instance_doc = instance.to_doc()
@@ -887,6 +901,7 @@ class WorkflowInstanceManager:
         schedule_id: str | None = None,
         max_retries: int = 3,
         auto_claim_enabled: bool = True,
+        required_worker_build: str | None = None,
     ) -> tuple[str, bool]:
         """Create an event-triggered instance with idempotency protection.
 
@@ -898,8 +913,19 @@ class WorkflowInstanceManager:
             raise RuntimeError("Database unavailable for workflow instance creation")
 
         key = event_idempotency_key.strip()
-        existing = coll.find_one({"event_idempotency_key": key}, {"instance_id": 1})
+        existing = coll.find_one(
+            {"event_idempotency_key": key},
+            {"instance_id": 1, "min_worker_build": 1},
+        )
         if existing and isinstance(existing.get("instance_id"), str):
+            expected_build = (
+                required_worker_build.strip()
+                if isinstance(required_worker_build, str)
+                and required_worker_build.strip()
+                else None
+            )
+            if expected_build and existing.get("min_worker_build") != expected_build:
+                raise ValueError("event_instance_required_worker_build_mismatch")
             return existing["instance_id"], False
 
         try:
@@ -915,12 +941,27 @@ class WorkflowInstanceManager:
                 source_event_id=source_event_id,
                 event_idempotency_key=key,
                 auto_claim_enabled=auto_claim_enabled,
+                required_worker_build=required_worker_build,
             )
             return instance_id, True
         except DuplicateKeyError:
             # Another caller may have inserted concurrently for the same event key.
-            existing = coll.find_one({"event_idempotency_key": key}, {"instance_id": 1})
+            existing = coll.find_one(
+                {"event_idempotency_key": key},
+                {"instance_id": 1, "min_worker_build": 1},
+            )
             if existing and isinstance(existing.get("instance_id"), str):
+                expected_build = (
+                    required_worker_build.strip()
+                    if isinstance(required_worker_build, str)
+                    and required_worker_build.strip()
+                    else None
+                )
+                if (
+                    expected_build
+                    and existing.get("min_worker_build") != expected_build
+                ):
+                    raise ValueError("event_instance_required_worker_build_mismatch")
                 return existing["instance_id"], False
             raise
 

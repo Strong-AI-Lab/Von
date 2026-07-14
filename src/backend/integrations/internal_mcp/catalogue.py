@@ -16498,6 +16498,7 @@ def _workflow_create_instance(**kwargs):
     source_event_type_raw = kwargs.get("source_event_type")
     source_event_id_raw = kwargs.get("source_event_id")
     event_idempotency_key_raw = kwargs.get("event_idempotency_key")
+    required_worker_build_raw = kwargs.get("required_worker_build")
 
     try:
         actor_scope = _resolve_internal_mcp_workflow_launch_actor_scope(
@@ -16531,6 +16532,19 @@ def _workflow_create_instance(**kwargs):
         and event_idempotency_key_raw.strip()
         else None
     )
+    if required_worker_build_raw is None:
+        required_worker_build = None
+    elif (
+        isinstance(required_worker_build_raw, str)
+        and required_worker_build_raw.strip()
+    ):
+        required_worker_build = required_worker_build_raw.strip()
+    else:
+        return make_error_response(
+            "invalid_parameter",
+            "required_worker_build must be a non-empty string when supplied.",
+            details={"invalid": ["required_worker_build"]},
+        )
     inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
     try:
         max_retries = int(max_retries_raw)
@@ -16551,6 +16565,7 @@ def _workflow_create_instance(**kwargs):
             source_event_type=source_event_type,
             source_event_id=source_event_id,
             event_idempotency_key=event_idempotency_key,
+            required_worker_build=required_worker_build,
         )
         return submission.to_dict()
     except Exception as e:
@@ -16590,6 +16605,7 @@ def _workflow_execute(**kwargs):
     source_event_type_raw = kwargs.get("source_event_type")
     source_event_id_raw = kwargs.get("source_event_id")
     event_idempotency_key_raw = kwargs.get("event_idempotency_key")
+    required_worker_build_raw = kwargs.get("required_worker_build")
     await_terminal_raw = kwargs.get("await_terminal")
     include_step_result_envelopes_raw = kwargs.get("include_step_result_envelopes")
     include_trace_raw = kwargs.get("include_trace")
@@ -16663,6 +16679,19 @@ def _workflow_execute(**kwargs):
         and event_idempotency_key_raw.strip()
         else None
     )
+    if required_worker_build_raw is None:
+        required_worker_build = None
+    elif (
+        isinstance(required_worker_build_raw, str)
+        and required_worker_build_raw.strip()
+    ):
+        required_worker_build = required_worker_build_raw.strip()
+    else:
+        return make_error_response(
+            "invalid_parameter",
+            "required_worker_build must be a non-empty string when supplied.",
+            details={"invalid": ["required_worker_build"]},
+        )
     inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
     try:
         max_retries = int(max_retries_raw)
@@ -16683,6 +16712,7 @@ def _workflow_execute(**kwargs):
             source_event_type=source_event_type,
             source_event_id=source_event_id,
             event_idempotency_key=event_idempotency_key,
+            required_worker_build=required_worker_build,
         )
         instance = None
         poll_count: int | None = None
@@ -34282,6 +34312,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "source_event_type": (str, type(None)),
                     "source_event_id": (str, type(None)),
                     "event_idempotency_key": (str, type(None)),
+                    "required_worker_build": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Create a durable workflow instance.",
@@ -34317,6 +34348,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "source_event_type": (str, type(None)),
                     "source_event_id": (str, type(None)),
                     "event_idempotency_key": (str, type(None)),
+                    "required_worker_build": (str, type(None)),
                     "await_terminal": (bool, str, int, float),
                     "timeout_seconds": (int, float),
                     "poll_interval_seconds": (int, float),

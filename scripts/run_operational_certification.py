@@ -4180,6 +4180,13 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "agent_test_mcp_fault_plan_requires_synchronous_adapter"
                 )
             payloads: list[dict[str, Any]] = []
+            required_worker_build = _text(
+                runtime_alignment.get("local_git_commit")
+            )
+            if not required_worker_build:
+                raise RuntimeError(
+                    "durable_workflow_required_worker_build_unavailable"
+                )
             for step_index, raw_step in enumerate(submission_plan, start=1):
                 step = dict(raw_step)
                 await_terminal = step.get("await_terminal", True)
@@ -4210,6 +4217,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                             source_event_type="operational_certification_trial",
                             source_event_id=correlation_id,
                             event_idempotency_key=correlation_id,
+                            required_worker_build=required_worker_build,
                         )
                     )
                 )
@@ -4230,6 +4238,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 _text(step_payload.get("instance_id")) for step_payload in payloads
             ]
             durable_binding_mismatches: list[str] = []
+            durable_worker_build_mismatches: list[str] = []
             for step_index, step_payload in enumerate(payloads, start=1):
                 instance = _mapping(step_payload.get("workflow_instance"))
                 for field_name, expected, observed in (
@@ -4245,10 +4254,36 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         durable_binding_mismatches.append(
                             f"step_{step_index}.{field_name}"
                         )
+                persisted_required_build = _text(
+                    instance.get("min_worker_build")
+                )
+                if persisted_required_build != required_worker_build:
+                    durable_worker_build_mismatches.append(
+                        f"step_{step_index}.min_worker_build"
+                    )
+                claim = _mapping(instance.get("claimed_by_build"))
+                claimed_git_commit = _text(claim.get("git_commit"))
+                instance_status = _text(instance.get("status")).lower()
+                if claim and claimed_git_commit != required_worker_build:
+                    durable_worker_build_mismatches.append(
+                        f"step_{step_index}.claimed_by_build.git_commit"
+                    )
+                if (
+                    instance_status in {"completed", "failed", "cancelled"}
+                    and not claim
+                ):
+                    durable_worker_build_mismatches.append(
+                        f"step_{step_index}.claimed_by_build"
+                    )
             if durable_binding_mismatches:
                 raise RuntimeError(
                     "durable_workflow_instance_binding_mismatch:"
                     + ",".join(durable_binding_mismatches)
+                )
+            if durable_worker_build_mismatches:
+                raise RuntimeError(
+                    "durable_workflow_claim_build_mismatch:"
+                    + ",".join(durable_worker_build_mismatches)
                 )
             created_new_flags = [
                 step_payload.get("created_new") for step_payload in payloads
@@ -4291,6 +4326,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "idempotent_instance_reuse_observed": (
                         idempotent_instance_reuse_observed
                     ),
+                    "required_worker_build": required_worker_build,
                     "agent_test_fault_events": json_serialisable_projection(
                         fault_events
                     ),
