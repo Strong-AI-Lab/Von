@@ -21,6 +21,7 @@ import {
   populateOrganisationsDropdown,
   populatePeopleDropdown,
   saveOllamaHosts,
+  setOllamaHostManagementWritable,
   showStatusMessage,
   verifyOllamaHost
 } from './settings.js';
@@ -64,6 +65,13 @@ import {
   setStoredOpenAiModelParameters,
   setStoredOpenAiSelectedModel,
 } from './utils/localModelPreferences.js';
+import {
+  __testOnly_resetWorkflowCapabilityIndexStatusCoordinator,
+  getLatestWorkflowCapabilityIndexStatus,
+  refreshWorkflowCapabilityIndexStatus,
+  resetWorkflowCapabilityIndexStatusCoordinator,
+  subscribeToWorkflowCapabilityIndexStatus,
+} from './utils/workflowCapabilityStatusCoordinator.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
 function buildSettingsFetchHeaders(extraHeaders = {}) {
@@ -110,15 +118,33 @@ let runtimeAbortController = null;
 let runtimeStatusInFlight = false;
 let runtimeModelStatusInFlight = null;
 let runtimeModelStatusLastFetchedAt = 0;
+let runtimeModelStatusGeneration = 0;
 let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
+let currentEffectiveLlm = null;
+let currentEffectiveEnabledLlms = [];
 let latestOpenAiModelProbe = null;
 let latestOpenAiModelParameterCapability = null;
 let latestOllamaModelProbe = null;
 let latestSettingsAuthStatus = null;
 let latestCapabilityIndexStatus = null;
+let capabilityIndexStatusUnsubscribe = null;
 let latestRagRuntimeConfiguration = null;
+let currentEnabledLlmAlternatives = [];
+let currentServerDefaultLlm = null;
+let stagedScopedPrimaryLlm = null;
+let scopedModelStateReady = false;
+let scopedModelLoadGeneration = 0;
+let scopedModelSaveInFlight = false;
+let explicitlyRemovedWorkflowPoolKeys = new Set();
+let sharedRuntimeModelSettingsWritable = false;
+let selectedModelPoolTargetScope = 'user';
+let actorContextGeneration = 0;
+let actorSessionReady = false;
+let actorTransitionQueue = Promise.resolve();
+let suppressActorOrgSwitchReload = false;
+let currentActorOrganisationRole = '';
 
 let __vonIsAdminOrOwner = false;
 let __canPersistWriteConservatism = false;
@@ -606,7 +632,27 @@ document.addEventListener('authStatusChanged', (event) => {
   refreshActiveSettingsConcernGuidance();
 });
 
-document.addEventListener('orgSwitched', () => {
+document.addEventListener('orgSwitched', (event) => {
+  if (suppressActorOrgSwitchReload) {
+    refreshActiveSettingsConcernGuidance();
+    return;
+  }
+  actorContextGeneration += 1;
+  actorSessionReady = true;
+  applySettingsActorRole(event?.detail?.role || '');
+  invalidateActorScopedCapabilityStatus();
+  const generation = invalidateScopedModelState('Loading model settings after the organisation switch...');
+  const organisationConceptId = event?.detail?.organisation_id || null;
+  const organisationName = event?.detail?.organisation_name || null;
+  setStoredJson(
+    LS_ORG_KEY,
+    organisationConceptId
+      ? { id: null, concept_id: organisationConceptId, name: organisationName }
+      : null,
+  );
+  syncModelPoolTargetScopeControls();
+  void reloadScopedModelSettings({ generation, targetScope: selectedModelPoolTargetScope });
+  void refreshRuntimeModelStatus({ force: true });
   refreshActiveSettingsConcernGuidance();
 });
 
@@ -703,14 +749,22 @@ function _setWriteConservatismOverrideBadgeEnabled(enabled) {
 }
 
 function resolveActiveLlmScopeContext() {
+  const targetScope = String(
+    document.getElementById('modelPoolTargetScopeSelect')?.value
+      || selectedModelPoolTargetScope
+      || 'user',
+  ).trim().toLowerCase();
+  if (targetScope === 'organisation') {
+    const storedOrg = getStoredJson(LS_ORG_KEY);
+    if (__vonIsAdminOrOwner && storedOrg?.concept_id) {
+      return { scope: 'organisation', conceptId: storedOrg.concept_id };
+    }
+    return { scope: null, conceptId: null };
+  }
+
   const storedUser = getStoredJson(LS_USER_KEY);
   if (storedUser?.concept_id) {
     return { scope: 'user', conceptId: storedUser.concept_id };
-  }
-
-  const storedOrg = getStoredJson(LS_ORG_KEY);
-  if (storedOrg?.concept_id) {
-    return { scope: 'organisation', conceptId: storedOrg.concept_id };
   }
 
   return { scope: null, conceptId: null };
@@ -815,42 +869,68 @@ async function syncInitialScopedSelections({
     postJson('/von/api/session/set_user_concept', { user_concept_id: userConceptId }),
   switchOrganisationFn = switchOrganisation,
   refreshRagStatus = () => loadRagStatus(null),
+  committedUser = null,
+  committedOrganisation = null,
 } = {}) {
+  actorSessionReady = false;
+  scopedModelStateReady = false;
+  updateScopedModelSaveAvailability();
   const userData = getSelectedUserContextFromUi() || getStoredJson(LS_USER_KEY);
-  setStoredJson(LS_USER_KEY, userData);
-
-  let fallbackNamespace = '';
-  if (userData?.concept_id) {
-    try {
-      const resp = await setUserConcept(userData.concept_id);
-      fallbackNamespace = resp?.namespace || '';
-      setSessionScopedNamespace(fallbackNamespace);
-    } catch (e) {
-      console.warn('Failed to sync server session user concept (initial load)', e);
-    }
-  } else {
-    setSessionScopedNamespace(null);
-  }
-
   const orgSelect = getOrganisationSelectFromUi();
   const orgData = getSelectedOrganisationContextFromUi()
     || (!orgSelect ? (getStoredJson(LS_ORG_KEY) || getSessionScopedOrgContext()) : null);
-  setStoredJson(LS_ORG_KEY, orgData);
-
-  try {
-    const resp = await switchOrganisationFn(orgData?.concept_id || null, orgData?.name || null);
-    if (resp && Object.prototype.hasOwnProperty.call(resp, 'namespace')) {
-      setSessionScopedNamespace(resp.namespace || null);
-    } else {
-      setSessionScopedNamespace(fallbackNamespace || null);
-    }
-  } catch (e) {
-    console.warn('Failed to sync organisation via backend (initial load)', e);
-    setSessionScopedNamespace(fallbackNamespace || null);
+  if (!userData?.concept_id) {
+    throw new Error('No authenticated user is available for scoped model settings.');
   }
-
-  renderActiveNamespace();
-  void refreshRagStatus();
+  try {
+    const userResponse = await setUserConcept(userData.concept_id);
+    const organisationResponse = await switchOrganisationFn(
+      orgData?.concept_id || null,
+      orgData?.name || null,
+    );
+    const namespace = organisationResponse?.namespace || userResponse?.namespace || null;
+    setStoredJson(LS_USER_KEY, userData);
+    setStoredJson(LS_ORG_KEY, orgData);
+    setSessionScopedNamespace(namespace);
+    renderActiveNamespace();
+    void refreshRagStatus();
+    return {
+      applied: true,
+      user: userData,
+      organisation: orgData,
+      namespace,
+      role: organisationResponse?.role || userResponse?.role || '',
+    };
+  } catch (error) {
+    const rollbackErrors = [];
+    try {
+      if (committedUser?.concept_id) {
+        await setUserConcept(committedUser.concept_id);
+      }
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    try {
+      const rollbackResponse = await switchOrganisationFn(
+        committedOrganisation?.concept_id || null,
+        committedOrganisation?.name || null,
+      );
+      setSessionScopedNamespace(rollbackResponse?.namespace || null);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+      setSessionScopedNamespace(null);
+    }
+    setStoredJson(LS_USER_KEY, committedUser);
+    setStoredJson(LS_ORG_KEY, committedOrganisation);
+    renderActiveNamespace();
+    void refreshRagStatus();
+    const syncError = new Error(
+      `${error?.message || 'Initial actor synchronisation failed.'} Scoped model saving remains disabled.`,
+    );
+    syncError.cause = error;
+    syncError.rollbackErrors = rollbackErrors;
+    throw syncError;
+  }
 }
 
 function resolveOllamaSelection(includeFallback = false) {
@@ -908,32 +988,29 @@ function appendUniquePersistedLlmSelection(selections, entry) {
 
 function buildPersistedLlmSelections({
   localModelPreference = getEffectiveLocalModelPreference(),
+  primary = null,
+  enabledAlternatives = currentEnabledLlmAlternatives,
+  formerPrimary = currentResolvedLlm,
+  explicitlyRemovedKeys = explicitlyRemovedWorkflowPoolKeys,
 } = {}) {
   const selections = [];
-  const openaiModelSelect = document.getElementById('openaiModelSelect');
-
-  const openaiModel = String(openaiModelSelect?.value || '').trim();
-  if (openaiModel) {
-    const openaiModelParameters = readOpenAiModelParametersFromUi();
-    setStoredOpenAiSelectedModel(openaiModel);
-    setStoredOpenAiModelParameters(openaiModelParameters);
-    appendUniquePersistedLlmSelection(selections, {
-      provider: 'openai',
-      model: openaiModel,
-      ...(openaiModelParameters ? { model_parameters: openaiModelParameters } : {}),
-    });
+  const effectivePrimary = buildCanonicalLlmEntry(primary)
+    || buildCanonicalLlmEntry(localModelPreference?.requestedLlm);
+  appendUniquePersistedLlmSelection(selections, effectivePrimary);
+  const canonicalFormerPrimary = buildCanonicalLlmEntry(formerPrimary);
+  if (
+    canonicalFormerPrimary
+    && effectivePrimary
+    && !sameLlmSlot(canonicalFormerPrimary, effectivePrimary)
+    && !explicitlyRemovedKeys?.has(modelEntryKey(canonicalFormerPrimary))
+  ) {
+    appendUniquePersistedLlmSelection(selections, canonicalFormerPrimary);
   }
-
-  const ollamaSelection = resolveOllamaSelection(false) || localModelPreference?.ollamaSelection || null;
-  if (ollamaSelection?.model) {
-    appendUniquePersistedLlmSelection(selections, {
-      provider: 'ollama',
-      model: ollamaSelection.model,
-      ...(ollamaSelection.host ? { host: ollamaSelection.host } : {}),
-    });
+  for (const entry of Array.isArray(enabledAlternatives) ? enabledAlternatives : []) {
+    if (effectivePrimary && sameLlmSlot(entry, effectivePrimary)) continue;
+    if (explicitlyRemovedKeys?.has(modelEntryKey(entry))) continue;
+    appendUniquePersistedLlmSelection(selections, entry);
   }
-
-  appendUniquePersistedLlmSelection(selections, localModelPreference?.requestedLlm);
 
   return selections;
 }
@@ -1369,6 +1446,631 @@ function formatLlmEntry(entry) {
   return `${base}${parameterText}`;
 }
 
+function sameLlmSlot(left, right) {
+  const leftEntry = buildCanonicalLlmEntry(left);
+  const rightEntry = buildCanonicalLlmEntry(right);
+  if (!leftEntry || !rightEntry) return false;
+  return leftEntry.provider === rightEntry.provider
+    && leftEntry.model === rightEntry.model
+    && (leftEntry.host || null) === (rightEntry.host || null);
+}
+
+function sameLlmEntry(left, right) {
+  return sameLlmSlot(left, right)
+    && stableModelParametersKey(left?.model_parameters)
+      === stableModelParametersKey(right?.model_parameters);
+}
+
+function normaliseEnabledLlmEntries(entries) {
+  const normalised = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    appendUniquePersistedLlmSelection(normalised, entry);
+  }
+  return normalised;
+}
+
+function updateScopedModelSaveAvailability() {
+  const button = document.getElementById('saveModelPoolButton');
+  if (button) {
+    const targetContext = resolveActiveLlmScopeContext();
+    button.disabled = !actorSessionReady
+      || !scopedModelStateReady
+      || scopedModelSaveInFlight
+      || !buildCanonicalLlmEntry(stagedScopedPrimaryLlm)
+      || !targetContext.scope
+      || !targetContext.conceptId;
+  }
+}
+
+function applySettingsActorRole(role) {
+  currentActorOrganisationRole = String(role || '').trim().toLowerCase();
+  __vonIsAdminOrOwner = currentActorOrganisationRole === 'admin'
+    || currentActorOrganisationRole === 'owner';
+  const conservatismContainer = document.getElementById('disableWriteToolConservatismContainer');
+  if (conservatismContainer) {
+    conservatismContainer.classList.toggle('hidden', !__vonIsAdminOrOwner);
+  }
+  applySharedRuntimeModelWriteAccess(__vonIsAdminOrOwner);
+  setOllamaHostManagementWritable(__vonIsAdminOrOwner);
+  syncModelPoolTargetScopeControls();
+}
+
+function invalidateActorScopedCapabilityStatus() {
+  runtimeModelStatusGeneration += 1;
+  runtimeModelStatusInFlight = null;
+  latestCapabilityIndexStatus = null;
+  runtimeModelStatusLastFetchedAt = 0;
+  resetWorkflowCapabilityIndexStatusCoordinator();
+  applyCapabilityIndexStatusCard(null);
+}
+
+function organisationModelPoolTargetAvailable() {
+  return Boolean(__vonIsAdminOrOwner && getStoredJson(LS_ORG_KEY)?.concept_id);
+}
+
+function syncModelPoolTargetScopeControls() {
+  const select = document.getElementById('modelPoolTargetScopeSelect');
+  const orgOption = select?.querySelector('option[value="organisation"]');
+  const orgAvailable = organisationModelPoolTargetAvailable();
+  if (orgOption) {
+    orgOption.disabled = !orgAvailable;
+    orgOption.textContent = orgAvailable
+      ? 'Current organisation'
+      : 'Current organisation (admin/owner only)';
+  }
+  if (selectedModelPoolTargetScope === 'organisation' && !orgAvailable) {
+    selectedModelPoolTargetScope = 'user';
+  }
+  if (select) {
+    select.value = selectedModelPoolTargetScope;
+    select.disabled = !actorSessionReady || scopedModelSaveInFlight;
+    select.setAttribute('aria-disabled', select.disabled.toString());
+  }
+  updateScopedModelSaveAvailability();
+}
+
+function effectiveModelScope(entry = currentEffectiveLlm) {
+  const scope = String(entry?.scope || '').trim().toLowerCase();
+  return scope === 'user' || scope === 'organisation' ? scope : null;
+}
+
+function chooseInitialModelPoolTargetScope() {
+  const effectiveScope = effectiveModelScope();
+  selectedModelPoolTargetScope = effectiveScope === 'organisation'
+    && organisationModelPoolTargetAvailable()
+    ? 'organisation'
+    : 'user';
+  syncModelPoolTargetScopeControls();
+  return selectedModelPoolTargetScope;
+}
+
+function invalidateScopedModelState(message = 'Loading model settings for the current user and organisation...') {
+  scopedModelLoadGeneration += 1;
+  scopedModelStateReady = false;
+  currentResolvedLlm = null;
+  stagedScopedPrimaryLlm = null;
+  currentEnabledLlmAlternatives = [];
+  explicitlyRemovedWorkflowPoolKeys = new Set();
+  updateScopedModelSaveAvailability();
+  syncModelPoolTargetScopeControls();
+  setInlineStatusMessage(document.getElementById('modelPoolStatusMessage'), message, null);
+  renderModelScopeOverview();
+  return scopedModelLoadGeneration;
+}
+
+function resolveScopedModelActorContext(actorContext = null) {
+  const storedUser = getStoredJson(LS_USER_KEY);
+  const storedOrganisation = getStoredJson(LS_ORG_KEY);
+  return {
+    userConceptId: actorContext?.userConceptId ?? storedUser?.concept_id ?? null,
+    organisationConceptId:
+      actorContext?.organisationConceptId ?? storedOrganisation?.concept_id ?? null,
+  };
+}
+
+function buildScopedSettingsUrl(actorContext = null, targetScope = selectedModelPoolTargetScope) {
+  const resolvedActor = resolveScopedModelActorContext(actorContext);
+  const params = new URLSearchParams();
+  if (resolvedActor.userConceptId) {
+    params.set('user_concept_id', resolvedActor.userConceptId);
+  }
+  if (resolvedActor.organisationConceptId) {
+    params.set('organisation_concept_id', resolvedActor.organisationConceptId);
+  }
+  params.set('model_scope', targetScope === 'organisation' ? 'organisation' : 'user');
+  return `/api/settings/${params.toString() ? `?${params.toString()}` : ''}`;
+}
+
+function applyScopedModelSettings(settings, generation = scopedModelLoadGeneration) {
+  if (generation !== scopedModelLoadGeneration) return false;
+  const responseTargetScope = String(
+    settings?.selected_model_scope || selectedModelPoolTargetScope,
+  ).trim().toLowerCase();
+  if (responseTargetScope !== selectedModelPoolTargetScope) return false;
+  const resolved = settings?.resolved_llm || null;
+  currentResolvedLlm = resolved;
+  currentEffectiveLlm = settings?.effective_llm || resolved;
+  stagedScopedPrimaryLlm = buildCanonicalLlmEntry(resolved)
+    || (
+      selectedModelPoolTargetScope === 'user'
+      && effectiveModelScope(currentEffectiveLlm) === 'organisation'
+      ? buildCanonicalLlmEntry(currentEffectiveLlm)
+      : null
+    );
+  currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(
+    settings?.effective_enabled_llms || settings?.enabled_llms,
+  );
+  currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(settings?.enabled_llms)
+    .filter((entry) => !resolved || !sameLlmSlot(entry, resolved));
+  explicitlyRemovedWorkflowPoolKeys = new Set();
+  scopedModelStateReady = true;
+  updateScopedModelSaveAvailability();
+  syncModelPoolTargetScopeControls();
+  renderModelScopeOverview();
+  return true;
+}
+
+async function reloadScopedModelSettings({
+  actorContext = null,
+  fetchFn = fetch,
+  generation = null,
+  targetScope = selectedModelPoolTargetScope,
+} = {}) {
+  const resolvedActor = resolveScopedModelActorContext(actorContext);
+  const loadGeneration = generation ?? invalidateScopedModelState();
+  const requestedTargetScope = targetScope === 'organisation' ? 'organisation' : 'user';
+  if (!actorSessionReady) {
+    const error = new Error('The server actor session is not ready for scoped model loading.');
+    setInlineStatusMessage(document.getElementById('modelPoolStatusMessage'), error.message, 'error');
+    return { applied: false, stale: false, generation: loadGeneration, error };
+  }
+  const settingsUrl = buildScopedSettingsUrl(resolvedActor, requestedTargetScope);
+
+  try {
+    const response = await fetchFn(settingsUrl, {
+      cache: 'no-store',
+      headers: buildSettingsFetchHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch scoped model settings: ${response.statusText || response.status}`);
+    }
+    const settings = await response.json();
+    if (
+      loadGeneration !== scopedModelLoadGeneration
+      || requestedTargetScope !== selectedModelPoolTargetScope
+      || !applyScopedModelSettings(settings, loadGeneration)
+    ) {
+      return { applied: false, stale: true, generation: loadGeneration };
+    }
+    setInlineStatusMessage(
+      document.getElementById('modelPoolStatusMessage'),
+      'Model settings loaded for the current user and organisation.',
+      null,
+    );
+    return { applied: true, stale: false, generation: loadGeneration, settings };
+  } catch (error) {
+    if (
+      loadGeneration !== scopedModelLoadGeneration
+      || requestedTargetScope !== selectedModelPoolTargetScope
+    ) {
+      return { applied: false, stale: true, generation: loadGeneration };
+    }
+    scopedModelStateReady = false;
+    updateScopedModelSaveAvailability();
+    setInlineStatusMessage(
+      document.getElementById('modelPoolStatusMessage'),
+      error?.message || 'Failed to load scoped model settings.',
+      'error',
+    );
+    renderModelScopeOverview();
+    return { applied: false, stale: false, generation: loadGeneration, error };
+  }
+}
+
+function selectedOpenAiPoolEntry() {
+  const model = String(document.getElementById('openaiModelSelect')?.value || '').trim();
+  if (!model) return null;
+  const modelParameters = readOpenAiModelParametersFromUi();
+  return buildCanonicalLlmEntry({
+    provider: 'openai',
+    model,
+    ...(modelParameters ? { model_parameters: modelParameters } : {}),
+  });
+}
+
+function selectedOllamaPoolEntry() {
+  const selection = resolveOllamaSelection(false);
+  if (!selection?.model) return null;
+  return buildCanonicalLlmEntry({
+    provider: 'ollama',
+    model: selection.model,
+    ...(selection.host ? { host: selection.host } : {}),
+  });
+}
+
+function browserChatPrimaryEntry() {
+  const localModelPreference = getEffectiveLocalModelPreference();
+  return buildCanonicalLlmEntry(localModelPreference?.requestedLlm);
+}
+
+function modelEntryKey(entry) {
+  const canonical = buildCanonicalLlmEntry(entry);
+  if (!canonical) return '';
+  return JSON.stringify([
+    canonical.provider,
+    canonical.model,
+    canonical.host || null,
+    stableModelParametersKey(canonical.model_parameters),
+  ]);
+}
+
+function workflowPoolAlternativesForPrimary(primary) {
+  const canonicalPrimary = buildCanonicalLlmEntry(primary);
+  const alternatives = [];
+  const formerPrimary = buildCanonicalLlmEntry(currentResolvedLlm);
+  if (
+    formerPrimary
+    && canonicalPrimary
+    && !sameLlmSlot(formerPrimary, canonicalPrimary)
+    && !explicitlyRemovedWorkflowPoolKeys.has(modelEntryKey(formerPrimary))
+  ) {
+    appendUniquePersistedLlmSelection(alternatives, formerPrimary);
+  }
+  for (const entry of currentEnabledLlmAlternatives) {
+    if (canonicalPrimary && sameLlmSlot(entry, canonicalPrimary)) continue;
+    if (explicitlyRemovedWorkflowPoolKeys.has(modelEntryKey(entry))) continue;
+    appendUniquePersistedLlmSelection(alternatives, entry);
+  }
+  return alternatives;
+}
+
+function setModelScopeSummaryText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function formatScopedPrimarySummary(entry) {
+  const canonical = buildCanonicalLlmEntry(entry);
+  if (!canonical) return 'Not set for the current user or organisation';
+  const scope = String(entry?.scope || '').trim().toLowerCase();
+  const scopeText = scope === 'organisation' ? 'organisation scope' : (scope === 'user' ? 'user scope' : 'scoped');
+  return `${formatLlmEntry(canonical)} (${scopeText})`;
+}
+
+function formatEffectiveModelSummary() {
+  const effective = buildCanonicalLlmEntry(currentEffectiveLlm);
+  if (!effective) return 'No effective scoped model is configured';
+  const scope = effectiveModelScope();
+  if (scope === 'organisation') {
+    return `${formatLlmEntry(effective)} (inherited from organisation scope)`;
+  }
+  if (scope === 'user') {
+    return `${formatLlmEntry(effective)} (user override)`;
+  }
+  return `${formatLlmEntry(effective)} (scope unavailable)`;
+}
+
+function formatSelectedTargetPrimarySummary() {
+  const staged = buildCanonicalLlmEntry(stagedScopedPrimaryLlm);
+  const persisted = buildCanonicalLlmEntry(currentResolvedLlm);
+  if (staged) {
+    if (persisted && sameLlmEntry(staged, persisted)) {
+      return formatScopedPrimarySummary(currentResolvedLlm);
+    }
+    if (!persisted && selectedModelPoolTargetScope === 'user' && effectiveModelScope() === 'organisation') {
+      return `${formatLlmEntry(staged)} (inherited; saving creates a user override)`;
+    }
+    return `${formatLlmEntry(staged)} (pending explicit primary change)`;
+  }
+  return selectedModelPoolTargetScope === 'organisation'
+    ? 'No organisation-scoped primary is configured'
+    : 'No user-scoped primary is configured';
+}
+
+function renderModelPoolTargetScopeNote() {
+  const note = document.getElementById('modelPoolTargetScopeNote');
+  if (!note) return;
+  if (!actorSessionReady) {
+    note.textContent = 'Waiting for the selected user and organisation to be committed to the server session.';
+    return;
+  }
+  if (!scopedModelStateReady) {
+    note.textContent = `Loading the ${selectedModelPoolTargetScope} target without borrowing another scope's pool.`;
+    return;
+  }
+  if (selectedModelPoolTargetScope === 'organisation') {
+    note.textContent = 'Saving changes the current organisation primary and pool. This target is available only to an administrator or owner.';
+    return;
+  }
+  if (!currentResolvedLlm && effectiveModelScope() === 'organisation') {
+    const inheritedPoolSize = currentEffectiveEnabledLlms.length;
+    note.textContent = `The current user inherits the organisation configuration (${inheritedPoolSize} enabled model${inheritedPoolSize === 1 ? '' : 's'}). Saving creates an explicit user override from the selected primary and explicitly added alternatives; the organisation pool is not copied.`;
+    return;
+  }
+  note.textContent = 'Saving changes only the current user primary and pool.';
+}
+
+function updatePoolActionButton(buttonId, entry) {
+  const button = document.getElementById(buttonId);
+  if (!button) return;
+  if (!scopedModelStateReady) {
+    button.disabled = true;
+    button.textContent = 'Wait for scoped models to load';
+    return;
+  }
+  if (!entry) {
+    button.disabled = true;
+    button.textContent = 'Select a model first';
+    return;
+  }
+
+  const effectivePrimary = buildCanonicalLlmEntry(stagedScopedPrimaryLlm);
+  if (effectivePrimary && sameLlmSlot(entry, effectivePrimary)) {
+    button.disabled = true;
+    button.textContent = 'Selected target primary';
+    return;
+  }
+
+  const existing = currentEnabledLlmAlternatives.find((candidate) => sameLlmSlot(candidate, entry));
+  if (existing && sameLlmEntry(existing, entry)) {
+    button.disabled = true;
+    button.textContent = 'Already in workflow pool';
+    return;
+  }
+
+  button.disabled = false;
+  button.textContent = existing ? 'Update workflow pool entry' : 'Add to workflow pool';
+}
+
+function renderWorkflowModelPool() {
+  const listEl = document.getElementById('workflowModelPoolList');
+  const persistedPrimary = buildCanonicalLlmEntry(currentResolvedLlm);
+  const displayPrimary = buildCanonicalLlmEntry(stagedScopedPrimaryLlm);
+  if (listEl) {
+    listEl.replaceChildren();
+    if (!scopedModelStateReady) {
+      const loading = document.createElement('div');
+      loading.className = 'settings-model-pool-empty';
+      loading.textContent = 'Scoped model settings are loading. Saving is unavailable until they are ready.';
+      listEl.appendChild(loading);
+      updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
+      updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
+      updateScopedPrimaryActionButtons();
+      updateScopedModelSaveAvailability();
+      return;
+    }
+    if (displayPrimary) {
+      const primaryRow = document.createElement('div');
+      primaryRow.className = 'settings-model-pool-entry';
+      const label = document.createElement('span');
+      label.className = 'settings-model-pool-entry-label';
+      label.textContent = formatLlmEntry(displayPrimary);
+      const role = document.createElement('span');
+      role.className = 'settings-model-pool-entry-role';
+      role.textContent = persistedPrimary && sameLlmEntry(persistedPrimary, displayPrimary)
+        ? 'Primary · always enabled'
+        : 'Pending primary · explicit save required';
+      label.appendChild(role);
+      primaryRow.appendChild(label);
+      listEl.appendChild(primaryRow);
+    }
+
+    const alternatives = workflowPoolAlternativesForPrimary(displayPrimary);
+    for (const entry of alternatives) {
+      const row = document.createElement('div');
+      row.className = 'settings-model-pool-entry';
+      const label = document.createElement('span');
+      label.className = 'settings-model-pool-entry-label';
+      label.textContent = formatLlmEntry(entry);
+      const role = document.createElement('span');
+      role.className = 'settings-model-pool-entry-role';
+      role.textContent = 'Enabled alternative';
+      label.appendChild(role);
+      const removeButton = document.createElement('button');
+      removeButton.type = 'button';
+      removeButton.className = 'btn-secondary';
+      removeButton.textContent = 'Remove';
+      removeButton.setAttribute('aria-label', `Remove ${formatLlmEntry(entry)} from workflow pool`);
+      const key = modelEntryKey(entry);
+      removeButton.addEventListener('click', () => {
+        explicitlyRemovedWorkflowPoolKeys.add(key);
+        currentEnabledLlmAlternatives = currentEnabledLlmAlternatives.filter(
+          (candidate) => modelEntryKey(candidate) !== key,
+        );
+        setInlineStatusMessage(
+          document.getElementById('modelPoolStatusMessage'),
+          'Workflow pool change pending. Save the scoped primary and workflow pool to apply it.',
+          null,
+        );
+        renderModelScopeOverview();
+      });
+      row.append(label, removeButton);
+      listEl.appendChild(row);
+    }
+
+    if (!displayPrimary && alternatives.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'settings-model-pool-empty';
+      empty.textContent = 'No scoped primary or enabled alternatives are configured.';
+      listEl.appendChild(empty);
+    }
+  }
+
+  updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
+  updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
+  updateScopedPrimaryActionButtons();
+}
+
+function renderModelScopeOverview() {
+  const browserPrimary = browserChatPrimaryEntry();
+  setModelScopeSummaryText(
+    'browserChatModelSummary',
+    browserPrimary ? `${formatLlmEntry(browserPrimary)} (browser preference)` : 'No usable browser chat model selected',
+  );
+  setModelScopeSummaryText(
+    'effectiveScopedModelSummary',
+    scopedModelStateReady ? formatEffectiveModelSummary() : 'Loading effective scope...',
+  );
+  setModelScopeSummaryText(
+    'scopedPrimaryModelSummary',
+    scopedModelStateReady
+      ? formatSelectedTargetPrimarySummary()
+      : `Loading ${selectedModelPoolTargetScope} target...`,
+  );
+  setModelScopeSummaryText(
+    'sharedServerDefaultModelSummary',
+    currentServerDefaultLlm ? formatLlmEntry(currentServerDefaultLlm) : 'Not set',
+  );
+  syncModelPoolTargetScopeControls();
+  renderModelPoolTargetScopeNote();
+  renderWorkflowModelPool();
+}
+
+function addOrUpdateWorkflowPoolEntry(entry) {
+  if (!scopedModelStateReady) return false;
+  const canonical = buildCanonicalLlmEntry(entry);
+  if (!canonical) return false;
+  const primary = buildCanonicalLlmEntry(stagedScopedPrimaryLlm);
+  if (primary && sameLlmSlot(canonical, primary)) return false;
+  explicitlyRemovedWorkflowPoolKeys.delete(modelEntryKey(canonical));
+  currentEnabledLlmAlternatives = [
+    ...currentEnabledLlmAlternatives.filter((candidate) => !sameLlmSlot(candidate, canonical)),
+    canonical,
+  ];
+  setInlineStatusMessage(
+    document.getElementById('modelPoolStatusMessage'),
+    'Workflow pool change pending. Save the scoped primary and workflow pool to apply it.',
+    null,
+  );
+  renderModelScopeOverview();
+  return true;
+}
+
+function baselineScopedPrimaryEntry() {
+  const persisted = buildCanonicalLlmEntry(currentResolvedLlm);
+  if (persisted) return persisted;
+  if (
+    selectedModelPoolTargetScope === 'user'
+    && effectiveModelScope(currentEffectiveLlm) === 'organisation'
+  ) {
+    return buildCanonicalLlmEntry(currentEffectiveLlm);
+  }
+  return null;
+}
+
+function updateScopedPrimaryActionButtons() {
+  const useBrowserButton = document.getElementById('useBrowserModelAsScopedPrimaryButton');
+  const restoreButton = document.getElementById('restoreScopedPrimaryButton');
+  const browserPrimary = browserChatPrimaryEntry();
+  const stagedPrimary = buildCanonicalLlmEntry(stagedScopedPrimaryLlm);
+  const baselinePrimary = baselineScopedPrimaryEntry();
+  if (useBrowserButton) {
+    useBrowserButton.disabled = !scopedModelStateReady
+      || !browserPrimary
+      || (stagedPrimary && sameLlmEntry(stagedPrimary, browserPrimary));
+  }
+  if (restoreButton) {
+    restoreButton.disabled = !scopedModelStateReady
+      || (!baselinePrimary && !stagedPrimary)
+      || Boolean(
+        baselinePrimary
+        && stagedPrimary
+        && sameLlmEntry(baselinePrimary, stagedPrimary),
+      );
+  }
+}
+
+function useBrowserModelAsScopedPrimary() {
+  if (!scopedModelStateReady) return false;
+  const browserPrimary = browserChatPrimaryEntry();
+  if (!browserPrimary) return false;
+  stagedScopedPrimaryLlm = browserPrimary;
+  setInlineStatusMessage(
+    document.getElementById('modelPoolStatusMessage'),
+    'Primary change pending. Save the selected target to apply it; the browser chat choice remains separate.',
+    null,
+  );
+  renderModelScopeOverview();
+  updateScopedModelSaveAvailability();
+  return true;
+}
+
+function restoreScopedPrimary() {
+  if (!scopedModelStateReady) return false;
+  stagedScopedPrimaryLlm = baselineScopedPrimaryEntry();
+  setInlineStatusMessage(
+    document.getElementById('modelPoolStatusMessage'),
+    'Pending primary change cleared. Pool edits will retain the selected target primary.',
+    null,
+  );
+  renderModelScopeOverview();
+  updateScopedModelSaveAvailability();
+  return true;
+}
+
+async function persistModelScopeSettings() {
+  if (!scopedModelStateReady) {
+    setInlineStatusMessage(
+      document.getElementById('modelPoolStatusMessage'),
+      'Wait for model settings for the current user and organisation to finish loading before saving.',
+      'error',
+    );
+    updateScopedModelSaveAvailability();
+    return false;
+  }
+  scopedModelSaveInFlight = true;
+  updateScopedModelSaveAvailability();
+  setInlineStatusMessage(
+    document.getElementById('modelPoolStatusMessage'),
+    'Saving scoped primary and workflow pool...',
+    null,
+  );
+  try {
+    const saved = await saveAllSettings({ includeChatModels: true });
+    if (!saved) throw new Error('Model scope save did not complete.');
+    setInlineStatusMessage(
+      document.getElementById('modelPoolStatusMessage'),
+      'Scoped primary and workflow pool saved for the current scope.',
+      'success',
+    );
+  } catch (error) {
+    setInlineStatusMessage(
+      document.getElementById('modelPoolStatusMessage'),
+      error?.message || 'Failed to save scoped primary and workflow pool.',
+      'error',
+    );
+  } finally {
+    scopedModelSaveInFlight = false;
+    updateScopedModelSaveAvailability();
+  }
+}
+
+async function persistRuntimeModelSettings() {
+  const button = document.getElementById('saveRuntimeModelSettingsButton');
+  if (!sharedRuntimeModelSettingsWritable) {
+    showStatusMessage(
+      'ragModelSettingsStatusMessage',
+      'Shared server and RAG model settings are read-only for this session. Ask an administrator or organisation owner to change them.',
+      true,
+    );
+    return false;
+  }
+  if (button) button.disabled = true;
+  showStatusMessage('ragModelSettingsStatusMessage', 'Saving shared RAG model settings.');
+  try {
+    const saved = await saveAllSettings({ includeRuntimeModels: true });
+    if (!saved) throw new Error('Shared RAG model save did not complete.');
+  } catch (error) {
+    showStatusMessage(
+      'ragModelSettingsStatusMessage',
+      error?.message || 'Failed to save shared RAG model settings.',
+      true,
+    );
+  } finally {
+    if (button) button.disabled = !sharedRuntimeModelSettingsWritable;
+  }
+}
+
 function readExplicitServerDefaultLlmFormEntry() {
   const provider = String(document.getElementById('serverDefaultLlmProvider')?.value || '').trim().toLowerCase();
   const model = String(document.getElementById('serverDefaultLlmModel')?.value || '').trim();
@@ -1385,13 +2087,16 @@ function readExplicitServerDefaultLlmFormEntry() {
 function humaniseSelectionSource(source) {
   const token = String(source || '').trim();
   if (!token) return 'unknown source';
+  if (token === 'server_default_llm') return 'server default';
+  if (token === 'active_llm_scope') return 'scoped primary';
+  if (token === 'explicit_setting') return 'explicit setting';
+  if (token === 'configured_disabled') return 'disabled in Settings';
   return token.replace(/_/g, ' ');
 }
 
 function buildServerDefaultLlmPayload({
   strictFromUi = false,
-  currentResolved = currentResolvedLlm,
-  localModelPreference = getEffectiveLocalModelPreference(),
+  persisted = currentServerDefaultLlm,
 } = {}) {
   const provider = String(document.getElementById('serverDefaultLlmProvider')?.value || '').trim().toLowerCase();
   const model = String(document.getElementById('serverDefaultLlmModel')?.value || '').trim();
@@ -1408,10 +2113,12 @@ function buildServerDefaultLlmPayload({
     return host ? { provider, model, host } : { provider, model };
   }
 
-  const requested = buildCanonicalLlmEntry(localModelPreference?.requestedLlm);
-  if (requested) return requested;
-
-  return buildCanonicalLlmEntry(currentResolved);
+  const persistedEntry = buildCanonicalLlmEntry(persisted);
+  if (persistedEntry) return persistedEntry;
+  if (strictFromUi) {
+    throw new Error('Set an explicit provider and model before saving the shared server default.');
+  }
+  return null;
 }
 
 function readRuntimeModelSettingFromForm(prefix, { allowDisabled = false } = {}) {
@@ -1441,14 +2148,48 @@ function applyRuntimeModelModeUi(prefix, { allowDisabled = false } = {}) {
   ['Provider', 'Model', 'Host'].forEach((suffix) => {
     const el = document.getElementById(`${prefix}${suffix}`);
     if (!el) return;
-    el.disabled = !explicitEnabled;
-    el.setAttribute('aria-disabled', (!explicitEnabled).toString());
-    el.classList.toggle('is-disabled', !explicitEnabled);
+    const controlDisabled = !sharedRuntimeModelSettingsWritable || !explicitEnabled;
+    el.disabled = controlDisabled;
+    el.setAttribute('aria-disabled', controlDisabled.toString());
+    el.classList.toggle('is-disabled', controlDisabled);
   });
   const summaryEl = document.getElementById(`${prefix}Summary`);
   if (summaryEl) {
     summaryEl.dataset.mode = disabled ? 'disabled' : mode;
   }
+}
+
+function applySharedRuntimeModelWriteAccess(canWrite = __vonIsAdminOrOwner) {
+  sharedRuntimeModelSettingsWritable = Boolean(canWrite);
+  const note = document.getElementById('sharedRuntimeModelWriteAccessNote');
+  if (note) {
+    note.textContent = sharedRuntimeModelSettingsWritable
+      ? 'Shared server and RAG model changes apply across Von.'
+      : 'Read-only: only an administrator or organisation owner can change shared server and RAG model settings.';
+    note.dataset.writable = sharedRuntimeModelSettingsWritable ? 'true' : 'false';
+  }
+
+  for (const id of [
+    'serverDefaultLlmProvider',
+    'serverDefaultLlmModel',
+    'serverDefaultLlmHost',
+    'ragEmbedderMode',
+    'ragLlmMode',
+    'saveRuntimeModelSettingsButton',
+  ]) {
+    const control = document.getElementById(id);
+    if (!control) continue;
+    control.disabled = !sharedRuntimeModelSettingsWritable;
+    control.setAttribute('aria-disabled', (!sharedRuntimeModelSettingsWritable).toString());
+    if (!sharedRuntimeModelSettingsWritable) {
+      control.title = 'Administrator or organisation owner access is required.';
+    } else {
+      control.removeAttribute('title');
+    }
+  }
+
+  applyRuntimeModelModeUi('ragEmbedder', { allowDisabled: false });
+  applyRuntimeModelModeUi('ragLlm', { allowDisabled: true });
 }
 
 function bindRuntimeModelModeControl(prefix, { allowDisabled = false } = {}) {
@@ -1496,7 +2237,6 @@ function populateServerDefaultLlmForm(serverDefault) {
 function formatServerDefaultSummary({
   persisted = null,
   explicitFormEntry = null,
-  fallback = null,
 } = {}) {
   const persistedEntry = buildCanonicalLlmEntry(persisted);
   if (persistedEntry) {
@@ -1508,12 +2248,7 @@ function formatServerDefaultSummary({
     return `Pending server default: ${formatLlmEntry(pendingEntry)}`;
   }
 
-  const fallbackEntry = buildCanonicalLlmEntry(fallback);
-  if (fallbackEntry) {
-    return `Server default not saved. Save will snapshot current chat selection: ${formatLlmEntry(fallbackEntry)}`;
-  }
-
-  return 'Server default not saved.';
+  return 'Server default not saved. Enter an explicit provider and model.';
 }
 
 function formatRuntimeModelResolutionSummary(label, resolution) {
@@ -1558,6 +2293,7 @@ function applyCapabilityIndexStatusCard(report) {
   cardEl.dataset.status = status || 'unknown';
   cardEl.dataset.warningLevel = displayWarningLevel;
   cardEl.dataset.userVisibleSeverity = userVisibleSeverity || displayWarningLevel;
+  cardEl.dataset.checkedAtUtc = String(report?.checked_at_utc || '').trim();
   summaryEl.textContent = summary;
   detailEl.textContent = detail;
 }
@@ -1570,15 +2306,9 @@ function renderRuntimeModelSummaries({
 } = {}) {
   const serverSummaryEl = document.getElementById('serverDefaultLlmSummary');
   if (serverSummaryEl) {
-    const localModelPreference = getEffectiveLocalModelPreference();
-    const fallbackEntry =
-      buildCanonicalLlmEntry(localModelPreference?.requestedLlm)
-      || buildCanonicalLlmEntry(currentResolvedLlm)
-      || null;
     serverSummaryEl.textContent = formatServerDefaultSummary({
-      persisted: serverDefaultLlm,
+      persisted: serverDefaultLlm || currentServerDefaultLlm,
       explicitFormEntry: readExplicitServerDefaultLlmFormEntry(),
-      fallback: fallbackEntry,
     });
   }
 
@@ -1594,7 +2324,7 @@ function renderRuntimeModelSummaries({
   }
   if (llmSummaryEl) {
     llmSummaryEl.textContent = formatRuntimeModelResolutionSummary(
-      'Effective RAG LLM',
+      'Effective shared RAG LLM',
       effectiveLlm,
     );
   }
@@ -1603,8 +2333,12 @@ function renderRuntimeModelSummaries({
 }
 
 async function refreshRuntimeModelStatus({ force = false } = {}) {
-  if (runtimeModelStatusInFlight) {
-    return runtimeModelStatusInFlight;
+  const requestGeneration = runtimeModelStatusGeneration;
+  if (
+    runtimeModelStatusInFlight
+    && runtimeModelStatusInFlight.generation === requestGeneration
+  ) {
+    return runtimeModelStatusInFlight.promise;
   }
   const now = Date.now();
   if (
@@ -1616,50 +2350,66 @@ async function refreshRuntimeModelStatus({ force = false } = {}) {
     return null;
   }
 
-  runtimeModelStatusInFlight = (async () => {
-    const capabilityUrl = force
-      ? '/api/workflows/capability-index/status?nocache=1'
-      : '/api/workflows/capability-index/status';
+  const request = (async () => {
     const runtimeUrl = force
       ? '/admin/rag_runtime?namespace=workflow_capabilities&nocache=1'
       : '/admin/rag_runtime?namespace=workflow_capabilities';
-    const [runtimeResponse, capabilityResponse] = await Promise.all([
+    const [runtimeResponse, capabilityStatus] = await Promise.all([
       fetch(runtimeUrl, { cache: 'no-store' }),
-      fetch(capabilityUrl, { cache: 'no-store' }),
+      refreshWorkflowCapabilityIndexStatus({ force }),
     ]);
+
+    if (requestGeneration !== runtimeModelStatusGeneration) return null;
 
     if (runtimeResponse.ok) {
       const runtimePayload = await runtimeResponse.json();
+      if (requestGeneration !== runtimeModelStatusGeneration) return null;
       if (runtimePayload?.success && runtimePayload?.runtime_configuration) {
         latestRagRuntimeConfiguration = runtimePayload.runtime_configuration;
       }
     }
 
-    if (capabilityResponse.ok) {
-      latestCapabilityIndexStatus = await capabilityResponse.json();
+    if (capabilityStatus) {
+      latestCapabilityIndexStatus = capabilityStatus;
     }
 
     runtimeModelStatusLastFetchedAt = Date.now();
     renderRuntimeModelSummaries();
     return {
       runtime: runtimeResponse.ok,
-      capability: capabilityResponse.ok,
+      capability: Boolean(capabilityStatus),
     };
   })();
+  runtimeModelStatusInFlight = {
+    generation: requestGeneration,
+    promise: request,
+  };
 
   try {
-    return await runtimeModelStatusInFlight;
+    return await request;
   } catch (error) {
     console.warn('Failed to refresh runtime model status', error);
     return null;
   } finally {
-    runtimeModelStatusInFlight = null;
+    if (
+      runtimeModelStatusInFlight?.generation === requestGeneration
+      && runtimeModelStatusInFlight?.promise === request
+    ) {
+      runtimeModelStatusInFlight = null;
+    }
   }
 }
 
 function setupRuntimeModelSettingsSection() {
+  if (!capabilityIndexStatusUnsubscribe) {
+    capabilityIndexStatusUnsubscribe = subscribeToWorkflowCapabilityIndexStatus((report) => {
+      latestCapabilityIndexStatus = report;
+      renderRuntimeModelSummaries({ capabilityIndex: report });
+    });
+  }
   bindRuntimeModelModeControl('ragEmbedder', { allowDisabled: false });
   bindRuntimeModelModeControl('ragLlm', { allowDisabled: true });
+  applySharedRuntimeModelWriteAccess(__vonIsAdminOrOwner);
   ['serverDefaultLlmProvider', 'serverDefaultLlmModel', 'serverDefaultLlmHost',
     'ragEmbedderProvider', 'ragEmbedderModel', 'ragEmbedderHost',
     'ragLlmProvider', 'ragLlmModel', 'ragLlmHost'].forEach((id) => {
@@ -2891,6 +3641,90 @@ export function __testOnly_buildPersistedLlmSelections(options = {}) {
   return buildPersistedLlmSelections(options);
 }
 
+export function __testOnly_setModelScopeState({
+  resolvedLlm = null,
+  enabledLlms = [],
+  effectiveLlm = resolvedLlm,
+  effectiveEnabledLlms = enabledLlms,
+  serverDefaultLlm = null,
+  ready = true,
+  actorReady = true,
+  targetScope = 'user',
+  canManageOrganisation = null,
+} = {}) {
+  if (canManageOrganisation !== null) {
+    __vonIsAdminOrOwner = Boolean(canManageOrganisation);
+  }
+  selectedModelPoolTargetScope = targetScope === 'organisation' ? 'organisation' : 'user';
+  currentResolvedLlm = resolvedLlm;
+  currentEffectiveLlm = effectiveLlm;
+  stagedScopedPrimaryLlm = buildCanonicalLlmEntry(resolvedLlm)
+    || (
+      selectedModelPoolTargetScope === 'user'
+      && effectiveModelScope(effectiveLlm) === 'organisation'
+      ? buildCanonicalLlmEntry(effectiveLlm)
+      : null
+    );
+  currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(effectiveEnabledLlms);
+  currentServerDefaultLlm = buildCanonicalLlmEntry(serverDefaultLlm);
+  currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(enabledLlms)
+    .filter((entry) => !currentResolvedLlm || !sameLlmSlot(entry, currentResolvedLlm));
+  explicitlyRemovedWorkflowPoolKeys = new Set();
+  scopedModelStateReady = ready;
+  actorSessionReady = actorReady;
+  syncModelPoolTargetScopeControls();
+  updateScopedModelSaveAvailability();
+}
+
+export function __testOnly_renderModelScopeOverview() {
+  renderModelScopeOverview();
+}
+
+export function __testOnly_renderRuntimeModelSummaries(options = {}) {
+  renderRuntimeModelSummaries(options);
+}
+
+export function __testOnly_addOrUpdateWorkflowPoolEntry(entry) {
+  return addOrUpdateWorkflowPoolEntry(entry);
+}
+
+export function __testOnly_useBrowserModelAsScopedPrimary() {
+  return useBrowserModelAsScopedPrimary();
+}
+
+export function __testOnly_restoreScopedPrimary() {
+  return restoreScopedPrimary();
+}
+
+export function __testOnly_reloadScopedModelSettings(options = {}) {
+  return reloadScopedModelSettings(options);
+}
+
+export function __testOnly_queueActorContextTransition(options = {}) {
+  return queueActorContextTransition(options);
+}
+
+export function __testOnly_getScopedModelState() {
+  return {
+    ready: scopedModelStateReady,
+    generation: scopedModelLoadGeneration,
+    actorReady: actorSessionReady,
+    targetScope: selectedModelPoolTargetScope,
+    resolvedLlm: currentResolvedLlm,
+    stagedPrimaryLlm: stagedScopedPrimaryLlm,
+    effectiveLlm: currentEffectiveLlm,
+    enabledAlternatives: [...currentEnabledLlmAlternatives],
+  };
+}
+
+export function __testOnly_saveAllSettings(options = {}) {
+  return saveAllSettings(options);
+}
+
+export function __testOnly_applySharedRuntimeModelWriteAccess(canWrite) {
+  applySharedRuntimeModelWriteAccess(canWrite);
+}
+
 export function __testOnly_resolvePersistedActiveLlm(enabledLlms, options = {}) {
   return resolvePersistedActiveLlm(enabledLlms, options);
 }
@@ -2908,10 +3742,16 @@ export function __testOnly_applyCapabilityIndexStatusCard(report) {
 }
 
 export function __testOnly_resetRuntimeModelStatusCache() {
+  runtimeModelStatusGeneration += 1;
   runtimeModelStatusInFlight = null;
   runtimeModelStatusLastFetchedAt = 0;
   latestCapabilityIndexStatus = null;
   latestRagRuntimeConfiguration = null;
+  if (capabilityIndexStatusUnsubscribe) {
+    capabilityIndexStatusUnsubscribe();
+    capabilityIndexStatusUnsubscribe = null;
+  }
+  __testOnly_resetWorkflowCapabilityIndexStatusCoordinator();
 }
 
 export async function __testOnly_testSelectedOllamaModel() {
@@ -2958,7 +3798,15 @@ export function __testOnly_applyStoredSelection(selectId, stored, fallbackSelect
 
 // Export for testing
 export async function __testOnly_syncInitialScopedSelections(overrides = {}) {
-  await syncInitialScopedSelections(overrides);
+  return syncInitialScopedSelections(overrides);
+}
+
+export function __testOnly_applySettingsActorRole(role) {
+  return applySettingsActorRole(role);
+}
+
+export function __testOnly_invalidateActorScopedCapabilityStatus() {
+  return invalidateActorScopedCapabilityStatus();
 }
 
 export function __testOnly_formatGmailOAuthStoredStatus(data) {
@@ -3154,6 +4002,197 @@ function setStoredJson(key, value) {
   } catch { }
 }
 
+function snapshotActorBrowserContext() {
+  const userSelect = document.getElementById('currentUserSelect');
+  const organisationSelect = document.getElementById('currentOrganisationSelect');
+  return {
+    user: getStoredJson(LS_USER_KEY),
+    organisation: getStoredJson(LS_ORG_KEY),
+    organisationRole: currentActorOrganisationRole,
+    userSelectedIndex: userSelect?.selectedIndex ?? -1,
+    organisationSelectedIndex: organisationSelect?.selectedIndex ?? -1,
+  };
+}
+
+function restoreActorBrowserContext(snapshot) {
+  setStoredJson(LS_USER_KEY, snapshot?.user || null);
+  setStoredJson(LS_ORG_KEY, snapshot?.organisation || null);
+  const userSelect = document.getElementById('currentUserSelect');
+  const organisationSelect = document.getElementById('currentOrganisationSelect');
+  if (userSelect) {
+    const applied = applyStoredSelection('currentUserSelect', snapshot?.user, false);
+    if (!applied && Number.isInteger(snapshot?.userSelectedIndex)) {
+      userSelect.selectedIndex = snapshot.userSelectedIndex;
+    }
+  }
+  if (organisationSelect) {
+    const applied = applyStoredSelection('currentOrganisationSelect', snapshot?.organisation, false);
+    if (!applied && Number.isInteger(snapshot?.organisationSelectedIndex)) {
+      organisationSelect.selectedIndex = snapshot.organisationSelectedIndex;
+    }
+  }
+  applySettingsActorRole(snapshot?.organisationRole || '');
+}
+
+async function rollbackServerActorContext(
+  snapshot,
+  {
+    setUserConceptFn = (userConceptId) => postJson('/von/api/session/set_user_concept', {
+      user_concept_id: userConceptId,
+    }),
+    switchOrganisationFn = switchOrganisation,
+  } = {},
+) {
+  const rollbackErrors = [];
+  const priorUserConceptId = snapshot?.user?.concept_id || null;
+  const priorOrganisationConceptId = snapshot?.organisation?.concept_id || null;
+  if (priorUserConceptId) {
+    try {
+      await setUserConceptFn(priorUserConceptId);
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  }
+  try {
+    suppressActorOrgSwitchReload = true;
+    await switchOrganisationFn(priorOrganisationConceptId, snapshot?.organisation?.name || null);
+  } catch (error) {
+    rollbackErrors.push(error);
+  } finally {
+    suppressActorOrgSwitchReload = false;
+  }
+  return rollbackErrors;
+}
+
+function failClosedActorTransition(error, snapshot) {
+  restoreActorBrowserContext(snapshot);
+  actorSessionReady = false;
+  scopedModelStateReady = false;
+  currentResolvedLlm = null;
+  currentEnabledLlmAlternatives = [];
+  explicitlyRemovedWorkflowPoolKeys = new Set();
+  syncModelPoolTargetScopeControls();
+  renderModelScopeOverview();
+  setInlineStatusMessage(
+    document.getElementById('modelPoolStatusMessage'),
+    `${error?.message || 'Actor switch failed.'} Scoped model saving remains disabled.`,
+    'error',
+  );
+}
+
+function queueActorContextTransition({
+  snapshot,
+  requestedUser,
+  requestedOrganisation,
+  hydrateUserPreferences = false,
+  setUserConceptFn = (userConceptId) => postJson('/von/api/session/set_user_concept', {
+    user_concept_id: userConceptId,
+  }),
+  switchOrganisationFn = switchOrganisation,
+  loadUserPreferencesFn = loadUserConceptPreferences,
+  reloadScopedModelsFn = reloadScopedModelSettings,
+  rollbackActorFn = rollbackServerActorContext,
+  refreshRagStatusFn = () => loadRagStatus(null),
+} = {}) {
+  actorContextGeneration += 1;
+  const actorGeneration = actorContextGeneration;
+  actorSessionReady = false;
+  applySettingsActorRole('');
+  invalidateActorScopedCapabilityStatus();
+  const modelGeneration = invalidateScopedModelState(
+    'Switching the server actor session before loading scoped model settings...',
+  );
+
+  const transition = actorTransitionQueue
+    .catch(() => null)
+    .then(async () => {
+      if (actorGeneration !== actorContextGeneration) {
+        return { applied: false, stale: true };
+      }
+
+      try {
+        const userConceptId = requestedUser?.concept_id || null;
+        if (!userConceptId) {
+          throw new Error('The selected user does not have a valid concept ID.');
+        }
+        const userSession = await setUserConceptFn(userConceptId);
+        if (actorGeneration !== actorContextGeneration) {
+          return { applied: false, stale: true };
+        }
+
+        let organisation = requestedOrganisation || null;
+        if (hydrateUserPreferences) {
+          await loadUserPreferencesFn(userConceptId, { actorGeneration });
+          if (actorGeneration !== actorContextGeneration) {
+            return { applied: false, stale: true };
+          }
+          organisation = getSelectedOrganisationContextFromUi();
+        }
+
+        suppressActorOrgSwitchReload = true;
+        let organisationSession = null;
+        try {
+          organisationSession = await switchOrganisationFn(
+            organisation?.concept_id || null,
+            organisation?.name || null,
+          );
+          setSessionScopedNamespace(
+            organisationSession?.namespace || userSession?.namespace || null,
+          );
+        } finally {
+          suppressActorOrgSwitchReload = false;
+        }
+        if (actorGeneration !== actorContextGeneration) {
+          return { applied: false, stale: true };
+        }
+
+        setStoredJson(LS_USER_KEY, requestedUser);
+        setStoredJson(LS_ORG_KEY, organisation);
+        renderActiveNamespace();
+        void refreshRagStatusFn();
+        actorSessionReady = true;
+        applySettingsActorRole(organisationSession?.role || userSession?.role || '');
+        syncModelPoolTargetScopeControls();
+        const loadResult = await reloadScopedModelsFn({
+          actorContext: {
+            userConceptId,
+            organisationConceptId: organisation?.concept_id || null,
+          },
+          generation: modelGeneration,
+          targetScope: selectedModelPoolTargetScope,
+        });
+        if (actorGeneration !== actorContextGeneration || loadResult?.stale) {
+          return { applied: false, stale: true };
+        }
+        if (!loadResult?.applied) {
+          throw loadResult?.error || new Error('Scoped model settings did not load after the actor switch.');
+        }
+
+        void refreshRuntimeModelStatus({ force: true });
+
+        if (window.parent?.updateModelInfoFooterDisplay) {
+          window.parent.updateModelInfoFooterDisplay();
+        }
+        refreshActiveSettingsConcernGuidance();
+        return { applied: true, stale: false };
+      } catch (error) {
+        if (actorGeneration !== actorContextGeneration) {
+          return { applied: false, stale: true };
+        }
+        try {
+          await rollbackActorFn(snapshot, { setUserConceptFn, switchOrganisationFn });
+        } catch (rollbackError) {
+          console.warn('Failed to confirm actor-session rollback', rollbackError);
+        }
+        failClosedActorTransition(error, snapshot);
+        return { applied: false, stale: false, error };
+      }
+    });
+
+  actorTransitionQueue = transition;
+  return transition;
+}
+
 function normaliseOrgConceptId(value) {
   const raw = String(value || '').trim();
   if (!raw) return null;
@@ -3253,32 +4292,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { await loadDeprecationMetrics(); } catch { }
 
   // Set up event listeners for auto-saving
-  document.getElementById('globalModelSelect')?.addEventListener('change', async (event) => {
-    // Auto-switch to the host when selecting a global model
-    const selectedOption = event.target.selectedOptions[0];
-    if (selectedOption && selectedOption.dataset.hostUrl) {
-      const hostUrl = selectedOption.dataset.hostUrl;
-
-      // Check if we need to switch hosts by getting current active host
-      try {
-        const hostsData = await loadOllamaHosts();
-        const currentActiveHost = hostsData.active_host;
-
-        // Only switch if the selected model's host is different from the current active host
-        if (hostUrl !== currentActiveHost) {
-          console.log(`Auto-switching from ${currentActiveHost} to ${hostUrl} for model ${selectedOption.dataset.modelName}`);
-          await window.setActiveOllamaHost(hostUrl);
-        }
-      } catch (error) {
-        console.error('Failed to auto-switch host:', error);
-        showStatusMessage('settingsStatusMessage', 'Failed to switch to model host', true);
-      }
-    }
-    // Save settings after potentially switching host
+  document.getElementById('globalModelSelect')?.addEventListener('change', async () => {
     const ollamaSelection = resolveOllamaSelection(false);
     if (ollamaSelection) {
       setStoredOllamaSelection(ollamaSelection);
-      setLocalPremiumModelUseEnabled(false);
+      if (!document.getElementById('enableOpenAiPremiumToggle')?.checked) {
+        setLocalPremiumModelUseEnabled(false);
+      }
     } else {
       clearStoredOllamaSelection();
       if (!document.getElementById('enableOpenAiPremiumToggle')?.checked) {
@@ -3289,6 +4309,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateOllamaModelStatusMessage();
     refreshActiveSettingsConcernGuidance();
     notifyLocalModelPreferenceChanged();
+    renderModelScopeOverview();
     // Load the saved timeout for the newly selected Ollama model
     const selectedOllamaSelection = resolveOllamaSelection(false);
     const selectedModel = selectedOllamaSelection?.model || selectedOllamaSelection?.value || '';
@@ -3329,18 +4350,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
     refreshActiveSettingsConcernGuidance();
-    await testSelectedOpenAiModel();
-    await saveAllSettings();
     notifyLocalModelPreferenceChanged();
+    renderModelScopeOverview();
   });
   document.getElementById('openaiReasoningEffortSelect')?.addEventListener('change', async () => {
     setStoredOpenAiModelParameters(readOpenAiModelParametersFromUi());
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
     refreshActiveSettingsConcernGuidance();
-    await testSelectedOpenAiModel();
-    await saveAllSettings();
     notifyLocalModelPreferenceChanged();
+    renderModelScopeOverview();
   });
   document.getElementById('enableOpenAiPremiumToggle')?.addEventListener('change', async (event) => {
     const premiumToggle = event?.target;
@@ -3356,81 +4375,38 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateOllamaModelStatusMessage();
       refreshActiveSettingsConcernGuidance();
       notifyLocalModelPreferenceChanged();
+      renderModelScopeOverview();
       return;
     }
 
     setLocalPremiumModelUseEnabled(true);
     updateOpenAiModelStatusMessage();
     refreshActiveSettingsConcernGuidance();
-    const probe = await testSelectedOpenAiModel();
-    if (!probe?.usable) {
-      showStatusMessage(
-        'settingsStatusMessage',
-        'Premium use is enabled for this machine, but the selected model test failed. Check the premium model before relying on it.',
-        true,
-      );
-    }
-    await saveAllSettings();
     notifyLocalModelPreferenceChanged();
+    renderModelScopeOverview();
   });
-  document.getElementById('currentUserSelect')?.addEventListener('change', async () => {
+  document.getElementById('currentUserSelect')?.addEventListener('change', () => {
+    const snapshot = snapshotActorBrowserContext();
     const sel = document.getElementById('currentUserSelect');
     const opt = sel?.selectedOptions?.[0];
-    if (opt) {
-      setStoredJson(LS_USER_KEY, buildStoredUserContextFromOption(opt));
-      if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
-      // Keep the authenticated server session aligned with the selected user concept.
-      if (opt.dataset.conceptId) {
-        try {
-          const resp = await postJson('/von/api/session/set_user_concept', {
-            user_concept_id: opt.dataset.conceptId
-          });
-          setSessionScopedNamespace(resp?.namespace || null);
-          renderActiveNamespace();
-          void loadRagStatus(null);
-        } catch (e) {
-          console.warn('Failed to update server session user concept', e);
-        }
-      }
-      // When user changes, attempt to load stored server-side prefs (language/org)
-      if (opt.dataset.conceptId) {
-        await loadUserConceptPreferences(opt.dataset.conceptId);
-        // Refresh organisation selector so memberships reflect the selected user.
-        if (window.refreshOrgSelector) {
-          try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
-        }
-      }
-      refreshActiveSettingsConcernGuidance();
-    } else {
-      setStoredJson(LS_USER_KEY, null);
-      refreshActiveSettingsConcernGuidance();
-    }
+    void queueActorContextTransition({
+      snapshot,
+      requestedUser: buildStoredUserContextFromOption(opt),
+      requestedOrganisation: getSelectedOrganisationContextFromUi() || snapshot.organisation,
+      hydrateUserPreferences: true,
+    });
   });
-  document.getElementById('currentOrganisationSelect')?.addEventListener('change', async () => {
+  document.getElementById('currentOrganisationSelect')?.addEventListener('change', () => {
+    const snapshot = snapshotActorBrowserContext();
     const sel = document.getElementById('currentOrganisationSelect');
     const opt = sel?.selectedOptions?.[0];
-    const conceptId = opt?.dataset?.conceptId || null;
-
-    // Call backend to update session namespace (mirrors Phase 2 org selector behaviour)
-    try {
-      await switchOrganisation(conceptId);
-      // switchOrganisation dispatches 'orgSwitched' event which updates namespace display
-    } catch (e) {
-      console.warn('Failed to switch organisation via backend:', e);
-    }
-
-    if (opt && (opt.dataset?.id || conceptId)) {
-      setStoredJson(LS_ORG_KEY, buildStoredOrganisationContextFromOption(opt));
-      if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
-      // Persist organisation preference (and language if set)
-      persistCurrentUserPreferences();
-      refreshActiveSettingsConcernGuidance();
-    } else {
-      setStoredJson(LS_ORG_KEY, null);
-      if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
-      persistCurrentUserPreferences();
-      refreshActiveSettingsConcernGuidance();
-    }
+    void queueActorContextTransition({
+      snapshot,
+      requestedUser: getSelectedUserContextFromUi() || snapshot.user,
+      requestedOrganisation: buildStoredOrganisationContextFromOption(opt),
+    }).then((result) => {
+      if (result?.applied) persistCurrentUserPreferences();
+    });
   });
   document.getElementById('preferredLanguageSelect')?.addEventListener('change', () => {
     const val = document.getElementById('preferredLanguageSelect')?.value;
@@ -3507,6 +4483,37 @@ document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', (
 });
 document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
 document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
+document.getElementById('addOpenAiToWorkflowPoolButton')?.addEventListener('click', () => {
+  addOrUpdateWorkflowPoolEntry(selectedOpenAiPoolEntry());
+});
+document.getElementById('addOllamaToWorkflowPoolButton')?.addEventListener('click', () => {
+  addOrUpdateWorkflowPoolEntry(selectedOllamaPoolEntry());
+});
+document.getElementById('useBrowserModelAsScopedPrimaryButton')?.addEventListener(
+  'click',
+  useBrowserModelAsScopedPrimary,
+);
+document.getElementById('restoreScopedPrimaryButton')?.addEventListener(
+  'click',
+  restoreScopedPrimary,
+);
+document.getElementById('saveModelPoolButton')?.addEventListener('click', persistModelScopeSettings);
+document.getElementById('saveRuntimeModelSettingsButton')?.addEventListener('click', persistRuntimeModelSettings);
+document.getElementById('modelPoolTargetScopeSelect')?.addEventListener('change', (event) => {
+  if (!actorSessionReady) {
+    syncModelPoolTargetScopeControls();
+    return;
+  }
+  const requestedScope = event?.target?.value === 'organisation' ? 'organisation' : 'user';
+  if (requestedScope === 'organisation' && !organisationModelPoolTargetAvailable()) {
+    selectedModelPoolTargetScope = 'user';
+    syncModelPoolTargetScopeControls();
+    return;
+  }
+  selectedModelPoolTargetScope = requestedScope;
+  const generation = invalidateScopedModelState(`Loading the ${requestedScope} primary and pool...`);
+  void reloadScopedModelSettings({ generation, targetScope: requestedScope });
+});
 
 // Sync visibility of the remote hosts section based on the disable-scan toggle
 function syncOllamaRemoteHostsVisibility() {
@@ -3709,6 +4716,7 @@ async function loadModelLlmTimeout(provider, model) {
 }
 
 async function loadAndDisplaySettings() {
+  const scopedModelGeneration = invalidateScopedModelState();
   try {
     // Pass user context to get properly resolved LLM setting (user > org > global precedence)
     const storedUser = getStoredJson(LS_USER_KEY);
@@ -3765,25 +4773,23 @@ async function loadAndDisplaySettings() {
     // Admin-only controls: decide visibility based on session role.
     try {
       const role = (sessionContext && sessionContext.role) ? String(sessionContext.role).toLowerCase() : '';
-      __vonIsAdminOrOwner = role === 'admin' || role === 'owner';
+      applySettingsActorRole(role);
       __canPersistWriteConservatism = __vonIsAdminOrOwner
         && Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism');
-      const container = document.getElementById('disableWriteToolConservatismContainer');
-      if (container) {
-        container.classList.toggle('hidden', !__vonIsAdminOrOwner);
-      }
     } catch {
-      __vonIsAdminOrOwner = false;
+      applySettingsActorRole('');
       __canPersistWriteConservatism = false;
     }
 
     // The selector should reflect the resolved active model for the provider in scope,
     // not a stale enabled_llms entry from an older or broader context.
-    const {
-      effectiveLlm,
-      currentOpenAIModel,
-    } = resolveDisplayedProviderModels(settings);
-    currentResolvedLlm = effectiveLlm || null;
+    const { currentOpenAIModel } = resolveDisplayedProviderModels(settings);
+    currentEffectiveLlm = settings.effective_llm || settings.resolved_llm || null;
+    currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(
+      settings.effective_enabled_llms || settings.enabled_llms,
+    );
+    chooseInitialModelPoolTargetScope();
+    currentServerDefaultLlm = buildCanonicalLlmEntry(settings.server_default_llm);
     const localModelPreference = getEffectiveLocalModelPreference();
     const currentOllamaModel = resolveOllamaDropdownSelectionValue(localModelPreference);
     const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
@@ -3898,7 +4904,7 @@ async function loadAndDisplaySettings() {
         } catch { }
 
         try {
-          if (window.parent?.document) {
+          if (window.parent !== window && window.parent?.document) {
             const resolvedNameForEvent = orgId ? resolveOrgNameFromSelect(orgId) : null;
             window.parent.document.dispatchEvent(new CustomEvent('orgSwitched', {
               detail: {
@@ -3922,7 +4928,37 @@ async function loadAndDisplaySettings() {
     // Keep storage and server session aligned with the restored dropdown state.
     // Otherwise the page can look correctly selected while saves and namespace reads
     // still operate on stale user-only context.
-    await syncInitialScopedSelections();
+    suppressActorOrgSwitchReload = true;
+    let initialActorSync = null;
+    try {
+      initialActorSync = await syncInitialScopedSelections({
+        committedUser: bootstrapUser,
+        committedOrganisation: bootstrapOrg,
+      });
+      actorSessionReady = true;
+      applySettingsActorRole(initialActorSync?.role || sessionContext?.role || '');
+      invalidateActorScopedCapabilityStatus();
+      syncModelPoolTargetScopeControls();
+      await reloadScopedModelSettings({
+        generation: scopedModelGeneration,
+        targetScope: selectedModelPoolTargetScope,
+      });
+      void refreshRuntimeModelStatus({ force: true });
+    } catch (error) {
+      actorSessionReady = false;
+      scopedModelStateReady = false;
+      stagedScopedPrimaryLlm = null;
+      updateScopedModelSaveAvailability();
+      syncModelPoolTargetScopeControls();
+      setInlineStatusMessage(
+        document.getElementById('modelPoolStatusMessage'),
+        error?.message || 'Initial actor synchronisation failed. Scoped model saving remains disabled.',
+        'error',
+      );
+      renderModelScopeOverview();
+    } finally {
+      suppressActorOrgSwitchReload = false;
+    }
 
     // Populate OpenAI settings
     const envVarInput = document.getElementById('openaiApiKeyEnvVar');
@@ -3943,7 +4979,7 @@ async function loadAndDisplaySettings() {
     populateServerDefaultLlmForm(settings.server_default_llm);
     populateRuntimeModelSettingForm('ragEmbedder', settings.rag_embedder, { allowDisabled: false });
     populateRuntimeModelSettingForm('ragLlm', settings.rag_llm, { allowDisabled: true });
-    latestCapabilityIndexStatus = settings.workflow_capability_index || null;
+    latestCapabilityIndexStatus = getLatestWorkflowCapabilityIndexStatus();
     latestRagRuntimeConfiguration = {
       embedder_resolution: settings.effective_rag_embedder || null,
       llm_resolution: settings.effective_rag_llm || null,
@@ -3953,8 +4989,12 @@ async function loadAndDisplaySettings() {
       serverDefaultLlm: settings.server_default_llm,
       ragEmbedder: settings.effective_rag_embedder,
       ragLlm: settings.effective_rag_llm,
-      capabilityIndex: settings.workflow_capability_index,
+      capabilityIndex: latestCapabilityIndexStatus,
     });
+    renderModelScopeOverview();
+    if (scopedModelGeneration === scopedModelLoadGeneration) {
+      setInlineStatusMessage(document.getElementById('modelPoolStatusMessage'), '', null);
+    }
     void refreshRuntimeModelStatus();
     refreshActiveSettingsConcernGuidance();
 
@@ -4116,6 +5156,12 @@ async function loadAndDisplaySettings() {
   } catch (error) {
     console.error('Error loading settings:', error);
     showStatusMessage('settingsStatusMessage', 'Failed to load settings.', true);
+    if (scopedModelGeneration === scopedModelLoadGeneration) {
+      actorSessionReady = false;
+      scopedModelStateReady = false;
+      updateScopedModelSaveAvailability();
+      renderModelScopeOverview();
+    }
   }
 }
 
@@ -4226,54 +5272,71 @@ async function loadAndDisplayDbInfo() {
   }
 }
 
-async function saveAllSettings() {
-  const { scope: llmScope, conceptId: llmConceptId } = resolveActiveLlmScopeContext();
-  const localModelPreference = getEffectiveLocalModelPreference();
-  const enabledLlms = buildPersistedLlmSelections({ localModelPreference });
-  let activeLlm = resolvePersistedActiveLlm(enabledLlms, { localModelPreference });
+async function saveAllSettings({ includeChatModels = false, includeRuntimeModels = false } = {}) {
+  const concernSpecificSave = includeChatModels || includeRuntimeModels;
+  // Actor-scoped and shared-runtime Save buttons deliberately send only their
+  // own concern. General auto-saves continue to use the ordinary settings payload.
+  const settings = concernSpecificSave
+    ? {}
+    : {
+      openai_api_key_env_var: document.getElementById('openaiApiKeyEnvVar')?.value,
+      preload_vontology_tree: !!document.getElementById('preloadVontologyTreeToggle')?.checked,
+      fetch_counts_on_load: !!document.getElementById('fetchCountsOnLoadToggle')?.checked,
+      disable_remote_ollama_scan: !!document.getElementById('disableRemoteOllamaScanToggle')?.checked,
+      ...readInternalMcpCapSettingsFromForm(),
+      show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
+      buttonify_model_enabled: !!document.getElementById('buttonifyModelEnabledToggle')?.checked,
+      auto_proceed_minimal_imposition_enabled: !!document.getElementById('autoProceedMinimalImpositionToggle')?.checked,
+    };
 
-  if (activeLlm && llmScope && llmConceptId) {
-    activeLlm.scope = llmScope;
-    activeLlm.concept_id = llmConceptId;
-  } else {
-    activeLlm = null;
-  }
-
-  // We now persist user/org/language only in localStorage; do not send to backend
-  const settings = {
-    openai_api_key_env_var: document.getElementById('openaiApiKeyEnvVar')?.value,
-    preload_vontology_tree: !!document.getElementById('preloadVontologyTreeToggle')?.checked,
-    fetch_counts_on_load: !!document.getElementById('fetchCountsOnLoadToggle')?.checked,
-    disable_remote_ollama_scan: !!document.getElementById('disableRemoteOllamaScanToggle')?.checked,
-    ...readInternalMcpCapSettingsFromForm(),
-    show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
-    buttonify_model_enabled: !!document.getElementById('buttonifyModelEnabledToggle')?.checked,
-    auto_proceed_minimal_imposition_enabled: !!document.getElementById('autoProceedMinimalImpositionToggle')?.checked,
-  };
-
-  if (__canPersistWriteConservatism) {
+  if (!concernSpecificSave && __canPersistWriteConservatism) {
     const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');
     if (adminToggleEl) {
       settings.disable_write_tool_conservatism = !adminToggleEl.checked;
     }
   }
 
-  if (activeLlm && enabledLlms.length) {
+  let activeLlm = null;
+  const modelScopeGenerationAtSave = scopedModelLoadGeneration;
+  if (includeChatModels) {
+    if (!scopedModelStateReady) {
+      throw new Error('Wait for model settings for the current user and organisation to finish loading before saving.');
+    }
+    const { scope: llmScope, conceptId: llmConceptId } = resolveActiveLlmScopeContext();
+    activeLlm = buildCanonicalLlmEntry(stagedScopedPrimaryLlm);
+    if (!activeLlm) {
+      throw new Error('Choose an explicit primary for the selected target before saving its model pool.');
+    }
+    if (!llmScope || !llmConceptId) {
+      throw new Error('Choose a current user or organisation before saving model scope settings.');
+    }
+    const enabledLlms = buildPersistedLlmSelections({
+      primary: activeLlm,
+      enabledAlternatives: currentEnabledLlmAlternatives,
+    });
+    activeLlm = {
+      ...activeLlm,
+      scope: llmScope,
+      concept_id: llmConceptId,
+    };
     settings.active_llm = activeLlm;
     settings.enabled_llms = enabledLlms;
   }
 
   try {
-    const serverDefaultLlm = buildServerDefaultLlmPayload({ strictFromUi: true });
-    const ragEmbedderSetting = readRuntimeModelSettingFromForm('ragEmbedder', {
-      allowDisabled: false,
-    });
-    const ragLlmSetting = readRuntimeModelSettingFromForm('ragLlm', {
-      allowDisabled: true,
-    });
-    settings.server_default_llm = serverDefaultLlm;
-    settings.rag_embedder = ragEmbedderSetting;
-    settings.rag_llm = ragLlmSetting;
+    let serverDefaultLlm = currentServerDefaultLlm;
+    if (includeRuntimeModels) {
+      serverDefaultLlm = buildServerDefaultLlmPayload({ strictFromUi: true });
+      const ragEmbedderSetting = readRuntimeModelSettingFromForm('ragEmbedder', {
+        allowDisabled: false,
+      });
+      const ragLlmSetting = readRuntimeModelSettingFromForm('ragLlm', {
+        allowDisabled: true,
+      });
+      settings.server_default_llm = serverDefaultLlm;
+      settings.rag_embedder = ragEmbedderSetting;
+      settings.rag_llm = ragLlmSetting;
+    }
 
     const response = await fetch('/api/settings/', {
       method: 'POST',
@@ -4287,7 +5350,13 @@ async function saveAllSettings() {
       throw new Error(message);
     }
 
+    if (includeChatModels && modelScopeGenerationAtSave !== scopedModelLoadGeneration) {
+      throw new Error('The current user or organisation changed while model settings were saving. The new scope was not overwritten.');
+    }
+
     if (
+      includeChatModels
+      &&
       activeLlm
       && (
         !payload?.resolved_llm
@@ -4300,47 +5369,60 @@ async function saveAllSettings() {
       throw new Error('Model change did not take effect for the current context.');
     }
 
-    if (payload?.resolved_llm) {
+    if (includeChatModels && payload?.resolved_llm) {
       currentResolvedLlm = payload.resolved_llm;
+      stagedScopedPrimaryLlm = buildCanonicalLlmEntry(payload.resolved_llm);
+      if (Array.isArray(payload?.enabled_llms)) {
+        currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(payload.enabled_llms)
+          .filter((entry) => !currentResolvedLlm || !sameLlmSlot(entry, currentResolvedLlm));
+      }
+      explicitlyRemovedWorkflowPoolKeys = new Set();
+      scopedModelStateReady = true;
+      updateScopedModelSaveAvailability();
     }
-    if (payload?.server_default_llm || serverDefaultLlm) {
+    if (includeRuntimeModels && (payload?.server_default_llm || serverDefaultLlm)) {
+      currentServerDefaultLlm = buildCanonicalLlmEntry(payload?.server_default_llm || serverDefaultLlm);
       populateServerDefaultLlmForm(payload?.server_default_llm || serverDefaultLlm);
     }
-    if (payload?.resolved_rag_embedder || payload?.resolved_rag_llm) {
+    if (includeRuntimeModels && (payload?.resolved_rag_embedder || payload?.resolved_rag_llm)) {
       latestRagRuntimeConfiguration = {
         embedder_resolution: payload?.resolved_rag_embedder || null,
         llm_resolution: payload?.resolved_rag_llm || null,
       };
     }
-    if (payload?.workflow_capability_index) {
-      latestCapabilityIndexStatus = payload.workflow_capability_index;
+    if (includeRuntimeModels) {
+      renderRuntimeModelSummaries({
+        serverDefaultLlm: payload?.server_default_llm || serverDefaultLlm,
+        ragEmbedder: payload?.resolved_rag_embedder || null,
+        ragLlm: payload?.resolved_rag_llm || null,
+        capabilityIndex: getLatestWorkflowCapabilityIndexStatus(),
+      });
     }
-    renderRuntimeModelSummaries({
-      serverDefaultLlm: payload?.server_default_llm || serverDefaultLlm,
-      ragEmbedder: payload?.resolved_rag_embedder || null,
-      ragLlm: payload?.resolved_rag_llm || null,
-      capabilityIndex: payload?.workflow_capability_index || null,
-    });
+    if (includeChatModels) renderModelScopeOverview();
 
-    showStatusMessage('settingsStatusMessage', payload.message || 'Settings saved successfully!');
-    if (payload?.workflow_capability_rebuild?.required) {
-      showStatusMessage(
-        'ragModelSettingsStatusMessage',
-        payload.workflow_capability_rebuild.detail
-          || 'Workflow capability index rebuild required after RAG embedder change.',
-      );
-    } else {
-      showStatusMessage('ragModelSettingsStatusMessage', 'RAG model settings saved.');
+    if (!concernSpecificSave) {
+      showStatusMessage('settingsStatusMessage', payload.message || 'Settings saved successfully!');
     }
-    void refreshRuntimeModelStatus();
+    if (includeRuntimeModels) {
+      if (payload?.workflow_capability_rebuild?.required) {
+        showStatusMessage(
+          'ragModelSettingsStatusMessage',
+          payload.workflow_capability_rebuild.detail
+            || 'Workflow capability index rebuild required after RAG embedder change.',
+        );
+      } else {
+        showStatusMessage('ragModelSettingsStatusMessage', 'Shared RAG model settings saved.');
+      }
+      void refreshRuntimeModelStatus({ force: true });
+    }
 
     // Update parent window footer
-    if (window.parent?.updateModelInfoFooterDisplay) {
+    if (!includeRuntimeModels && window.parent?.updateModelInfoFooterDisplay) {
       window.parent.updateModelInfoFooterDisplay();
     }
 
     // Emit event to update language indicator in footer
-    if (window.parent) {
+    if (!includeRuntimeModels && window.parent) {
       window.parent.document.dispatchEvent(new CustomEvent('von:settingsChanged'));
     }
     return true;
@@ -4351,21 +5433,24 @@ async function saveAllSettings() {
       error?.message || 'Failed to save settings.',
       true,
     );
-    showStatusMessage(
-      'ragModelSettingsStatusMessage',
-      error?.message || 'Failed to save RAG model settings.',
-      true,
-    );
+    if (includeRuntimeModels) {
+      showStatusMessage(
+        'ragModelSettingsStatusMessage',
+        error?.message || 'Failed to save shared RAG model settings.',
+        true,
+      );
+    }
     return false;
   }
 }
 
 // --- User concept preference helpers (server-side stored) ---
 
-async function loadUserConceptPreferences(userConceptId) {
+async function loadUserConceptPreferences(userConceptId, { actorGeneration = null } = {}) {
   try {
     const data = await fetchUserPreferences(userConceptId);
     if (!data) return;
+    if (actorGeneration !== null && actorGeneration !== actorContextGeneration) return;
     if (data.preferred_language) {
       const langSel = document.getElementById('preferredLanguageSelect');
       if (langSel) {

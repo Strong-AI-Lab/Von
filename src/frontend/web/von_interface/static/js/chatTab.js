@@ -56,6 +56,13 @@ import {
 } from './utils/textDecorator.js';
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { showToast } from './utils/toast.js';
+import {
+    __testOnly_resetWorkflowCapabilityIndexStatusCoordinator,
+    acceptWorkflowCapabilityIndexStatus as acceptSharedWorkflowCapabilityIndexStatus,
+    getLatestWorkflowCapabilityIndexStatus,
+    refreshWorkflowCapabilityIndexStatus as refreshSharedWorkflowCapabilityIndexStatus,
+    subscribeToWorkflowCapabilityIndexStatus
+} from './utils/workflowCapabilityStatusCoordinator.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
 // JVNAUTOSCI-1651: Include X-User-Concept-ID so backend can resolve user
@@ -90,8 +97,12 @@ function notifyUnavailableLocalModelForChat() {
 
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
+const llmDebugExecutionContextBindings = new Map();
 const llmDebugFetchInFlight = new Map();
 const LATEST_LLM_EXECUTION_TELEMETRY_SCHEMA_VERSION = 'latest_llm_execution_telemetry.v1';
+const LLM_EXECUTION_CONTEXT_BINDING_SCHEMA_VERSION = 'llm_execution_context_binding.v1';
+let llmExecutionContextGeneration = 0;
+let llmExecutionContextSignature = null;
 const CONVERSATION_INFO_COPY_BUTTON_ID = 'copyConversationInfoJsonBtn';
 const CONVERSATION_INFO_COPY_BUTTON_LABEL = 'ℹ';
 const CONVERSATION_INFO_COPY_BUTTON_TITLE_READY = 'Copy conversation info as JSON';
@@ -240,7 +251,6 @@ const workflowDefinitionsState = {
 const workflowCapabilityIndexState = {
     loading: false,
     error: '',
-    payload: null,
     lastFetchedAt: 0,
     pollTimeoutId: null
 };
@@ -261,7 +271,7 @@ const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_BASE_MS = 1200;
 const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_MS = 6000;
 const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_ATTEMPTS = 2;
 let workflowStatusPanelInitialised = false;
-let workflowCapabilityIndexRefreshPromise = null;
+let workflowCapabilityIndexStatusUnsubscribe = null;
 let chatTabInitialised = false;
 const REALTIME_CONNECTION_TELEMETRY_SCHEMA_VERSION = 1;
 const workflowEpisodesState = {
@@ -276,17 +286,177 @@ const workflowEpisodesState = {
     lastFetchedAt: 0
 };
 
-function setLlmDebugDataEntry(turnId, debugData) {
+function normaliseLlmExecutionContextString(value) {
+    return (typeof value === 'string' && value.trim()) ? value.trim() : null;
+}
+
+function normaliseLlmExecutionContextModel(value) {
+    const clean = normaliseLlmExecutionContextString(value);
+    if (!clean) return null;
+    return clean.replace(/^(?:openai|ollama|gemini)[/:]/i, '');
+}
+
+function inferLlmProviderFromModelReference(value) {
+    const clean = normaliseLlmExecutionContextString(value);
+    if (!clean) return null;
+    const matched = clean.match(/^(openai|ollama|gemini)[/:]/i);
+    return matched ? matched[1].toLowerCase() : null;
+}
+
+function buildLlmExecutionConfigurationBinding(requestedLlm = null) {
+    const source = requestedLlm && typeof requestedLlm === 'object' ? requestedLlm : {};
+    const model = normaliseLlmExecutionContextModel(source.model || source.requestModel);
+    const provider = normaliseLlmExecutionContextString(source.provider)
+        || inferLlmProviderFromModelReference(source.requestModel || source.model);
+    const host = normaliseLlmExecutionContextString(source.host);
+    const modelParameters = source.model_parameters && typeof source.model_parameters === 'object'
+        ? JSON.parse(JSON.stringify(source.model_parameters))
+        : null;
+    return {
+        provider: provider ? provider.toLowerCase() : null,
+        model,
+        host,
+        model_parameters: modelParameters,
+    };
+}
+
+function readCurrentLlmExecutionContextSnapshot(sessionId = activeChatSessionId) {
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    const localPreference = getEffectiveLocalModelPreference();
+    const configuration = buildLlmExecutionConfigurationBinding(localPreference?.requestedLlm);
+    return {
+        window_session_id: normaliseLlmExecutionContextString(getWindowSessionId()),
+        user_concept_id: normaliseLlmExecutionContextString(namespaceContext.user_id),
+        organisation_concept_id: normaliseLlmExecutionContextString(namespaceContext.org_id),
+        conversation_session_id: normaliseLlmExecutionContextString(sessionId),
+        configuration,
+    };
+}
+
+function publishCurrentLlmExecutionContextBinding(snapshot) {
+    try {
+        window.__vonCurrentLlmExecutionContextBinding = snapshot;
+    } catch (_) {
+        // Ignore non-writable globals in constrained environments.
+    }
+}
+
+function invalidatePublishedLlmExecutionTelemetry(reason = 'execution_context_changed') {
+    try {
+        window.__vonLatestLlmExecutionTelemetry = null;
+    } catch (_) {
+        // Ignore non-writable globals in constrained environments.
+    }
+    try {
+        document.dispatchEvent(new CustomEvent('von:latestLlmExecutionTelemetryUpdated', {
+            detail: null,
+        }));
+    } catch (_) {
+        // Telemetry invalidation should not block normal flow.
+    }
+    console.debug('[chatTab] Invalidated latest LLM execution telemetry', { reason });
+}
+
+function synchroniseLlmExecutionContext({ force = false, reason = 'context_refresh' } = {}) {
+    const current = readCurrentLlmExecutionContextSnapshot();
+    const signature = JSON.stringify(current);
+    const changed = llmExecutionContextSignature !== null && signature !== llmExecutionContextSignature;
+    if (llmExecutionContextSignature === null) {
+        llmExecutionContextGeneration = 1;
+    } else if (force || changed) {
+        llmExecutionContextGeneration += 1;
+        invalidatePublishedLlmExecutionTelemetry(reason);
+    }
+    llmExecutionContextSignature = signature;
+    const bound = {
+        schema_version: LLM_EXECUTION_CONTEXT_BINDING_SCHEMA_VERSION,
+        generation: llmExecutionContextGeneration,
+        ...current,
+    };
+    publishCurrentLlmExecutionContextBinding(bound);
+    return bound;
+}
+
+function deriveLlmExecutionContextBinding(debugData, baseBinding = null) {
+    const binding = {
+        ...(baseBinding && typeof baseBinding === 'object'
+            ? baseBinding
+            : synchroniseLlmExecutionContext()),
+    };
+    const namespaceReport = debugData?.namespace_report && typeof debugData.namespace_report === 'object'
+        ? debugData.namespace_report
+        : null;
+    if (namespaceReport && Object.prototype.hasOwnProperty.call(namespaceReport, 'user_concept_id')) {
+        const reportedUser = normaliseLlmExecutionContextString(namespaceReport.user_concept_id);
+        if (reportedUser) binding.user_concept_id = reportedUser;
+    }
+    if (namespaceReport && Object.prototype.hasOwnProperty.call(namespaceReport, 'organisation_concept_id')) {
+        const reportedOrganisation = normaliseLlmExecutionContextString(
+            namespaceReport.organisation_concept_id,
+        );
+        if (reportedOrganisation) binding.organisation_concept_id = reportedOrganisation;
+    }
+    const historySessionId = normaliseLlmExecutionContextString(
+        debugData?.history_location?.session_id
+        || debugData?.turn_execution_diagnostics?.history_location?.session_id,
+    );
+    if (historySessionId) {
+        binding.conversation_session_id = historySessionId;
+    }
+
+    const llmInteraction = debugData?.llm_interaction && typeof debugData.llm_interaction === 'object'
+        ? debugData.llm_interaction
+        : null;
+    const requestedModel = normaliseLlmExecutionContextString(
+        llmInteraction?.requested_model || debugData?.model,
+    );
+    if (requestedModel) {
+        const interactionCalls = Array.isArray(llmInteraction?.calls) ? llmInteraction.calls : [];
+        const requestedModelForComparison = normaliseLlmExecutionContextModel(requestedModel)?.toLowerCase();
+        const matchingRequestedCall = [...interactionCalls].reverse().find((call) => (
+            normaliseLlmExecutionContextModel(call?.model)?.toLowerCase() === requestedModelForComparison
+        ));
+        const recordedProvider = normaliseLlmExecutionContextString(
+            matchingRequestedCall?.provider
+            || (interactionCalls.length === 1 ? interactionCalls[0]?.provider : null),
+        );
+        const requestedProvider = normaliseLlmExecutionContextString(llmInteraction?.requested_provider)
+            || inferLlmProviderFromModelReference(requestedModel)
+            || recordedProvider
+            || binding.configuration?.provider
+            || null;
+        binding.configuration = {
+            ...(binding.configuration && typeof binding.configuration === 'object'
+                ? binding.configuration
+                : {}),
+            provider: requestedProvider ? requestedProvider.toLowerCase() : null,
+            model: normaliseLlmExecutionContextModel(requestedModel),
+        };
+    }
+    binding.configuration_fingerprint = JSON.stringify(binding.configuration || {});
+    return binding;
+}
+
+function setLlmDebugDataEntry(turnId, debugData, executionContextBinding = null) {
     if (!turnId) {
         return;
     }
     llmDebugData.set(turnId, debugData);
+    const existingBinding = llmDebugExecutionContextBindings.get(turnId) || null;
+    llmDebugExecutionContextBindings.set(
+        turnId,
+        deriveLlmExecutionContextBinding(
+            debugData,
+            executionContextBinding || existingBinding,
+        ),
+    );
     refreshConversationInfoCopyButtonState();
     publishLatestLlmExecutionTelemetry();
 }
 
 function clearLlmDebugDataEntries() {
     llmDebugData.clear();
+    llmDebugExecutionContextBindings.clear();
     refreshConversationInfoCopyButtonState();
     publishLatestLlmExecutionTelemetry();
 }
@@ -315,47 +485,144 @@ function normaliseTelemetryStringArray(values) {
     return normalised;
 }
 
-function extractLatestLlmExecutionFailure(auxCalls = []) {
+function readLlmExecutionFailureCandidate(candidate) {
+    if (!candidate || typeof candidate !== 'object') {
+        return null;
+    }
+    const failureKind = (typeof candidate.failure_kind === 'string' && candidate.failure_kind.trim())
+        ? candidate.failure_kind.trim()
+        : null;
+    const failureReason = (typeof candidate.error === 'string' && candidate.error.trim())
+        ? candidate.error.trim()
+        : null;
+    if (!failureKind && !failureReason) {
+        return null;
+    }
+    return { failureKind, failureReason };
+}
+
+function isSuccessfulLlmExecutionCall(call) {
+    if (!call || typeof call !== 'object') {
+        return false;
+    }
+    if (call.success === true) {
+        return true;
+    }
+    if (call.success === false) {
+        return false;
+    }
+    const status = (typeof call.status === 'string') ? call.status.trim().toLowerCase() : '';
+    if (['ok', 'success', 'succeeded', 'completed'].includes(status)) {
+        return true;
+    }
+    if (['error', 'failed', 'failure', 'cancelled', 'timed_out', 'timeout'].includes(status)) {
+        return false;
+    }
+    if (
+        (typeof call.error === 'string' && call.error.trim())
+        || (typeof call.failure_kind === 'string' && call.failure_kind.trim())
+    ) {
+        return false;
+    }
+    // Successful orchestrator call records currently omit status/success, while
+    // failed records carry explicit failure fields. A recorded model/provider is
+    // therefore positive completion evidence when no failure marker is present.
+    return !!(
+        (typeof call.model === 'string' && call.model.trim())
+        || (typeof call.provider === 'string' && call.provider.trim())
+    );
+}
+
+function extractLatestLlmExecutionFailure(auxCalls = [], rawCalls = []) {
     const policyStages = Array.isArray(auxCalls)
         ? auxCalls.filter((entry) => entry && typeof entry === 'object' && entry.type === 'workflow_model_policy_stage')
         : [];
-
-    for (let index = policyStages.length - 1; index >= 0; index -= 1) {
-        const stageEntry = policyStages[index];
-        const errors = Array.isArray(stageEntry.errors) ? stageEntry.errors : [];
-        const fallbackAttempts = Array.isArray(stageEntry.fallback_attempts) ? stageEntry.fallback_attempts : [];
-        const candidates = [...errors, ...fallbackAttempts];
-        for (const candidate of candidates) {
-            if (!candidate || typeof candidate !== 'object') {
-                continue;
-            }
-            const failureKind = (typeof candidate.failure_kind === 'string' && candidate.failure_kind.trim())
-                ? candidate.failure_kind.trim()
-                : null;
-            const failureReason = (typeof candidate.error === 'string' && candidate.error.trim())
-                ? candidate.error.trim()
-                : null;
-            if (failureKind || failureReason) {
-                return {
-                    fallbackUsed: true,
-                    failureKind,
-                    failureReason,
-                };
+    const calls = Array.isArray(rawCalls)
+        ? rawCalls.filter((entry) => entry && typeof entry === 'object')
+        : [];
+    const terminalCall = calls.length ? calls[calls.length - 1] : null;
+    const terminalCallSucceeded = isSuccessfulLlmExecutionCall(terminalCall);
+    const terminalCallStage = (typeof terminalCall?.stage === 'string' && terminalCall.stage.trim())
+        ? terminalCall.stage.trim()
+        : null;
+    let latestStage = null;
+    if (terminalCall && terminalCallStage) {
+        for (let index = policyStages.length - 1; index >= 0; index -= 1) {
+            if (policyStages[index]?.stage === terminalCallStage) {
+                latestStage = policyStages[index];
+                break;
             }
         }
-        if (stageEntry.fallback_used) {
-            return {
-                fallbackUsed: true,
-                failureKind: null,
-                failureReason: null,
-            };
+    }
+    if (!terminalCall && policyStages.length) {
+        latestStage = policyStages[policyStages.length - 1];
+    }
+
+    let latestObservedFailure = null;
+    let fallbackUsed = calls.some((call) => (
+        typeof call?.note === 'string'
+        && call.note.toLowerCase().includes('trying fallback')
+    ));
+    for (const stageEntry of policyStages) {
+        const errors = Array.isArray(stageEntry.errors) ? stageEntry.errors : [];
+        const fallbackAttempts = Array.isArray(stageEntry.fallback_attempts) ? stageEntry.fallback_attempts : [];
+        fallbackUsed = fallbackUsed || !!stageEntry.fallback_used || errors.length > 0;
+        const candidates = [...errors, ...fallbackAttempts].reverse();
+        for (const candidate of candidates) {
+            const failure = readLlmExecutionFailureCandidate(candidate);
+            if (failure) {
+                latestObservedFailure = failure;
+                break;
+            }
         }
     }
 
+    const latestFallbackAttempts = Array.isArray(latestStage?.fallback_attempts)
+        ? latestStage.fallback_attempts
+        : [];
+    const latestStageSucceeded = !!(
+        latestStage?.selected
+        && typeof latestStage.selected === 'object'
+    ) || latestFallbackAttempts.some((attempt) => {
+        const status = (typeof attempt?.status === 'string') ? attempt.status.trim().toLowerCase() : '';
+        return ['ok', 'success', 'succeeded', 'completed'].includes(status) || attempt?.success === true;
+    });
+    const latestStageErrors = Array.isArray(latestStage?.errors) ? latestStage.errors : [];
+    const latestStageFailureCandidates = [
+        ...latestStageErrors,
+        ...latestFallbackAttempts,
+    ].reverse();
+    let latestStageFailure = null;
+    for (const candidate of latestStageFailureCandidates) {
+        latestStageFailure = readLlmExecutionFailureCandidate(candidate);
+        if (latestStageFailure) {
+            break;
+        }
+    }
+
+    const terminalCallFailure = readLlmExecutionFailureCandidate(terminalCall);
+    const executionSucceeded = terminalCall
+        ? terminalCallSucceeded
+        : latestStageSucceeded;
+    if (executionSucceeded) {
+        return {
+            executionSucceeded: true,
+            fallbackUsed,
+            failureKind: null,
+            failureReason: null,
+            recoveredFailureKind: latestObservedFailure?.failureKind || null,
+            recoveredFailureReason: latestObservedFailure?.failureReason || null,
+        };
+    }
+
+    const terminalFailure = terminalCallFailure || latestStageFailure;
     return {
-        fallbackUsed: false,
-        failureKind: null,
-        failureReason: null,
+        executionSucceeded: false,
+        fallbackUsed,
+        failureKind: terminalFailure?.failureKind || null,
+        failureReason: terminalFailure?.failureReason || null,
+        recoveredFailureKind: null,
+        recoveredFailureReason: null,
     };
 }
 
@@ -476,7 +743,7 @@ function getTurnOutputHealthLlmExecutionFailure(turnOutputHealth) {
     return issue ? issue.message.trim() : null;
 }
 
-function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
+function buildLatestLlmExecutionTelemetrySummary(turnId, debugData, executionContextBinding = null) {
     if (!debugData || typeof debugData !== 'object') {
         return null;
     }
@@ -532,15 +799,16 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
         : null;
     const turnOutputHealth = getTurnOutputHealth(debugData);
     const warnings = deriveLlmDebugWarnings(debugData);
-    const failure = extractLatestLlmExecutionFailure(debugData.aux_llm_calls);
+    const failure = extractLatestLlmExecutionFailure(debugData.aux_llm_calls, rawCalls);
     const stageSelection = extractLatestStageModelSelection(debugData.aux_llm_calls);
-    const callNoteIndicatesFallback = rawCalls.some((call) => (
-        typeof call?.note === 'string'
-        && call.note.toLowerCase().includes('trying fallback')
-    ));
-    const fallbackUsed = !!failure.fallbackUsed || callNoteIndicatesFallback;
+    const fallbackUsed = !!failure.fallbackUsed;
     const outputHealthLlmFailure = getTurnOutputHealthLlmExecutionFailure(turnOutputHealth);
-    const primaryFailureReason = failure.failureReason || topLevelError || outputHealthLlmFailure || null;
+    const primaryFailureReason = topLevelError || outputHealthLlmFailure || failure.failureReason || null;
+    const primaryFailureKind = (
+        failure.failureKind
+        && (!topLevelError || topLevelError === failure.failureReason)
+        && (!outputHealthLlmFailure || outputHealthLlmFailure === failure.failureReason)
+    ) ? failure.failureKind : null;
 
     const effectiveRequestedModel = requestedModel || stageSelection.requestedModel || null;
     const effectiveActualModel = actualModel || stageSelection.actualModel || null;
@@ -551,6 +819,7 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
         && !effectiveActualModel
         && !effectiveActualProvider
         && !primaryFailureReason
+        && !failure.recoveredFailureReason
         && warnings.length === 0
     ) {
         return null;
@@ -558,6 +827,9 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
 
     return {
         schema_version: LATEST_LLM_EXECUTION_TELEMETRY_SCHEMA_VERSION,
+        context_binding: executionContextBinding && typeof executionContextBinding === 'object'
+            ? { ...executionContextBinding }
+            : null,
         turn_id: typeof turnId === 'string' ? turnId : null,
         timestamp: debugData.timestamp ?? null,
         requested_model: effectiveRequestedModel,
@@ -565,9 +837,12 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
         actual_provider: effectiveActualProvider,
         call_models: uniqueCallModels,
         call_providers: uniqueCallProviders,
+        execution_succeeded: failure.executionSucceeded === true,
         fallback_used: fallbackUsed,
-        primary_failure_kind: failure.failureKind || null,
+        primary_failure_kind: primaryFailureKind,
         primary_failure_reason: primaryFailureReason,
+        recovered_failure_kind: failure.recoveredFailureKind || null,
+        recovered_failure_reason: failure.recoveredFailureReason || null,
         error: topLevelError,
         execution_stage: stageSelection.stage,
         policy_stage: stageSelection.policyStage,
@@ -581,9 +856,20 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
 
 function publishLatestLlmExecutionTelemetry() {
     const latestEntry = getLatestLlmDebugEntryForExport();
-    const summary = latestEntry
-        ? buildLatestLlmExecutionTelemetrySummary(latestEntry.turnId, latestEntry.debugData)
+    const currentBinding = synchroniseLlmExecutionContext();
+    let summary = latestEntry
+        ? buildLatestLlmExecutionTelemetrySummary(
+            latestEntry.turnId,
+            latestEntry.debugData,
+            latestEntry.executionContextBinding,
+        )
         : null;
+    if (
+        summary?.context_binding?.generation
+        && summary.context_binding.generation !== currentBinding.generation
+    ) {
+        summary = null;
+    }
 
     try {
         window.__vonLatestLlmExecutionTelemetry = summary;
@@ -20814,6 +21100,7 @@ function updateHistoryBanner() {
 }
 
 function setActiveChatSession(sessionId, sessionName) {
+    const previousSessionId = activeChatSessionId;
     activeChatSessionId = (typeof sessionId === 'string' && sessionId.trim())
         ? sessionId.trim()
         : null;
@@ -20821,6 +21108,10 @@ function setActiveChatSession(sessionId, sessionName) {
         ? sessionName.trim()
         : null;
     activeChatSessionOwnerId = null;
+
+    if (previousSessionId !== activeChatSessionId) {
+        synchroniseLlmExecutionContext({ reason: 'conversation_session_changed' });
+    }
 
     if (activeChatSessionId) {
         const cachedSession = sessionTabsCache.find(
@@ -26611,28 +26902,42 @@ function buildWorkflowStatusStreamQuery() {
     return params;
 }
 
+function applySharedWorkflowCapabilityIndexPayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return;
+    }
+    workflowCapabilityIndexState.error = '';
+    workflowCapabilityIndexState.lastFetchedAt = Date.now();
+    syncWorkflowCapabilityIndexPolling();
+    renderWorkflowStatusBody();
+}
+
+function ensureWorkflowCapabilityIndexStatusSubscription() {
+    if (workflowCapabilityIndexStatusUnsubscribe) {
+        return;
+    }
+    workflowCapabilityIndexStatusUnsubscribe = subscribeToWorkflowCapabilityIndexStatus(
+        applySharedWorkflowCapabilityIndexPayload
+    );
+}
+
 function applyWorkflowCapabilityIndexPayload(payload) {
     if (!payload || typeof payload !== 'object') {
         return;
     }
-    workflowCapabilityIndexState.payload = { ...payload };
-    workflowCapabilityIndexState.error = '';
-    workflowCapabilityIndexState.lastFetchedAt = Date.now();
-    syncWorkflowCapabilityIndexPolling();
+    ensureWorkflowCapabilityIndexStatusSubscription();
+    const previousPayload = getLatestWorkflowCapabilityIndexStatus();
+    const acceptedPayload = acceptSharedWorkflowCapabilityIndexStatus(payload);
+    // Event dispatch is best effort in the shared coordinator. Apply the
+    // accepted (possibly newer) snapshot locally as well so this monitor stays
+    // correct in browsers where cross-frame event dispatch is unavailable.
+    if (acceptedPayload !== previousPayload) {
+        applySharedWorkflowCapabilityIndexPayload(acceptedPayload);
+    }
 }
 
 function getWorkflowCapabilityIndexPayload() {
-    if (workflowCapabilityIndexState.payload && typeof workflowCapabilityIndexState.payload === 'object') {
-        return workflowCapabilityIndexState.payload;
-    }
-    const definitionsPayload = (
-        workflowDefinitionsState.lastPayload && typeof workflowDefinitionsState.lastPayload === 'object'
-    ) ? workflowDefinitionsState.lastPayload : null;
-    const capabilityPayload = definitionsPayload?.capability_index;
-    if (capabilityPayload && typeof capabilityPayload === 'object') {
-        return capabilityPayload;
-    }
-    return null;
+    return getLatestWorkflowCapabilityIndexStatus();
 }
 
 function clearWorkflowCapabilityIndexPollTimer() {
@@ -26761,60 +27066,68 @@ function describeWorkflowCapabilityIndexStatusFetchError(err) {
 async function refreshWorkflowCapabilityIndexStatus({ silent = false, force = false } = {}) {
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
-    if (workflowCapabilityIndexRefreshPromise) {
-        return workflowCapabilityIndexRefreshPromise;
-    }
+    ensureWorkflowCapabilityIndexStatusSubscription();
     const now = Date.now();
+    const currentPayload = getWorkflowCapabilityIndexPayload();
     if (
         !force
         && silent
-        && workflowCapabilityIndexState.payload
+        && currentPayload
         && Number.isFinite(workflowCapabilityIndexState.lastFetchedAt)
         && workflowCapabilityIndexState.lastFetchedAt > 0
         && (now - workflowCapabilityIndexState.lastFetchedAt) < WORKFLOW_CAPABILITY_INDEX_SILENT_REFRESH_COOLDOWN_MS
     ) {
-        return workflowCapabilityIndexState.payload;
+        return currentPayload;
     }
-    if (workflowCapabilityIndexState.loading) return workflowCapabilityIndexState.payload;
 
     workflowCapabilityIndexState.loading = true;
     if (!silent) {
         renderWorkflowStatusBody();
     }
 
-    workflowCapabilityIndexRefreshPromise = (async () => {
-        const resp = await fetchWithTimeout(
-            force
-                ? '/api/workflows/capability-index/status?nocache=1'
-                : '/api/workflows/capability-index/status',
-            {
+    let refreshError = null;
+    const fetchImpl = async (url, options = {}) => {
+        try {
+            const resp = await fetchWithTimeout(url, {
+                ...options,
                 method: 'GET',
-                headers: buildChatFetchHeaders(),
+                headers: {
+                    ...(options.headers || {}),
+                    ...buildChatFetchHeaders()
+                },
                 timeoutMs: WORKFLOW_CAPABILITY_INDEX_FETCH_TIMEOUT_MS
+            });
+            if (!resp.ok) {
+                const responsePayload = await resp.json().catch(() => null);
+                const detail = (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
+                    ? responsePayload.detail.trim()
+                    : '';
+                throw new Error(detail || `HTTP ${resp.status}`);
             }
-        );
-        const responsePayload = await resp.json().catch(() => null);
-        if (!resp.ok) {
-            const detail = (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
-                ? responsePayload.detail.trim()
-                : '';
-            throw new Error(detail || `HTTP ${resp.status}`);
+            return resp;
+        } catch (err) {
+            refreshError = err;
+            const message = describeWorkflowCapabilityIndexStatusFetchError(err);
+            workflowCapabilityIndexState.error = `Could not load capability index status: ${message}`;
+            if (!silent) {
+                console.warn('[workflowStatus] Capability index status fetch failed', err);
+            }
+            throw err;
         }
-        applyWorkflowCapabilityIndexPayload(responsePayload);
-        return responsePayload;
-    })();
+    };
 
     try {
-        return await workflowCapabilityIndexRefreshPromise;
-    } catch (err) {
-        const message = describeWorkflowCapabilityIndexStatusFetchError(err);
-        workflowCapabilityIndexState.error = `Could not load capability index status: ${message}`;
-        if (!silent) {
-            console.warn('[workflowStatus] Capability index status fetch failed', err);
+        const payload = await refreshSharedWorkflowCapabilityIndexStatus({ force, fetchImpl });
+        if (
+            payload
+            && typeof payload === 'object'
+            && !refreshError
+            && payload !== currentPayload
+        ) {
+            applySharedWorkflowCapabilityIndexPayload(payload);
         }
-        return null;
+        return payload;
     } finally {
-        workflowCapabilityIndexRefreshPromise = null;
         workflowCapabilityIndexState.loading = false;
         renderWorkflowStatusBody();
     }
@@ -27644,9 +27957,11 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
         workflowDefinitionsState.lastFetchedAt = Date.now();
         workflowDefinitionsState.error = '';
         workflowDefinitionsState.notice = '';
-        if (data?.capability_index && typeof data.capability_index === 'object') {
-            applyWorkflowCapabilityIndexPayload(data.capability_index);
-        }
+        // Keep an embedded capability projection in the definitions snapshot for
+        // diagnostics only. Definitions are actor-scoped and may complete after
+        // the browser actor changes, so they must not publish shared display
+        // status. The canonical capability-status coordinator is the sole
+        // authority for the footer, Settings card, and workflow monitor warning.
         workflowDefinitionsState.cacheState = (
             typeof data?.cache?.state === 'string' && data.cache.state.trim() === 'stale'
         ) ? 'stale' : 'fresh';
@@ -27824,6 +28139,7 @@ function initializeWorkflowStatusPanel() {
     if (!panel) return;
     if (workflowStatusPanelInitialised) return;
     workflowStatusPanelInitialised = true;
+    ensureWorkflowCapabilityIndexStatusSubscription();
     // Keep the diagnostic surface compact on first load; users can unfurl it
     // when they need the full operational detail.
     workflowStatusGroupUiState.globallyFurled = true;
@@ -27983,7 +28299,15 @@ function handleRealtimeConnectionsVisibilityChange() {
     publishRealtimeConnectionTelemetry('document_visible');
 }
 
+function invalidateLlmExecutionContextForOrgSwitch() {
+    return synchroniseLlmExecutionContext({ force: true, reason: 'organisation_context_changed' });
+}
+
 async function handleOrgSwitchForChatTab(_detail) {
+    // An organisation change invalidates the previous actor-scoped execution
+    // even when no conversation is selected (and therefore setting the active
+    // session to null below is a no-op).
+    invalidateLlmExecutionContextForOrgSwitch();
     const container = getChatSessionTabsContainer();
     showAllConversationHistoryMatches = false;
     sessionTabsCache = [];
@@ -28054,6 +28378,7 @@ try {
 }
 
 function handleAuthStatusChangeForChatTab(detail) {
+    synchroniseLlmExecutionContext({ force: true, reason: 'authenticated_actor_changed' });
     loadHiddenChatSessionIds();
     loadPinnedChatSessionIds();
     loadAgentCreatedSessionsVisibilityPreference();
@@ -28115,6 +28440,10 @@ export function initializeChatTab() {
     // Reload hidden sessions when user changes (settings change event)
     try {
         document.addEventListener('von:settingsChanged', () => {
+            // Model and actor controls share this event. Invalidate the display
+            // snapshot immediately; retained debug data remains available for
+            // diagnostics and will be rebound only when current history loads.
+            synchroniseLlmExecutionContext({ force: true, reason: 'settings_context_changed' });
             const newHiddenKey = getHiddenSessionsStorageKey();
             const newPinnedKey = getPinnedSessionsStorageKey();
             const newAgentCreatedVisibilityKey = getAgentCreatedSessionsVisibleStorageKey();
@@ -28858,13 +29187,14 @@ function getLatestLlmDebugEntryForExport() {
 
     let latest = null;
     for (const [turnId, debugData] of llmDebugData.entries()) {
+        const executionContextBinding = llmDebugExecutionContextBindings.get(turnId) || null;
         if (!latest) {
-            latest = { turnId, debugData, timestamp: getTurnTimestamp(turnId) };
+            latest = { turnId, debugData, executionContextBinding, timestamp: getTurnTimestamp(turnId) };
             continue;
         }
         const nextTimestamp = getTurnTimestamp(turnId);
         if (nextTimestamp >= latest.timestamp) {
-            latest = { turnId, debugData, timestamp: nextTimestamp };
+            latest = { turnId, debugData, executionContextBinding, timestamp: nextTimestamp };
         }
     }
     return latest;
@@ -30202,6 +30532,7 @@ async function handleSendPrompt(options = {}) {
         : null;
 
     const clientRequestId = createClientRequestId();
+    const executionContextBinding = synchroniseLlmExecutionContext();
     const request = {
         abortController: new AbortController(),
         sessionId: targetSessionId,
@@ -30213,6 +30544,7 @@ async function handleSendPrompt(options = {}) {
         selectionEnd,
         aborted: false,
         clientRequestId,
+        executionContextBinding,
         thinkingStartedAtMs: Date.now(),
         activityHistory: [],
         toolUseProgressHistory: [],
@@ -30341,7 +30673,7 @@ async function handleSendPrompt(options = {}) {
             });
             enriched.foreground_delivery_source = source;
             syncThinkingCriticOutputFromSource(request, enriched);
-            setLlmDebugDataEntry(assistantTurnId, enriched);
+            setLlmDebugDataEntry(assistantTurnId, enriched, request.executionContextBinding);
             if (isRequestVisible()) {
                 refreshThinkingCardProgressUi(request);
             }
@@ -30412,7 +30744,7 @@ async function handleSendPrompt(options = {}) {
         const errorTurnId = `e-${Date.now()}`;
         if (data?.llm_debug) {
             syncThinkingCriticOutputFromSource(request, data.llm_debug);
-            setLlmDebugDataEntry(errorTurnId, data.llm_debug);
+            setLlmDebugDataEntry(errorTurnId, data.llm_debug, request.executionContextBinding);
             if (isRequestVisible()) {
                 refreshThinkingCardProgressUi(request);
             }
@@ -33261,23 +33593,26 @@ export async function __testOnly_refreshWorkflowCapabilityIndexStatus(options = 
     return refreshWorkflowCapabilityIndexStatus(options);
 }
 export function __testOnly_resetWorkflowCapabilityIndexState() {
-    workflowCapabilityIndexRefreshPromise = null;
     clearWorkflowCapabilityIndexPollTimer();
+    if (workflowCapabilityIndexStatusUnsubscribe) {
+        workflowCapabilityIndexStatusUnsubscribe();
+        workflowCapabilityIndexStatusUnsubscribe = null;
+    }
+    __testOnly_resetWorkflowCapabilityIndexStatusCoordinator();
     workflowCapabilityIndexState.loading = false;
     workflowCapabilityIndexState.error = '';
-    workflowCapabilityIndexState.payload = null;
     workflowCapabilityIndexState.lastFetchedAt = 0;
 }
 export function __testOnly_setWorkflowCapabilityIndexPayload(payload = null) {
     if (payload && typeof payload === 'object') {
-        workflowCapabilityIndexState.payload = { ...payload };
-        workflowCapabilityIndexState.lastFetchedAt = Date.now();
+        applyWorkflowCapabilityIndexPayload(payload);
     } else {
-        workflowCapabilityIndexState.payload = null;
+        __testOnly_resetWorkflowCapabilityIndexStatusCoordinator();
         workflowCapabilityIndexState.lastFetchedAt = 0;
+        syncWorkflowCapabilityIndexPolling();
+        renderWorkflowStatusBody();
     }
     workflowCapabilityIndexState.error = '';
-    syncWorkflowCapabilityIndexPolling();
 }
 export function __testOnly_setWorkflowMonitorGloballyFurled(furled) {
     setWorkflowMonitorGloballyFurled(furled);
@@ -33500,6 +33835,12 @@ export function __testOnly_getLatestLlmExecutionTelemetry() {
     } catch (_) {
         return null;
     }
+}
+export function __testOnly_invalidateLlmExecutionContext(reason = 'test_context_change') {
+    return synchroniseLlmExecutionContext({ force: true, reason });
+}
+export function __testOnly_invalidateLlmExecutionContextForOrgSwitch() {
+    return invalidateLlmExecutionContextForOrgSwitch();
 }
 export function __testOnly_setTranscriptTurns(turns = []) {
     transcriptTurns.length = 0;

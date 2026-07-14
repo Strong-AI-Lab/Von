@@ -1,6 +1,12 @@
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
 import { applyLocalModelPreferenceOverlay, getEffectiveLocalModelPreference } from './utils/localModelPreferences.js';
+import { getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import {
+  getLatestWorkflowCapabilityIndexStatus,
+  refreshWorkflowCapabilityIndexStatus,
+  subscribeToWorkflowCapabilityIndexStatus,
+} from './utils/workflowCapabilityStatusCoordinator.js';
 
 export const elements = {};
 
@@ -257,14 +263,26 @@ export function getUserClientId() {
 }
 
 export function getCurrentUserConceptId() {
-  const stored = readStoredJson('von_current_user');
+  const stored = readSessionScopedJson('von_current_user');
   return stored?.concept_id || null;
+}
+
+function buildFooterActorHeaders(extraHeaders = {}) {
+  const userConceptId = getCurrentUserConceptId();
+  return {
+    [WINDOW_SESSION_HEADER]: getWindowSessionId(),
+    ...(userConceptId ? { 'X-User-Concept-ID': userConceptId } : {}),
+    ...extraHeaders,
+  };
 }
 
 // Bound non-critical footer calls so one stalled endpoint cannot block footer rendering indefinitely.
 async function fetchJsonWithTimeout(url, options = {}) {
   const { timeoutMs = 6000, ...fetchOptions } = options || {};
-  const init = { ...fetchOptions };
+  const init = {
+    ...fetchOptions,
+    headers: buildFooterActorHeaders(fetchOptions.headers || {}),
+  };
   let timeoutId = null;
 
   try {
@@ -286,7 +304,7 @@ async function fetchJsonWithTimeout(url, options = {}) {
 async function getSettings() {
   try {
     // Pass user context to get properly resolved LLM setting (user > org precedence, no global)
-    const storedUser = readStoredJson('von_current_user');
+    const storedUser = readSessionScopedJson('von_current_user');
     const storedOrg = readSessionScopedJson('von_current_org');
     const userConceptId = storedUser?.concept_id;
     const orgConceptId = storedOrg?.concept_id;
@@ -311,8 +329,7 @@ async function getSettings() {
   return {};
 }
 
-// Helpers to access current user / organisation with both name and concept id
-function readStoredJson(key) { try { return parseStoredContextValue(localStorage.getItem(key)); } catch { return null; } }
+// Helpers to access current user / organisation with both name and concept id.
 // JVNAUTOSCI-1011: For window-scoped values, check sessionStorage first (per-window), then localStorage (shared fallback)
 function readSessionScopedJson(key) {
   try {
@@ -322,7 +339,7 @@ function readSessionScopedJson(key) {
   } catch { return null; }
 }
 async function getCurrentUserInfo(settingsOverride = null) {
-  const stored = readStoredJson('von_current_user');
+  const stored = readSessionScopedJson('von_current_user');
   if (stored?.id || stored?.concept_id) {
     return { id: stored.id || null, conceptId: stored.concept_id || null, name: stored.name || null };
   }
@@ -482,7 +499,8 @@ function scheduleFooterWorkflowCapabilityRefresh() {
   footerWorkflowCapabilityRetryTimerId = setTimeout(() => {
     footerWorkflowCapabilityRetryTimerId = null;
     if (document.getElementById('modelInfoFooter')) {
-      void setModelInfoFooterText();
+      void refreshWorkflowCapabilityIndexStatus();
+      scheduleFooterWorkflowCapabilityRefresh();
     }
   }, FOOTER_WORKFLOW_CAPABILITY_RETRY_MS);
 }
@@ -512,13 +530,95 @@ function normaliseFooterTelemetryStrings(values) {
  */
 function normaliseModelNameForComparison(name) {
   if (!name || typeof name !== 'string') return '';
-  return name.trim().replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  return name
+    .trim()
+    .replace(/^(?:openai|ollama|gemini)[/:]/i, '')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .toLowerCase();
 }
 
-function readLatestLlmExecutionTelemetry() {
+function normaliseLlmExecutionProvider(value) {
+  return (typeof value === 'string' && value.trim()) ? value.trim().toLowerCase() : '';
+}
+
+function normaliseLlmExecutionContextValue(value) {
+  return (typeof value === 'string' && value.trim()) ? value.trim() : null;
+}
+
+function modelReferencesMatch(left, right) {
+  const leftModel = normaliseModelNameForComparison(left);
+  const rightModel = normaliseModelNameForComparison(right);
+  return !!leftModel && !!rightModel && leftModel === rightModel;
+}
+
+function boundContextValueMatches(binding, key, currentValue) {
+  if (!binding || !Object.prototype.hasOwnProperty.call(binding, key)) return true;
+  return normaliseLlmExecutionContextValue(binding[key])
+    === normaliseLlmExecutionContextValue(currentValue);
+}
+
+function llmExecutionTelemetryMatchesCurrentContext(raw, currentContext = {}) {
+  const binding = raw?.context_binding && typeof raw.context_binding === 'object'
+    ? raw.context_binding
+    : null;
+  const configuredModel = normaliseLlmExecutionContextValue(currentContext.configuredModel);
+  const configuredProvider = normaliseLlmExecutionProvider(currentContext.configuredProvider);
+  const actualModel = normaliseLlmExecutionContextValue(
+    raw?.actual_model || (Array.isArray(raw?.call_models) ? raw.call_models.at(-1) : null),
+  );
+  const actualProvider = normaliseLlmExecutionProvider(
+    raw?.actual_provider || (Array.isArray(raw?.call_providers) ? raw.call_providers.at(-1) : null),
+  );
+
+  // Old snapshots have no actor/configuration envelope. They are useful for a
+  // same-model live-success/probe disagreement, but must never paint a model
+  // mismatch from a previous selection as a current fatal state.
+  if (!binding) {
+    return !!configuredModel
+      && !!actualModel
+      && modelReferencesMatch(actualModel, configuredModel)
+      && (!actualProvider || !configuredProvider || actualProvider === configuredProvider);
+  }
+
+  if (!boundContextValueMatches(binding, 'window_session_id', currentContext.windowSessionId)) return false;
+  if (!boundContextValueMatches(binding, 'user_concept_id', currentContext.userConceptId)) return false;
+  if (!boundContextValueMatches(binding, 'organisation_concept_id', currentContext.organisationConceptId)) return false;
+  if (!boundContextValueMatches(binding, 'conversation_session_id', currentContext.conversationSessionId)) return false;
+
+  const currentGeneration = Number(currentContext.generation);
+  const boundGeneration = Number(binding.generation);
+  if (
+    Number.isFinite(currentGeneration)
+    && currentGeneration > 0
+    && Number.isFinite(boundGeneration)
+    && boundGeneration > 0
+    && currentGeneration !== boundGeneration
+  ) {
+    return false;
+  }
+
+  const boundConfiguration = binding.configuration && typeof binding.configuration === 'object'
+    ? binding.configuration
+    : {};
+  const boundModel = normaliseLlmExecutionContextValue(
+    boundConfiguration.model || raw?.requested_model,
+  );
+  const boundProvider = normaliseLlmExecutionProvider(boundConfiguration.provider);
+  if (configuredModel && boundModel && !modelReferencesMatch(configuredModel, boundModel)) return false;
+  if (configuredProvider && boundProvider && configuredProvider !== boundProvider) return false;
+
+  // A partially bound record still needs model evidence. This preserves valid
+  // represented fallbacks (requested model matches current configuration) while
+  // rejecting an ambiguous stale mismatch.
+  if (configuredModel && !boundModel && !modelReferencesMatch(actualModel, configuredModel)) return false;
+  return true;
+}
+
+function readLatestLlmExecutionTelemetry(currentContext = {}) {
   try {
     const raw = window.__vonLatestLlmExecutionTelemetry;
     if (!raw || typeof raw !== 'object') return null;
+    if (!llmExecutionTelemetryMatchesCurrentContext(raw, currentContext)) return null;
     const callModels = normaliseFooterTelemetryStrings(raw.call_models);
     const callProviders = normaliseFooterTelemetryStrings(raw.call_providers);
     const requestedModel = (typeof raw.requested_model === 'string' && raw.requested_model.trim())
@@ -535,6 +635,12 @@ function readLatestLlmExecutionTelemetry() {
       : null;
     const primaryFailureReason = (typeof raw.primary_failure_reason === 'string' && raw.primary_failure_reason.trim())
       ? raw.primary_failure_reason.trim()
+      : null;
+    const recoveredFailureKind = (typeof raw.recovered_failure_kind === 'string' && raw.recovered_failure_kind.trim())
+      ? raw.recovered_failure_kind.trim()
+      : null;
+    const recoveredFailureReason = (typeof raw.recovered_failure_reason === 'string' && raw.recovered_failure_reason.trim())
+      ? raw.recovered_failure_reason.trim()
       : null;
     const error = (typeof raw.error === 'string' && raw.error.trim())
       ? raw.error.trim()
@@ -553,7 +659,15 @@ function readLatestLlmExecutionTelemetry() {
       ? raw.explicit_stage_model_override_origin.trim()
       : null;
     const warnings = normaliseFooterTelemetryStrings(raw.warnings).slice(0, 3);
-    if (!requestedModel && !actualModel && !actualProvider && !primaryFailureReason && !error && warnings.length === 0) {
+    if (
+      !requestedModel
+      && !actualModel
+      && !actualProvider
+      && !primaryFailureReason
+      && !recoveredFailureReason
+      && !error
+      && warnings.length === 0
+    ) {
       return null;
     }
     return {
@@ -562,9 +676,12 @@ function readLatestLlmExecutionTelemetry() {
       actualProvider,
       callModels,
       callProviders,
+      executionSucceeded: raw.execution_succeeded === true,
       fallbackUsed: !!raw.fallback_used,
       primaryFailureKind,
       primaryFailureReason,
+      recoveredFailureKind,
+      recoveredFailureReason,
       error,
       executionStage,
       policyStage,
@@ -573,6 +690,9 @@ function readLatestLlmExecutionTelemetry() {
       explicitStageModelOverride: raw.explicit_stage_model_override === true,
       explicitStageModelOverrideOrigin,
       warnings,
+      contextBinding: raw.context_binding && typeof raw.context_binding === 'object'
+        ? raw.context_binding
+        : null,
     };
   } catch (_) {
     return null;
@@ -597,6 +717,9 @@ try {
   document.addEventListener('von:latestLlmExecutionTelemetryUpdated', () => {
     scheduleFooterModelInfoRefresh();
   });
+  subscribeToWorkflowCapabilityIndexStatus(() => {
+    scheduleFooterModelInfoRefresh();
+  }, { emitCurrent: false });
 } catch (_) {
   // Ignore missing document in tests or constrained environments.
 }
@@ -977,6 +1100,7 @@ function normaliseWorkflowCapabilityIndexFooterStatus(report) {
     summary,
     detail,
     title: titleParts.join('\n'),
+    checkedAtUtc: String(report.checked_at_utc || '').trim(),
   };
 }
 
@@ -1033,8 +1157,39 @@ export async function setModelInfoFooterText() {
     readinessIssues.add('llm');
   }
 
-  const executionTelemetry = readLatestLlmExecutionTelemetry();
-  const workflowCapabilityStatus = normaliseWorkflowCapabilityIndexFooterStatus(settings.workflow_capability_index);
+  const configuredProvider = (typeof effectiveLlm?.provider === 'string' && effectiveLlm.provider.trim())
+    ? effectiveLlm.provider.trim()
+    : ((typeof llmInfo?.provider === 'string' && llmInfo.provider.trim()) ? llmInfo.provider.trim() : '');
+  const configuredModel = (typeof effectiveLlm?.model === 'string' && effectiveLlm.model.trim())
+    ? effectiveLlm.model.trim()
+    : '';
+  const currentChatExecutionContext = (
+    typeof window !== 'undefined'
+    && window.__vonCurrentLlmExecutionContextBinding
+    && typeof window.__vonCurrentLlmExecutionContextBinding === 'object'
+  ) ? window.__vonCurrentLlmExecutionContextBinding : {};
+  const executionTelemetry = readLatestLlmExecutionTelemetry({
+    windowSessionId: getWindowSessionId(),
+    userConceptId: userInfo?.conceptId || null,
+    organisationConceptId: orgInfo?.conceptId || null,
+    conversationSessionId: currentChatExecutionContext.conversation_session_id,
+    generation: currentChatExecutionContext.generation,
+    configuredProvider,
+    configuredModel,
+  });
+  const sharedWorkflowCapabilityStatus = getLatestWorkflowCapabilityIndexStatus();
+  if (!sharedWorkflowCapabilityStatus) {
+    // The actor-safe endpoint is the sole display authority. Let the rest of the
+    // footer render immediately; the shared update event will repaint this badge.
+    void refreshWorkflowCapabilityIndexStatus();
+    scheduleFooterWorkflowCapabilityRefresh();
+  }
+  const workflowCapabilityStatus = normaliseWorkflowCapabilityIndexFooterStatus(
+    sharedWorkflowCapabilityStatus,
+  );
+  footer.dataset.workflowCapabilityCheckedAtUtc = String(
+    sharedWorkflowCapabilityStatus?.checked_at_utc || '',
+  ).trim();
 
   // Determine LLM status styles
   const status = llmInfo?.status || 'unknown';
@@ -1136,6 +1291,7 @@ export async function setModelInfoFooterText() {
   function makeActionButton(labelPrefix, displayName, onClick, options = {}) {
     const span = document.createElement('span');
     span.className = 'footer-segment';
+    setKeptNativeTitle(span, options.title);
     const prefix = document.createElement('span');
     prefix.className = 'footer-label-inline';
     prefix.textContent = labelPrefix + ': ';
@@ -1157,35 +1313,75 @@ export async function setModelInfoFooterText() {
   }
 
   {
-    const configuredProvider = (typeof effectiveLlm?.provider === 'string' && effectiveLlm.provider.trim())
-      ? effectiveLlm.provider.trim()
-      : ((typeof llmInfo?.provider === 'string' && llmInfo.provider.trim()) ? llmInfo.provider.trim() : '');
-    const configuredModel = (typeof effectiveLlm?.model === 'string' && effectiveLlm.model.trim())
-      ? effectiveLlm.model.trim()
+    const probedModel = (typeof llmInfo?.model === 'string' && llmInfo.model.trim())
+      ? llmInfo.model.trim()
       : '';
     const requestedModel = executionTelemetry?.requestedModel || configuredModel;
     const actualModel = executionTelemetry?.actualModel || '';
     const actualProvider = executionTelemetry?.actualProvider || '';
+    const configuredComparisonModel = configuredModel || probedModel;
     const actualDiffersFromRequested = !!actualModel && !!requestedModel
       && normaliseModelNameForComparison(actualModel) !== normaliseModelNameForComparison(requestedModel);
-    const actualDiffersFromConfiguredProvider = !!actualProvider && !!configuredProvider && actualProvider !== configuredProvider;
+    const actualDiffersFromConfiguredProvider = !!actualProvider && !!configuredProvider
+      && actualProvider.trim().toLowerCase() !== configuredProvider.trim().toLowerCase();
     const failureReason = executionTelemetry?.primaryFailureReason || executionTelemetry?.error || '';
+    const recoveredFailureReason = executionTelemetry?.recoveredFailureReason || '';
     const explicitStageModelOverride = !!executionTelemetry?.explicitStageModelOverride;
+    const activeLlmSelectionModes = new Set([
+      'active_llm_default',
+      'preferred_default_model',
+      'policy_primary_active_llm',
+      'policy_fallback_active_llm',
+    ]);
+    const representedAlternateSelectionModes = new Set([
+      'enabled_settings_candidate',
+      'policy_candidate',
+      'policy_primary_override',
+      'policy_fallback_override',
+    ]);
+    const representedAlternateSelection = representedAlternateSelectionModes.has(
+      executionTelemetry?.selectionMode,
+    )
+      && !executionTelemetry.followsActiveLlm
+      && !activeLlmSelectionModes.has(executionTelemetry.selectionMode);
+    const expectedModelChange = !!executionTelemetry?.fallbackUsed
+      || explicitStageModelOverride
+      || representedAlternateSelection;
     const unexpectedModelMismatch = (
       actualDiffersFromRequested || actualDiffersFromConfiguredProvider
-    ) && !explicitStageModelOverride;
+    ) && !expectedModelChange;
+    const successfulLiveExecutionMatchesConfigured = !!executionTelemetry?.executionSucceeded
+      && !!actualModel
+      && !!configuredComparisonModel
+      && normaliseModelNameForComparison(actualModel) === normaliseModelNameForComparison(configuredComparisonModel)
+      && (!actualProvider || !configuredProvider
+        || actualProvider.trim().toLowerCase() === configuredProvider.trim().toLowerCase());
+    const probeDisagreesWithSuccessfulExecution = status === 'error'
+      && successfulLiveExecutionMatchesConfigured
+      && !failureReason;
     const executionOverlayActive = !localModelUnavailable && !!executionTelemetry && (
       !!executionTelemetry.fallbackUsed
       || actualDiffersFromRequested
       || actualDiffersFromConfiguredProvider
       || explicitStageModelOverride
+      || representedAlternateSelection
       || !!failureReason
+      || !!recoveredFailureReason
+      || probeDisagreesWithSuccessfulExecution
     );
-    const executionStatusLabel = explicitStageModelOverride && !failureReason
-      ? 'Stage Override Active'
-      : executionTelemetry?.primaryFailureKind === 'quota_exhausted'
+    const executionStatusLabel = failureReason && executionTelemetry?.primaryFailureKind === 'quota_exhausted'
       ? 'Quota Exhausted'
-      : (executionTelemetry?.fallbackUsed ? 'Fallback Active' : (failureReason ? 'Execution Error' : 'Last Execution'));
+      : failureReason
+      ? 'Execution Error'
+      : recoveredFailureReason
+      ? 'Fallback Recovered'
+      : probeDisagreesWithSuccessfulExecution
+      ? 'Live Execution Succeeded'
+      : explicitStageModelOverride
+      ? 'Stage Override Active'
+      : representedAlternateSelection
+      ? 'Model Selection Active'
+      : (executionTelemetry?.fallbackUsed ? 'Fallback Active' : 'Last Execution');
     const titleParts = ['Open language model settings'];
     titleParts.push(`Configured status: ${configuredStatusLabel}`);
     if (localModelUnavailable) {
@@ -1227,6 +1423,15 @@ export async function setModelInfoFooterText() {
       if (failureReason) {
         titleParts.push(`Failure reason: ${failureReason}`);
       }
+      if (executionTelemetry?.recoveredFailureKind) {
+        titleParts.push(`Recovered failure kind: ${executionTelemetry.recoveredFailureKind}`);
+      }
+      if (recoveredFailureReason) {
+        titleParts.push(`Recovered failure reason: ${recoveredFailureReason}`);
+      }
+      if (probeDisagreesWithSuccessfulExecution) {
+        titleParts.push('The configured health probe failed, but the same model completed the latest live LLM call successfully.');
+      }
       if (executionTelemetry?.warnings?.length) {
         titleParts.push(`Warnings: ${executionTelemetry.warnings.join(' | ')}`);
       }
@@ -1236,12 +1441,26 @@ export async function setModelInfoFooterText() {
       : executionOverlayActive
       ? (actualModel || requestedModel || configuredModel || 'Not Set')
       : (configuredModel || 'Not Set');
+    const accessibilityParts = [
+      `Model ${displayModelText}`,
+      `Configured status ${configuredStatusLabel}`,
+    ];
+    if (executionOverlayActive) {
+      accessibilityParts.push(`Last execution status ${executionStatusLabel}`);
+    }
+    if (failureReason) {
+      accessibilityParts.push(`Failure reason ${failureReason}`);
+    } else if (recoveredFailureReason) {
+      accessibilityParts.push(`Recovered failure reason ${recoveredFailureReason}`);
+    }
+    accessibilityParts.push('Open language model settings');
+    const modelAccessibilityLabel = accessibilityParts.join('. ');
     const modelSettingsSegment = makeActionButton(
       'Model',
       displayModelText,
       () => { openSettingsForModelControls(); },
       {
-        ariaLabel: 'Open language model settings',
+        ariaLabel: modelAccessibilityLabel,
         title: titleParts.join('\n')
       }
     );
@@ -1287,6 +1506,7 @@ export async function setModelInfoFooterText() {
       'workflow-index-status-badge',
       workflowCapabilityStatus.severity === 'fatal' ? 'fatal' : 'warning',
     );
+    workflowIndexSegment.dataset.checkedAtUtc = workflowCapabilityStatus.checkedAtUtc;
     segments.push(workflowIndexSegment);
     readinessIssues.add('workflow capability index');
     scheduleFooterWorkflowCapabilityRefresh();

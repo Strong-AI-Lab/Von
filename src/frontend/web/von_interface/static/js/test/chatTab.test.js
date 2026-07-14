@@ -735,6 +735,32 @@ describe('workflow monitor capability-index warning cartouche', () => {
         const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
         expect(exportPayload.capability_index.auto_rebuild.last_status).toBe('started');
     });
+
+    test('does not regress to an older capability snapshot accepted after a newer shared status', () => {
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: true,
+            status: 'ready',
+            summary: 'Workflow capability index ready.',
+            checked_at_utc: '2026-04-24T07:19:41.000Z'
+        });
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'building',
+            summary: 'Stale workflow capability index state.',
+            checked_at_utc: '2026-04-24T07:18:41.000Z'
+        });
+
+        __testOnly_renderWorkflowDefinitionsBody([]);
+
+        const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.capability_index).toMatchObject({
+            ready: true,
+            status: 'ready',
+            checked_at_utc: '2026-04-24T07:19:41.000Z'
+        });
+        expect(document.getElementById('workflowStatusBody').textContent)
+            .not.toContain('Stale workflow capability index state');
+    });
 });
 
 describe('workflow monitor capability-index polling and global furl', () => {
@@ -1141,6 +1167,56 @@ describe('workflow monitor definitions refresh contention handling', () => {
         );
         const successExport = __testOnly_buildWorkflowMonitorExportPayload();
         expect(successExport.monitor_state.available_notice).toBeNull();
+    });
+
+    test('keeps late actor-scoped definitions capability data out of shared status', async () => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#actor_a' }));
+        __testOnly_resetWorkflowCapabilityIndexState();
+        let resolveDefinitionsFetch;
+        global.fetch = jest.fn(() => new Promise((resolve) => {
+            resolveDefinitionsFetch = resolve;
+        }));
+
+        const actorADefinitionsRefresh = __testOnly_refreshAvailableWorkflowDefinitions();
+
+        sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#actor_b' }));
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: true,
+            status: 'ready',
+            summary: 'Actor B canonical status',
+            checked_at_utc: '2026-07-14T05:00:00Z',
+        });
+        resolveDefinitionsFetch({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            json: async () => ({
+                items: [],
+                capability_index: {
+                    ready: false,
+                    status: 'error',
+                    summary: 'Late actor A projection',
+                    checked_at_utc: '2026-07-14T05:01:00Z',
+                },
+            }),
+        });
+
+        await actorADefinitionsRefresh;
+
+        const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.capability_index).toMatchObject({
+            ready: true,
+            status: 'ready',
+            summary: 'Actor B canonical status',
+        });
+        expect(exportPayload.definitions_snapshot.payload.capability_index).toMatchObject({
+            ready: false,
+            status: 'error',
+            summary: 'Late actor A projection',
+        });
+
+        __testOnly_resetWorkflowCapabilityIndexState();
+        sessionStorage.removeItem('von_current_user');
     });
 
     test('treats timeout as transient and retries before surfacing a hard timeout', async () => {

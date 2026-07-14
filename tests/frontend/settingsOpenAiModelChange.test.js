@@ -3,6 +3,7 @@
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     postJson: jest.fn(),
     getJsonDetailed: jest.fn(),
+    getUserContext: jest.fn(() => ({ user_id: '#V#settings-test-user' })),
     getWindowSessionId: jest.fn(() => 'test-window-session'),
     WINDOW_SESSION_HEADER: 'X-Von-Window-Session'
 }));
@@ -43,7 +44,18 @@ describe('settingsPage OpenAI model change handling', () => {
             <div id="openaiModelsContainer" class="hidden" style="display:none"></div>
             <input id="enableOpenAiPremiumToggle" type="checkbox" />
             <select id="openaiModelSelect"></select>
+            <div id="openaiReasoningEffortContainer" class="hidden">
+                <select id="openaiReasoningEffortSelect"></select>
+            </div>
+            <button id="testOpenAiModelButton" type="button">Test this model</button>
             <div id="openaiModelStatusMessage"></div>
+            <div id="browserChatModelSummary"></div>
+            <div id="scopedPrimaryModelSummary"></div>
+            <div id="sharedServerDefaultModelSummary"></div>
+            <div id="workflowModelPoolList"></div>
+            <div id="modelPoolStatusMessage"></div>
+            <button id="addOpenAiToWorkflowPoolButton" type="button"></button>
+            <button id="addOllamaToWorkflowPoolButton" type="button"></button>
             <select id="globalModelSelect"></select>
             <select id="currentUserSelect"></select>
             <select id="currentOrganisationSelect"></select>
@@ -52,7 +64,7 @@ describe('settingsPage OpenAI model change handling', () => {
         `;
     });
 
-    test('changing the selected OpenAI model persists, tests, and saves the real model id', async () => {
+    test('editing GPT reasoning while Gemma is active neither probes, saves, enrols, nor switches provider', async () => {
         const { getJsonDetailed, postJson } = await import(apiServicePath);
         const savePayloads = [];
         const testPayloads = [];
@@ -96,6 +108,17 @@ describe('settingsPage OpenAI model change handling', () => {
         global.fetch.mockImplementation(async (url, options = {}) => {
             const target = String(url);
             const method = options.method || 'GET';
+            if (target.startsWith('/api/settings/model_parameters/capabilities')) {
+                return jsonResponse({
+                    success: true,
+                    parameters: {
+                        reasoning_effort: {
+                            supported: true,
+                            allowed_values: ['low', 'medium', 'high']
+                        }
+                    }
+                });
+            }
             if (target.startsWith('/api/settings/') && method === 'POST') {
                 savePayloads.push(JSON.parse(options.body || '{}'));
                 return jsonResponse({
@@ -107,9 +130,30 @@ describe('settingsPage OpenAI model change handling', () => {
             if (target.startsWith('/api/settings/')) {
                 return jsonResponse({
                     openai_api_key_env_var: 'OPENAI_API_KEY',
-                    enabled_llms: [],
-                    active_llm: null,
-                    server_default_llm: null
+                    enabled_llms: [
+                        {
+                            provider: 'ollama',
+                            model: 'gemma4:latest',
+                            host: 'http://127.0.0.1:11434'
+                        },
+                        {
+                            provider: 'openai',
+                            model: 'gpt-5.6-luna',
+                            model_parameters: { reasoning_effort: 'low' }
+                        }
+                    ],
+                    active_llm: {
+                        provider: 'ollama',
+                        model: 'gemma4:latest',
+                        host: 'http://127.0.0.1:11434'
+                    },
+                    resolved_llm: {
+                        provider: 'ollama',
+                        model: 'gemma4:latest',
+                        host: 'http://127.0.0.1:11434',
+                        scope: 'user'
+                    },
+                    server_default_llm: { provider: 'ollama', model: 'qwen3:8b' }
                 });
             }
             if (target.startsWith('/von/api/session/context')) {
@@ -124,25 +168,69 @@ describe('settingsPage OpenAI model change handling', () => {
             return jsonResponse({});
         });
 
+        localStorage.setItem('von:localModelPreference', JSON.stringify({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'ollama',
+            openaiModel: 'gpt-5.6-luna',
+            openaiModelParameters: { reasoning_effort: 'low' },
+            ollamaSelection: {
+                value: 'http://127.0.0.1:11434:gemma4:latest',
+                model: 'gemma4:latest',
+                host: 'http://127.0.0.1:11434'
+            }
+        }));
+        localStorage.setItem('von_current_user', JSON.stringify({
+            concept_id: '#V#settings-test-user',
+            name: 'Settings Test User'
+        }));
+
         await import(settingsPagePath);
         document.dispatchEvent(new Event('DOMContentLoaded'));
-        await waitUntil(() => changeListenerCount > 0);
+        await waitUntil(() => (
+            changeListenerCount > 0
+            && Array.from(document.getElementById('openaiReasoningEffortSelect').options)
+                .some((option) => option.value === 'high')
+        ));
 
-        select.innerHTML = '<option value="">Select an OpenAI Model</option><option value="gpt-5-mini">gpt-5-mini</option>';
-        select.value = 'gpt-5-mini';
+        select.innerHTML = '<option value="">Select an OpenAI Model</option><option value="gpt-5.6-luna">gpt-5.6-luna</option>';
+        select.value = 'gpt-5.6-luna';
         select.dispatchEvent(new Event('change', { bubbles: true }));
-        await waitUntil(() => testPayloads.length === 1 && savePayloads.length === 1);
+        await waitUntil(() => localStorage.getItem('von:openaiSelectedModel') === 'gpt-5.6-luna');
 
-        expect(localStorage.getItem('von:openaiSelectedModel')).toBe('gpt-5-mini');
+        const reasoningEffort = document.getElementById('openaiReasoningEffortSelect');
+        reasoningEffort.value = 'high';
+        reasoningEffort.dispatchEvent(new Event('change', { bubbles: true }));
+        await waitUntil(() => (
+            JSON.parse(localStorage.getItem('von:localModelPreference'))
+                ?.openaiModelParameters?.reasoning_effort === 'high'
+        ));
+
+        expect(localStorage.getItem('von:openaiSelectedModel')).toBe('gpt-5.6-luna');
         expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toMatchObject({
-            openaiModel: 'gpt-5-mini'
+            activeSource: 'ollama',
+            openaiModel: 'gpt-5.6-luna',
+            openaiModelParameters: { reasoning_effort: 'high' },
+            ollamaSelection: {
+                model: 'gemma4:latest',
+                host: 'http://127.0.0.1:11434'
+            }
         });
+        expect(document.getElementById('enableOpenAiPremiumToggle').checked).toBe(false);
+        expect(document.getElementById('browserChatModelSummary').textContent).toContain('gemma4:latest');
+        expect(document.getElementById('workflowModelPoolList').textContent).toContain('low effort');
+        expect(document.getElementById('addOpenAiToWorkflowPoolButton').textContent).toBe(
+            'Update workflow pool entry'
+        );
+        expect(testPayloads).toEqual([]);
+        expect(savePayloads).toEqual([]);
+
+        document.getElementById('testOpenAiModelButton').click();
+        await waitUntil(() => testPayloads.length === 1);
         expect(testPayloads[0]).toEqual({
             api_key_env_var: 'OPENAI_API_KEY',
-            model: 'gpt-5-mini'
+            model: 'gpt-5.6-luna',
+            model_parameters: { reasoning_effort: 'high' }
         });
-        expect(savePayloads[0]).toMatchObject({
-            openai_api_key_env_var: 'OPENAI_API_KEY'
-        });
+        expect(savePayloads).toEqual([]);
     });
 });

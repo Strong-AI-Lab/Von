@@ -251,12 +251,6 @@ def test_settings_endpoint_refreshes_in_memory_internal_mcp_caps(monkeypatch):
     monkeypatch.setattr(settings_routes, "resolve_rag_embedder_setting", lambda: None)
     monkeypatch.setattr(settings_routes, "resolve_rag_llm_setting", lambda: None)
     monkeypatch.setattr(settings_routes, "get_server_default_llm_setting", lambda: None)
-    monkeypatch.setattr(
-        settings_routes,
-        "get_workflow_capability_index_readiness_report",
-        lambda: {},
-    )
-
     with app.test_client() as client:
         resp = client.post(
             "/api/settings/",
@@ -267,6 +261,4 @@ def test_settings_endpoint_refreshes_in_memory_internal_mcp_caps(monkeypatch):
         )
 
     assert resp.status_code == 200
-    assert recorder.calls == [
-        {"max_tool_invocations": 100, "tool_batch_cap": 10}
-    ]
+    assert recorder.calls == [{"max_tool_invocations": 100, "tool_batch_cap": 10}]

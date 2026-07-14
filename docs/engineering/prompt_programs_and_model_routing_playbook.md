@@ -110,6 +110,26 @@ parameters, call IDs, results, and telemetry for the chosen surface. It should
 not silently drop tools, repeat a known-incompatible surface, or turn a typed
 transport mismatch into a text-only planner call.
 
+## 6A. Model configuration scopes
+
+Keep model configuration scopes explicit and independently observable:
+
+- a browser chat preference selects the model requested by that browser; editing
+  or probing another model must not silently change the scoped primary or model
+  pool
+- a user- or organisation-scoped primary is persisted server state and is always
+  eligible within that scope
+- the enabled model pool expresses routing eligibility, while the represented
+  model-selection workflow remains authoritative for the actual choice
+- shared server defaults and singleton RAG/index services are separate from
+  browser chat preferences and should not silently inherit them
+
+Persist changes through concern-specific, explicit actions. Telemetry and UI
+status should distinguish configured, requested, and executed models, including
+represented alternates, overrides, fallbacks, and recovered failures. A health
+probe that disagrees with a successful live execution should be shown as such,
+not collapsed into an unexplained fatal model badge.
+
 ## 7. Default routing pattern
 
 A reasonable default pattern is:

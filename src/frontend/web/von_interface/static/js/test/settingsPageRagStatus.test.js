@@ -15,6 +15,8 @@ import {
     __testOnly_resolveActiveLlmFromSelections,
     __testOnly_resolveDisplayedProviderModels,
     __testOnly_resolvePersistedActiveLlm,
+    __testOnly_renderRuntimeModelSummaries,
+    __testOnly_setModelScopeState,
     __testOnly_syncInitialScopedSelections,
     __testOnly_setupInternalMcpCapAutoSave,
 } from '../settingsPage.js';
@@ -147,7 +149,7 @@ describe('settingsPage RAG status summary', () => {
         expect(result).toEqual({ provider: 'openai', model: 'gpt-5.4-mini' });
     });
 
-    test('persists the selected Ollama model as an enabled LLM', () => {
+    test('does not implicitly enable an inactive configured OpenAI model', () => {
         document.body.innerHTML = `
             <select id="openaiModelSelect">
                 <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
@@ -169,8 +171,36 @@ describe('settingsPage RAG status summary', () => {
         });
 
         expect(result).toEqual([
-            { provider: 'openai', model: 'gpt-5.4-mini' },
             { provider: 'ollama', model: 'gemma4:31b', host: 'http://127.0.0.1:11434' },
+        ]);
+    });
+
+    test('preserves only explicit workflow alternatives behind the primary', () => {
+        const result = __testOnly_buildPersistedLlmSelections({
+            primary: {
+                provider: 'ollama',
+                model: 'gemma4:31b',
+                host: 'http://127.0.0.1:11434',
+            },
+            enabledAlternatives: [
+                {
+                    provider: 'openai',
+                    model: 'gpt-5.4-mini',
+                    model_parameters: { reasoning_effort: 'low' },
+                },
+                { provider: 'gemini', model: 'gemini-2.5-pro' },
+            ],
+            localModelPreference: { requestedLlm: null },
+        });
+
+        expect(result).toEqual([
+            { provider: 'ollama', model: 'gemma4:31b', host: 'http://127.0.0.1:11434' },
+            {
+                provider: 'openai',
+                model: 'gpt-5.4-mini',
+                model_parameters: { reasoning_effort: 'low' },
+            },
+            { provider: 'gemini', model: 'gemini-2.5-pro' },
         ]);
     });
 
@@ -199,37 +229,47 @@ describe('settingsPage RAG status summary', () => {
         });
     });
 
-    test('server default payload falls back to the current browser chat selection when the form is blank', () => {
+    test('server default payload retains the persisted shared default when the form is blank', () => {
         document.body.innerHTML = `
             <select id="serverDefaultLlmProvider">
-                <option value="" selected>Use current chat model on save</option>
+                <option value="" selected>Keep saved shared default</option>
             </select>
             <input id="serverDefaultLlmModel" value="" />
             <input id="serverDefaultLlmHost" value="" />
         `;
 
         const payload = __testOnly_buildServerDefaultLlmPayload({
-            localModelPreference: {
-                requestedLlm: {
-                    provider: 'ollama',
-                    model: 'gemma4:26b',
-                    host: 'http://localhost:11434',
-                },
+            persisted: {
+                provider: 'ollama',
+                model: 'qwen3:8b',
+                host: 'http://localhost:11434',
             },
-            currentResolved: null,
         });
 
         expect(payload).toEqual({
             provider: 'ollama',
-            model: 'gemma4:26b',
+            model: 'qwen3:8b',
             host: 'http://localhost:11434',
         });
+    });
+
+    test('server default Save requires an explicit value when no shared default exists', () => {
+        document.body.innerHTML = `
+            <select id="serverDefaultLlmProvider"><option value="" selected>Keep saved shared default</option></select>
+            <input id="serverDefaultLlmModel" value="" />
+            <input id="serverDefaultLlmHost" value="" />
+        `;
+
+        expect(() => __testOnly_buildServerDefaultLlmPayload({
+            strictFromUi: true,
+            persisted: null,
+        })).toThrow('Set an explicit provider and model');
     });
 
     test('server default form stays blank when there is no persisted server default', () => {
         document.body.innerHTML = `
             <select id="serverDefaultLlmProvider">
-                <option value="" selected>Use current chat model on save</option>
+                <option value="" selected>Keep saved shared default</option>
                 <option value="ollama">Ollama</option>
             </select>
             <input id="serverDefaultLlmModel" value="stale-model" />
@@ -243,19 +283,14 @@ describe('settingsPage RAG status summary', () => {
         expect(document.getElementById('serverDefaultLlmHost').value).toBe('');
     });
 
-    test('server default summary distinguishes unsaved fallback from persisted value', () => {
+    test('server default summary requires an explicit shared value when none is persisted', () => {
         expect(
             __testOnly_formatServerDefaultSummary({
                 persisted: null,
                 explicitFormEntry: null,
-                fallback: {
-                    provider: 'ollama',
-                    model: 'gemma4:26b',
-                    host: 'http://127.0.0.1:11434',
-                },
             }),
         ).toBe(
-            'Server default not saved. Save will snapshot current chat selection: ollama:gemma4:26b @ http://127.0.0.1:11434',
+            'Server default not saved. Enter an explicit provider and model.',
         );
 
         expect(
@@ -267,6 +302,30 @@ describe('settingsPage RAG status summary', () => {
                 },
             }),
         ).toBe('Server default: ollama:gemma4:26b @ http://127.0.0.1:11434');
+    });
+
+    test('runtime status repaint keeps the persisted shared server default label', () => {
+        document.body.innerHTML = `
+            <select id="serverDefaultLlmProvider">
+                <option value="ollama" selected>Ollama</option>
+            </select>
+            <input id="serverDefaultLlmModel" value="qwen3:8b" />
+            <input id="serverDefaultLlmHost" value="http://127.0.0.1:11434" />
+            <div id="serverDefaultLlmSummary"></div>
+        `;
+        __testOnly_setModelScopeState({
+            serverDefaultLlm: {
+                provider: 'ollama',
+                model: 'qwen3:8b',
+                host: 'http://127.0.0.1:11434',
+            },
+        });
+
+        __testOnly_renderRuntimeModelSummaries();
+
+        expect(document.getElementById('serverDefaultLlmSummary').textContent).toBe(
+            'Server default: ollama:qwen3:8b @ http://127.0.0.1:11434',
+        );
     });
 
     test('runtime model form reader returns explicit payload for a configured embedder', () => {

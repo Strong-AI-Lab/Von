@@ -12709,6 +12709,81 @@ body.settings-body {
     gap: 16px;
 }
 
+.settings-model-scope-overview {
+    border: 1px solid #bfdbfe;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
+    background: linear-gradient(180deg, #eff6ff 0%, #fff 100%);
+}
+
+.settings-model-scope-overview > h2,
+.settings-model-pool-panel > h3 {
+    margin-top: 0;
+}
+
+.settings-model-scope-summary {
+    display: grid;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.settings-model-scope-summary > div {
+    display: grid;
+    grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
+    gap: 12px;
+}
+
+.settings-model-scope-summary dt {
+    font-weight: 700;
+    color: #1e3a5f;
+}
+
+.settings-model-scope-summary dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.settings-model-pool-panel {
+    border-top: 1px solid #dbeafe;
+    margin-top: 12px;
+    padding-top: 12px;
+}
+
+.settings-model-pool-list {
+    display: grid;
+    gap: 8px;
+}
+
+.settings-model-pool-entry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid #dbe4ee;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: #fff;
+}
+
+.settings-model-pool-entry-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.settings-model-pool-entry-role {
+    display: inline-block;
+    margin-left: 6px;
+    color: #475569;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.settings-model-pool-empty {
+    color: #64748b;
+    font-style: italic;
+}
+
 .settings-runtime-model-block {
     border: 1px solid #e5e7eb;
     border-radius: 10px;
@@ -12836,6 +12911,16 @@ body.settings-body {
 
     .settings-runtime-model-grid {
         grid-template-columns: 1fr;
+    }
+
+    .settings-model-scope-summary > div {
+        grid-template-columns: 1fr;
+        gap: 2px;
+    }
+
+    .settings-model-pool-entry {
+        align-items: flex-start;
+        flex-direction: column;
     }
 }
 

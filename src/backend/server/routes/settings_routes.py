@@ -24,8 +24,6 @@ from ...services.settings_service import (
     resolve_enabled_llm_settings,
     set_user_llm_setting,
     set_org_llm_setting,
-    set_user_enabled_llm_settings,
-    set_org_enabled_llm_settings,
     set_disable_remote_ollama_scan,
     set_show_tool_use_during_thinking,
     get_internal_mcp_max_tool_invocations,
@@ -71,9 +69,12 @@ from ...services.paper_recommendation_workflow_vontology_service import (
     request_paper_recommendation_refresh,
 )
 from ...services.window_session_context_service import get_effective_context
+from ...security.access_control import (
+    get_effective_organisation_concept_id,
+    get_effective_user_concept_id,
+)
 from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
 from ...services.workflow_capability_service import (
-    get_workflow_capability_index_readiness_report,
     invalidate_workflow_capability_index,
     prewarm_workflow_capability_index,
 )
@@ -92,7 +93,10 @@ from ...services.rag_service import peek_rag_service
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...services.concept_service import ConceptNotFoundError
-from ...languagemodels.llm_interface import OpenAIClient, get_ollama_auto_pull_state_snapshot
+from ...languagemodels.llm_interface import (
+    OpenAIClient,
+    get_ollama_auto_pull_state_snapshot,
+)
 from ...db.repositories.concepts_repository import ConceptsRepository
 from bson import ObjectId
 from pymongo.errors import BulkWriteError
@@ -115,6 +119,7 @@ from ...workflows.write_tool_policy import (
     MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE,
     MUTATION_AUTHORITY_LEVEL_READ_ONLY,
 )
+
 # REFACTORING_NOTE: This blueprint is part of the backend model selection refactoring.
 # It provides API endpoints for managing global application settings.
 
@@ -235,12 +240,37 @@ settings_bp = Blueprint(
     "settings", __name__
 )  # REMOVED url_prefix, as it's set during registration
 
+_SHARED_RUNTIME_MODEL_SETTING_KEYS = frozenset(
+    {"server_default_llm", "rag_embedder", "rag_llm"}
+)
+_ADMIN_ONLY_SETTING_KEYS = _SHARED_RUNTIME_MODEL_SETTING_KEYS | frozenset(
+    {
+        "disable_write_tool_conservatism",
+        "require_human_review_for_high_impact_kb_writes",
+    }
+)
+
 
 def _jsonify_no_store(payload: dict[str, Any], status_code: int = 200):
     response = jsonify(payload)
     response.status_code = status_code
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+def _has_valid_admin_token() -> bool:
+    """Return whether this request carries the configured ops admin token."""
+
+    try:
+        required_token = os.getenv("VON_ADMIN_TOKEN")
+        if not required_token:
+            return False
+        provided = request.headers.get("X-Von-Admin-Token") or request.headers.get(
+            "X-Admin-Token"
+        )
+        return bool(provided) and provided == required_token
+    except Exception:
+        return False
 
 
 def _is_admin_or_owner_session() -> bool:
@@ -266,16 +296,71 @@ def _is_admin_or_owner_session() -> bool:
     except Exception:
         pass
 
-    try:
-        required_token = os.getenv("VON_ADMIN_TOKEN")
-        if not required_token:
-            return False
-        provided = request.headers.get("X-Von-Admin-Token") or request.headers.get(
-            "X-Admin-Token"
+    return _has_valid_admin_token()
+
+
+def _normalise_scope_concept_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned if cleaned.startswith("#") else f"#V#{cleaned}"
+
+
+def _authorise_active_llm_scope(
+    scope: str,
+    concept_id: Any,
+) -> tuple[str | None, str | None]:
+    """Bind a client model-setting target to ambient actor authority.
+
+    Returns the canonical target concept ID and no error on success.  Client
+    claims never establish identity or organisation authority.
+    """
+
+    target_id = _normalise_scope_concept_id(concept_id)
+    if target_id is None:
+        return None, "Model changes require a valid scoped concept ID."
+
+    # Model-setting mutations must be bound to identity established in the
+    # signed server-side Flask session.  ``get_effective_user_concept_id`` also
+    # supports a legacy, concept-validated identity header for read/tool paths;
+    # that header is not authentication and must never authorise a settings
+    # write.  The configured admin token remains the explicit automation path.
+    actor_user_id = _normalise_scope_concept_id(session.get("user_concept_id"))
+    if actor_user_id is None:
+        if _has_valid_admin_token():
+            return target_id, None
+        return None, "An authenticated actor is required to update model settings."
+
+    if scope == "user":
+        if actor_user_id != target_id:
+            return (
+                None,
+                "The selected user model scope does not match the authenticated user.",
+            )
+        return target_id, None
+
+    if scope == "organisation":
+        effective = get_effective_context(
+            request.headers.get("X-Von-Window-Session"),
+            dict(session),
+            actor_user_id,
         )
-        return bool(provided) and provided == required_token
-    except Exception:
-        return False
+        actor_org_id = _normalise_scope_concept_id(effective.get("organisation_id"))
+        if actor_org_id is None or actor_org_id != target_id:
+            return (
+                None,
+                "The selected organisation model scope does not match the effective organisation.",
+            )
+        if not _is_admin_or_owner_session():
+            return (
+                None,
+                "Admin or owner privileges are required to update an organisation model scope.",
+            )
+        return target_id, None
+
+    return None, "Model scope must be 'user' or 'organisation'."
 
 
 def _can_access_user_scoped_profile(user_concept_id: str) -> bool:
@@ -415,7 +500,6 @@ def _write_cached_db_info(payload: dict) -> None:
                 "expires_at_monotonic": now_monotonic + ttl_seconds,
             }
         )
-
 
 
 def _utc_now_iso() -> str:
@@ -615,9 +699,7 @@ def get_db_location_info():
             "classification": classification,
             "using_fallback": using_fallback,
             "primary_uri_sanitized": (
-                _sanitize_mongo_uri_for_display(MONGO_URI)
-                if using_fallback
-                else None
+                _sanitize_mongo_uri_for_display(MONGO_URI) if using_fallback else None
             ),
             "server_public_ip": public_ip,
         }
@@ -656,7 +738,10 @@ def get_db_guardrails():
             e,
             exc_info=True,
         )
-        return jsonify({"success": False, "error": "Failed to retrieve DB guardrails."}), 500
+        return (
+            jsonify({"success": False, "error": "Failed to retrieve DB guardrails."}),
+            500,
+        )
 
 
 @settings_bp.route("/llm/info", methods=["GET"])
@@ -871,31 +956,100 @@ def get_all_settings():
             # Remove admin-only setting if it leaked via batch query
             settings.pop("disable_write_tool_conservatism", None)
             settings.pop("require_human_review_for_high_impact_kb_writes", None)
-        # Optional resolution using query args
-        user_concept_id = request.args.get("user_concept_id")
-        org_concept_id = request.args.get(
-            "organisation_concept_id"
-        ) or request.args.get("organization_concept_id")
-        resolved = resolve_llm_setting(
-            user_concept_id=user_concept_id, org_concept_id=org_concept_id
-        )
+        selected_model_scope = str(request.args.get("model_scope") or "").strip()
+        if selected_model_scope and selected_model_scope not in {
+            "user",
+            "organisation",
+        }:
+            return _jsonify_no_store(
+                {
+                    "error": "model_scope must be 'user' or 'organisation'.",
+                },
+                400,
+            )
+        effective_user_concept_id = get_effective_user_concept_id()
+        if effective_user_concept_id:
+            # An authenticated actor owns its model-settings read scope.  Query
+            # parameters may help the pre-login bootstrap path, but cannot
+            # replace a current session/window actor.
+            user_concept_id = effective_user_concept_id
+            org_concept_id = get_effective_organisation_concept_id()
+            effective_llm = resolve_llm_setting(
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+            effective_enabled_llms = resolve_enabled_llm_settings(
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+            if selected_model_scope == "user":
+                selected_user_concept_id = user_concept_id
+                selected_org_concept_id = None
+            elif selected_model_scope == "organisation":
+                if not org_concept_id:
+                    return _jsonify_no_store(
+                        {
+                            "error": (
+                                "No effective organisation is available for the "
+                                "selected model scope."
+                            ),
+                        },
+                        403,
+                    )
+                selected_user_concept_id = None
+                selected_org_concept_id = org_concept_id
+            else:
+                selected_user_concept_id = user_concept_id
+                selected_org_concept_id = org_concept_id
+        else:
+            if selected_model_scope:
+                return _jsonify_no_store(
+                    {
+                        "error": (
+                            "An authenticated actor is required to select a model scope."
+                        ),
+                    },
+                    403,
+                )
+            # No authenticated session actor means there is no safe scoped
+            # model-settings read.  Query claims are untrusted and must not be
+            # used to disclose another user's or organisation's primary/pool.
+            # Keep the unauthenticated response useful for shared/bootstrap
+            # settings while returning an empty scoped model projection.
+            user_concept_id = None
+            org_concept_id = None
+            selected_user_concept_id = None
+            selected_org_concept_id = None
+            effective_llm = resolve_llm_setting(
+                user_concept_id=None,
+                org_concept_id=None,
+            )
+            effective_enabled_llms = resolve_enabled_llm_settings(
+                user_concept_id=None,
+                org_concept_id=None,
+            )
+        if selected_model_scope:
+            resolved = resolve_llm_setting(
+                user_concept_id=selected_user_concept_id,
+                org_concept_id=selected_org_concept_id,
+            )
+            enabled_llms = resolve_enabled_llm_settings(
+                user_concept_id=selected_user_concept_id,
+                org_concept_id=selected_org_concept_id,
+            )
+        else:
+            resolved = effective_llm
+            enabled_llms = effective_enabled_llms
         settings["resolved_llm"] = resolved
+        settings["effective_llm"] = effective_llm
+        settings["selected_model_scope"] = selected_model_scope or None
         settings["server_default_llm"] = get_server_default_llm_setting()
-        settings["enabled_llms"] = resolve_enabled_llm_settings(
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-        )
-        settings["effective_rag_embedder"] = resolve_rag_embedder_setting(
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-        )
-        settings["effective_rag_llm"] = resolve_rag_llm_setting(
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-        )
-        settings["workflow_capability_index"] = (
-            get_workflow_capability_index_readiness_report()
-        )
+        settings["enabled_llms"] = enabled_llms
+        settings["effective_enabled_llms"] = effective_enabled_llms
+        # RAG and the workflow capability index are singleton server services;
+        # their models do not inherit browser-only or actor-scoped chat state.
+        settings["effective_rag_embedder"] = resolve_rag_embedder_setting()
+        settings["effective_rag_llm"] = resolve_rag_llm_setting()
         settings["ollama_model_auto_pull"] = get_ollama_auto_pull_state_snapshot()
         settings["available_mutation_authority_levels"] = [
             MUTATION_AUTHORITY_LEVEL_READ_ONLY,
@@ -935,6 +1089,115 @@ def save_all_settings():
         return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
 
     try:
+        if any(key in data for key in _ADMIN_ONLY_SETTING_KEYS):
+            if not _is_admin_or_owner_session():
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "Admin or owner privileges are required to update "
+                                "the requested protected settings."
+                            ),
+                        }
+                    ),
+                    403,
+                )
+
+        llm_scope = None
+        llm_scope_concept_id = None
+        llm_provider = None
+        llm_model = None
+        llm_host = None
+        llm_model_parameters: dict[str, Any] = {}
+        enabled_entries_requested = "enabled_llms" in data
+        enabled_entries = data.get("enabled_llms")
+        if enabled_entries_requested and not isinstance(enabled_entries, list):
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "enabled_llms must be a list of provider/model entries.",
+                    }
+                ),
+                400,
+            )
+
+        llm_data = data.get("active_llm")
+        if llm_data:
+            if not isinstance(llm_data, dict):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "active_llm must be a scoped model object.",
+                        }
+                    ),
+                    400,
+                )
+            llm_provider = llm_data.get("provider")
+            llm_model = llm_data.get("model")
+            raw_llm_host = llm_data.get("host")
+            if raw_llm_host is not None and not isinstance(raw_llm_host, str):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "active_llm host must be a string when supplied.",
+                        }
+                    ),
+                    400,
+                )
+            llm_host = str(raw_llm_host or "").strip() or None
+            llm_scope = llm_data.get("scope")
+            claimed_concept_id = llm_data.get("concept_id")
+            if (
+                llm_scope not in {"user", "organisation"}
+                or not claimed_concept_id
+                or not llm_provider
+                or not llm_model
+            ):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "Model changes require a current user or organisation "
+                                "context."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            llm_scope_concept_id, scope_error = _authorise_active_llm_scope(
+                llm_scope,
+                claimed_concept_id,
+            )
+            if scope_error:
+                return (
+                    jsonify({"status": "error", "message": scope_error}),
+                    403,
+                )
+            llm_model_parameters = normalise_model_parameters_for_storage(
+                llm_data.get(MODEL_PARAMETERS_KEY) or llm_data.get("modelParameters"),
+                provider=llm_provider,
+                model=llm_model,
+                include_registry=True,
+            )
+        elif enabled_entries_requested:
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": (
+                            "Saving enabled_llms requires active_llm scope and "
+                            "concept_id in the same request."
+                        ),
+                    }
+                ),
+                400,
+            )
+
         resolved_llm = None
         resolved_enabled_llms = None
         resolved_mutation_authority = None
@@ -945,22 +1208,8 @@ def save_all_settings():
             "embedder",
             prior_global_rag_embedder,
         )
-        workflow_capability_rebuild = None
-        llm_scope = None
-        llm_scope_concept_id = None
         internal_mcp_caps_updated = False
         if "disable_write_tool_conservatism" in data:
-            if not _is_admin_or_owner_session():
-                return (
-                    jsonify(
-                        {
-                            "status": "error",
-                            "message": "Admin privileges required to update disable_write_tool_conservatism.",
-                        }
-                    ),
-                    403,
-                )
-
             try:
                 disabled = bool(data.get("disable_write_tool_conservatism"))
             except Exception:
@@ -972,19 +1221,10 @@ def save_all_settings():
             )
 
         if "require_human_review_for_high_impact_kb_writes" in data:
-            if not _is_admin_or_owner_session():
-                return (
-                    jsonify(
-                        {
-                            "status": "error",
-                            "message": "Admin privileges required to update require_human_review_for_high_impact_kb_writes.",
-                        }
-                    ),
-                    403,
-                )
-
             try:
-                required = bool(data.get("require_human_review_for_high_impact_kb_writes"))
+                required = bool(
+                    data.get("require_human_review_for_high_impact_kb_writes")
+                )
             except Exception:
                 required = False
             set_require_human_review_for_high_impact_kb_writes(required)
@@ -993,126 +1233,69 @@ def save_all_settings():
                 required,
             )
 
-        if "active_llm" in data and data["active_llm"]:
-            llm_data = data["active_llm"]
-            provider = llm_data.get("provider")
-            model = llm_data.get("model")
-            scope = llm_data.get("scope")  # required: user or organisation
-            concept_id = llm_data.get("concept_id")
-            if scope in ("user", "organisation") and concept_id and provider and model:
-                llm_scope = scope
-                llm_scope_concept_id = concept_id
-                model_parameters = normalise_model_parameters_for_storage(
-                    llm_data.get(MODEL_PARAMETERS_KEY) or llm_data.get("modelParameters"),
-                    provider=provider,
-                    model=model,
-                    include_registry=True,
-                )
-                if scope == "user":
-                    ok = (
-                        set_user_llm_setting(
-                            concept_id,
-                            provider,
-                            model,
-                            model_parameters=model_parameters,
-                        )
-                        if model_parameters
-                        else set_user_llm_setting(concept_id, provider, model)
-                    )
-                else:
-                    ok = (
-                        set_org_llm_setting(
-                            concept_id,
-                            provider,
-                            model,
-                            model_parameters=model_parameters,
-                        )
-                        if model_parameters
-                        else set_org_llm_setting(concept_id, provider, model)
-                    )
-                if not ok:
-                    return (
-                        jsonify(
-                            {
-                                "status": "error",
-                                "message": "Failed to persist the selected model setting.",
-                            }
-                        ),
-                        500,
-                    )
-                resolved_llm = resolve_llm_setting(
-                    user_concept_id=concept_id if scope == "user" else None,
-                    org_concept_id=concept_id if scope == "organisation" else None,
-                )
-                if not resolved_llm:
-                    return (
-                        jsonify(
-                            {
-                                "status": "error",
-                                "message": "The selected model did not resolve after persistence.",
-                            }
-                        ),
-                        500,
-                    )
-                current_app.logger.info(
-                    f"Scoped LLM set scope={scope} concept={concept_id} provider={provider} model={model}"
-                )
-            elif provider and model:
-                current_app.logger.warning(
-                    "LLM setting rejected: no user/org scope provided. provider=%s model=%s",
-                    provider,
-                    model,
-                )
-                return (
-                    jsonify(
-                        {
-                            "status": "error",
-                            "message": "Model changes require a current user or organisation context.",
-                        }
-                    ),
-                    400,
-                )
-
-        if "enabled_llms" in data:
-            enabled_entries = data.get("enabled_llms")
-            if not isinstance(enabled_entries, list):
-                return (
-                    jsonify(
-                        {
-                            "status": "error",
-                            "message": "enabled_llms must be a list of provider/model entries.",
-                        }
-                    ),
-                    400,
-                )
-            if not (llm_scope and llm_scope_concept_id):
-                return (
-                    jsonify(
-                        {
-                            "status": "error",
-                            "message": (
-                                "Saving enabled_llms requires active_llm scope and concept_id "
-                                "in the same request."
-                            ),
-                        }
-                    ),
-                    400,
-                )
-            ok = (
-                set_user_enabled_llm_settings(llm_scope_concept_id, enabled_entries)
-                if llm_scope == "user"
-                else set_org_enabled_llm_settings(llm_scope_concept_id, enabled_entries)
+        if llm_scope and llm_scope_concept_id and llm_provider and llm_model:
+            setter_kwargs: dict[str, Any] = {}
+            if llm_model_parameters:
+                setter_kwargs["model_parameters"] = llm_model_parameters
+            if llm_host:
+                setter_kwargs["host"] = llm_host
+            if enabled_entries_requested:
+                setter_kwargs["enabled_entries"] = enabled_entries
+            setter = (
+                set_user_llm_setting if llm_scope == "user" else set_org_llm_setting
+            )
+            ok = setter(
+                llm_scope_concept_id,
+                llm_provider,
+                llm_model,
+                **setter_kwargs,
             )
             if not ok:
                 return (
                     jsonify(
                         {
                             "status": "error",
-                            "message": "Failed to persist enabled_llms.",
+                            "message": (
+                                "Failed to persist the selected model and enabled "
+                                "model pool."
+                            ),
                         }
                     ),
                     500,
                 )
+            resolved_llm = resolve_llm_setting(
+                user_concept_id=(llm_scope_concept_id if llm_scope == "user" else None),
+                org_concept_id=(
+                    llm_scope_concept_id if llm_scope == "organisation" else None
+                ),
+            )
+            if not resolved_llm:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "The selected model did not resolve after persistence."
+                            ),
+                        }
+                    ),
+                    500,
+                )
+            current_app.logger.info(
+                "Scoped LLM set scope=%s concept=%s provider=%s model=%s",
+                llm_scope,
+                llm_scope_concept_id,
+                llm_provider,
+                llm_model,
+            )
+
+        if llm_scope and llm_scope_concept_id:
+            resolved_enabled_llms = resolve_enabled_llm_settings(
+                user_concept_id=(llm_scope_concept_id if llm_scope == "user" else None),
+                org_concept_id=(
+                    llm_scope_concept_id if llm_scope == "organisation" else None
+                ),
+            )
 
         if "mutation_authority" in data and data["mutation_authority"]:
             authority_data = data["mutation_authority"]
@@ -1388,22 +1571,15 @@ def save_all_settings():
             prewarm_started = False
             if current_embedder_signature is not None:
                 prewarm_started = prewarm_workflow_capability_index(force_refresh=True)
-            workflow_capability_rebuild = {
-                "required": True,
-                "started": bool(prewarm_started),
-                "reason": "rag_embedder_signature_changed",
-                "detail": rebuild_detail,
-                "invalidation": invalidation_result,
-            }
-        else:
-            workflow_capability_rebuild = {
-                "required": False,
-                "started": False,
-                "reason": None,
-                "detail": None,
-                "invalidation": None,
-            }
-        workflow_capability_index = get_workflow_capability_index_readiness_report()
+            current_app.logger.info(
+                "Workflow capability index refresh requested after RAG embedder "
+                "change (invalidated=%s prewarm_started=%s)",
+                bool(
+                    isinstance(invalidation_result, Mapping)
+                    and invalidation_result.get("success")
+                ),
+                bool(prewarm_started),
+            )
 
         return (
             jsonify(
@@ -1416,8 +1592,6 @@ def save_all_settings():
                     "server_default_llm": get_server_default_llm_setting(),
                     "resolved_rag_embedder": resolved_rag_embedder,
                     "resolved_rag_llm": resolved_rag_llm,
-                    "workflow_capability_index": workflow_capability_index,
-                    "workflow_capability_rebuild": workflow_capability_rebuild,
                 }
             ),
             200,
@@ -1438,7 +1612,7 @@ def save_all_settings():
 @settings_bp.route("/llm/override", methods=["POST"])
 def set_llm_override():
     """Set a scoped LLM override (user or organisation).
-    Body: { provider, model, scope: 'user'|'organisation', concept_id }
+    Body: { provider, model, scope: 'user'|'organisation', concept_id, host? }
     Returns resolved setting for convenience.
     """
     try:
@@ -1447,6 +1621,7 @@ def set_llm_override():
         model = data.get("model")
         scope = data.get("scope")
         concept_id = data.get("concept_id")
+        raw_host = data.get("host")
         if not all([provider, model, scope, concept_id]):
             return (
                 jsonify(
@@ -1467,6 +1642,24 @@ def set_llm_override():
                 ),
                 400,
             )
+        if raw_host is not None and not isinstance(raw_host, str):
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "host must be a string when supplied",
+                    }
+                ),
+                400,
+            )
+        host = str(raw_host or "").strip() or None
+        authorised_concept_id, scope_error = _authorise_active_llm_scope(
+            scope,
+            concept_id,
+        )
+        if scope_error:
+            return jsonify({"status": "error", "message": scope_error}), 403
+        concept_id = authorised_concept_id
         assert (
             isinstance(concept_id, str)
             and isinstance(provider, str)
@@ -1478,28 +1671,13 @@ def set_llm_override():
             model=model,
             include_registry=True,
         )
-        if scope == "user":
-            ok = (
-                set_user_llm_setting(
-                    concept_id,
-                    provider,
-                    model,
-                    model_parameters=model_parameters,
-                )
-                if model_parameters
-                else set_user_llm_setting(concept_id, provider, model)
-            )
-        else:
-            ok = (
-                set_org_llm_setting(
-                    concept_id,
-                    provider,
-                    model,
-                    model_parameters=model_parameters,
-                )
-                if model_parameters
-                else set_org_llm_setting(concept_id, provider, model)
-            )
+        setter_kwargs: dict[str, Any] = {}
+        if model_parameters:
+            setter_kwargs["model_parameters"] = model_parameters
+        if host:
+            setter_kwargs["host"] = host
+        setter = set_user_llm_setting if scope == "user" else set_org_llm_setting
+        ok = setter(concept_id, provider, model, **setter_kwargs)
         if not ok:
             return (
                 jsonify({"status": "error", "message": "Failed to persist override"}),
@@ -1647,7 +1825,9 @@ def get_model_parameter_capabilities():
     provider = str(request.args.get("provider") or "").strip().lower()
     model = str(request.args.get("model") or "").strip()
     api_surface = str(request.args.get("api_surface") or "responses").strip()
-    include_registry_arg = str(request.args.get("include_registry") or "").strip().lower()
+    include_registry_arg = (
+        str(request.args.get("include_registry") or "").strip().lower()
+    )
     include_registry = include_registry_arg not in {"0", "false", "no", "off"}
     if not provider or not model:
         return _jsonify_no_store(
@@ -2019,6 +2199,19 @@ def get_ollama_hosts():
 def set_ollama_hosts():
     """API endpoint to set Ollama hosts configuration."""
     try:
+        if not _is_admin_or_owner_session():
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": (
+                            "Admin or owner privileges are required to update "
+                            "shared Ollama hosts."
+                        ),
+                    }
+                ),
+                403,
+            )
         data = request.get_json()
         hosts_list = data.get("hosts", [])
         active_host = data.get("active_host")
@@ -3149,21 +3342,33 @@ def test_openai_model():
             if isinstance(exc, openai.AuthenticationError):
                 return "authentication_error", f"OpenAI authentication failed: {exc}"
             if isinstance(exc, openai.PermissionDeniedError):
-                return "permission_denied", f"OpenAI access was denied for this model: {exc}"
+                return (
+                    "permission_denied",
+                    f"OpenAI access was denied for this model: {exc}",
+                )
             if isinstance(exc, openai.NotFoundError):
-                return "model_not_found", f"The selected OpenAI model was not found: {exc}"
+                return (
+                    "model_not_found",
+                    f"The selected OpenAI model was not found: {exc}",
+                )
             if isinstance(exc, openai.RateLimitError):
                 body = getattr(exc, "body", None)
                 code = body.get("code") if isinstance(body, dict) else None
                 if code == "insufficient_quota":
-                    return "quota_exhausted", f"OpenAI quota exhausted (insufficient_quota): {exc}"
+                    return (
+                        "quota_exhausted",
+                        f"OpenAI quota exhausted (insufficient_quota): {exc}",
+                    )
                 return "rate_limited", f"OpenAI rate limit exceeded: {exc}"
             if isinstance(exc, openai.APIConnectionError):
                 return "connection_error", f"Could not reach the OpenAI API: {exc}"
             if isinstance(exc, openai.BadRequestError):
                 return "bad_request", f"OpenAI rejected the selected model probe: {exc}"
             if isinstance(exc, openai.APIError):
-                return "api_error", f"OpenAI API error while testing the selected model: {exc}"
+                return (
+                    "api_error",
+                    f"OpenAI API error while testing the selected model: {exc}",
+                )
         except Exception:
             pass
         return "unexpected_error", f"Unexpected OpenAI model probe failure: {exc}"

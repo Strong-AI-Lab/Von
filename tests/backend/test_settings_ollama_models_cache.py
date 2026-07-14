@@ -72,3 +72,84 @@ def test_ollama_models_route_nocache_bypasses_cache(monkeypatch):
     assert first.status_code == 200
     assert second.status_code == 200
     assert calls["count"] == 2
+
+
+def test_ollama_hosts_post_rejects_member_without_side_effects(monkeypatch):
+    app = _make_settings_app()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_ollama_hosts_list",
+        lambda _hosts: calls.append("hosts") or True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_active_ollama_host",
+        lambda _host: calls.append("active") or True,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "member"
+
+        response = client.post(
+            "/api/settings/ollama/hosts",
+            json={
+                "hosts": [{"url": "http://127.0.0.1:11434"}],
+                "active_host": "http://127.0.0.1:11434",
+            },
+        )
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_ollama_hosts_post_allows_admin(monkeypatch):
+    app = _make_settings_app()
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_ollama_hosts_list",
+        lambda hosts: calls.append(("hosts", hosts)) or True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_active_ollama_host",
+        lambda host: calls.append(("active", host)) or True,
+    )
+    hosts = [{"url": "http://127.0.0.1:11434"}]
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "admin"
+
+        response = client.post(
+            "/api/settings/ollama/hosts",
+            json={
+                "hosts": hosts,
+                "active_host": "http://127.0.0.1:11434",
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls == [
+        ("hosts", hosts),
+        ("active", "http://127.0.0.1:11434"),
+    ]
+
+
+def test_ollama_hosts_post_validates_before_admin_side_effect(monkeypatch):
+    app = _make_settings_app()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_ollama_hosts_list",
+        lambda _hosts: calls.append("hosts") or True,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "owner"
+
+        response = client.post(
+            "/api/settings/ollama/hosts",
+            json={"hosts": "http://127.0.0.1:11434"},
+        )
+
+    assert response.status_code == 400
+    assert calls == []

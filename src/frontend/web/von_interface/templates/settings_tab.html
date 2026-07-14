@@ -240,6 +240,69 @@
         </section>
 
         <section id="premium-model-settings" data-settings-concern="models">
+            <div class="settings-model-scope-overview" aria-labelledby="modelScopeOverviewHeading">
+                <h2 id="modelScopeOverviewHeading">Model Selection Scopes</h2>
+                <p class="settings-note">
+                    Chat selection, workflow routing, and shared server services are separate scopes. Von's
+                    represented model-selection workflow may choose any model in the enabled pool; Settings
+                    controls eligibility, not routing policy.
+                </p>
+                <dl class="settings-model-scope-summary">
+                    <div>
+                        <dt>Chat on this browser</dt>
+                        <dd id="browserChatModelSummary">—</dd>
+                    </div>
+                    <div>
+                        <dt>Effective for current actor</dt>
+                        <dd id="effectiveScopedModelSummary">—</dd>
+                    </div>
+                    <div>
+                        <dt>Selected target primary</dt>
+                        <dd id="scopedPrimaryModelSummary">—</dd>
+                    </div>
+                    <div>
+                        <dt>Shared server default</dt>
+                        <dd id="sharedServerDefaultModelSummary">—</dd>
+                    </div>
+                </dl>
+                <div class="settings-model-pool-panel">
+                    <h3>Workflow-enabled model pool</h3>
+                    <div class="inline-form inline-form-tight mb-1">
+                        <label for="modelPoolTargetScopeSelect">Save target</label>
+                        <select id="modelPoolTargetScopeSelect" disabled>
+                            <option value="user">Current user</option>
+                            <option value="organisation" disabled>Current organisation</option>
+                        </select>
+                    </div>
+                    <p id="modelPoolTargetScopeNote" class="settings-note">
+                        Loading the target-local scoped primary and pool...
+                    </p>
+                    <div class="inline-form inline-form-tight mb-1">
+                        <button id="useBrowserModelAsScopedPrimaryButton" class="btn-secondary" type="button" disabled>
+                            Use browser chat model as target primary
+                        </button>
+                        <button id="restoreScopedPrimaryButton" class="btn-secondary" type="button" disabled>
+                            Keep saved target primary
+                        </button>
+                    </div>
+                    <p class="settings-note">
+                        Pool-only edits retain the selected target primary. Replacing it with this browser's chat
+                        model requires the explicit action above.
+                    </p>
+                    <p class="settings-note">
+                        The scoped primary is always enabled. Add or remove alternatives explicitly; configuring
+                        or testing a model does not add it to this pool.
+                    </p>
+                    <div id="workflowModelPoolList" class="settings-model-pool-list"></div>
+                    <div class="inline-form inline-form-tight mt-2">
+                        <button id="saveModelPoolButton" class="btn-azure" type="button" disabled>
+                            Save scoped primary &amp; workflow pool
+                        </button>
+                    </div>
+                    <div id="modelPoolStatusMessage" class="status-message" role="status"></div>
+                </div>
+            </div>
+
             <h2>Premium Models (OpenAI)</h2>
             <label for="openaiApiKeyEnvVar">OpenAI API Key Environment Variable:</label>
             <input type="text" id="openaiApiKeyEnvVar" name="openai_api_key_env_var" value="OPENAI_API_KEY">
@@ -247,10 +310,11 @@
             <div class="inline-form inline-form-tight mt-2">
                 <input type="checkbox" id="enableOpenAiPremiumToggle" />
                 <label for="enableOpenAiPremiumToggle"
-                    title="When enabled, Von may use the selected OpenAI model. When disabled, Ollama remains active even if a premium model is configured.">Enable
-                    premium model use</label>
+                    title="When enabled, this browser requests the selected OpenAI model for chat. When disabled, it requests the selected Ollama model.">Use
+                    selected OpenAI model for chat in this browser</label>
             </div>
-            <small class="settings-note">Disable this to force Ollama while still keeping a premium model selected for testing.</small>
+            <small class="settings-note">Turn this off to use the selected Ollama model for browser chat. Editing or
+                testing a model does not add it to workflow routing.</small>
             <div id="openaiModelsContainer" class="hidden">
                 <label for="openaiModelSelect">Select OpenAI Model:</label>
                 <select id="openaiModelSelect" name="openai_model">
@@ -261,8 +325,11 @@
                     <select id="openaiReasoningEffortSelect" name="openai_reasoning_effort"></select>
                 </div>
                 <div class="inline-form inline-form-tight mt-2">
-                    <button id="testOpenAiModelButton" class="btn-secondary" type="button">Test Selected Model</button>
+                    <button id="testOpenAiModelButton" class="btn-secondary" type="button">Test this model</button>
+                    <button id="addOpenAiToWorkflowPoolButton" class="btn-secondary" type="button">Add to workflow pool</button>
                 </div>
+                <small class="settings-note">A test is a live probe only; it does not change the browser chat
+                    choice, scoped primary, or workflow pool.</small>
                 <div id="openaiModelStatusMessage" class="status-message" role="alert">
                     <!-- Status messages for the selected premium model will appear here -->
                 </div>
@@ -299,14 +366,19 @@
                         Configure multiple Ollama server hosts. Set OLLAMA_HOSTS_LIST environment variable with
                         comma-separated URLs, or add them manually below.
                     </p>
+                    <p id="ollamaHostManagementAccessNote" class="settings-note">
+                        Read-only: an admin or owner must add, remove, or activate shared Ollama hosts.
+                    </p>
 
                     <div id="ollamaHostsList">
                         <!-- Hosts will be populated here -->
                     </div>
 
                     <div class="inline-form">
-                        <input type="text" id="newOllamaHostUrl" placeholder="http://localhost:11434" class="flex-1">
-                        <button id="addOllamaHostButton" class="btn-azure">
+                        <input type="text" id="newOllamaHostUrl" placeholder="http://localhost:11434" class="flex-1"
+                            title="Admin or owner privileges are required to update shared Ollama hosts." disabled>
+                        <button id="addOllamaHostButton" class="btn-azure"
+                            title="Admin or owner privileges are required to update shared Ollama hosts." disabled>
                             Add Host
                         </button>
                     </div>
@@ -322,7 +394,7 @@
             </div>
 
             <!-- Model Selection -->
-            <label for="globalModelSelect">Global Ollama Model:</label>
+            <label for="globalModelSelect">Selected Ollama model on this browser:</label>
             <div class="inline-form inline-form-tight settings-model-select-row">
                 <select id="globalModelSelect" name="global_ollama_model" class="flex-1">
                     <option value="">Loading models...</option>
@@ -339,8 +411,11 @@
                 </button>
             </div>
             <div class="inline-form inline-form-tight mt-2">
-                <button id="testOllamaModelButton" class="btn-secondary" type="button">Test Selected Model</button>
+                <button id="testOllamaModelButton" class="btn-secondary" type="button">Test this model</button>
+                <button id="addOllamaToWorkflowPoolButton" class="btn-secondary" type="button">Add to workflow pool</button>
             </div>
+            <small class="settings-note">A test is a live probe only; it does not change the browser chat choice,
+                scoped primary, or workflow pool.</small>
             <div id="ollamaModelStatusMessage" class="status-message" role="alert">
                 <!-- Status messages for the selected Ollama model will appear here -->
             </div>
@@ -366,31 +441,32 @@
         </section>
 
         <section id="rag-model-settings" data-settings-concern="models">
-            <h2>RAG &amp; Workflow Index Models</h2>
-            <p class="settings-note">These controls govern the embedding and optional LLM surfaces used by RAG and by
-                the authoritative workflow capability index. If a RAG setting is left on inherit, Von uses the active
-                chat model in scope when available, then the saved server default below.</p>
+            <h2>Shared RAG &amp; Workflow Index Models</h2>
+            <p class="settings-note">These singleton server-side services do not inherit a browser-only chat choice.
+                If a RAG setting is left on inherit, Von uses the saved shared server default below.</p>
+            <p id="sharedRuntimeModelWriteAccessNote" class="settings-note" data-writable="false">
+                Checking whether this session may change shared server settings...
+            </p>
 
             <div class="settings-runtime-model-panel">
                 <div class="settings-runtime-model-block">
-                    <h3>Server Default Chat Model</h3>
-                    <p class="settings-note">Used by server-side features when no scoped chat model is available. If
-                        you leave these blank, Save uses the current browser chat selection as the server default
-                        snapshot.</p>
+                    <h3>Shared Server Default Model</h3>
+                    <p class="settings-note">Used by shared server-side features. Blank fields retain the saved
+                        shared default. If no shared default exists, enter an explicit provider and model.</p>
                     <div class="settings-runtime-model-grid">
                         <label for="serverDefaultLlmProvider">Provider</label>
-                        <select id="serverDefaultLlmProvider">
-                            <option value="">Use current chat model on save</option>
+                        <select id="serverDefaultLlmProvider" disabled>
+                            <option value="">Keep saved shared default</option>
                             <option value="ollama">Ollama</option>
                             <option value="openai">OpenAI</option>
                             <option value="gemini">Gemini</option>
                         </select>
 
                         <label for="serverDefaultLlmModel">Model</label>
-                        <input type="text" id="serverDefaultLlmModel" placeholder="e.g. gemma4:26b or gpt-5.4-mini" />
+                        <input type="text" id="serverDefaultLlmModel" placeholder="e.g. gemma4:26b or gpt-5.4-mini" disabled />
 
                         <label for="serverDefaultLlmHost">Host (optional)</label>
-                        <input type="text" id="serverDefaultLlmHost" placeholder="e.g. http://localhost:11434" />
+                        <input type="text" id="serverDefaultLlmHost" placeholder="e.g. http://localhost:11434" disabled />
                     </div>
                     <div id="serverDefaultLlmSummary" class="settings-runtime-model-summary">Server default: —</div>
                 </div>
@@ -399,13 +475,13 @@
                     <h3>RAG Embedder</h3>
                     <div class="settings-runtime-model-grid">
                         <label for="ragEmbedderMode">Selection mode</label>
-                        <select id="ragEmbedderMode">
-                            <option value="inherit">Inherit chat default</option>
+                        <select id="ragEmbedderMode" disabled>
+                            <option value="inherit">Inherit server default</option>
                             <option value="explicit">Explicit model</option>
                         </select>
 
                         <label for="ragEmbedderProvider">Provider</label>
-                        <select id="ragEmbedderProvider">
+                        <select id="ragEmbedderProvider" disabled>
                             <option value="">Choose provider</option>
                             <option value="ollama">Ollama</option>
                             <option value="openai">OpenAI</option>
@@ -413,10 +489,10 @@
                         </select>
 
                         <label for="ragEmbedderModel">Model</label>
-                        <input type="text" id="ragEmbedderModel" placeholder="e.g. nomic-embed-text or text-embedding-3-small" />
+                        <input type="text" id="ragEmbedderModel" placeholder="e.g. nomic-embed-text or text-embedding-3-small" disabled />
 
                         <label for="ragEmbedderHost">Host (optional)</label>
-                        <input type="text" id="ragEmbedderHost" placeholder="e.g. http://localhost:11434" />
+                        <input type="text" id="ragEmbedderHost" placeholder="e.g. http://localhost:11434" disabled />
                     </div>
                     <small class="settings-note">Changing the embedder invalidates embedding-backed indices. Von will
                         rebuild the authoritative workflow capability index and treat incompatible namespaces as
@@ -428,14 +504,14 @@
                     <h3>RAG Backend LLM</h3>
                     <div class="settings-runtime-model-grid">
                         <label for="ragLlmMode">Selection mode</label>
-                        <select id="ragLlmMode">
-                            <option value="inherit">Inherit chat default</option>
+                        <select id="ragLlmMode" disabled>
+                            <option value="inherit">Inherit server default</option>
                             <option value="explicit">Explicit model</option>
                             <option value="disabled">Disabled</option>
                         </select>
 
                         <label for="ragLlmProvider">Provider</label>
-                        <select id="ragLlmProvider">
+                        <select id="ragLlmProvider" disabled>
                             <option value="">Choose provider</option>
                             <option value="ollama">Ollama</option>
                             <option value="openai">OpenAI</option>
@@ -443,15 +519,21 @@
                         </select>
 
                         <label for="ragLlmModel">Model</label>
-                        <input type="text" id="ragLlmModel" placeholder="Optional unless explicit mode is selected" />
+                        <input type="text" id="ragLlmModel" placeholder="Optional unless explicit mode is selected" disabled />
 
                         <label for="ragLlmHost">Host (optional)</label>
-                        <input type="text" id="ragLlmHost" placeholder="e.g. http://localhost:11434" />
+                        <input type="text" id="ragLlmHost" placeholder="e.g. http://localhost:11434" disabled />
                     </div>
                     <small class="settings-note">If disabled, the backend does not use a separate LLM for RAG support
                         operations and avoids hidden provider defaults.</small>
-                    <div id="ragLlmSummary" class="settings-runtime-model-summary">Effective RAG LLM: —</div>
+                    <div id="ragLlmSummary" class="settings-runtime-model-summary">Effective shared RAG LLM: —</div>
                 </div>
+            </div>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <button id="saveRuntimeModelSettingsButton" class="btn-azure" type="button" disabled>
+                    Save shared RAG models
+                </button>
             </div>
 
             <div id="workflowCapabilityIndexStatusCard" class="settings-runtime-status-card">

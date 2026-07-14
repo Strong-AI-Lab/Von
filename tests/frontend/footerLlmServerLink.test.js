@@ -68,7 +68,9 @@ describe('footer model settings button', () => {
         const modelButton = modelSegment.querySelector('.concept-footer-button');
         expect(modelButton).toBeTruthy();
         expect(modelButton.textContent.trim()).toBe('llama3.1:8b');
-        expect(modelButton.getAttribute('aria-label')).toBe('Open language model settings');
+        expect(modelButton.getAttribute('aria-label')).toContain('Model llama3.1:8b');
+        expect(modelButton.getAttribute('aria-label')).toContain('Configured status Ready');
+        expect(modelButton.getAttribute('aria-label')).toContain('Open language model settings');
 
         const llmSegment = Array.from(document.querySelectorAll('.footer-segment'))
             .find((seg) => seg.querySelector('.footer-label-inline')?.textContent?.trim() === 'LLM:');

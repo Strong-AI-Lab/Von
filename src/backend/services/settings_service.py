@@ -2,9 +2,9 @@ import logging
 import json
 import os
 import time
-from typing import Any, Optional, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Optional, Dict, List, Mapping, Sequence
 from pymongo.results import UpdateResult
-from pymongo.errors import OperationFailure
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from ..utils.time_utils import utc_now
 from ..db.mongo_client import (
     APPLICATION_SETTINGS_COLLECTION_NAME,
@@ -36,6 +36,15 @@ def _settings_mongo_comment(operation: str, detail: str | None = None):
     )
 
 
+def _settings_comment_is_unsupported(exc: OperationFailure) -> bool:
+    message = str(exc).lower()
+    return "comment" in message and (
+        "unrecognized field" in message
+        or "unrecognised field" in message
+        or "unknown option" in message
+    )
+
+
 def _settings_find_one(collection, query, *, operation: str, detail: str | None = None):
     kwargs: dict[str, Any] = {}
     comment = _settings_mongo_comment(operation, detail=detail)
@@ -48,7 +57,11 @@ def _settings_find_one(collection, query, *, operation: str, detail: str | None 
         result = collection.find_one(query, **kwargs)
         success = True
         return result
-    except TypeError as exc:
+    except (TypeError, OperationFailure) as exc:
+        if isinstance(exc, OperationFailure) and not _settings_comment_is_unsupported(
+            exc
+        ):
+            raise
         error_type = type(exc).__name__
         try:
             result = collection.find_one(query)
@@ -84,7 +97,11 @@ def _settings_find(collection, query, *, operation: str, detail: str | None = No
         cursor = collection.find(query, **kwargs)
         success = True
         return cursor
-    except TypeError as exc:
+    except (TypeError, OperationFailure) as exc:
+        if isinstance(exc, OperationFailure) and not _settings_comment_is_unsupported(
+            exc
+        ):
+            raise
         error_type = type(exc).__name__
         try:
             cursor = collection.find(query)
@@ -128,7 +145,11 @@ def _settings_update_one(
         result = collection.update_one(query, update, **kwargs)
         success = True
         return result
-    except TypeError as exc:
+    except (TypeError, OperationFailure) as exc:
+        if isinstance(exc, OperationFailure) and not _settings_comment_is_unsupported(
+            exc
+        ):
+            raise
         error_type = type(exc).__name__
         kwargs.pop("comment", None)
         try:
@@ -151,6 +172,7 @@ def _settings_update_one(
             detail=detail,
             error_type=error_type,
         )
+
 
 # --- Setting Names ---
 # REFACTORING_NOTE: Consolidating to a single setting for the active LLM.
@@ -210,9 +232,11 @@ _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
 _ACTIVE_LLM_ORG_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:org:"
 _ENABLED_LLMS_USER_PREFIX = f"{ENABLED_LLMS_SETTING_NAME}:user:"
 _ENABLED_LLMS_ORG_PREFIX = f"{ENABLED_LLMS_SETTING_NAME}:org:"
-_MUTATION_AUTHORITY_LEVEL_USER_PREFIX = (
-    f"{MUTATION_AUTHORITY_LEVEL_SETTING_NAME}:user:"
-)
+_SCOPED_LLM_CONFIGURATION_USER_PREFIX = "llm_configuration:user:"
+_SCOPED_LLM_CONFIGURATION_ORG_PREFIX = "llm_configuration:org:"
+_SCOPED_LLM_CONFIGURATION_SCHEMA_VERSION = 1
+_SCOPED_LLM_CONFIGURATION_CAS_ATTEMPTS = 5
+_MUTATION_AUTHORITY_LEVEL_USER_PREFIX = f"{MUTATION_AUTHORITY_LEVEL_SETTING_NAME}:user:"
 _RUNTIME_MODEL_SETTING_MODES = {"inherit", "explicit", "disabled"}
 
 
@@ -736,7 +760,7 @@ def _resolve_runtime_model_setting(
         "effective": None,
         "status": "unresolved",
         "selection_source": "inherit_without_source",
-        "reason": "inherits_chat_default_but_no_chat_default_is_available",
+        "reason": "shared_server_default_is_not_configured",
     }
 
 
@@ -831,16 +855,406 @@ def _build_org_enabled_llm_setting_name(org_concept_id: str) -> str:
     return f"{_ENABLED_LLMS_ORG_PREFIX}{org_concept_id}"
 
 
+def _build_user_llm_configuration_setting_name(user_concept_id: str) -> str:
+    return f"{_SCOPED_LLM_CONFIGURATION_USER_PREFIX}{user_concept_id}"
+
+
+def _build_org_llm_configuration_setting_name(org_concept_id: str) -> str:
+    return f"{_SCOPED_LLM_CONFIGURATION_ORG_PREFIX}{org_concept_id}"
+
+
+def _normalise_primary_and_enabled_llms(
+    *,
+    primary: Mapping[str, Any] | None,
+    enabled: Sequence[Mapping[str, Any]] | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Return one coherent primary/pool projection.
+
+    Older scoped primary documents often omitted the Ollama host while the
+    matching pool entry retained it.  When exactly one hosted entry matches
+    the same provider, model, and parameters, the host is unambiguous and can
+    safely complete the primary instead of exposing one model twice.
+    """
+
+    primary_entry = _normalise_llm_setting_entry(primary)
+    enabled_entries = _normalise_llm_setting_list(list(enabled or []))
+    if primary_entry is not None and not primary_entry.get("host"):
+        provider = str(primary_entry.get("provider") or "").strip().lower()
+        model = str(primary_entry.get("model") or "").strip()
+        parameters_key = stable_model_parameters_key(
+            primary_entry.get(MODEL_PARAMETERS_KEY),
+            provider=provider,
+            model=model,
+        )
+        matching_hosts = {
+            str(entry.get("host") or "").strip()
+            for entry in enabled_entries
+            if str(entry.get("provider") or "").strip().lower() == provider
+            and str(entry.get("model") or "").strip() == model
+            and stable_model_parameters_key(
+                entry.get(MODEL_PARAMETERS_KEY),
+                provider=provider,
+                model=model,
+            )
+            == parameters_key
+            and str(entry.get("host") or "").strip()
+        }
+        if len(matching_hosts) == 1:
+            primary_entry = {**primary_entry, "host": next(iter(matching_hosts))}
+
+    merged = list(enabled_entries)
+    if primary_entry is not None:
+        merged.insert(0, primary_entry)
+    return primary_entry, _dedupe_llm_setting_entries(merged)
+
+
 def _merge_primary_into_enabled_llms(
     *,
     primary: Mapping[str, Any] | None,
     enabled: Sequence[Mapping[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    merged = list(enabled or [])
-    primary_entry = _normalise_llm_setting_entry(primary)
-    if primary_entry is None:
-        return _dedupe_llm_setting_entries(merged)
-    return _dedupe_llm_setting_entries([primary_entry, *merged])
+    _primary_entry, merged = _normalise_primary_and_enabled_llms(
+        primary=primary,
+        enabled=enabled,
+    )
+    return merged
+
+
+def _normalise_scoped_llm_configuration_value(
+    raw: Any,
+) -> dict[str, Any] | None:
+    """Validate and normalise the canonical per-scope model configuration."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    schema_version = raw.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != _SCOPED_LLM_CONFIGURATION_SCHEMA_VERSION
+        or "primary" not in raw
+        or "enabled_llms" not in raw
+    ):
+        return None
+    primary, enabled = _normalise_primary_and_enabled_llms(
+        primary=raw.get("primary"),
+        enabled=_normalise_llm_setting_list(raw.get("enabled_llms")),
+    )
+    return {
+        "schema_version": _SCOPED_LLM_CONFIGURATION_SCHEMA_VERSION,
+        "primary": primary,
+        "enabled_llms": enabled,
+    }
+
+
+def _scoped_llm_configuration_value(
+    *,
+    primary: Mapping[str, Any] | None,
+    enabled: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    primary_entry, enabled_entries = _normalise_primary_and_enabled_llms(
+        primary=primary,
+        enabled=enabled,
+    )
+    return {
+        "schema_version": _SCOPED_LLM_CONFIGURATION_SCHEMA_VERSION,
+        "primary": primary_entry,
+        "enabled_llms": enabled_entries,
+    }
+
+
+def _read_scoped_llm_configuration(
+    *,
+    canonical_setting_name: str,
+    legacy_primary_setting_name: str,
+    legacy_enabled_setting_name: str,
+    collection=None,
+) -> dict[str, Any] | None:
+    """Read one complete scoped configuration, falling back only if absent.
+
+    The legacy primary and pool documents remain read-compatible during the
+    migration, but once a canonical document exists they are never consulted.
+    A malformed canonical document therefore fails closed instead of reviving
+    stale legacy state.
+    """
+
+    settings_collection = (
+        collection if collection is not None else get_application_settings_collection()
+    )
+    if settings_collection is None:
+        logger.error(
+            "Could not access the '%s' collection for scoped LLM configuration.",
+            APPLICATION_SETTINGS_COLLECTION_NAME,
+        )
+        return None
+    try:
+        canonical_doc = _settings_find_one(
+            settings_collection,
+            {"setting_name": canonical_setting_name},
+            operation="scoped_llm_configuration.find_one",
+            detail=canonical_setting_name[:96],
+        )
+        if canonical_doc is not None:
+            revision = canonical_doc.get("revision")
+            value = _normalise_scoped_llm_configuration_value(
+                canonical_doc.get("value")
+            )
+            if (
+                value is None
+                or isinstance(revision, bool)
+                or not isinstance(revision, int)
+                or revision < 1
+            ):
+                logger.error(
+                    "Canonical scoped LLM configuration '%s' is malformed; "
+                    "legacy values will not be used.",
+                    canonical_setting_name,
+                )
+                return None
+            return {
+                "canonical_exists": True,
+                "revision": revision,
+                "primary": value["primary"],
+                "enabled_llms": value["enabled_llms"],
+                "source": "canonical",
+            }
+
+        legacy_cursor = _settings_find(
+            settings_collection,
+            {
+                "setting_name": {
+                    "$in": [
+                        legacy_primary_setting_name,
+                        legacy_enabled_setting_name,
+                    ]
+                }
+            },
+            operation="scoped_llm_configuration.legacy_find",
+            detail=canonical_setting_name[:96],
+        )
+        legacy_values: dict[str, Any] = {}
+        for doc in legacy_cursor:
+            setting_name = doc.get("setting_name")
+            if isinstance(setting_name, str):
+                legacy_values[setting_name] = doc.get("value")
+        primary, enabled = _normalise_primary_and_enabled_llms(
+            primary=legacy_values.get(legacy_primary_setting_name),
+            enabled=_normalise_llm_setting_list(
+                legacy_values.get(legacy_enabled_setting_name)
+            ),
+        )
+        return {
+            "canonical_exists": False,
+            "revision": 0,
+            "primary": primary,
+            "enabled_llms": enabled,
+            "source": "legacy",
+        }
+    except OperationFailure as exc:
+        logger.error(
+            "MongoDB operation failed while reading scoped LLM configuration '%s': %s",
+            canonical_setting_name,
+            exc,
+        )
+        return None
+    except Exception as exc:
+        logger.error(
+            "Unexpected error while reading scoped LLM configuration '%s': %s",
+            canonical_setting_name,
+            exc,
+        )
+        return None
+
+
+def _write_scoped_llm_configuration_cas(
+    *,
+    canonical_setting_name: str,
+    legacy_primary_setting_name: str,
+    legacy_enabled_setting_name: str,
+    build_value: Callable[[Mapping[str, Any]], Mapping[str, Any] | None],
+) -> bool:
+    """Atomically replace one scope's complete configuration with CAS retry."""
+
+    settings_collection = get_application_settings_collection()
+    if settings_collection is None:
+        logger.error(
+            "Could not access the '%s' collection for scoped LLM configuration.",
+            APPLICATION_SETTINGS_COLLECTION_NAME,
+        )
+        return False
+
+    for attempt in range(1, _SCOPED_LLM_CONFIGURATION_CAS_ATTEMPTS + 1):
+        current = _read_scoped_llm_configuration(
+            canonical_setting_name=canonical_setting_name,
+            legacy_primary_setting_name=legacy_primary_setting_name,
+            legacy_enabled_setting_name=legacy_enabled_setting_name,
+            collection=settings_collection,
+        )
+        if current is None:
+            return False
+        next_value = _normalise_scoped_llm_configuration_value(build_value(current))
+        if next_value is None:
+            logger.error(
+                "Refusing malformed scoped LLM configuration for '%s'.",
+                canonical_setting_name,
+            )
+            return False
+
+        if current["canonical_exists"]:
+            current_revision = int(current["revision"])
+            query = {
+                "setting_name": canonical_setting_name,
+                "revision": current_revision,
+            }
+            next_revision = current_revision + 1
+            upsert = False
+        else:
+            # If another process creates the canonical document after our read,
+            # the unique setting_name index turns this upsert into a duplicate
+            # key conflict. Re-read and retry against its revision.
+            query = {
+                "setting_name": canonical_setting_name,
+                "revision": {"$exists": False},
+            }
+            next_revision = 1
+            upsert = True
+
+        try:
+            result = _settings_update_one(
+                settings_collection,
+                query,
+                {
+                    "$set": {
+                        "setting_name": canonical_setting_name,
+                        "revision": next_revision,
+                        "value": next_value,
+                        "updated_at": utc_now(),
+                    }
+                },
+                operation="scoped_llm_configuration.cas_update",
+                detail=f"{canonical_setting_name[:80]} attempt={attempt}",
+                upsert=upsert,
+            )
+        except DuplicateKeyError:
+            continue
+        except OperationFailure as exc:
+            logger.error(
+                "MongoDB operation failed while writing scoped LLM configuration '%s': %s",
+                canonical_setting_name,
+                exc,
+            )
+            return False
+        except Exception as exc:
+            logger.error(
+                "Unexpected error while writing scoped LLM configuration '%s': %s",
+                canonical_setting_name,
+                exc,
+            )
+            return False
+
+        if not result.acknowledged:
+            logger.error(
+                "Scoped LLM configuration write for '%s' was not acknowledged.",
+                canonical_setting_name,
+            )
+            return False
+        if result.upserted_id is not None or result.matched_count > 0:
+            return True
+
+    logger.error(
+        "Scoped LLM configuration '%s' changed during all %d CAS attempts.",
+        canonical_setting_name,
+        _SCOPED_LLM_CONFIGURATION_CAS_ATTEMPTS,
+    )
+    return False
+
+
+def _set_scoped_llm_configuration(
+    *,
+    canonical_setting_name: str,
+    primary_setting_name: str,
+    enabled_setting_name: str,
+    provider: str,
+    model_name: str,
+    model_parameters: Mapping[str, Any] | None = None,
+    host: str | None = None,
+    enabled_entries: Sequence[Mapping[str, Any]] | None = None,
+) -> bool:
+    """Persist one scope's primary and pool in one atomic document."""
+
+    explicit_enabled = (
+        _normalise_llm_setting_list(list(enabled_entries))
+        if enabled_entries is not None
+        else None
+    )
+
+    def _build(current: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        # Older clients omit ``host`` when updating parameters on an existing
+        # Ollama model.  Treat omission as "preserve" for the same
+        # provider/model slot; otherwise a reasoning-effort or compatibility
+        # save can silently turn a hosted primary into a second hostless entry.
+        effective_host = host
+        prior_primary_entry = _normalise_llm_setting_entry(current.get("primary"))
+        if (
+            effective_host is None
+            and prior_primary_entry is not None
+            and prior_primary_entry.get("provider") == str(provider).strip().lower()
+            and prior_primary_entry.get("model") == str(model_name).strip()
+        ):
+            effective_host = prior_primary_entry.get("host")
+
+        payload = _normalise_llm_setting_entry(
+            {
+                "provider": provider,
+                "model": model_name,
+                "host": effective_host,
+                MODEL_PARAMETERS_KEY: model_parameters or {},
+            }
+        )
+        if payload is None:
+            logger.error(
+                "Scoped LLM configuration received invalid provider/model payload"
+            )
+            return None
+        requested_enabled = (
+            explicit_enabled
+            if explicit_enabled is not None
+            else _normalise_llm_setting_list(current.get("enabled_llms"))
+        )
+        return _scoped_llm_configuration_value(
+            primary=payload,
+            enabled=requested_enabled,
+        )
+
+    return _write_scoped_llm_configuration_cas(
+        canonical_setting_name=canonical_setting_name,
+        legacy_primary_setting_name=primary_setting_name,
+        legacy_enabled_setting_name=enabled_setting_name,
+        build_value=_build,
+    )
+
+
+def _set_scoped_enabled_llm_settings(
+    *,
+    canonical_setting_name: str,
+    primary_setting_name: str,
+    enabled_setting_name: str,
+    entries: Sequence[Mapping[str, Any]],
+) -> bool:
+    normalised_entries = _normalise_llm_setting_list(list(entries))
+
+    def _build(current: Mapping[str, Any]) -> Mapping[str, Any]:
+        return _scoped_llm_configuration_value(
+            primary=current.get("primary"),
+            enabled=normalised_entries,
+        )
+
+    return _write_scoped_llm_configuration_cas(
+        canonical_setting_name=canonical_setting_name,
+        legacy_primary_setting_name=primary_setting_name,
+        legacy_enabled_setting_name=enabled_setting_name,
+        build_value=_build,
+    )
 
 
 def set_user_enabled_llm_settings(
@@ -848,17 +1262,37 @@ def set_user_enabled_llm_settings(
     entries: Sequence[Mapping[str, Any]],
 ) -> bool:
     if not isinstance(user_concept_id, str) or not user_concept_id.strip():
-        logger.error("set_user_enabled_llm_settings requires a non-empty user_concept_id")
+        logger.error(
+            "set_user_enabled_llm_settings requires a non-empty user_concept_id"
+        )
         return False
-    normalised = _normalise_llm_setting_list(list(entries))
-    return update_setting(_build_user_enabled_llm_setting_name(user_concept_id), normalised)
+    return _set_scoped_enabled_llm_settings(
+        canonical_setting_name=_build_user_llm_configuration_setting_name(
+            user_concept_id
+        ),
+        primary_setting_name=_build_user_llm_setting_name(user_concept_id),
+        enabled_setting_name=_build_user_enabled_llm_setting_name(user_concept_id),
+        entries=entries,
+    )
 
 
 def get_user_enabled_llm_settings(user_concept_id: str) -> list[dict[str, Any]]:
     if not isinstance(user_concept_id, str) or not user_concept_id.strip():
         return []
-    raw = get_setting(_build_user_enabled_llm_setting_name(user_concept_id))
-    return _normalise_llm_setting_list(raw)
+    configuration = _read_scoped_llm_configuration(
+        canonical_setting_name=_build_user_llm_configuration_setting_name(
+            user_concept_id
+        ),
+        legacy_primary_setting_name=_build_user_llm_setting_name(user_concept_id),
+        legacy_enabled_setting_name=_build_user_enabled_llm_setting_name(
+            user_concept_id
+        ),
+    )
+    return (
+        _normalise_llm_setting_list(configuration.get("enabled_llms"))
+        if configuration is not None
+        else []
+    )
 
 
 def set_org_enabled_llm_settings(
@@ -868,15 +1302,31 @@ def set_org_enabled_llm_settings(
     if not isinstance(org_concept_id, str) or not org_concept_id.strip():
         logger.error("set_org_enabled_llm_settings requires a non-empty org_concept_id")
         return False
-    normalised = _normalise_llm_setting_list(list(entries))
-    return update_setting(_build_org_enabled_llm_setting_name(org_concept_id), normalised)
+    return _set_scoped_enabled_llm_settings(
+        canonical_setting_name=_build_org_llm_configuration_setting_name(
+            org_concept_id
+        ),
+        primary_setting_name=_build_org_llm_setting_name(org_concept_id),
+        enabled_setting_name=_build_org_enabled_llm_setting_name(org_concept_id),
+        entries=entries,
+    )
 
 
 def get_org_enabled_llm_settings(org_concept_id: str) -> list[dict[str, Any]]:
     if not isinstance(org_concept_id, str) or not org_concept_id.strip():
         return []
-    raw = get_setting(_build_org_enabled_llm_setting_name(org_concept_id))
-    return _normalise_llm_setting_list(raw)
+    configuration = _read_scoped_llm_configuration(
+        canonical_setting_name=_build_org_llm_configuration_setting_name(
+            org_concept_id
+        ),
+        legacy_primary_setting_name=_build_org_llm_setting_name(org_concept_id),
+        legacy_enabled_setting_name=_build_org_enabled_llm_setting_name(org_concept_id),
+    )
+    return (
+        _normalise_llm_setting_list(configuration.get("enabled_llms"))
+        if configuration is not None
+        else []
+    )
 
 
 def set_user_llm_setting(
@@ -884,44 +1334,49 @@ def set_user_llm_setting(
     provider: str,
     model_name: str,
     model_parameters: Mapping[str, Any] | None = None,
+    *,
+    host: str | None = None,
+    enabled_entries: Sequence[Mapping[str, Any]] | None = None,
 ) -> bool:
     if not all(
         isinstance(x, str) and x for x in (user_concept_id, provider, model_name)
     ):
         logger.error("set_user_llm_setting requires non-empty string arguments")
         return False
-    payload = _normalise_llm_setting_entry(
-        {
-            "provider": provider,
-            "model": model_name,
-            MODEL_PARAMETERS_KEY: model_parameters or {},
-        }
-    )
-    if payload is None:
-        logger.error("set_user_llm_setting received invalid provider/model payload")
+    if host is not None and not isinstance(host, str):
+        logger.error("set_user_llm_setting host must be a string when supplied")
         return False
-    ok = update_setting(
-        _build_user_llm_setting_name(user_concept_id),
-        payload,
+    return _set_scoped_llm_configuration(
+        canonical_setting_name=_build_user_llm_configuration_setting_name(
+            user_concept_id
+        ),
+        primary_setting_name=_build_user_llm_setting_name(user_concept_id),
+        enabled_setting_name=_build_user_enabled_llm_setting_name(user_concept_id),
+        provider=provider,
+        model_name=model_name,
+        model_parameters=model_parameters,
+        host=host,
+        enabled_entries=enabled_entries,
     )
-    if not ok:
-        return False
-    merged_enabled = _merge_primary_into_enabled_llms(
-        primary=payload,
-        enabled=get_user_enabled_llm_settings(user_concept_id),
-    )
-    set_user_enabled_llm_settings(user_concept_id, merged_enabled)
-    return True
 
 
 def get_user_llm_setting(user_concept_id: str):
     if not isinstance(user_concept_id, str) or not user_concept_id:
         return None
-    raw = get_setting(_build_user_llm_setting_name(user_concept_id))
-    if raw is not None and not isinstance(raw, dict):
-        logger.warning("User LLM setting malformed (not dict); ignoring")
-        return None
-    return _normalise_llm_setting_entry(raw) if raw is not None else None
+    configuration = _read_scoped_llm_configuration(
+        canonical_setting_name=_build_user_llm_configuration_setting_name(
+            user_concept_id
+        ),
+        legacy_primary_setting_name=_build_user_llm_setting_name(user_concept_id),
+        legacy_enabled_setting_name=_build_user_enabled_llm_setting_name(
+            user_concept_id
+        ),
+    )
+    return (
+        _normalise_llm_setting_entry(configuration.get("primary"))
+        if configuration is not None
+        else None
+    )
 
 
 def set_user_mutation_authority_level(user_concept_id: str, level: str) -> bool:
@@ -959,44 +1414,47 @@ def set_org_llm_setting(
     provider: str,
     model_name: str,
     model_parameters: Mapping[str, Any] | None = None,
+    *,
+    host: str | None = None,
+    enabled_entries: Sequence[Mapping[str, Any]] | None = None,
 ) -> bool:
     if not all(
         isinstance(x, str) and x for x in (org_concept_id, provider, model_name)
     ):
         logger.error("set_org_llm_setting requires non-empty string arguments")
         return False
-    payload = _normalise_llm_setting_entry(
-        {
-            "provider": provider,
-            "model": model_name,
-            MODEL_PARAMETERS_KEY: model_parameters or {},
-        }
-    )
-    if payload is None:
-        logger.error("set_org_llm_setting received invalid provider/model payload")
+    if host is not None and not isinstance(host, str):
+        logger.error("set_org_llm_setting host must be a string when supplied")
         return False
-    ok = update_setting(
-        _build_org_llm_setting_name(org_concept_id),
-        payload,
+    return _set_scoped_llm_configuration(
+        canonical_setting_name=_build_org_llm_configuration_setting_name(
+            org_concept_id
+        ),
+        primary_setting_name=_build_org_llm_setting_name(org_concept_id),
+        enabled_setting_name=_build_org_enabled_llm_setting_name(org_concept_id),
+        provider=provider,
+        model_name=model_name,
+        model_parameters=model_parameters,
+        host=host,
+        enabled_entries=enabled_entries,
     )
-    if not ok:
-        return False
-    merged_enabled = _merge_primary_into_enabled_llms(
-        primary=payload,
-        enabled=get_org_enabled_llm_settings(org_concept_id),
-    )
-    set_org_enabled_llm_settings(org_concept_id, merged_enabled)
-    return True
 
 
 def get_org_llm_setting(org_concept_id: str):
     if not isinstance(org_concept_id, str) or not org_concept_id:
         return None
-    raw = get_setting(_build_org_llm_setting_name(org_concept_id))
-    if raw is not None and not isinstance(raw, dict):
-        logger.warning("Org LLM setting malformed (not dict); ignoring")
-        return None
-    return _normalise_llm_setting_entry(raw) if raw is not None else None
+    configuration = _read_scoped_llm_configuration(
+        canonical_setting_name=_build_org_llm_configuration_setting_name(
+            org_concept_id
+        ),
+        legacy_primary_setting_name=_build_org_llm_setting_name(org_concept_id),
+        legacy_enabled_setting_name=_build_org_enabled_llm_setting_name(org_concept_id),
+    )
+    return (
+        _normalise_llm_setting_entry(configuration.get("primary"))
+        if configuration is not None
+        else None
+    )
 
 
 def resolve_llm_setting(
@@ -1008,11 +1466,37 @@ def resolve_llm_setting(
     Returns dict or None.
     """
     if user_concept_id:
-        user_val = get_user_llm_setting(user_concept_id)
+        user_configuration = _read_scoped_llm_configuration(
+            canonical_setting_name=_build_user_llm_configuration_setting_name(
+                user_concept_id
+            ),
+            legacy_primary_setting_name=_build_user_llm_setting_name(user_concept_id),
+            legacy_enabled_setting_name=_build_user_enabled_llm_setting_name(
+                user_concept_id
+            ),
+        )
+        user_val = (
+            _normalise_llm_setting_entry(user_configuration.get("primary"))
+            if user_configuration is not None
+            else None
+        )
         if user_val:
             return {**user_val, "scope": "user", "user_concept_id": user_concept_id}
     if org_concept_id:
-        org_val = get_org_llm_setting(org_concept_id)
+        org_configuration = _read_scoped_llm_configuration(
+            canonical_setting_name=_build_org_llm_configuration_setting_name(
+                org_concept_id
+            ),
+            legacy_primary_setting_name=_build_org_llm_setting_name(org_concept_id),
+            legacy_enabled_setting_name=_build_org_enabled_llm_setting_name(
+                org_concept_id
+            ),
+        )
+        org_val = (
+            _normalise_llm_setting_entry(org_configuration.get("primary"))
+            if org_configuration is not None
+            else None
+        )
         if org_val:
             return {
                 **org_val,
@@ -1033,10 +1517,19 @@ def resolve_enabled_llm_settings(
     """
 
     if user_concept_id:
-        user_primary = get_user_llm_setting(user_concept_id)
-        user_enabled = _merge_primary_into_enabled_llms(
-            primary=user_primary,
-            enabled=get_user_enabled_llm_settings(user_concept_id),
+        user_configuration = _read_scoped_llm_configuration(
+            canonical_setting_name=_build_user_llm_configuration_setting_name(
+                user_concept_id
+            ),
+            legacy_primary_setting_name=_build_user_llm_setting_name(user_concept_id),
+            legacy_enabled_setting_name=_build_user_enabled_llm_setting_name(
+                user_concept_id
+            ),
+        )
+        user_enabled = (
+            _normalise_llm_setting_list(user_configuration.get("enabled_llms"))
+            if user_configuration is not None
+            else []
         )
         if user_enabled:
             return [
@@ -1049,10 +1542,19 @@ def resolve_enabled_llm_settings(
             ]
 
     if org_concept_id:
-        org_primary = get_org_llm_setting(org_concept_id)
-        org_enabled = _merge_primary_into_enabled_llms(
-            primary=org_primary,
-            enabled=get_org_enabled_llm_settings(org_concept_id),
+        org_configuration = _read_scoped_llm_configuration(
+            canonical_setting_name=_build_org_llm_configuration_setting_name(
+                org_concept_id
+            ),
+            legacy_primary_setting_name=_build_org_llm_setting_name(org_concept_id),
+            legacy_enabled_setting_name=_build_org_enabled_llm_setting_name(
+                org_concept_id
+            ),
+        )
+        org_enabled = (
+            _normalise_llm_setting_list(org_configuration.get("enabled_llms"))
+            if org_configuration is not None
+            else []
         )
         if org_enabled:
             return [
@@ -2181,9 +2683,7 @@ def set_model_llm_timeout(provider: str, model: str, timeout_sec: float | None) 
 
     key = _make_model_timeout_key(provider, model)
     if not key.replace(":", "").strip():
-        logger.error(
-            "set_model_llm_timeout requires non-empty provider and model"
-        )
+        logger.error("set_model_llm_timeout requires non-empty provider and model")
         return False
     overrides = get_model_llm_timeout_overrides()
     if timeout_sec is None:

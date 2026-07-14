@@ -6,6 +6,36 @@ import {
 } from './utils/retryableLoadState.js';
 import { normaliseLocalModelName } from './utils/localModelPreferences.js';
 
+let ollamaHostManagementWritable = false;
+
+export function setOllamaHostManagementWritable(canWrite) {
+  ollamaHostManagementWritable = canWrite === true;
+  const sharedControlTitle = ollamaHostManagementWritable
+    ? 'Updates the shared server Ollama host configuration.'
+    : 'Admin or owner privileges are required to update shared Ollama hosts.';
+  const input = document.getElementById('newOllamaHostUrl');
+  const addButton = document.getElementById('addOllamaHostButton');
+  const note = document.getElementById('ollamaHostManagementAccessNote');
+  if (input) {
+    input.disabled = !ollamaHostManagementWritable;
+    input.title = sharedControlTitle;
+  }
+  if (addButton) {
+    addButton.disabled = !ollamaHostManagementWritable;
+    addButton.title = sharedControlTitle;
+  }
+  if (note) {
+    note.textContent = ollamaHostManagementWritable
+      ? 'Changes here update the shared server host configuration.'
+      : 'Read-only: an admin or owner must add, remove, or activate shared Ollama hosts.';
+  }
+  document.querySelectorAll('[data-ollama-host-write-control="true"]').forEach(button => {
+    const alreadyActive = button.dataset.ollamaHostActive === 'true';
+    button.disabled = !ollamaHostManagementWritable || alreadyActive;
+    button.title = sharedControlTitle;
+  });
+}
+
 // Settings management functions
 export async function loadAvailableModels() {
   const { data } = await getJsonDetailed('/api/settings/models/ollama');
@@ -26,6 +56,9 @@ export async function loadOllamaHosts() {
 }
 
 export async function saveOllamaHosts(hosts, activeHost = null) {
+  if (!ollamaHostManagementWritable) {
+    throw new Error('Admin or owner privileges are required to update shared Ollama hosts.');
+  }
   try {
     return await postJson('/api/settings/ollama/hosts', {
       hosts: hosts,
@@ -398,21 +431,26 @@ export function renderOllamaHostsList(hosts, activeHost) {
         ${host.is_local ? '<span style="color: #28a745; font-size: 0.8em;">(Local)</span>' : '<span style="color: #007cba; font-size: 0.8em;">(Remote)</span>'}
         ${host.url === activeHost ? '<span style="color: #dc3545; font-size: 0.8em; font-weight: bold;">(Active)</span>' : ''}
       </span>
-      <button onclick="setActiveOllamaHost('${host.url}')" 
+      <button onclick="setActiveOllamaHost('${host.url}')"
+              data-ollama-host-write-control="true"
+              data-ollama-host-active="${host.url === activeHost ? 'true' : 'false'}"
               style="padding: 4px 8px; font-size: 0.8em; background: #007cba; color: white; border: none; border-radius: 3px; cursor: pointer;"
-              ${host.url === activeHost ? 'disabled' : ''}>
+              disabled>
         ${host.url === activeHost ? 'Active' : 'Set Active'}
       </button>
       <button onclick="testOllamaHost('${host.url}')" 
               style="padding: 4px 8px; font-size: 0.8em; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">
         Test
       </button>
-      <button onclick="removeOllamaHost('${host.url}')" 
-              style="padding: 4px 8px; font-size: 0.8em; background: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer;">
+      <button onclick="removeOllamaHost('${host.url}')"
+              data-ollama-host-write-control="true"
+              style="padding: 4px 8px; font-size: 0.8em; background: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer;"
+              disabled>
         Remove
       </button>
     </div>
   `).join('');
+  setOllamaHostManagementWritable(ollamaHostManagementWritable);
 }
 
 export async function loadAndRenderOllamaHosts() {
@@ -440,6 +478,10 @@ export async function loadAndRenderOllamaHosts() {
 
 // Global functions for host management (called from HTML buttons)
 window.setActiveOllamaHost = async function(hostUrl) {
+  if (!ollamaHostManagementWritable) {
+    showStatusMessage('settingsStatusMessage', 'Admin or owner privileges are required to update shared Ollama hosts.', true);
+    return;
+  }
   try {
     const data = await loadOllamaHosts();
     await saveOllamaHosts(data.hosts, hostUrl);
@@ -467,6 +509,10 @@ window.testOllamaHost = async function(hostUrl) {
 };
 
 window.removeOllamaHost = async function(hostUrl) {
+  if (!ollamaHostManagementWritable) {
+    showStatusMessage('settingsStatusMessage', 'Admin or owner privileges are required to update shared Ollama hosts.', true);
+    return;
+  }
   try {
     const data = await loadOllamaHosts();
     const updatedHosts = data.hosts.filter(host => host.url !== hostUrl);
