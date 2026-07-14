@@ -77,7 +77,7 @@ def vontology_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(service, "get_texts_for_concept", get_texts)
     monkeypatch.setattr(service, "upsert_singleton_text_relation", upsert_text)
     monkeypatch.setattr(
-        service, "_verify_live_authority_reference", lambda _value: None
+        service, "_verify_live_authority_reference", lambda _value, **_kwargs: None
     )
     monkeypatch.setattr(
         service,
@@ -821,18 +821,33 @@ def test_campaign_projection_uses_unique_receipts_and_exact_release_bindings(
 def test_live_authority_revision_must_match_current_vontology_definition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    observed_scope: dict[str, str | None] = {}
+
+    def _load_identity(_workflow_id: str) -> dict[str, str]:
+        from src.backend.security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
+
+        observed_scope["user_id"] = get_effective_user_concept_id()
+        observed_scope["org_id"] = get_effective_organisation_concept_id()
+        return {"authoritative_definition_hash": "a" * 64}
+
     monkeypatch.setattr(
         service,
         "_load_authoritative_workflow_identity",
-        lambda _workflow_id: {"authoritative_definition_hash": "a" * 64},
+        _load_identity,
     )
 
     service._verify_live_authority_reference(
         {
             "authority_concept_id": "#V#represented_learning_workflow",
             "authority_revision_sha256": "a" * 64,
-        }
+        },
+        user_id=USER_ID,
+        org_id=ORG_ID,
     )
+    assert observed_scope == {"user_id": USER_ID, "org_id": ORG_ID}
     with pytest.raises(
         service.LearningReleasePersistenceError,
         match="live_represented_authority_revision_mismatch",
@@ -841,7 +856,9 @@ def test_live_authority_revision_must_match_current_vontology_definition(
             {
                 "authority_concept_id": "#V#represented_learning_workflow",
                 "authority_revision_sha256": "b" * 64,
-            }
+            },
+            user_id=USER_ID,
+            org_id=ORG_ID,
         )
 
 

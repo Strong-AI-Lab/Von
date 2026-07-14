@@ -22,6 +22,7 @@ import threading
 from typing import Any
 import uuid
 
+from ..security.access_control import override_current_actor
 from . import concept_service
 from .concept_service import ConceptNotFoundError
 from .namespace_service import (
@@ -1422,14 +1423,24 @@ def _verify_persisted_represented_decision_trace(
         )
 
 
-def _verify_live_authority_reference(value: Any) -> None:
+def _verify_live_authority_reference(
+    value: Any,
+    *,
+    user_id: str,
+    org_id: str,
+) -> None:
     if not isinstance(value, Mapping):
         raise LearningReleasePersistenceError(
             "live_represented_authority_reference_required"
         )
     workflow_id = str(value.get("authority_concept_id") or "").strip()
     expected_revision = str(value.get("authority_revision_sha256") or "").strip()
-    identity = _load_authoritative_workflow_identity(workflow_id)
+    # Durable submission and execution resolve Vontology workflow authority in
+    # the authenticated actor's scope. Revalidate in that same scope so an
+    # ambient or anonymous materialisation cannot be compared with an exact
+    # actor-scoped execution snapshot.
+    with override_current_actor(user_id, org_id):
+        identity = _load_authoritative_workflow_identity(workflow_id)
     observed_revision = (
         str(identity.get("authoritative_definition_hash") or "").strip()
         if isinstance(identity, Mapping)
@@ -1925,7 +1936,26 @@ def register_operational_learning_release_candidate_in_vontology(
 ) -> dict[str, Any]:
     """Validate/register a represented candidate and persist exact readback."""
 
-    _verify_live_authority_reference(proposal_authority)
+    _verify_live_authority_reference(
+        proposal_authority,
+        user_id=user_id,
+        org_id=org_id,
+    )
+    _verify_persisted_represented_candidate_proposal_trace(
+        namespace=namespace,
+        user_id=user_id,
+        org_id=org_id,
+        candidate_id=candidate_id,
+        release_id=release_id,
+        affected_artifact=affected_artifact,
+        release_payload=release_payload,
+        failure_evidence_packets=failure_evidence_packets,
+        proposal_authority=proposal_authority,
+        risk_classes=risk_classes or [],
+        expires_at=expires_at,
+        retest_after=retest_after,
+        retest_requirements=retest_requirements,
+    )
     return _mutate(
         namespace=namespace,
         user_id=user_id,
