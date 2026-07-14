@@ -2288,6 +2288,7 @@ def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
     status_poll_calls: list[str] = []
     sleep_calls: list[float] = []
     observed_execution: dict[str, Any] = {}
+    exact_worker_build = "a" * 40
     pause_receipt = {
         "schema_version": "workflow_checkpoint_pause_receipt.v1",
         "instance_id": "checkpoint-instance-1",
@@ -2329,6 +2330,10 @@ def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
                 "user_id": "#V#unit_user",
                 "org_id": "#V#unit_org",
                 "status": "completed" if terminal else "pending",
+                "min_worker_build": exact_worker_build,
+                "claimed_by_build": (
+                    {"git_commit": exact_worker_build} if terminal else None
+                ),
                 "checkpoint_pause_receipt": pause_receipt if terminal else None,
                 "checkpoint_resume_receipt": resume_receipt if terminal else None,
             },
@@ -2352,6 +2357,8 @@ def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
                 "status": "running",
                 "current_state": "request_checkpoint_pause",
                 "step_index": 0,
+                "min_worker_build": exact_worker_build,
+                "claimed_by_build": {"git_commit": exact_worker_build},
             }
         return {
             "success": True,
@@ -2363,6 +2370,8 @@ def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
             "status": "paused",
             "current_state": "after_pause",
             "step_index": 1,
+            "min_worker_build": exact_worker_build,
+            "claimed_by_build": {"git_commit": exact_worker_build},
             "checkpoint_pause_receipt": pause_receipt,
         }
 
