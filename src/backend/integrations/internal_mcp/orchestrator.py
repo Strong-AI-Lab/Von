@@ -3149,6 +3149,547 @@ def _build_workflow_execution_aux_entry(
     return payload
 
 
+def _workflow_execute_snapshot_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _workflow_execute_vontology_definition_identity(
+    value: Any,
+    *,
+    workflow_id: str,
+) -> dict[str, Any] | None:
+    """Return a definition identity suitable for exact authority binding.
+
+    The bridge below is deliberately stricter than ordinary workflow launch
+    telemetry.  A represented authority output can influence a release only
+    when the exact definition executed by the durable worker is also proven to
+    be the Vontology-authoritative definition.
+    """
+
+    if not isinstance(value, Mapping):
+        return None
+    identity = dict(value)
+    definition_hash = _workflow_execute_snapshot_text(
+        identity.get("definition_hash")
+    )
+    authoritative_hash = _workflow_execute_snapshot_text(
+        identity.get("authoritative_definition_hash")
+    )
+    runtime_hash = _workflow_execute_snapshot_text(
+        identity.get("runtime_definition_hash")
+    )
+    if (
+        identity.get("schema_version") != "workflow_definition_identity.v1"
+        or identity.get("workflow_id") != workflow_id
+        or str(identity.get("source") or "").strip().lower() != "vontology"
+        or not definition_hash
+        or len(definition_hash) != 64
+        or any(character not in "0123456789abcdef" for character in definition_hash)
+        or authoritative_hash != definition_hash
+        or identity.get("hash_mismatch") is not False
+        or runtime_hash != definition_hash
+    ):
+        return None
+    return {
+        key: identity[key]
+        for key in (
+            "schema_version",
+            "version",
+            "workflow_id",
+            "source",
+            "definition_hash",
+            "runtime_definition_hash",
+            "authoritative_definition_hash",
+            "hash_mismatch",
+            "state_count",
+            "action_count",
+        )
+        if key in identity
+    }
+
+
+@dataclass(frozen=True)
+class _AwaitedWorkflowExecuteEnvelope:
+    workflow_id: str
+    instance_id: str
+
+
+@dataclass(frozen=True)
+class _WorkflowExecuteActorScope:
+    namespace: str
+    user_id: str
+    org_id: str | None
+
+
+def _workflow_execute_snapshot_failure(
+    *,
+    workflow_id: str | None,
+    reason_code: str,
+    instance_id: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "workflow_execute_result_snapshot",
+        "source": "workflow_execute_tool",
+        "status": "not_recorded",
+        "workflow_id": workflow_id,
+        "reason_code": reason_code,
+    }
+    if instance_id:
+        payload["workflow_instance_id"] = instance_id
+    return payload
+
+
+def _verified_awaited_workflow_execute_envelope(
+    *,
+    tool_payload: Mapping[str, Any],
+    tool_result_payload: Any,
+) -> tuple[_AwaitedWorkflowExecuteEnvelope | None, str | None]:
+    workflow_id = _workflow_execute_snapshot_text(tool_payload.get("workflow_id"))
+    if not workflow_id or not isinstance(tool_result_payload, Mapping):
+        return None, "workflow_execute_result_missing"
+    if tool_result_payload.get("success") is not True:
+        return None, "workflow_execute_not_successful"
+    execution = tool_result_payload.get("workflow_execution")
+    if not isinstance(execution, Mapping):
+        return None, "workflow_execute_execution_envelope_missing"
+    instance_id = _workflow_execute_snapshot_text(execution.get("instance_id"))
+    if not instance_id:
+        return None, "workflow_execute_instance_id_missing"
+    envelope = _AwaitedWorkflowExecuteEnvelope(workflow_id, instance_id)
+    if (
+        execution.get("workflow_id") != workflow_id
+        or execution.get("await_terminal") is not True
+        or execution.get("timed_out") is not False
+        or tool_result_payload.get("timed_out") is True
+    ):
+        return envelope, "workflow_execute_not_awaited_terminal_snapshot"
+    final_status = (
+        _workflow_execute_snapshot_text(execution.get("final_status"))
+        or _workflow_execute_snapshot_text(execution.get("current_status"))
+        or _workflow_execute_snapshot_text(tool_result_payload.get("final_status"))
+    )
+    if str(final_status or "").lower() != "completed":
+        return envelope, "workflow_execute_not_completed"
+    return envelope, None
+
+
+def _verified_workflow_execute_submission_identity(
+    *,
+    tool_result_payload: Mapping[str, Any],
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    verification = tool_result_payload.get("verification")
+    if not isinstance(verification, Mapping):
+        return None, "workflow_execute_submission_identity_missing"
+    preflight = verification.get("preflight")
+    postflight = verification.get("postflight")
+    preflight_identity = _workflow_execute_vontology_definition_identity(
+        preflight.get("definition_identity") if isinstance(preflight, Mapping) else None,
+        workflow_id=workflow_id,
+    )
+    postflight_identity = _workflow_execute_vontology_definition_identity(
+        postflight.get("definition_identity")
+        if isinstance(postflight, Mapping)
+        else None,
+        workflow_id=workflow_id,
+    )
+    if (
+        verification.get("preflight_passed") is not True
+        or verification.get("postflight_passed") is not True
+        or preflight_identity is None
+        or postflight_identity is None
+        or preflight_identity.get("definition_hash")
+        != postflight_identity.get("definition_hash")
+    ):
+        return None, "workflow_execute_submission_identity_unverified"
+    return postflight_identity, None
+
+
+def _verified_workflow_execute_actor_scope(
+    *,
+    tool_payload: Mapping[str, Any],
+    parent_data: Mapping[str, Any],
+    user_namespace: str | None,
+) -> tuple[_WorkflowExecuteActorScope | None, str | None]:
+    # The environment namespace is established before tool arguments exist.
+    namespace = _workflow_execute_snapshot_text(user_namespace)
+    try:
+        from ...services.namespace_service import derive_actor_context_from_namespace
+
+        user_id, org_id = derive_actor_context_from_namespace(namespace or "")
+    except Exception:
+        user_id, org_id = None, None
+    user_id = _workflow_execute_snapshot_text(user_id)
+    org_id = _workflow_execute_snapshot_text(org_id)
+    if not namespace or not user_id:
+        return None, "workflow_execute_parent_actor_scope_missing"
+
+    expected = _WorkflowExecuteActorScope(namespace, user_id, org_id)
+    namespace_hints = (
+        parent_data.get("namespace"),
+        parent_data.get("user_namespace"),
+        tool_payload.get("namespace"),
+    )
+    user_hints = (
+        parent_data.get("user_concept_id"),
+        tool_payload.get("user_id"),
+        tool_payload.get("user_concept_id"),
+    )
+    org_hints = (
+        parent_data.get("org_concept_id"),
+        parent_data.get("organisation_concept_id"),
+        tool_payload.get("org_id"),
+        tool_payload.get("org_concept_id"),
+        tool_payload.get("organisation_concept_id"),
+    )
+    mismatched = (
+        any(
+            (hint := _workflow_execute_snapshot_text(value)) is not None
+            and hint != expected.namespace
+            for value in namespace_hints
+        )
+        or any(
+            (hint := _workflow_execute_snapshot_text(value)) is not None
+            and hint != expected.user_id
+            for value in user_hints
+        )
+        or any(
+            (hint := _workflow_execute_snapshot_text(value)) is not None
+            and hint != expected.org_id
+            for value in org_hints
+        )
+    )
+    if mismatched:
+        return None, "workflow_execute_requested_actor_scope_mismatch"
+    return expected, None
+
+
+def _workflow_execute_instance_matches_scope(
+    *,
+    instance: Any,
+    envelope: _AwaitedWorkflowExecuteEnvelope,
+    actor_scope: _WorkflowExecuteActorScope,
+) -> bool:
+    status_raw = getattr(instance, "status", None)
+    status = _workflow_execute_snapshot_text(getattr(status_raw, "value", status_raw))
+    return bool(
+        getattr(instance, "instance_id", None) == envelope.instance_id
+        and getattr(instance, "workflow_id", None) == envelope.workflow_id
+        and str(status or "").lower() == "completed"
+        and getattr(instance, "user_id", None) == actor_scope.user_id
+        and getattr(instance, "namespace", None) == actor_scope.namespace
+        and getattr(instance, "org_id", None) == actor_scope.org_id
+    )
+
+
+def _workflow_execute_claim_provenance_projection(instance: Any) -> dict[str, Any]:
+    """Return a bounded audit projection without exposing the opaque claim token."""
+
+    claimed_by_build = getattr(instance, "claimed_by_build", None)
+    checkpoint_attestation = getattr(
+        instance, "authority_checkpoint_attestation", None
+    )
+    claim = claimed_by_build if isinstance(claimed_by_build, Mapping) else {}
+    attestation = (
+        checkpoint_attestation
+        if isinstance(checkpoint_attestation, Mapping)
+        else {}
+    )
+    claim_token = _workflow_execute_snapshot_text(
+        getattr(instance, "claim_token", None)
+    )
+    capabilities = claim.get("capabilities")
+    projected_capabilities = (
+        sorted(
+            {
+                str(item).strip()
+                for item in capabilities
+                if isinstance(item, str) and item.strip()
+            }
+        )[:16]
+        if isinstance(capabilities, Sequence)
+        and not isinstance(capabilities, (str, bytes, bytearray))
+        else []
+    )
+    projection = {
+        "schema_version": "workflow_execute_claim_provenance.v1",
+        "worker_claim_schema_version": _workflow_execute_snapshot_text(
+            claim.get("schema_version")
+        ),
+        "worker_id": _workflow_execute_snapshot_text(claim.get("worker_id")),
+        "version": _workflow_execute_snapshot_text(claim.get("version")),
+        "version_base": _workflow_execute_snapshot_text(claim.get("version_base")),
+        "git_commit": _workflow_execute_snapshot_text(claim.get("git_commit")),
+        "git_short_commit": _workflow_execute_snapshot_text(
+            claim.get("git_short_commit")
+        ),
+        "capabilities": projected_capabilities,
+        "claim_token_sha256": (
+            hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+            if claim_token
+            else None
+        ),
+        "checkpoint_attestation_schema_version": (
+            _workflow_execute_snapshot_text(attestation.get("schema_version"))
+        ),
+        "authority_payload_sha256": _workflow_execute_snapshot_text(
+            attestation.get("authority_payload_sha256")
+        ),
+        "exact_snapshot_eligible": attestation.get("exact_snapshot_eligible"),
+    }
+    return {key: value for key, value in projection.items() if value is not None}
+
+
+def _exact_workflow_execute_child_result(
+    *,
+    instance: Any,
+    envelope: _AwaitedWorkflowExecuteEnvelope,
+    submission_identity: Mapping[str, Any],
+) -> tuple[WorkflowResult | None, dict[str, Any] | None, str | None]:
+    workflow_data = getattr(instance, "workflow_data", None)
+    if not isinstance(workflow_data, Mapping):
+        return None, None, "workflow_execute_instance_context_missing"
+    try:
+        from ...workflows.durable.authority_snapshot_attestation import (
+            validate_authority_checkpoint_attestation,
+            worker_claim_supports_exact_authority_snapshot,
+        )
+        from ...workflows.durable.checkpoint_context_projection import (
+            CHECKPOINT_CONTEXT_PROJECTION_KEY,
+            CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
+        )
+        from ...workflows.durable.durable_executor import (
+            DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
+        )
+    except Exception:
+        return None, None, "workflow_execute_executed_identity_support_unavailable"
+
+    claimed_by_build = getattr(instance, "claimed_by_build", None)
+    if not worker_claim_supports_exact_authority_snapshot(claimed_by_build):
+        return None, None, "workflow_execute_worker_capability_unverified"
+    claimed_worker_id = (
+        _workflow_execute_snapshot_text(claimed_by_build.get("worker_id"))
+        if isinstance(claimed_by_build, Mapping)
+        else None
+    )
+    current_claim_token = _workflow_execute_snapshot_text(
+        getattr(instance, "claim_token", None)
+    )
+    if current_claim_token is None:
+        return None, None, "workflow_execute_current_claim_token_missing"
+    checkpoint_attestation, attestation_error = (
+        validate_authority_checkpoint_attestation(
+            getattr(instance, "authority_checkpoint_attestation", None),
+            instance_id=envelope.instance_id,
+            workflow_id=envelope.workflow_id,
+            current_state=(
+                _workflow_execute_snapshot_text(getattr(instance, "current_state", None))
+                or "completed"
+            ),
+            step_index=int(getattr(instance, "step_index", 0) or 0),
+            workflow_data=workflow_data,
+            expected_claim_token=current_claim_token,
+            expected_worker_id=claimed_worker_id,
+            require_exact_eligible=True,
+        )
+    )
+    if checkpoint_attestation is None:
+        return (
+            None,
+            None,
+            attestation_error
+            or "workflow_execute_authority_checkpoint_attestation_unverified",
+        )
+
+    projection = workflow_data.get(CHECKPOINT_CONTEXT_PROJECTION_KEY)
+    projected_keys = (
+        projection.get("projected_keys") if isinstance(projection, Mapping) else None
+    )
+    if (
+        not isinstance(projection, Mapping)
+        or projection.get("schema_version")
+        != CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION
+        or not isinstance(projected_keys, Sequence)
+        or isinstance(projected_keys, (str, bytes, bytearray))
+    ):
+        return None, None, "workflow_execute_checkpoint_projection_unverified"
+    authority_lineage_keys = {
+        _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_KEY,
+        "prompt_context_diagnostics",
+        DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
+    }
+    if int(projection.get("omitted_projected_key_count") or 0) > 0 or any(
+        isinstance(record, Mapping)
+        and str(record.get("key") or "").strip() in authority_lineage_keys
+        for record in projected_keys
+    ):
+        return (
+            None,
+            None,
+            "workflow_execute_authority_lineage_was_checkpoint_projected",
+        )
+
+    executed_identity = _workflow_execute_vontology_definition_identity(
+        workflow_data.get(DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY),
+        workflow_id=envelope.workflow_id,
+    )
+    if (
+        executed_identity is None
+        or executed_identity.get("definition_hash")
+        != submission_identity.get("definition_hash")
+    ):
+        return None, None, "workflow_execute_executed_identity_unverified"
+    authority_output = workflow_data.get(_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_KEY)
+    prompt_diagnostics = workflow_data.get("prompt_context_diagnostics")
+    if not isinstance(authority_output, Mapping):
+        return None, None, "workflow_execute_exact_authority_snapshot_unavailable"
+    if not isinstance(prompt_diagnostics, Mapping):
+        return None, None, "workflow_execute_exact_prompt_lineage_missing"
+    return (
+        WorkflowResult(
+            data={
+                _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_KEY: dict(authority_output),
+                "prompt_context_diagnostics": dict(prompt_diagnostics),
+            },
+            completed=True,
+            final_state=(
+                _workflow_execute_snapshot_text(getattr(instance, "current_state", None))
+                or "completed"
+            ),
+            error=None,
+        ),
+        executed_identity,
+        None,
+    )
+
+
+def _build_awaited_workflow_execute_aux_entry(
+    *,
+    tool_payload: Mapping[str, Any],
+    tool_result_payload: Any,
+    parent_data: Mapping[str, Any],
+    user_namespace: str | None,
+    instance_loader: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Project exact awaited child authority into the parent TER, fail closed."""
+
+    envelope, reason = _verified_awaited_workflow_execute_envelope(
+        tool_payload=tool_payload,
+        tool_result_payload=tool_result_payload,
+    )
+    workflow_id = (
+        envelope.workflow_id
+        if envelope is not None
+        else _workflow_execute_snapshot_text(tool_payload.get("workflow_id"))
+    )
+    instance_id = envelope.instance_id if envelope is not None else None
+
+    def _fail(failure_reason: str) -> dict[str, Any]:
+        return _workflow_execute_snapshot_failure(
+            workflow_id=workflow_id,
+            reason_code=failure_reason,
+            instance_id=instance_id,
+        )
+
+    if envelope is None or reason:
+        return _fail(reason or "workflow_execute_result_missing")
+    assert isinstance(tool_result_payload, Mapping)
+    submission_identity, reason = _verified_workflow_execute_submission_identity(
+        tool_result_payload=tool_result_payload,
+        workflow_id=envelope.workflow_id,
+    )
+    if submission_identity is None:
+        return _fail(reason or "workflow_execute_submission_identity_unverified")
+    actor_scope, reason = _verified_workflow_execute_actor_scope(
+        tool_payload=tool_payload,
+        parent_data=parent_data,
+        user_namespace=user_namespace,
+    )
+    if actor_scope is None:
+        return _fail(reason or "workflow_execute_parent_actor_scope_missing")
+
+    if instance_loader is None:
+        try:
+            from ...workflows.durable import WorkflowInstanceManager
+
+            instance_loader = WorkflowInstanceManager().get_instance
+        except Exception:
+            return _fail("workflow_execute_instance_loader_unavailable")
+    try:
+        instance = instance_loader(envelope.instance_id)
+    except Exception:
+        return _fail("workflow_execute_instance_read_failed")
+    if instance is None:
+        return _fail("workflow_execute_instance_not_found")
+    if not _workflow_execute_instance_matches_scope(
+        instance=instance,
+        envelope=envelope,
+        actor_scope=actor_scope,
+    ):
+        return _fail("workflow_execute_completed_instance_scope_mismatch")
+
+    workflow_result, executed_identity, reason = _exact_workflow_execute_child_result(
+        instance=instance,
+        envelope=envelope,
+        submission_identity=submission_identity,
+    )
+    if workflow_result is None or executed_identity is None:
+        return _fail(reason or "workflow_execute_exact_authority_snapshot_unavailable")
+    execution_request_id = _workflow_execute_snapshot_text(parent_data.get("turn_id"))
+    if not execution_request_id:
+        return _fail("workflow_execute_exact_authority_snapshot_unavailable")
+    claim_provenance = _workflow_execute_claim_provenance_projection(instance)
+    setattr(
+        workflow_result,
+        _WORKFLOW_EXECUTION_IDENTITY_ATTRIBUTE,
+        {
+            "schema_version": _WORKFLOW_EXECUTION_IDENTITY_SCHEMA_VERSION,
+            "workflow_id": envelope.workflow_id,
+            "execution_request_id": execution_request_id,
+            "conversation_session_id": _workflow_execute_snapshot_text(
+                parent_data.get("conversation_session_id")
+            ),
+            "workflow_instance_id": envelope.instance_id,
+            "episode_source": "workflow_execute_tool",
+            "workflow_definition_identity": dict(executed_identity),
+            "durable_claim_provenance": claim_provenance,
+        },
+    )
+    entry = _build_workflow_execution_aux_entry(
+        workflow_id=envelope.workflow_id,
+        workflow_result=workflow_result,
+    )
+    result_snapshot = entry.get("result_snapshot")
+    metadata = (
+        result_snapshot.get(_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_METADATA_KEY)
+        if isinstance(result_snapshot, Mapping)
+        else None
+    )
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("exact") is not True
+        or metadata.get("prompt_lineage_observed") is not True
+        or metadata.get("prompt_lineage_ambiguous") is not False
+    ):
+        return _fail("workflow_execute_exact_authority_snapshot_unavailable")
+    entry.update(
+        {
+            "source": "workflow_execute_tool",
+            "instance_id": envelope.instance_id,
+            "workflow_instance_id": envelope.instance_id,
+            "execution_trace_id": _workflow_execute_snapshot_text(
+                getattr(instance, "execution_trace_id", None)
+            ),
+            "workflow_definition_identity": dict(executed_identity),
+            "durable_claim_provenance": claim_provenance,
+        }
+    )
+    return entry
+
+
 def _derive_workflow_selection_rationale(
     *,
     selected_workflow_id: str | None,
@@ -10797,6 +11338,36 @@ class InternalMCPChatOrchestrator:
                     continue
 
                 result = self._gateway.invoke(tool_name, payload)
+                if tool_name_key == "workflow_execute" and isinstance(
+                    aux_llm_calls, list
+                ):
+                    try:
+                        workflow_execute_aux_entry = (
+                            _build_awaited_workflow_execute_aux_entry(
+                                tool_payload=payload,
+                                tool_result_payload=result.payload,
+                                parent_data=data,
+                                user_namespace=env.user_namespace,
+                            )
+                        )
+                    except Exception:
+                        # Telemetry projection must never change the already
+                        # completed tool call's semantics. Keep the failure
+                        # bounded and observable without exposing child data.
+                        workflow_execute_aux_entry = {
+                            "type": "workflow_execute_result_snapshot",
+                            "source": "workflow_execute_tool",
+                            "status": "not_recorded",
+                            "workflow_id": _workflow_execute_snapshot_text(
+                                payload.get("workflow_id")
+                            ),
+                            "reason_code": (
+                                "workflow_execute_snapshot_projection_failed"
+                            ),
+                        }
+                    if isinstance(call_id, str) and call_id.strip():
+                        workflow_execute_aux_entry["call_id"] = call_id.strip()
+                    aux_llm_calls.append(workflow_execute_aux_entry)
                 auto_retry_details: dict[str, Any] | None = None
                 if tool_name == "add_relationship" and isinstance(
                     result.payload, Mapping

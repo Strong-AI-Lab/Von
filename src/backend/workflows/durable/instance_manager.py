@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,12 @@ from ...services.workflow_payload_store import (
     compact_workflow_payload_for_storage,
     hydrate_workflow_payload_blob_refs,
     is_workflow_payload_blob_ref,
+)
+from .authority_snapshot_attestation import (
+    DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD,
+    DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION,
+    EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY,
+    validate_authority_checkpoint_attestation,
 )
 from .models import (
     EventWorkflowBinding,
@@ -1424,6 +1431,7 @@ class WorkflowInstanceManager:
                 {
                     "instance_id": doc.get("instance_id"),
                     "locked_by": doc.get("locked_by"),
+                    "claim_token": doc.get("claim_token"),
                     "status": WorkflowInstanceStatus.RUNNING.value,
                 },
                 {
@@ -1453,6 +1461,55 @@ class WorkflowInstanceManager:
     # -------------------------------------------------------------------------
     # Locking for distributed workers
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _claim_fence_query(
+        *,
+        instance_id: str,
+        worker_id: str | None,
+        claim_token: str | None,
+        require_unexpired: bool,
+    ) -> dict[str, Any]:
+        """Build a strict claim CAS query, with an explicit direct-call lane."""
+
+        if worker_id is None and claim_token is None:
+            # Legacy/direct execution is permitted only before a durable worker
+            # claim exists.  In particular, an omitted fence must never be able
+            # to overwrite a live or previously released worker claim: the
+            # persisted claim token is the durable evidence that all subsequent
+            # checkpoint and terminal writes must use the worker lane.
+            return {
+                "instance_id": instance_id,
+                "claim_token": None,
+                "status": {
+                    "$in": [
+                        WorkflowInstanceStatus.PENDING.value,
+                        WorkflowInstanceStatus.RUNNING.value,
+                    ]
+                },
+                "$or": [
+                    {"locked_by": None},
+                    {
+                        "locked_by": SUPERVISED_HOLD_LOCK_HOLDER,
+                        "auto_claim_enabled": False,
+                    },
+                ],
+            }
+        if not worker_id or not claim_token:
+            # Exactly one fencing component is never authoritative.
+            return {
+                "instance_id": instance_id,
+                "_id": {"$exists": False},
+            }
+        query: dict[str, Any] = {
+            "instance_id": instance_id,
+            "status": WorkflowInstanceStatus.RUNNING.value,
+            "locked_by": worker_id,
+            "claim_token": claim_token,
+        }
+        if require_unexpired:
+            query["lock_expires_at"] = {"$gt": datetime.now(timezone.utc)}
+        return query
 
     def find_and_claim_instance(
         self,
@@ -1503,6 +1560,7 @@ class WorkflowInstanceManager:
 
         now = datetime.now(timezone.utc)
         lock_expires = now + timedelta(seconds=self._lock_ttl)
+        claim_token = str(uuid.uuid4())
         claim_provenance = build_claim_provenance(
             normalised_build_identity,
             worker_id=worker_id_clean,
@@ -1576,6 +1634,7 @@ class WorkflowInstanceManager:
                         "started_at": now,
                         "claimed_at": now,
                         "claimed_by_build": claim_provenance,
+                        "claim_token": claim_token,
                         "claim_ineligible_reason": None,
                         "claim_ineligible_detected_at": None,
                         "progress_message": "running",
@@ -1597,6 +1656,7 @@ class WorkflowInstanceManager:
                             "lock_expires_at": lock_expires,
                             "claimed_at": now,
                             "claimed_by_build": claim_provenance,
+                            "claim_token": claim_token,
                             "claim_ineligible_reason": None,
                             "claim_ineligible_detected_at": None,
                             "progress_message": "running",
@@ -1658,6 +1718,8 @@ class WorkflowInstanceManager:
         instance_id: str,
         worker_id: str,
         extend_seconds: int | None = None,
+        *,
+        claim_token: str | None = None,
     ) -> bool:
         """Extend the lock on an instance.
 
@@ -1676,13 +1738,25 @@ class WorkflowInstanceManager:
         extend_by = extend_seconds or self._lock_ttl
         new_expiry = datetime.now(timezone.utc) + timedelta(seconds=extend_by)
 
+        query = self._claim_fence_query(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            require_unexpired=True,
+        )
         result = coll.update_one(
-            {"instance_id": instance_id, "locked_by": worker_id},
+            query,
             {"$set": {"lock_expires_at": new_expiry}},
         )
         return result.modified_count > 0
 
-    def release_lock(self, instance_id: str, worker_id: str) -> bool:
+    def release_lock(
+        self,
+        instance_id: str,
+        worker_id: str,
+        *,
+        claim_token: str | None = None,
+    ) -> bool:
         """Release the lock on an instance.
 
         Args:
@@ -1696,9 +1770,28 @@ class WorkflowInstanceManager:
         if coll is None:
             return False
 
+        query = self._claim_fence_query(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            require_unexpired=False,
+        )
+        now = datetime.now(timezone.utc)
         result = coll.update_one(
-            {"instance_id": instance_id, "locked_by": worker_id},
-            {"$set": {"locked_by": None, "lock_expires_at": None}},
+            query,
+            {
+                "$set": {
+                    # A worker releases only a RUNNING claim.  Make the row
+                    # explicitly resumable instead of leaving RUNNING with no
+                    # expiry, which neither the claimant nor orphan recovery
+                    # can discover.
+                    "status": WorkflowInstanceStatus.PAUSED.value,
+                    "locked_by": None,
+                    "lock_expires_at": None,
+                    "progress_message": "paused: worker claim released",
+                    "progress_updated_at": now,
+                }
+            },
         )
         return result.modified_count > 0
 
@@ -1719,6 +1812,10 @@ class WorkflowInstanceManager:
         progress_total: int | None = None,
         progress_message: str | None = None,
         execution_trace_id: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
+        authority_checkpoint_attestation: Mapping[str, Any] | None = None,
+        workflow_id: str | None = None,
     ) -> bool:
         """Persist checkpoint data for an instance.
 
@@ -1738,28 +1835,22 @@ class WorkflowInstanceManager:
         Returns:
             True if checkpoint was saved.
         """
+        compacted_workflow_data = self._compact_instance_payload_field(
+            workflow_data,
+            field="workflow_data",
+            instance_id=instance_id,
+            namespace=(
+                workflow_data.get("namespace")
+                or workflow_data.get("user_namespace")
+            ),
+            workflow_id=workflow_data.get("workflow_id"),
+        )
         update: dict[str, Any] = {
             "$set": {
                 "current_state": current_state,
-                "workflow_data": self._compact_instance_payload_field(
-                    workflow_data,
-                    field="workflow_data",
-                    instance_id=instance_id,
-                    namespace=(
-                        (
-                            workflow_data.get("namespace")
-                            or workflow_data.get("user_namespace")
-                        )
-                        if isinstance(workflow_data, dict)
-                        else None
-                    ),
-                    workflow_id=(
-                        workflow_data.get("workflow_id")
-                        if isinstance(workflow_data, dict)
-                        else None
-                    ),
-                ),
-            }
+                "workflow_data": compacted_workflow_data,
+            },
+            "$unset": {DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD: ""},
         }
         if step_index is not None:
             update["$set"]["step_index"] = step_index
@@ -1793,6 +1884,27 @@ class WorkflowInstanceManager:
             update["$set"]["progress_message"] = progress_message
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id
+        projected_attestation: dict[str, Any] | None = None
+        if authority_checkpoint_attestation is not None and workflow_id:
+            projected_attestation, _ = validate_authority_checkpoint_attestation(
+                authority_checkpoint_attestation,
+                instance_id=instance_id,
+                workflow_id=workflow_id,
+                current_state=current_state,
+                step_index=step_index if step_index is not None else 0,
+                workflow_data=compacted_workflow_data,
+                expected_claim_token=claim_token,
+                expected_worker_id=worker_id,
+            )
+            if (
+                projected_attestation is not None
+                and worker_id is not None
+                and claim_token is not None
+            ):
+                update["$set"][DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD] = (
+                    projected_attestation
+                )
+                update.pop("$unset", None)
         if any(
             field is not None
             for field in (
@@ -1804,8 +1916,30 @@ class WorkflowInstanceManager:
         ):
             update["$set"]["progress_updated_at"] = datetime.now(timezone.utc)
 
+        checkpoint_query = self._claim_fence_query(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            require_unexpired=(worker_id is not None or claim_token is not None),
+        )
+        if projected_attestation is not None:
+            checkpoint_query.update(
+                {
+                    "workflow_id": workflow_id,
+                    "claimed_by_build.schema_version": (
+                        DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION
+                    ),
+                    "claimed_by_build.worker_id": worker_id,
+                    "claimed_by_build.capabilities": (
+                        EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY
+                    ),
+                    "claimed_by_build.match_tokens": (
+                        EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY
+                    ),
+                }
+            )
         updated_instance = self._find_one_and_update_instance(
-            {"instance_id": instance_id},
+            checkpoint_query,
             update,
         )
         if updated_instance is not None:
@@ -1869,6 +2003,8 @@ class WorkflowInstanceManager:
         outputs: dict[str, Any] | None = None,
         final_state: str | None = None,
         execution_trace_id: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
     ) -> bool:
         """Mark an instance as completed.
 
@@ -1905,8 +2041,14 @@ class WorkflowInstanceManager:
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id
 
+        completion_query = self._claim_fence_query(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            require_unexpired=(worker_id is not None or claim_token is not None),
+        )
         instance_before = self._find_one_and_update_instance(
-            {"instance_id": instance_id},
+            completion_query,
             update,
             return_document=False,
         )
@@ -1956,6 +2098,8 @@ class WorkflowInstanceManager:
         increment_retry: bool = True,
         outputs: dict[str, Any] | None = None,
         execution_trace_id: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
     ) -> bool:
         """Mark an instance as failed.
 
@@ -2015,8 +2159,14 @@ class WorkflowInstanceManager:
         if increment_retry:
             update["$inc"] = {"retry_count": 1}
 
+        failure_query = self._claim_fence_query(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            require_unexpired=(worker_id is not None or claim_token is not None),
+        )
         instance_before = self._find_one_and_update_instance(
-            {"instance_id": instance_id},
+            failure_query,
             update,
             return_document=False,
         )

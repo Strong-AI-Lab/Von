@@ -21,7 +21,10 @@ from src.backend.workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from src.backend.workflows.durable.durable_executor import DurableWorkflowExecutor
+from src.backend.workflows.durable.durable_executor import (
+    DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
+    DurableWorkflowExecutor,
+)
 from src.backend.workflows.durable.checkpoint_context_projection import (
     CHECKPOINT_CONTEXT_PROJECTION_KEY,
     CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
@@ -35,6 +38,9 @@ from src.backend.workflows.engine import (
     WorkflowStateSpec,
     WorkflowTransitionSpec,
     build_transition_condition,
+)
+from src.backend.workflows.workflow_definition_identity_service import (
+    build_workflow_definition_identity,
 )
 
 
@@ -249,6 +255,244 @@ def test_durable_executor_persists_trace_and_checkpoints_trace_link() -> None:
         isinstance(call.kwargs, dict)
         and call.kwargs.get("execution_trace_id") == "trace-1550"
         for call in manager.checkpoint.call_args_list
+    )
+
+
+def test_durable_executor_persists_worker_loaded_definition_identity() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_executed_definition_identity",
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+    )
+    definition_identity = build_workflow_definition_identity(
+        workflow_id=definition.workflow_id,
+        source="vontology",
+        definition=definition,
+        authoritative_definition=definition,
+    )
+    supplied_identity = {
+        **definition_identity,
+        "unexpected_diagnostic": {"must_not_be_persisted": True},
+    }
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+    executor = DurableWorkflowExecutor(registry=ActionRegistry(), instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+        patch(
+            "src.backend.workflows.durable.registry_factory._get_or_build_durable_mcp_gateway",
+            return_value=None,
+        ),
+        patch(
+            "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+            return_value="trace-definition-identity",
+        ) as insert_trace,
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+            workflow_definition_identity=supplied_identity,
+        )
+
+    assert result.completed is True
+    assert (
+        result.data[DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY]
+        == definition_identity
+    )
+    terminal_data = manager.checkpoint.call_args_list[-1].kwargs["workflow_data"]
+    assert (
+        terminal_data[DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY]
+        == definition_identity
+    )
+    stored_trace = insert_trace.call_args.args[0]
+    assert (
+        stored_trace["metadata"][DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY]
+        == definition_identity
+    )
+
+
+def test_durable_executor_reasserts_identity_after_action_overwrite() -> None:
+    condition_spec, condition = build_transition_condition({"kind": "always"})
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_identity_action_overwrite",
+        initial_state="overwrite",
+        states={
+            "overwrite": WorkflowStateSpec(
+                state_id="overwrite",
+                actions=(
+                    WorkflowActionInvocation(action_id="identity.overwrite"),
+                ),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=condition,
+                        condition_spec=condition_spec,
+                        reason="next_step",
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+        termination_states=("done",),
+    )
+    definition_identity = build_workflow_definition_identity(
+        workflow_id=definition.workflow_id,
+        source="vontology",
+        definition=definition,
+        authoritative_definition=definition,
+    )
+    forged_identity = {
+        **definition_identity,
+        "definition_hash": "f" * 64,
+        "runtime_definition_hash": "f" * 64,
+        "authoritative_definition_hash": "f" * 64,
+    }
+
+    def _overwrite_identity(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        request.data[DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY] = (
+            forged_identity
+        )
+        return WorkflowActionResult(outputs={})
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="identity.overwrite",
+            handler=_overwrite_identity,
+        )
+    )
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+        patch(
+            "src.backend.workflows.durable.registry_factory._get_or_build_durable_mcp_gateway",
+            return_value=None,
+        ),
+        patch(
+            "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+            return_value="trace-action-overwrite-identity",
+        ) as insert_trace,
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+            workflow_definition_identity=definition_identity,
+        )
+
+    assert result.completed is True
+    assert (
+        result.data[DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY]
+        == definition_identity
+    )
+    assert len(manager.checkpoint.call_args_list) >= 2
+    assert all(
+        checkpoint_call.kwargs["workflow_data"][
+            DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY
+        ]
+        == definition_identity
+        for checkpoint_call in manager.checkpoint.call_args_list
+    )
+    stored_trace = insert_trace.call_args.args[0]
+    assert (
+        stored_trace["metadata"][DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY]
+        == definition_identity
+    )
+
+
+@pytest.mark.parametrize("resume_from_checkpoint", [False, True])
+def test_durable_executor_discards_untrusted_definition_identity_from_context(
+    resume_from_checkpoint: bool,
+) -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_definition_identity_forgery",
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+    )
+    instance = _build_instance(definition.workflow_id)
+    instance.inputs = {
+        DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY: {
+            "workflow_id": definition.workflow_id,
+            "definition_hash": "f" * 64,
+            "source": "vontology",
+        }
+    }
+    instance.workflow_data = {
+        DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY: {
+            "workflow_id": definition.workflow_id,
+            "definition_hash": "e" * 64,
+            "source": "vontology",
+        }
+    }
+    instance.current_state = "done"
+    manager = MagicMock()
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+    executor = DurableWorkflowExecutor(registry=ActionRegistry(), instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+        patch(
+            "src.backend.workflows.durable.registry_factory._get_or_build_durable_mcp_gateway",
+            return_value=None,
+        ),
+        patch(
+            "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+            return_value="trace-forged-definition-identity",
+        ) as insert_trace,
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=resume_from_checkpoint,
+        )
+
+    assert result.completed is True
+    assert DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY not in result.data
+    terminal_data = manager.checkpoint.call_args_list[-1].kwargs["workflow_data"]
+    assert DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY not in terminal_data
+    stored_trace = insert_trace.call_args.args[0]
+    assert (
+        DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY
+        not in stored_trace["metadata"]
     )
 
 

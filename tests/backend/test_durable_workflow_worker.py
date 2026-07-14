@@ -29,6 +29,9 @@ from src.backend.workflows.engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
 )
+from src.backend.workflows.workflow_definition_identity_service import (
+    build_workflow_definition_identity,
+)
 
 
 class _WorkerManagerStub:
@@ -39,8 +42,17 @@ class _WorkerManagerStub:
         self.release_lock_error: Exception | None = None
         self.mark_completed_error: Exception | None = None
         self.mark_failed_error: Exception | None = None
+        self.mark_completed_result = True
+        self.mark_failed_result = True
 
-    def release_lock(self, instance_id: str, worker_id: str) -> bool:
+    def release_lock(
+        self,
+        instance_id: str,
+        worker_id: str,
+        *,
+        claim_token: str | None = None,
+    ) -> bool:
+        del claim_token
         self.release_lock_calls.append((instance_id, worker_id))
         if self.release_lock_error is not None:
             raise self.release_lock_error
@@ -52,7 +64,7 @@ class _WorkerManagerStub:
         self.mark_failed_calls.append(call)
         if self.mark_failed_error is not None:
             raise self.mark_failed_error
-        return True
+        return self.mark_failed_result
 
     def mark_completed(self, instance_id: str, **kwargs: Any) -> bool:
         call = {"instance_id": instance_id}
@@ -60,7 +72,7 @@ class _WorkerManagerStub:
         self.mark_completed_calls.append(call)
         if self.mark_completed_error is not None:
             raise self.mark_completed_error
-        return True
+        return self.mark_completed_result
 
 
 class _PollManagerStub:
@@ -107,13 +119,26 @@ class _SuccessfulWorkerManagerStub(_WorkerManagerStub):
         self.instances = {instance.instance_id: instance for instance in instances}
         self.checkpoint_calls: list[dict[str, Any]] = []
 
-    def get_instance(self, instance_id: str) -> WorkflowInstance | None:
+    def get_instance(
+        self,
+        instance_id: str,
+        *,
+        for_execution: bool = False,
+    ) -> WorkflowInstance | None:
+        del for_execution
         return self.instances.get(instance_id)
 
     def is_cancelled(self, _instance_id: str) -> bool:
         return False
 
-    def extend_lock(self, _instance_id: str, _worker_id: str) -> bool:
+    def extend_lock(
+        self,
+        _instance_id: str,
+        _worker_id: str,
+        *,
+        claim_token: str | None = None,
+    ) -> bool:
+        del claim_token
         return True
 
     def checkpoint(self, instance_id: str, **kwargs: Any) -> bool:
@@ -121,15 +146,21 @@ class _SuccessfulWorkerManagerStub(_WorkerManagerStub):
         return True
 
 
-def _build_instance() -> WorkflowInstance:
+def _bind_claim(instance: WorkflowInstance, worker_id: str) -> WorkflowInstance:
+    instance.status = WorkflowInstanceStatus.RUNNING
+    instance.locked_by = worker_id
+    instance.claim_token = f"claim-token-{worker_id}"
+    return instance
+
+
+def _build_instance(worker_id: str = "worker-1548") -> WorkflowInstance:
     instance = WorkflowInstance.create(
         "#V#workflow_introspection_maintenance_workflow",
         user_id="#V#user",
         org_id="#V#org",
         namespace="#V#user@org",
     )
-    instance.status = WorkflowInstanceStatus.RUNNING
-    return instance
+    return _bind_claim(instance, worker_id)
 
 
 def _build_pending_instance(workflow_id: str, instance_id: str) -> WorkflowInstance:
@@ -291,7 +322,7 @@ def test_worker_cleanup_removes_tracking_even_if_release_lock_fails() -> None:
         registry=ActionRegistry(),
         definition_loader=lambda _workflow_id, **_actor: None,
     )
-    instance = _build_instance()
+    instance = _build_instance("worker-1548")
     worker._current_instances[instance.instance_id] = Thread()
 
     worker._process_instance(instance)
@@ -316,7 +347,7 @@ def test_worker_loads_definition_under_persisted_instance_actor_scope() -> None:
         registry=ActionRegistry(),
         definition_loader=_actor_scoped_loader,
     )
-    instance = _build_instance()
+    instance = _build_instance("worker-2580")
     worker._current_instances[instance.instance_id] = Thread()
 
     worker._process_instance(instance)
@@ -332,6 +363,196 @@ def test_worker_loads_definition_under_persisted_instance_actor_scope() -> None:
     assert manager.mark_failed_calls[0]["error"] == (
         f"workflow_definition_not_found:{instance.workflow_id}"
     )
+
+
+def test_worker_forwards_actual_loaded_definition_identity_to_executor() -> None:
+    manager = _WorkerManagerStub()
+    instance = _build_instance("worker-authority-identity")
+    definition = WorkflowDefinition(
+        workflow_id=instance.workflow_id,
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+    )
+    definition_identity = build_workflow_definition_identity(
+        workflow_id=definition.workflow_id,
+        source="vontology",
+        definition=definition,
+        authoritative_definition=definition,
+    )
+    loaded_identity = {
+        **definition_identity,
+        "unexpected_diagnostic": {"must_not_be_persisted": True},
+    }
+    loader_calls: list[dict[str, Any]] = []
+
+    def _authority_loader(
+        workflow_id: str,
+        *,
+        actor_user_id: str | None = None,
+        actor_org_id: str | None = None,
+        actor_namespace: str | None = None,
+        include_authority_resolution: bool = False,
+    ) -> SimpleNamespace:
+        loader_calls.append(
+            {
+                "workflow_id": workflow_id,
+                "actor_user_id": actor_user_id,
+                "actor_org_id": actor_org_id,
+                "actor_namespace": actor_namespace,
+                "include_authority_resolution": include_authority_resolution,
+            }
+        )
+        return SimpleNamespace(
+            definition=definition,
+            definition_identity=loaded_identity,
+        )
+
+    executed: dict[str, Any] = {}
+
+    def _run_durable(
+        instance_id: str,
+        loaded_definition: WorkflowDefinition,
+        **kwargs: Any,
+    ) -> DurableWorkflowResult:
+        executed.update(
+            {
+                "instance_id": instance_id,
+                "definition": loaded_definition,
+                **kwargs,
+            }
+        )
+        return DurableWorkflowResult(
+            instance_id=instance_id,
+            data={},
+            completed=True,
+            final_state="done",
+        )
+
+    worker = DurableWorkflowWorker(
+        worker_id="worker-authority-identity",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=_authority_loader,
+    )
+    worker._executor = cast(Any, SimpleNamespace(run_durable=_run_durable))
+
+    worker._process_instance(instance)
+
+    assert loader_calls == [
+        {
+            "workflow_id": instance.workflow_id,
+            "actor_user_id": instance.user_id,
+            "actor_org_id": instance.org_id,
+            "actor_namespace": instance.namespace,
+            "include_authority_resolution": True,
+        }
+    ]
+    assert executed["definition"] is definition
+    assert executed["workflow_definition_identity"] == definition_identity
+    assert "unexpected_diagnostic" not in executed["workflow_definition_identity"]
+    assert manager.mark_completed_calls
+    assert manager.mark_failed_calls == []
+
+
+def test_worker_rejects_stale_loaded_definition_identity() -> None:
+    manager = _WorkerManagerStub()
+    instance = _build_instance("worker-stale-authority-identity")
+    definition = WorkflowDefinition(
+        workflow_id=instance.workflow_id,
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+    )
+    stale_identity = build_workflow_definition_identity(
+        workflow_id=definition.workflow_id,
+        source="vontology",
+        definition=definition,
+        authoritative_definition=definition,
+    )
+    stale_identity["definition_hash"] = "0" * 64
+    observed_identity: list[dict[str, Any] | None] = []
+
+    def _authority_loader(
+        _workflow_id: str,
+        *,
+        include_authority_resolution: bool = False,
+        **_actor: Any,
+    ) -> SimpleNamespace:
+        assert include_authority_resolution is True
+        return SimpleNamespace(
+            definition=definition,
+            definition_identity=stale_identity,
+        )
+
+    def _run_durable(
+        instance_id: str,
+        _loaded_definition: WorkflowDefinition,
+        **kwargs: Any,
+    ) -> DurableWorkflowResult:
+        observed_identity.append(kwargs.get("workflow_definition_identity"))
+        return DurableWorkflowResult(
+            instance_id=instance_id,
+            data={},
+            completed=True,
+            final_state="done",
+        )
+
+    worker = DurableWorkflowWorker(
+        worker_id="worker-stale-authority-identity",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=_authority_loader,
+    )
+    worker._executor = cast(Any, SimpleNamespace(run_durable=_run_durable))
+
+    worker._process_instance(instance)
+
+    assert observed_identity == [None]
+    assert manager.mark_completed_calls
+    assert manager.mark_failed_calls == []
+
+
+@pytest.mark.parametrize("completed", [True, False])
+def test_worker_suppresses_terminal_callbacks_when_claim_fence_rejects_write(
+    completed: bool,
+) -> None:
+    manager = _WorkerManagerStub()
+    manager.mark_completed_result = False
+    manager.mark_failed_result = False
+    instance = _build_instance("worker-terminal-fence")
+    result = DurableWorkflowResult(
+        instance_id=instance.instance_id,
+        data={},
+        completed=completed,
+        final_state="done",
+        error=None if completed else "synthetic_failure",
+    )
+    worker = DurableWorkflowWorker(
+        worker_id="worker-terminal-fence",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda workflow_id, **_actor: SimpleNamespace(
+            workflow_id=workflow_id
+        ),
+    )
+    worker._executor = cast(
+        Any,
+        SimpleNamespace(run_durable=lambda *_args, **_kwargs: result),
+    )
+    completed_callbacks: list[str] = []
+    failed_callbacks: list[str] = []
+    worker.set_callbacks(
+        on_completed=lambda instance_id, _result: completed_callbacks.append(
+            instance_id
+        ),
+        on_failed=lambda instance_id, _error: failed_callbacks.append(instance_id),
+    )
+
+    worker._process_instance(instance)
+
+    assert completed_callbacks == []
+    assert failed_callbacks == []
 
 
 def test_worker_keeps_cached_definition_prompt_reads_under_persisted_actor(
@@ -383,12 +604,16 @@ def test_worker_keeps_cached_definition_prompt_reads_under_persisted_actor(
         namespace="#V#queued_outsider@other_org",
     )
     instance.status = WorkflowInstanceStatus.RUNNING
+    _bind_claim(instance, "worker-2580-prompt-scope")
     manager = _WorkerManagerStub()
     observed: dict[str, Any] = {}
 
     def _run_durable(*_args: Any, **_kwargs: Any) -> DurableWorkflowResult:
         observed["user"] = access_control.get_effective_user_concept_id()
         observed["org"] = access_control.get_effective_organisation_concept_id()
+        observed["workflow_definition_identity"] = _kwargs.get(
+            "workflow_definition_identity"
+        )
         observed["prompt"] = prompt_template_service.PromptTemplateService().resolve_prompt_text(
             [warmed_definition.prompt_concept_id]
         )
@@ -412,6 +637,7 @@ def test_worker_keeps_cached_definition_prompt_reads_under_persisted_actor(
     assert observed == {
         "user": "#V#queued_outsider",
         "org": "#V#other_org",
+        "workflow_definition_identity": None,
         "prompt": (None, None),
     }
     assert manager.mark_completed_calls
@@ -436,7 +662,7 @@ def test_worker_completes_same_org_instances_with_each_persisted_actor(
         for user_id in ("#V#owner", "#V#cohort_member")
     ]
     for instance in instances:
-        instance.status = WorkflowInstanceStatus.RUNNING
+        _bind_claim(instance, "worker-2580-same-org")
 
     manager = _SuccessfulWorkerManagerStub(instances)
     loader_calls: list[dict[str, Any]] = []
@@ -548,7 +774,7 @@ def test_worker_retries_transient_actor_scoped_definition_authority(
         registry=ActionRegistry(),
         definition_loader=_transient_loader,
     )
-    instance = _build_instance()
+    instance = _build_instance("worker-2580-transient")
     worker._current_instances[instance.instance_id] = Thread()
 
     worker._process_instance(instance)

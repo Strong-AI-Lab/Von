@@ -373,6 +373,7 @@ def _get_durable_definition_loader():
         actor_user_id: str | None = None,
         actor_org_id: str | None = None,
         actor_namespace: str | None = None,
+        include_authority_resolution: bool = False,
     ):
         global _durable_workflow_registry
         try:
@@ -410,7 +411,11 @@ def _get_durable_definition_loader():
             if resolution.registry is not None:
                 _durable_workflow_registry = resolution.registry
             if resolution.definition is not None:
-                return resolution.definition
+                return (
+                    resolution
+                    if include_authority_resolution
+                    else resolution.definition
+                )
             if resolution.error_code:
                 logging.getLogger(__name__).warning(
                     "[durable_workflows] Workflow definition resolution failed for %s: %s",

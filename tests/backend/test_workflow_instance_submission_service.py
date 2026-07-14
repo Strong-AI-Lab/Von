@@ -223,6 +223,12 @@ def test_durable_definition_loader_resolves_after_shared_registry_rebuild(
     loader = utils_flask._get_durable_definition_loader()
 
     assert loader(workflow_id) is definition
+    authority_resolution = loader(
+        workflow_id,
+        include_authority_resolution=True,
+    )
+    assert authority_resolution.definition is definition
+    assert authority_resolution.definition_identity["workflow_id"] == workflow_id
     assert utils_flask._durable_workflow_registry is not stale_registry
 
 

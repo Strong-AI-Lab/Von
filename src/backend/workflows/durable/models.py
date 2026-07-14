@@ -220,6 +220,8 @@ class WorkflowInstance:
     lock_expires_at: datetime | None = None
     claimed_at: datetime | None = None
     claimed_by_build: dict[str, Any] | None = None
+    claim_token: str | None = None
+    authority_checkpoint_attestation: dict[str, Any] | None = None
     min_worker_build: str | None = None
     claim_ineligible_reason: str | None = None
     claim_ineligible_detected_at: datetime | None = None
@@ -303,6 +305,10 @@ class WorkflowInstance:
             "lock_expires_at": self.lock_expires_at,
             "claimed_at": self.claimed_at,
             "claimed_by_build": self.claimed_by_build,
+            "claim_token": self.claim_token,
+            "authority_checkpoint_attestation": (
+                self.authority_checkpoint_attestation
+            ),
             "min_worker_build": self.min_worker_build,
             "claim_ineligible_reason": self.claim_ineligible_reason,
             "claim_ineligible_detected_at": self.claim_ineligible_detected_at,
@@ -352,6 +358,16 @@ class WorkflowInstance:
             claimed_by_build=(
                 doc.get("claimed_by_build")
                 if isinstance(doc.get("claimed_by_build"), dict)
+                else None
+            ),
+            claim_token=(
+                doc.get("claim_token")
+                if isinstance(doc.get("claim_token"), str)
+                else None
+            ),
+            authority_checkpoint_attestation=(
+                doc.get("authority_checkpoint_attestation")
+                if isinstance(doc.get("authority_checkpoint_attestation"), dict)
                 else None
             ),
             min_worker_build=doc.get("min_worker_build"),

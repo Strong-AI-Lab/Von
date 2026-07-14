@@ -905,6 +905,29 @@ workflow ID or current definition hash is not represented authorship; accepting
 it would allow hidden code or an API caller to author policy while borrowing a
 represented authority label.
 
+An awaited durable `workflow_execute` result may be labelled exact only when
+the completed checkpoint is bound outside workflow-controlled context to the
+specific live worker claim that wrote it. Require a capability-bearing worker
+claim, an opaque claim token, lock-fenced checkpoint and terminal writes, and a
+manager-side digest over the authority output, prompt lineage, and actually
+loaded definition identity. Strip those reserved fields from launch inputs.
+On resume, reject exactness permanently if the preceding checkpoint is
+unattested, the producing worker claim changed, or the loaded definition
+changed; do not let an A-to-B-to-A sequence collapse back to an apparently pure
+A lineage. Until producer-specific lineage is represented, exact projection is
+limited to a definition containing exactly one self-contained `llm.action` with
+explicit `tool_mode: none`, and the trace must show exactly one actual producer
+invocation. Fail exactness for zero or multiple potential producers, retry,
+idempotency or cyclic execution surfaces, an unbound child workflow, a dynamic
+tool or MCP surface, or an arbitrary registry action. A represented mapping may
+project the sole LLM result into the authority-output field, but it must not
+author or overwrite prompt or execution lineage; reassert prompt diagnostics
+from the actual producer record. If checkpoint bounding redacts, truncates, or
+omits any authority-lineage field, make both the persisted attestation and
+execution trace visibly ineligible. The workflow may still complete for its
+ordinary user-facing purpose: these checks govern the strong provenance claim,
+not represented recovery or general execution.
+
 For user-visible issues, record both:
 
 - the user-visible acceptance evidence

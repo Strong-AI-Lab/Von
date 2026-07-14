@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, cast
 
+import pytest
+
 import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.gateway import (
     bind_internal_mcp_actor_context_source,
@@ -37,6 +39,10 @@ from src.backend.workflows import (
 )
 from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows.engine import WorkflowResult
+from src.backend.workflows.durable.authority_snapshot_attestation import (
+    EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY,
+    build_authority_checkpoint_attestation,
+)
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
@@ -3742,6 +3748,242 @@ def test_workflow_authority_output_snapshot_redacts_and_bounds_untrusted_data() 
     assert metadata["redacted_paths"] == [
         "$.release_payload.represented_change.api_key"
     ]
+
+
+@pytest.mark.parametrize(
+    ("failure_case", "expected_reason_code"),
+    (
+        (
+            "actor_scope_mismatch",
+            "workflow_execute_completed_instance_scope_mismatch",
+        ),
+        (
+            "parent_actor_hint_mismatch",
+            "workflow_execute_requested_actor_scope_mismatch",
+        ),
+        (
+            "submission_identity_disagreement",
+            "workflow_execute_submission_identity_unverified",
+        ),
+        (
+            "executed_identity_not_vontology",
+            "workflow_execute_executed_identity_unverified",
+        ),
+        (
+            "executed_runtime_hash_missing",
+            "workflow_execute_executed_identity_unverified",
+        ),
+        (
+            "authority_output_checkpoint_projected",
+            "workflow_execute_authority_lineage_was_checkpoint_projected",
+        ),
+        (
+            "worker_capability_missing",
+            "workflow_execute_worker_capability_unverified",
+        ),
+        (
+            "worker_claim_schema_missing",
+            "workflow_execute_worker_capability_unverified",
+        ),
+        (
+            "worker_build_locator_missing",
+            "workflow_execute_worker_capability_unverified",
+        ),
+        (
+            "checkpoint_attestation_missing",
+            "authority_checkpoint_attestation_shape_invalid",
+        ),
+        (
+            "checkpoint_attestation_token_mismatch",
+            "authority_checkpoint_attestation_binding_mismatch",
+        ),
+        (
+            "current_claim_token_missing",
+            "workflow_execute_current_claim_token_missing",
+        ),
+        (
+            "timed_out",
+            "workflow_execute_not_awaited_terminal_snapshot",
+        ),
+        ("instance_missing", "workflow_execute_instance_not_found"),
+    ),
+)
+def test_awaited_workflow_execute_snapshot_bridge_fails_closed_on_scope_or_authority_mismatch(
+    failure_case: str,
+    expected_reason_code: str,
+) -> None:
+    workflow_id = "#V#represented_candidate_proposal_workflow"
+    instance_id = "workflow-instance-fail-closed-1"
+    user_id = "#V#michael_witbrock"
+    org_id = "#V#university_of_auckland_strong_ai_lab"
+    namespace = f"{user_id}@university_of_auckland_strong_ai_lab"
+
+    def _identity(
+        definition_hash: str = "a" * 64,
+        *,
+        source: str = "vontology",
+        authoritative_hash: str | None = None,
+    ) -> dict[str, Any]:
+        effective_authoritative_hash = (
+            definition_hash
+            if authoritative_hash is None and source == "vontology"
+            else authoritative_hash
+        )
+        return {
+            "schema_version": "workflow_definition_identity.v1",
+            "version": 1,
+            "workflow_id": workflow_id,
+            "source": source,
+            "definition_hash": definition_hash,
+            "runtime_definition_hash": definition_hash,
+            "authoritative_definition_hash": effective_authoritative_hash,
+            "hash_mismatch": False,
+        }
+
+    preflight_identity = _identity()
+    postflight_identity = _identity()
+    executed_identity = _identity()
+    timed_out = False
+    instance_user_id = user_id
+    parent_user_id = user_id
+    instance_present = True
+    projected_keys: list[dict[str, Any]] = []
+    if failure_case == "actor_scope_mismatch":
+        instance_user_id = "#V#different_user"
+    elif failure_case == "parent_actor_hint_mismatch":
+        parent_user_id = "#V#different_user"
+    elif failure_case == "submission_identity_disagreement":
+        postflight_identity = _identity("c" * 64)
+    elif failure_case == "executed_identity_not_vontology":
+        executed_identity = _identity(
+            source="repo_seed_agent_test",
+            authoritative_hash=None,
+        )
+    elif failure_case == "executed_runtime_hash_missing":
+        executed_identity.pop("runtime_definition_hash")
+    elif failure_case == "authority_output_checkpoint_projected":
+        projected_keys = [
+            {
+                "key": "workflow_authority_output",
+                "reason": "oversized_value_bounded",
+                "original_bson_size_bytes": 300_000,
+                "projected_bson_size_bytes": 2_500,
+            }
+        ]
+    elif failure_case == "timed_out":
+        timed_out = True
+    elif failure_case == "instance_missing":
+        instance_present = False
+
+    tool_result_payload = {
+        "success": True,
+        "timed_out": timed_out,
+        "final_status": "completed",
+        "verification": {
+            "preflight_passed": True,
+            "postflight_passed": True,
+            "preflight": {"definition_identity": preflight_identity},
+            "postflight": {"definition_identity": postflight_identity},
+        },
+        "workflow_execution": {
+            "workflow_id": workflow_id,
+            "instance_id": instance_id,
+            "await_terminal": True,
+            "timed_out": timed_out,
+            "current_status": "completed",
+            "final_status": "completed",
+        },
+    }
+    workflow_data = {
+        "durable_executed_workflow_definition_identity": executed_identity,
+        "workflow_checkpoint_context_projection": {
+            "schema_version": "workflow_checkpoint_context_projection.v1",
+            "projected_key_count": len(projected_keys),
+            "projected_keys": projected_keys,
+            "omitted_projected_key_count": 0,
+        },
+        "workflow_authority_output": {
+            "schema_version": (
+                "represented_operational_learning_candidate_proposal.v1"
+            ),
+            "candidate_id": "must-not-be-authoritative",
+        },
+        "prompt_context_diagnostics": {
+            "resolved_prompt_concept_id": "#V#candidate_proposal_prompt",
+            "prompt_content_sha256": "b" * 64,
+        },
+    }
+    claim_token = "claim-token-fail-closed-1"
+    checkpoint_attestation = build_authority_checkpoint_attestation(
+        instance_id=instance_id,
+        workflow_id=workflow_id,
+        current_state="done",
+        step_index=2,
+        claim_token=claim_token,
+        worker_id="worker-fail-closed-1",
+        workflow_data=workflow_data,
+        exact_snapshot_eligible=True,
+    )
+    assert checkpoint_attestation is not None
+    completed_instance = SimpleNamespace(
+        instance_id=instance_id,
+        workflow_id=workflow_id,
+        user_id=instance_user_id,
+        org_id=org_id,
+        namespace=namespace,
+        status="completed",
+        current_state="done",
+        step_index=2,
+        claim_token=claim_token,
+        claimed_by_build={
+            "schema_version": "durable_worker_claim_provenance.v1",
+            "worker_id": "worker-fail-closed-1",
+            "git_short_commit": "abcdef123456",
+            "capabilities": [EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY],
+        },
+        authority_checkpoint_attestation=checkpoint_attestation,
+        execution_trace_id="child-trace-fail-closed-1",
+        workflow_data=workflow_data,
+    )
+    if failure_case == "worker_capability_missing":
+        completed_instance.claimed_by_build["capabilities"] = []
+    elif failure_case == "worker_claim_schema_missing":
+        completed_instance.claimed_by_build.pop("schema_version")
+    elif failure_case == "worker_build_locator_missing":
+        completed_instance.claimed_by_build.pop("git_short_commit")
+    elif failure_case == "checkpoint_attestation_missing":
+        completed_instance.authority_checkpoint_attestation = None
+    elif failure_case == "checkpoint_attestation_token_mismatch":
+        completed_instance.claim_token = "different-current-claim-token"
+    elif failure_case == "current_claim_token_missing":
+        completed_instance.claim_token = None
+
+    entry = orchestrator_module._build_awaited_workflow_execute_aux_entry(
+        tool_payload={
+            "workflow_id": workflow_id,
+            "user_id": user_id,
+            "org_id": org_id,
+            "namespace": namespace,
+            "await_terminal": True,
+        },
+        tool_result_payload=tool_result_payload,
+        parent_data={
+            "user_concept_id": parent_user_id,
+            "org_concept_id": org_id,
+            "conversation_session_id": "session-fail-closed-1",
+            "turn_id": "request-fail-closed-1",
+        },
+        user_namespace=namespace,
+        instance_loader=lambda _requested_id: (
+            completed_instance if instance_present else None
+        ),
+    )
+
+    assert entry["type"] == "workflow_execute_result_snapshot"
+    assert entry["status"] == "not_recorded"
+    assert entry["reason_code"] == expected_reason_code
+    assert "result_snapshot" not in entry
+    assert "workflow_definition_identity" not in entry
 
 
 def test_execute_selected_progress_includes_selector_route_evidence(

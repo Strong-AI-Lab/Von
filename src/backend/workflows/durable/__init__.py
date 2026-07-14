@@ -23,7 +23,11 @@ from .models import (
     ScheduleType,
 )
 from .instance_manager import WorkflowInstanceManager
-from .durable_executor import DurableWorkflowExecutor, DurableWorkflowResult
+from .durable_executor import (
+    DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
+    DurableWorkflowExecutor,
+    DurableWorkflowResult,
+)
 from .worker import DurableWorkflowWorker, AsyncDurableWorkflowWorker
 from .scheduler import WorkflowScheduler, AsyncWorkflowScheduler
 from .startup import (
@@ -48,6 +52,7 @@ __all__ = [
     # Executor
     "DurableWorkflowExecutor",
     "DurableWorkflowResult",
+    "DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY",
     # Worker
     "DurableWorkflowWorker",
     "AsyncDurableWorkflowWorker",

@@ -14,6 +14,10 @@ from src.backend.languagemodels.structured_tool_calling import (
     ToolResult,
 )
 from src.backend.languagemodels.structured_tool_calling.providers import OpenAIClient
+from src.backend.workflows.durable.authority_snapshot_attestation import (
+    EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY,
+    build_authority_checkpoint_attestation,
+)
 from orchestrator_test_harness import build_db_independent_orchestrator
 
 
@@ -1500,6 +1504,266 @@ def test_tool_execution_preserves_provider_call_correlation_in_tool_messages():
     assert {
         key: correlated_context[key] for key in expected_correlation
     } == expected_correlation
+
+
+def test_tool_execution_bridges_awaited_workflow_execute_authority_output_into_aux_trace(
+    monkeypatch,
+):
+    workflow_id = "#V#represented_candidate_proposal_workflow"
+    instance_id = "workflow-instance-bridge-1"
+    user_id = "#V#michael_witbrock"
+    org_id = "#V#university_of_auckland_strong_ai_lab"
+    namespace = f"{user_id}@university_of_auckland_strong_ai_lab"
+    definition_hash = "a" * 64
+    prompt_hash = "b" * 64
+    definition_identity = {
+        "schema_version": "workflow_definition_identity.v1",
+        "version": 1,
+        "workflow_id": workflow_id,
+        "source": "vontology",
+        "definition_hash": definition_hash,
+        "runtime_definition_hash": definition_hash,
+        "authoritative_definition_hash": definition_hash,
+        "hash_mismatch": False,
+        "state_count": 2,
+        "action_count": 1,
+    }
+
+    class _WorkflowExecuteGateway(_DummyGateway):
+        def describe_methods(self):
+            return {"workflow_execute": {"description": "Execute a workflow."}}
+
+        def invoke(self, method_name, payload):
+            self.calls.append((method_name, dict(payload)))
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "workflow_id": workflow_id,
+                    "final_status": "completed",
+                    "timed_out": False,
+                    "verification": {
+                        "preflight_passed": True,
+                        "postflight_passed": True,
+                        "preflight": {
+                            "definition_identity": dict(definition_identity)
+                        },
+                        "postflight": {
+                            "definition_identity": dict(definition_identity)
+                        },
+                    },
+                    "workflow_execution": {
+                        "workflow_id": workflow_id,
+                        "instance_id": instance_id,
+                        "await_terminal": True,
+                        "timed_out": False,
+                        "current_status": "completed",
+                        "final_status": "completed",
+                        "execution_trace_id": "child-trace-1",
+                    },
+                },
+                duration_ms=12.0,
+            )
+
+    authority_output = {
+        "schema_version": "represented_operational_learning_candidate_proposal.v1",
+        "candidate_id": "candidate-bridge-1",
+    }
+    workflow_data = {
+        "durable_executed_workflow_definition_identity": dict(
+            definition_identity
+        ),
+        "workflow_checkpoint_context_projection": {
+            "schema_version": "workflow_checkpoint_context_projection.v1",
+            "projected_key_count": 0,
+            "projected_keys": [],
+            "omitted_projected_key_count": 0,
+        },
+        "workflow_authority_output": authority_output,
+        "prompt_context_diagnostics": {
+            "resolved_prompt_concept_id": "#V#candidate_proposal_prompt",
+            "prompt_content_sha256": prompt_hash,
+        },
+    }
+    claim_token = "claim-token-bridge-1"
+    checkpoint_attestation = build_authority_checkpoint_attestation(
+        instance_id=instance_id,
+        workflow_id=workflow_id,
+        current_state="done",
+        step_index=2,
+        claim_token=claim_token,
+        worker_id="worker-bridge-1",
+        workflow_data=workflow_data,
+        exact_snapshot_eligible=True,
+    )
+    assert checkpoint_attestation is not None
+    completed_instance = SimpleNamespace(
+        instance_id=instance_id,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        org_id=org_id,
+        namespace=namespace,
+        status="completed",
+        current_state="done",
+        step_index=2,
+        claim_token=claim_token,
+        claimed_by_build={
+            "schema_version": "durable_worker_claim_provenance.v1",
+            "worker_id": "worker-bridge-1",
+            "git_short_commit": "abcdef123456",
+            "capabilities": [EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY],
+        },
+        authority_checkpoint_attestation=checkpoint_attestation,
+        execution_trace_id="child-trace-1",
+        workflow_data=workflow_data,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: SimpleNamespace(
+            get_instance=lambda requested_id: (
+                completed_instance if requested_id == instance_id else None
+            )
+        ),
+    )
+    gateway = _WorkflowExecuteGateway()
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway  # type: ignore[arg-type]
+    )
+    aux_llm_calls: list[dict[str, Any]] = []
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM([]),
+        action_id="tool_calling.execute",
+        user_namespace=namespace,
+        data={
+            "prompt": "Propose the represented learning candidate.",
+            "response": "",
+            "augmented_context": [],
+            "tool_calls": [
+                {
+                    "action": "call_tool",
+                    "tool": "workflow_execute",
+                    "payload": {
+                        "workflow_id": workflow_id,
+                        "user_id": user_id,
+                        "org_id": org_id,
+                        "namespace": namespace,
+                        "await_terminal": True,
+                    },
+                    "_call_id": "call-workflow-bridge-1",
+                }
+            ],
+            "method_catalogue": gateway.describe_methods(),
+            "tool_categories": {"workflow_execute": "read"},
+            "iteration_count": 0,
+            "aux_llm_calls": aux_llm_calls,
+            "llm_calls": [],
+            "user_concept_id": user_id,
+            "org_concept_id": org_id,
+            "conversation_session_id": "session-bridge-1",
+            "turn_id": "request-bridge-1",
+        },
+    )
+
+    result = orchestrator._action_tool_calling_execute(request)
+
+    assert result.outputs["tool_execution_complete"] is True
+    workflow_entries = [
+        item for item in aux_llm_calls if item.get("type") == "workflow_execution"
+    ]
+    assert len(workflow_entries) == 1
+    entry = workflow_entries[0]
+    assert entry["source"] == "workflow_execute_tool"
+    assert entry["workflow_id"] == workflow_id
+    assert entry["workflow_instance_id"] == instance_id
+    assert entry["execution_trace_id"] == "child-trace-1"
+    assert entry["call_id"] == "call-workflow-bridge-1"
+    snapshot = entry["result_snapshot"]
+    assert snapshot["workflow_authority_output"] == authority_output
+    metadata = snapshot["workflow_authority_output_snapshot"]
+    assert metadata["exact"] is True
+    assert metadata["prompt_content_sha256"] == prompt_hash
+    execution_identity = metadata["workflow_execution_identity"]
+    assert execution_identity["workflow_id"] == workflow_id
+    assert execution_identity["execution_request_id"] == "request-bridge-1"
+    assert execution_identity["conversation_session_id"] == "session-bridge-1"
+    assert execution_identity["workflow_instance_id"] == instance_id
+    assert execution_identity["workflow_definition_identity"] == (
+        definition_identity
+    )
+    claim_provenance = execution_identity["durable_claim_provenance"]
+    assert claim_provenance["worker_id"] == "worker-bridge-1"
+    assert claim_provenance["exact_snapshot_eligible"] is True
+    assert len(claim_provenance["claim_token_sha256"]) == 64
+    assert claim_token not in json.dumps(entry, sort_keys=True)
+    assert "workflow_data" not in entry
+
+    from src.backend.services.operational_learning_release_vontology_service import (
+        _exact_persisted_workflow_authority_outputs,
+    )
+
+    exact_outputs, unusable_outputs = _exact_persisted_workflow_authority_outputs(
+        {"execution": {"aux_llm_calls": aux_llm_calls}}
+    )
+    assert len(exact_outputs) == 1
+    assert unusable_outputs == []
+    assert exact_outputs[0]["output"] == authority_output
+
+
+def test_workflow_execute_snapshot_projection_failure_does_not_fail_tool_call(
+    monkeypatch,
+):
+    gateway = _DummyGateway()
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway  # type: ignore[arg-type]
+    )
+
+    def _projection_failure(**_kwargs):
+        raise RuntimeError("synthetic projection failure")
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator."
+        "_build_awaited_workflow_execute_aux_entry",
+        _projection_failure,
+    )
+    aux_llm_calls: list[dict[str, Any]] = []
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM([]),
+        action_id="tool_calling.execute",
+        data={
+            "prompt": "Execute the represented workflow.",
+            "response": "",
+            "augmented_context": [],
+            "tool_calls": [
+                {
+                    "action": "call_tool",
+                    "tool": "workflow_execute",
+                    "payload": {"workflow_id": "#V#synthetic_workflow"},
+                }
+            ],
+            "method_catalogue": {
+                "workflow_execute": {"description": "Execute a workflow."}
+            },
+            "tool_categories": {"workflow_execute": "read"},
+            "iteration_count": 0,
+            "aux_llm_calls": aux_llm_calls,
+            "llm_calls": [],
+        },
+    )
+
+    result = orchestrator._action_tool_calling_execute(request)
+
+    assert result.outputs["tool_execution_complete"] is True
+    assert request.data["invocations"][0]["status"] == "ok"
+    assert aux_llm_calls == [
+        {
+            "type": "workflow_execute_result_snapshot",
+            "source": "workflow_execute_tool",
+            "status": "not_recorded",
+            "workflow_id": "#V#synthetic_workflow",
+            "reason_code": "workflow_execute_snapshot_projection_failed",
+        }
+    ]
 
 
 def test_structured_tool_cap_synthesises_correlated_overflow_without_execution():

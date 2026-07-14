@@ -1173,6 +1173,7 @@ class TestWorkflowInstanceManager:
         assert claimed.status == WorkflowInstanceStatus.RUNNING
         assert claimed.locked_by == "worker-1"
         assert claimed.lock_expires_at is not None
+        assert claimed.claim_token
 
     def test_find_and_claim_stamps_worker_build_identity(
         self,
@@ -1371,6 +1372,71 @@ class TestWorkflowInstanceManager:
             instance.claim_ineligible_reason == "worker_build_requirement_not_satisfied"
         )
 
+    def test_release_ineligible_worker_claims_is_claim_token_fenced(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A scan snapshot cannot release a claim whose token changed mid-scan."""
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_BUILD", raising=False)
+        monkeypatch.delenv("VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT", raising=False)
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.RUNNING.value,
+                    "locked_by": "worker-reused",
+                    "lock_expires_at": datetime.now(timezone.utc)
+                    + timedelta(hours=1),
+                    "claim_token": "claim-token-a",
+                    "claimed_by_build": {
+                        "schema_version": "durable_worker_claim_provenance.v1",
+                        "worker_id": "worker-reused",
+                        "git_short_commit": "123456789abc",
+                        "match_tokens": ["1234567", "123456789abc"],
+                    },
+                    "min_worker_build": "abcdef1",
+                }
+            },
+        )
+
+        def rotate_claim_token_before_release(
+            _claim_identity: object,
+            _requirements: object,
+        ) -> bool:
+            collection.update_one(
+                {
+                    "instance_id": instance_id,
+                    "claim_token": "claim-token-a",
+                },
+                {"$set": {"claim_token": "claim-token-b"}},
+            )
+            return False
+
+        monkeypatch.setattr(
+            manager,
+            "_claim_satisfies_build_requirements",
+            rotate_claim_token_before_release,
+        )
+
+        released = manager.release_ineligible_worker_claims()
+
+        assert released == 0
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.RUNNING
+        assert instance.locked_by == "worker-reused"
+        assert instance.claim_token == "claim-token-b"
+        assert instance.claim_ineligible_reason is None
+
     def test_worker_heartbeat_registry_records_build_identity(self) -> None:
         """Worker registry rows should expose worker id, build, and liveness."""
         manager = WorkflowInstanceManager()
@@ -1430,6 +1496,8 @@ class TestWorkflowInstanceManager:
             instance_id,
             error="tool_timeout:Workflow step timed out",
             error_step="tool_execution",
+            worker_id="worker-episode-test",
+            claim_token=claimed.claim_token,
         )
         assert success is True
         assert len(finalised) == 1
@@ -1501,13 +1569,20 @@ class TestWorkflowInstanceManager:
             namespace="user-1/org-1",
         )
 
-        manager.find_and_claim_instance("worker-1")
+        claimed = manager.find_and_claim_instance("worker-1")
+        assert claimed is not None
+        assert claimed.claim_token
 
         instance_before = manager.get_instance(instance_id)
         assert instance_before is not None
         original_expiry = instance_before.lock_expires_at
 
-        success = manager.extend_lock(instance_id, "worker-1", extend_seconds=600)
+        success = manager.extend_lock(
+            instance_id,
+            "worker-1",
+            extend_seconds=600,
+            claim_token=claimed.claim_token,
+        )
 
         assert success is True
 
@@ -1518,7 +1593,7 @@ class TestWorkflowInstanceManager:
         assert instance_after.lock_expires_at > original_expiry
 
     def test_release_lock(self) -> None:
-        """release_lock() should clear the lock."""
+        """release_lock() should pause the row and make it resumable."""
         manager = WorkflowInstanceManager()
 
         instance_id = manager.create_instance(
@@ -1528,16 +1603,425 @@ class TestWorkflowInstanceManager:
             namespace="user-1/org-1",
         )
 
-        manager.find_and_claim_instance("worker-1")
+        claimed = manager.find_and_claim_instance("worker-1")
+        assert claimed is not None
+        assert claimed.claim_token
 
-        success = manager.release_lock(instance_id, "worker-1")
+        success = manager.release_lock(
+            instance_id,
+            "worker-1",
+            claim_token=claimed.claim_token,
+        )
 
         assert success is True
 
         instance = manager.get_instance(instance_id)
         assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.PAUSED
         assert instance.locked_by is None
         assert instance.lock_expires_at is None
+
+        reclaimed = manager.find_and_claim_instance("worker-2")
+        assert reclaimed is not None
+        assert reclaimed.instance_id == instance_id
+        assert reclaimed.locked_by == "worker-2"
+
+    def test_expired_claim_release_is_paused_and_reclaimable(self) -> None:
+        """Lease-loss cleanup must not leave RUNNING with no expiry."""
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        claimed = manager.find_and_claim_instance("worker-expired-release")
+        assert claimed is not None
+        assert claimed.claim_token
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "lock_expires_at": datetime.now(timezone.utc)
+                    - timedelta(seconds=1)
+                }
+            },
+        )
+
+        assert manager.release_lock(
+            instance_id,
+            "worker-expired-release",
+            claim_token=claimed.claim_token,
+        )
+        released = manager.get_instance(instance_id)
+        assert released is not None
+        assert released.status == WorkflowInstanceStatus.PAUSED
+        assert released.locked_by is None
+        assert released.lock_expires_at is None
+
+        reclaimed = manager.find_and_claim_instance("worker-successor")
+        assert reclaimed is not None
+        assert reclaimed.instance_id == instance_id
+        assert reclaimed.claim_token != claimed.claim_token
+
+    def test_expired_claim_cannot_extend_checkpoint_complete_or_fail(self) -> None:
+        """An expired claim must lose every worker-scoped write privilege."""
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        claimed = manager.find_and_claim_instance("worker-expired")
+        assert claimed is not None
+        assert claimed.claim_token
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "lock_expires_at": datetime.now(timezone.utc)
+                    - timedelta(seconds=1)
+                }
+            },
+        )
+
+        assert (
+            manager.extend_lock(
+                instance_id,
+                "worker-expired",
+                claim_token=claimed.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.checkpoint(
+                instance_id,
+                current_state="stale-checkpoint",
+                workflow_data={"writer": "expired"},
+                worker_id="worker-expired",
+                claim_token=claimed.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.mark_completed(
+                instance_id,
+                outputs={"writer": "expired"},
+                worker_id="worker-expired",
+                claim_token=claimed.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.mark_failed(
+                instance_id,
+                error="expired worker must not fail the instance",
+                worker_id="worker-expired",
+                claim_token=claimed.claim_token,
+            )
+            is False
+        )
+
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.RUNNING
+        assert instance.current_state == ""
+        assert instance.workflow_data == {}
+        assert instance.outputs is None
+        assert instance.error is None
+        assert instance.retry_count == 0
+
+    def test_reclaimed_instance_rejects_all_stale_worker_writes(self) -> None:
+        """A stale claimant cannot mutate or release a successor's claim."""
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        claim_a = manager.find_and_claim_instance("worker-a")
+        assert claim_a is not None
+        assert claim_a.claim_token
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "lock_expires_at": datetime.now(timezone.utc)
+                    - timedelta(seconds=1)
+                }
+            },
+        )
+        claim_b = manager.find_and_claim_instance("worker-b")
+        assert claim_b is not None
+        assert claim_b.claim_token
+        assert claim_b.claim_token != claim_a.claim_token
+
+        assert (
+            manager.extend_lock(
+                instance_id,
+                "worker-a",
+                claim_token=claim_a.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.checkpoint(
+                instance_id,
+                current_state="stale-a-checkpoint",
+                workflow_data={"writer": "worker-a"},
+                worker_id="worker-a",
+                claim_token=claim_a.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.mark_completed(
+                instance_id,
+                outputs={"writer": "worker-a"},
+                worker_id="worker-a",
+                claim_token=claim_a.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.mark_failed(
+                instance_id,
+                error="stale worker-a failure",
+                worker_id="worker-a",
+                claim_token=claim_a.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.release_lock(
+                instance_id,
+                "worker-a",
+                claim_token=claim_a.claim_token,
+            )
+            is False
+        )
+
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.RUNNING
+        assert instance.locked_by == "worker-b"
+        assert instance.claim_token == claim_b.claim_token
+        assert instance.current_state == ""
+        assert instance.workflow_data == {}
+        assert instance.outputs is None
+        assert instance.error is None
+
+    def test_same_worker_reclaim_rejects_previous_claim_token(self) -> None:
+        """The token, not only worker identity, fences successive claims."""
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        first_claim = manager.find_and_claim_instance("worker-reused")
+        assert first_claim is not None
+        assert first_claim.claim_token
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "lock_expires_at": datetime.now(timezone.utc)
+                    - timedelta(seconds=1)
+                }
+            },
+        )
+        second_claim = manager.find_and_claim_instance("worker-reused")
+        assert second_claim is not None
+        assert second_claim.claim_token
+        assert second_claim.claim_token != first_claim.claim_token
+
+        assert (
+            manager.extend_lock(
+                instance_id,
+                "worker-reused",
+                claim_token=first_claim.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.checkpoint(
+                instance_id,
+                current_state="old-token-checkpoint",
+                workflow_data={"token": "old"},
+                worker_id="worker-reused",
+                claim_token=first_claim.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.mark_completed(
+                instance_id,
+                worker_id="worker-reused",
+                claim_token=first_claim.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.mark_failed(
+                instance_id,
+                error="old token failure",
+                worker_id="worker-reused",
+                claim_token=first_claim.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.release_lock(
+                instance_id,
+                "worker-reused",
+                claim_token=first_claim.claim_token,
+            )
+            is False
+        )
+        assert (
+            manager.checkpoint(
+                instance_id,
+                current_state="new-token-checkpoint",
+                workflow_data={"token": "new"},
+                worker_id="worker-reused",
+                claim_token=second_claim.claim_token,
+            )
+            is True
+        )
+
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.RUNNING
+        assert instance.locked_by == "worker-reused"
+        assert instance.claim_token == second_claim.claim_token
+        assert instance.current_state == "new-token-checkpoint"
+        assert instance.workflow_data == {"token": "new"}
+        assert instance.outputs is None
+        assert instance.error is None
+
+    def test_direct_callers_without_claim_fence_still_write(self) -> None:
+        """Non-worker callers preserve the explicit unfenced management lane."""
+        manager = WorkflowInstanceManager()
+        checkpoint_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        completed_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        failed_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        assert (
+            manager.checkpoint(
+                checkpoint_id,
+                current_state="direct-checkpoint",
+                workflow_data={"writer": "direct"},
+            )
+            is True
+        )
+        assert (
+            manager.mark_completed(
+                completed_id,
+                outputs={"writer": "direct"},
+            )
+            is True
+        )
+        assert (
+            manager.mark_failed(
+                failed_id,
+                error="direct failure",
+            )
+            is True
+        )
+
+        checkpointed = manager.get_instance(checkpoint_id)
+        completed = manager.get_instance(completed_id)
+        failed = manager.get_instance(failed_id)
+        assert checkpointed is not None
+        assert checkpointed.current_state == "direct-checkpoint"
+        assert checkpointed.workflow_data == {"writer": "direct"}
+        assert completed is not None
+        assert completed.status == WorkflowInstanceStatus.COMPLETED
+        assert completed.outputs == {"writer": "direct"}
+        assert failed is not None
+        assert failed.status == WorkflowInstanceStatus.FAILED
+        assert failed.error == "direct failure"
+
+    def test_direct_lane_cannot_rewrite_terminal_or_cancelled_instances(self) -> None:
+        """Late unfenced persistence is limited to nonterminal lifecycle states."""
+        manager = WorkflowInstanceManager()
+        completed_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        failed_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        cancelled_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        assert manager.mark_completed(completed_id, outputs={"terminal": "completed"})
+        assert manager.mark_failed(failed_id, error="terminal failure")
+        assert manager.mark_cancelled(cancelled_id)
+
+        expected_statuses = {
+            completed_id: WorkflowInstanceStatus.COMPLETED,
+            failed_id: WorkflowInstanceStatus.FAILED,
+            cancelled_id: WorkflowInstanceStatus.CANCELLED,
+        }
+        for instance_id, expected_status in expected_statuses.items():
+            assert (
+                manager.checkpoint(
+                    instance_id,
+                    current_state="late-checkpoint",
+                    workflow_data={"writer": "late"},
+                )
+                is False
+            )
+            assert (
+                manager.mark_completed(instance_id, outputs={"writer": "late"})
+                is False
+            )
+            assert manager.mark_failed(instance_id, error="late failure") is False
+            instance = manager.get_instance(instance_id)
+            assert instance is not None
+            assert instance.status == expected_status
+            assert instance.current_state != "late-checkpoint"
+            assert instance.workflow_data != {"writer": "late"}
 
     def test_reset_for_retry(self) -> None:
         """reset_for_retry() should reset a failed instance for retry."""

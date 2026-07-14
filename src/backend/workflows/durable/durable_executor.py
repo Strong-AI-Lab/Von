@@ -42,11 +42,227 @@ from ..plan_state_runtime import (
 from ..trace_store import insert_workflow_execution_trace
 from .checkpoint_context_projection import (
     CHECKPOINT_CONTEXT_PROJECTION_KEY,
+    CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
     project_workflow_context_for_checkpoint,
+)
+from .authority_snapshot_attestation import (
+    DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
+    PROMPT_CONTEXT_DIAGNOSTICS_KEY,
+    RESERVED_AUTHORITY_CONTEXT_KEYS,
+    WORKFLOW_AUTHORITY_OUTPUT_KEY,
+    build_authority_checkpoint_attestation,
+    validate_authority_checkpoint_attestation,
+    worker_claim_supports_exact_authority_snapshot,
 )
 from .instance_manager import WorkflowInstanceManager
 
 logger = logging.getLogger(__name__)
+
+
+_DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_FIELDS = (
+    "schema_version",
+    "version",
+    "workflow_id",
+    "source",
+    "definition_hash",
+    "runtime_definition_hash",
+    "authoritative_definition_hash",
+    "hash_mismatch",
+    "state_count",
+    "action_count",
+)
+
+
+def _definition_has_state_cycle(definition: WorkflowDefinition) -> bool:
+    """Return whether the represented state graph can revisit a state."""
+
+    adjacency = {
+        state_id: tuple(
+            transition.to_state
+            for transition in state.transitions
+            if transition.to_state in definition.states
+        )
+        for state_id, state in definition.states.items()
+    }
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _visit(state_id: str) -> bool:
+        if state_id in visiting:
+            return True
+        if state_id in visited:
+            return False
+        visiting.add(state_id)
+        if any(_visit(next_state) for next_state in adjacency.get(state_id, ())):
+            return True
+        visiting.remove(state_id)
+        visited.add(state_id)
+        return False
+
+    return any(_visit(state_id) for state_id in adjacency)
+
+
+def _mapping_context_key(value: Mapping[str, Any]) -> str:
+    raw = str(
+        value.get("context_key")
+        or value.get("target_context_key_concept_id")
+        or value.get("context_key_concept_id")
+        or value.get("workflow_context_key")
+        or value.get("target_context_key")
+        or ""
+    ).strip()
+    if raw.startswith("#V#workflow_context_key_"):
+        return raw[len("#V#workflow_context_key_") :]
+    if raw.startswith("workflow_context_key_"):
+        return raw[len("workflow_context_key_") :]
+    if raw.startswith("#V#"):
+        return raw[3:]
+    return raw
+
+
+def _definition_exact_snapshot_dependency_ineligibility_reasons(
+    definition: WorkflowDefinition,
+) -> set[str]:
+    """Return unbound execution surfaces that prevent an exact output claim.
+
+    An exact durable authority snapshot currently attests the parent workflow
+    definition and worker claim only.  It does not bind child-workflow
+    definitions, MCP/tool implementations, or arbitrary registry action
+    implementations.  Fail closed for those surfaces until their producer
+    identity can be carried into the checkpoint attestation.  Exact eligibility
+    therefore requires exactly one self-contained ``llm.action`` whose
+    represented policy explicitly disables tool use.  More than one cannot be
+    bound reliably to the workflow-level authority output and last prompt
+    diagnostics.
+    """
+
+    reasons: set[str] = set()
+    self_contained_llm_producer_count = 0
+    authority_output_mapping_count = 0
+    for state in definition.states.values():
+        if state.metadata.get("idempotency_policy") is not None:
+            reasons.add("authority_producer_idempotency_surface")
+        if state.metadata.get("retry_policy") is not None:
+            reasons.add("authority_producer_retry_surface")
+        raw_mappings = state.metadata.get("tool_output_context_mappings")
+        mappings = (
+            [raw_mappings]
+            if isinstance(raw_mappings, Mapping)
+            else raw_mappings
+            if isinstance(raw_mappings, list)
+            else []
+        )
+        for mapping in mappings:
+            if not isinstance(mapping, Mapping):
+                continue
+            target_key = _mapping_context_key(mapping)
+            if target_key == WORKFLOW_AUTHORITY_OUTPUT_KEY:
+                authority_output_mapping_count += 1
+            elif target_key in {
+                PROMPT_CONTEXT_DIAGNOSTICS_KEY,
+                DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
+            }:
+                reasons.add("authority_lineage_mapping_override")
+        for action in state.actions:
+            action_id = str(action.action_id or "").strip()
+            if (
+                action.is_subworkflow_step
+                or bool(str(action.subworkflow_id or "").strip())
+                or action_id == "workflow_invoke_subworkflow"
+            ):
+                reasons.add("unbound_child_execution_surface")
+                continue
+
+            if action.is_llm_step and action_id == "llm.action":
+                llm_policy = (
+                    action.llm_policy
+                    if isinstance(action.llm_policy, Mapping)
+                    else {}
+                )
+                tool_mode = str(llm_policy.get("tool_mode") or "").strip().lower()
+                if tool_mode == "none":
+                    self_contained_llm_producer_count += 1
+                    continue
+                reasons.add("unbound_tool_execution_surface")
+                continue
+
+            # Deterministic/control registry actions, including
+            # workflow_mcp.invoke_tool, are executable code or dynamic
+            # dependency surfaces whose implementation identity is not yet
+            # included in the exact-snapshot attestation.
+            reasons.add("unbound_action_execution_surface")
+    if self_contained_llm_producer_count == 0 and not reasons:
+        reasons.add("authority_output_producer_action_missing")
+    elif self_contained_llm_producer_count > 1:
+        # The bridge binds the top-level authority output to the workflow's
+        # prompt diagnostics.  With multiple LLM steps, definition shape alone
+        # cannot prove which prompt produced that output (or whether a later
+        # step merely overwrote it), so no exact producer claim is possible.
+        reasons.add("ambiguous_authority_output_producer")
+    if _definition_has_state_cycle(definition):
+        reasons.add("authority_producer_cyclic_execution_surface")
+    if authority_output_mapping_count > 1:
+        reasons.add("ambiguous_authority_output_mapping")
+    return reasons
+
+
+def _discard_reserved_authority_context(context: dict[str, Any]) -> None:
+    for key in RESERVED_AUTHORITY_CONTEXT_KEYS:
+        context.pop(key, None)
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return len(text) == 64 and all(
+        character in "0123456789abcdef" for character in text
+    )
+
+
+def _project_executed_workflow_definition_identity(
+    value: Mapping[str, Any] | None,
+    *,
+    workflow_id: str,
+) -> dict[str, Any] | None:
+    """Return a bounded, internally consistent v1 identity for persistence."""
+
+    if not isinstance(value, Mapping):
+        return None
+    source = str(value.get("source") or "").strip()
+    definition_hash = value.get("definition_hash")
+    runtime_hash = value.get("runtime_definition_hash")
+    authoritative_hash = value.get("authoritative_definition_hash")
+    if (
+        value.get("schema_version") != "workflow_definition_identity.v1"
+        or value.get("version") != 1
+        or value.get("workflow_id") != workflow_id
+        or not source
+        or not _is_sha256(definition_hash)
+        or not _is_sha256(runtime_hash)
+        or runtime_hash != definition_hash
+        or value.get("hash_mismatch") is not False
+        or not isinstance(value.get("state_count"), int)
+        or isinstance(value.get("state_count"), bool)
+        or value.get("state_count", -1) < 0
+        or not isinstance(value.get("action_count"), int)
+        or isinstance(value.get("action_count"), bool)
+        or value.get("action_count", -1) < 0
+    ):
+        return None
+    if source.lower() == "vontology":
+        if authoritative_hash != definition_hash or not _is_sha256(
+            authoritative_hash
+        ):
+            return None
+    elif authoritative_hash is not None and (
+        not _is_sha256(authoritative_hash)
+        or authoritative_hash != definition_hash
+    ):
+        return None
+
+    return {
+        key: value.get(key)
+        for key in _DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_FIELDS
+    }
 
 
 def _coerce_non_empty_text(value: Any) -> str | None:
@@ -200,7 +416,9 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         definition: WorkflowDefinition,
         *,
         worker_id: str | None = None,
+        claim_token: str | None = None,
         resume_from_checkpoint: bool = True,
+        workflow_definition_identity: Mapping[str, Any] | None = None,
     ) -> DurableWorkflowResult:
         """Execute a workflow with checkpointing.
 
@@ -208,7 +426,11 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             instance_id: The workflow instance ID.
             definition: The workflow definition to execute.
             worker_id: Optional worker ID for lock extension.
+            claim_token: Opaque token for fencing one concrete worker claim.
             resume_from_checkpoint: Whether to resume from saved state.
+            workflow_definition_identity: Identity paired with the definition
+                loaded by the current worker. Untrusted launch/checkpoint values
+                under the persisted identity key are always discarded.
 
         Returns:
             DurableWorkflowResult with execution outcome.
@@ -237,8 +459,40 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                 error="instance_not_found",
             )
 
+        fenced_execution_requested = worker_id is not None or claim_token is not None
+        if fenced_execution_requested and (
+            not worker_id
+            or not claim_token
+            or instance.locked_by != worker_id
+            or instance.claim_token != claim_token
+        ):
+            return DurableWorkflowResult(
+                instance_id=instance_id,
+                data={},
+                completed=False,
+                final_state=instance.current_state,
+                error="durable_lock_lost",
+                step_count=instance.step_index,
+            )
+
         # Restore or initialise state
-        if resume_from_checkpoint and instance.workflow_data:
+        resuming_persisted_checkpoint = bool(
+            resume_from_checkpoint and instance.workflow_data
+        )
+        prior_attestation: dict[str, Any] | None = None
+        prior_attestation_error: str | None = None
+        if resuming_persisted_checkpoint:
+            prior_attestation, prior_attestation_error = (
+                validate_authority_checkpoint_attestation(
+                    instance.authority_checkpoint_attestation,
+                    instance_id=instance_id,
+                    workflow_id=definition.workflow_id,
+                    current_state=instance.current_state or definition.initial_state,
+                    step_index=instance.step_index,
+                    workflow_data=instance.workflow_data,
+                )
+            )
+        if resuming_persisted_checkpoint:
             context = dict(instance.workflow_data)
             context.pop(CHECKPOINT_CONTEXT_PROJECTION_KEY, None)
             current_state = instance.current_state or definition.initial_state
@@ -255,12 +509,109 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             current_state = definition.initial_state
             step_index = 0
         # Persisted instance actor scope is execution authority. Neither launch
-        # inputs nor a restored checkpoint may replace it.
+        # inputs nor a restored checkpoint may replace it. The executed
+        # definition identity and authority outputs have the same trust boundary.
+        # Launch inputs never own them. A resumed value is retained only when a
+        # manager-side checkpoint attestation binds it to the preceding claim.
         context["user_concept_id"] = instance.user_id
         context["org_concept_id"] = instance.org_id
         context["organisation_concept_id"] = instance.org_id
         context["namespace"] = instance.namespace
         context["user_namespace"] = instance.namespace
+        executed_definition_identity = (
+            _project_executed_workflow_definition_identity(
+                workflow_definition_identity,
+                workflow_id=definition.workflow_id,
+            )
+        )
+        exact_snapshot_ineligibility_reasons: set[str] = set()
+        if executed_definition_identity is None:
+            exact_snapshot_ineligibility_reasons.add(
+                "executed_definition_identity_unverified"
+            )
+        if not worker_claim_supports_exact_authority_snapshot(
+            instance.claimed_by_build,
+            expected_worker_id=worker_id,
+        ):
+            exact_snapshot_ineligibility_reasons.add(
+                "worker_exact_snapshot_capability_missing"
+            )
+        exact_snapshot_ineligibility_reasons.update(
+            _definition_exact_snapshot_dependency_ineligibility_reasons(definition)
+        )
+
+        retain_resumed_authority = False
+        if resuming_persisted_checkpoint:
+            if prior_attestation is None:
+                exact_snapshot_ineligibility_reasons.add(
+                    prior_attestation_error
+                    or "prior_checkpoint_attestation_unverified"
+                )
+            else:
+                if not prior_attestation.get("exact_snapshot_eligible"):
+                    exact_snapshot_ineligibility_reasons.update(
+                        str(reason)
+                        for reason in prior_attestation.get(
+                            "ineligibility_reasons", []
+                        )
+                        if str(reason).strip()
+                    )
+                prior_definition_hash = prior_attestation.get(
+                    "executed_definition_hash"
+                )
+                current_definition_hash = (
+                    executed_definition_identity.get("definition_hash")
+                    if executed_definition_identity is not None
+                    else None
+                )
+                if prior_definition_hash != current_definition_hash:
+                    exact_snapshot_ineligibility_reasons.add(
+                        "workflow_definition_drift_on_resume"
+                    )
+                else:
+                    retain_resumed_authority = True
+                prior_authority_was_produced = any(
+                    instance.workflow_data.get(key) is not None
+                    for key in (
+                        WORKFLOW_AUTHORITY_OUTPUT_KEY,
+                        PROMPT_CONTEXT_DIAGNOSTICS_KEY,
+                    )
+                )
+                if prior_authority_was_produced:
+                    # The v1 attestation binds a checkpoint, not a producer
+                    # invocation chain.  Retain same-claim data for ordinary
+                    # workflow continuity, but do not call a resumed authority
+                    # value exact until that producer chain is represented.
+                    exact_snapshot_ineligibility_reasons.add(
+                        "authority_output_resumed_without_producer_lineage"
+                    )
+                if prior_authority_was_produced and (
+                    prior_attestation.get("claim_token") != claim_token
+                    or prior_attestation.get("worker_id") != worker_id
+                ):
+                    # Do not let a successor claim re-attest output produced by
+                    # its predecessor.  The ineligibility reason is carried into
+                    # the next manager-side attestation, so A -> B -> A claim
+                    # churn cannot make the old output exact again.
+                    exact_snapshot_ineligibility_reasons.add(
+                        "authority_producer_claim_changed_on_resume"
+                    )
+                    retain_resumed_authority = False
+        if not retain_resumed_authority:
+            _discard_reserved_authority_context(context)
+        else:
+            context.pop(DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY, None)
+
+        def _reassert_executed_definition_identity() -> None:
+            # Workflow actions share the mutable context and must not be able to
+            # forge or delete this executor-owned persistence fact.
+            context.pop(DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY, None)
+            if executed_definition_identity is not None:
+                context[DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY] = dict(
+                    executed_definition_identity
+                )
+
+        _reassert_executed_definition_identity()
         clear_control_signal_context(context)
 
         # Create execution environment
@@ -311,6 +662,25 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             user_namespace=instance.namespace,
             org_id=instance.org_id,
         )
+        if executed_definition_identity is not None:
+            trace.metadata[DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY] = dict(
+                executed_definition_identity
+            )
+        def _sync_exact_snapshot_trace_metadata() -> None:
+            trace.metadata["exact_authority_snapshot_eligible"] = not bool(
+                exact_snapshot_ineligibility_reasons
+            )
+            if exact_snapshot_ineligibility_reasons:
+                trace.metadata[
+                    "exact_authority_snapshot_ineligibility_reasons"
+                ] = sorted(exact_snapshot_ineligibility_reasons)
+            else:
+                trace.metadata.pop(
+                    "exact_authority_snapshot_ineligibility_reasons",
+                    None,
+                )
+
+        _sync_exact_snapshot_trace_metadata()
         if isinstance(environment.model, str) and environment.model.strip():
             default_model = environment.model.strip()
             trace.metadata["default_model"] = default_model
@@ -345,6 +715,110 @@ class DurableWorkflowExecutor(WorkflowExecutor):
 
         transitions = 0
 
+        def _checkpoint_payload(
+            *,
+            checkpoint_state: str,
+            checkpoint_step_index: int,
+        ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+            _reassert_executed_definition_identity()
+            if any(
+                context.get(key) is not None
+                for key in (
+                    WORKFLOW_AUTHORITY_OUTPUT_KEY,
+                    PROMPT_CONTEXT_DIAGNOSTICS_KEY,
+                )
+            ):
+                producer_action_records = [
+                    action_record
+                    for action_record in trace.actions
+                    if str(action_record.get("action_id") or "").strip()
+                    == "llm.action"
+                ]
+                observed_producer_invocations = len(producer_action_records)
+                if observed_producer_invocations == 0:
+                    exact_snapshot_ineligibility_reasons.add(
+                        "authority_producer_invocation_missing"
+                    )
+                elif observed_producer_invocations > 1:
+                    exact_snapshot_ineligibility_reasons.add(
+                        "ambiguous_authority_output_producer_invocations"
+                    )
+                if observed_producer_invocations == 1:
+                    producer_outputs = producer_action_records[0].get("outputs")
+                    producer_diagnostics = (
+                        producer_outputs.get(PROMPT_CONTEXT_DIAGNOSTICS_KEY)
+                        if isinstance(producer_outputs, Mapping)
+                        else None
+                    )
+                    if isinstance(producer_diagnostics, Mapping):
+                        # Reassert prompt lineage from the actual LLM action
+                        # record after all represented output mappings ran.
+                        # The definition may map validated JSON to the authority
+                        # output, but it may not author its own execution lineage.
+                        context[PROMPT_CONTEXT_DIAGNOSTICS_KEY] = dict(
+                            producer_diagnostics
+                        )
+                    else:
+                        context.pop(PROMPT_CONTEXT_DIAGNOSTICS_KEY, None)
+                        exact_snapshot_ineligibility_reasons.add(
+                            "authority_producer_prompt_lineage_missing"
+                        )
+            projected = project_workflow_context_for_checkpoint(context)
+            projection = projected.get(CHECKPOINT_CONTEXT_PROJECTION_KEY)
+            projected_key_records = (
+                projection.get("projected_keys")
+                if isinstance(projection, Mapping)
+                else None
+            )
+            if (
+                not isinstance(projection, Mapping)
+                or projection.get("schema_version")
+                != CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION
+                or not isinstance(projected_key_records, list)
+            ):
+                exact_snapshot_ineligibility_reasons.add(
+                    "authority_checkpoint_projection_unverified"
+                )
+            elif int(projection.get("omitted_projected_key_count") or 0) > 0:
+                exact_snapshot_ineligibility_reasons.add(
+                    "authority_checkpoint_projection_unverified"
+                )
+            if isinstance(projected_key_records, list) and any(
+                isinstance(record, Mapping)
+                and str(record.get("key") or "").strip()
+                in RESERVED_AUTHORITY_CONTEXT_KEYS
+                for record in projected_key_records
+            ):
+                exact_snapshot_ineligibility_reasons.add(
+                    "authority_checkpoint_projection_lossy"
+                )
+            _sync_exact_snapshot_trace_metadata()
+            attestation = None
+            if (
+                worker_id is not None
+                and claim_token is not None
+                and worker_claim_supports_exact_authority_snapshot(
+                    instance.claimed_by_build,
+                    expected_worker_id=worker_id,
+                )
+            ):
+                attestation = build_authority_checkpoint_attestation(
+                    instance_id=instance_id,
+                    workflow_id=definition.workflow_id,
+                    current_state=checkpoint_state,
+                    step_index=checkpoint_step_index,
+                    claim_token=claim_token,
+                    worker_id=worker_id,
+                    workflow_data=projected,
+                    exact_snapshot_eligible=(
+                        not exact_snapshot_ineligibility_reasons
+                    ),
+                    ineligibility_reasons=sorted(
+                        exact_snapshot_ineligibility_reasons
+                    ),
+                )
+            return projected, attestation
+
         def _build_result(
             *,
             completed: bool,
@@ -354,13 +828,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             error_step: str | None = None,
         ) -> DurableWorkflowResult:
             nonlocal persisted_execution_trace_id
-            if persisted_execution_trace_id is None:
-                persisted_execution_trace_id = _retry_store_call(
-                    "insert_workflow_execution_trace",
-                    lambda: insert_workflow_execution_trace(
-                        trace.to_storage_document()
-                    ),
-                )
+            _reassert_executed_definition_identity()
             result_envelope = build_workflow_result_envelope(
                 workflow_id=definition.workflow_id,
                 completed=completed,
@@ -381,14 +849,26 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                         fallback_message=final_state,
                     )
                 )
-                _retry_store_call(
+                checkpoint_data, checkpoint_attestation = _checkpoint_payload(
+                    checkpoint_state=final_state,
+                    checkpoint_step_index=step_index,
+                )
+                # Projection can make an otherwise static definition ineligible.
+                # Persist the trace only after that verdict is known so the TER
+                # and manager-side attestation cannot disagree.
+                if persisted_execution_trace_id is None:
+                    persisted_execution_trace_id = _retry_store_call(
+                        "insert_workflow_execution_trace",
+                        lambda: insert_workflow_execution_trace(
+                            trace.to_storage_document()
+                        ),
+                    )
+                checkpoint_saved = _retry_store_call(
                     "checkpoint_terminal",
                     lambda: self._instance_manager.checkpoint(
                         instance_id,
                         current_state=final_state,
-                        workflow_data=project_workflow_context_for_checkpoint(
-                            context
-                        ),
+                        workflow_data=checkpoint_data,
                         step_index=step_index,
                         error=error,
                         error_step=error_step,
@@ -396,6 +876,27 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                         progress_total=progress_total_value,
                         progress_message=progress_message_value,
                         execution_trace_id=persisted_execution_trace_id,
+                        worker_id=worker_id,
+                        claim_token=claim_token,
+                        authority_checkpoint_attestation=checkpoint_attestation,
+                        workflow_id=definition.workflow_id,
+                    ),
+                )
+                if fenced_execution_requested and checkpoint_saved is not True:
+                    return DurableWorkflowResult(
+                        instance_id=instance_id,
+                        data={},
+                        completed=False,
+                        final_state=final_state,
+                        error="durable_lock_lost",
+                        step_count=step_index,
+                        execution_trace_id=persisted_execution_trace_id,
+                    )
+            if persisted_execution_trace_id is None:
+                persisted_execution_trace_id = _retry_store_call(
+                    "insert_workflow_execution_trace",
+                    lambda: insert_workflow_execution_trace(
+                        trace.to_storage_document()
                     ),
                 )
             return DurableWorkflowResult(
@@ -453,16 +954,17 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                     completed=False,
                     final_state=current_state,
                     error="cancelled",
-                    checkpoint=True,
+                    checkpoint=False,
                 )
 
             if worker_id:
                 try:
-                    _retry_store_call(
+                    lock_extended = _retry_store_call(
                         "extend_lock",
                         lambda: self._instance_manager.extend_lock(
                             instance_id,
                             worker_id,
+                            claim_token=claim_token,
                         ),
                     )
                 except Exception:
@@ -470,6 +972,15 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                         "[durable_workflow] Failed to extend lock for %s during execution",
                         instance_id,
                         exc_info=True,
+                    )
+                    lock_extended = False
+                if lock_extended is not True:
+                    trace.finish_failed("durable_lock_lost")
+                    return _build_result(
+                        completed=False,
+                        final_state=current_state,
+                        error="durable_lock_lost",
+                        checkpoint=False,
                     )
 
             state_spec = definition.states.get(current_state)
@@ -634,18 +1145,34 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                     fallback_message=resolved_next_state,
                 )
             )
-            _retry_store_call(
+            checkpoint_data, checkpoint_attestation = _checkpoint_payload(
+                checkpoint_state=resolved_next_state,
+                checkpoint_step_index=step_index,
+            )
+            checkpoint_saved = _retry_store_call(
                 "checkpoint_transition",
                 lambda: self._instance_manager.checkpoint(
                     instance_id,
                     current_state=resolved_next_state,
-                    workflow_data=project_workflow_context_for_checkpoint(context),
+                    workflow_data=checkpoint_data,
                     step_index=step_index,
                     progress_current=progress_current_value,
                     progress_total=progress_total_value,
                     progress_message=progress_message_value,
+                    worker_id=worker_id,
+                    claim_token=claim_token,
+                    authority_checkpoint_attestation=checkpoint_attestation,
+                    workflow_id=definition.workflow_id,
                 ),
             )
+            if fenced_execution_requested and checkpoint_saved is not True:
+                trace.finish_failed("durable_lock_lost")
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error="durable_lock_lost",
+                    checkpoint=False,
+                )
 
             trace.record_state_transition(
                 current_state,
@@ -701,6 +1228,9 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         return self.run_durable(
             instance_id,
             definition,
-            worker_id=worker_id,
+            # This helper executes synchronously without claiming the pending
+            # row. Keep it on the explicit direct/admin lane; background workers
+            # must use find_and_claim_instance and a claim token.
+            worker_id=None,
             resume_from_checkpoint=False,
         )

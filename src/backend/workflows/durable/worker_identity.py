@@ -12,9 +12,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from ...services.runtime_code_version_service import get_runtime_code_version_info
+from .authority_snapshot_attestation import (
+    DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION,
+    EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY,
+)
 
 WORKER_BUILD_IDENTITY_SCHEMA_VERSION = "durable_worker_build_identity.v1"
-WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION = "durable_worker_claim_provenance.v1"
+WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION = (
+    DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION
+)
 
 _IDENTITY_STRING_FIELDS = (
     "version",
@@ -39,6 +45,7 @@ _MIN_WORKER_BUILD_ENV_NAMES = (
     "VON_DURABLE_MIN_WORKER_BUILD",
     "VON_DURABLE_MIN_WORKER_GIT_SHORT_COMMIT",
 )
+_MAX_WORKER_CAPABILITIES = 32
 
 
 def _clean_text(value: object) -> str | None:
@@ -82,6 +89,13 @@ def worker_build_match_tokens(
             prefixed = f"g{value}"
             if prefixed not in tokens:
                 tokens.append(prefixed)
+
+    capabilities = worker_build_identity.get("capabilities")
+    if isinstance(capabilities, (list, tuple, set, frozenset)):
+        for raw_capability in capabilities:
+            capability = _clean_text(raw_capability)
+            if capability and capability not in tokens:
+                tokens.append(capability)
 
     return tuple(tokens)
 
@@ -127,6 +141,18 @@ def normalise_worker_build_identity(
     elif dirty_value is None:
         identity["git_dirty"] = None
 
+    raw_capabilities = source.get("capabilities")
+    if isinstance(raw_capabilities, (list, tuple, set, frozenset)):
+        capabilities: list[str] = []
+        for raw_capability in raw_capabilities:
+            capability = _clean_text(raw_capability)
+            if capability and capability not in capabilities:
+                capabilities.append(capability)
+            if len(capabilities) >= _MAX_WORKER_CAPABILITIES:
+                break
+        if capabilities:
+            identity["capabilities"] = sorted(capabilities)
+
     identity["match_tokens"] = list(worker_build_match_tokens(identity))
     return identity
 
@@ -137,6 +163,9 @@ def build_worker_build_identity(worker_id: str) -> dict[str, Any]:
     version_info["worker_id"] = worker_id
     version_info["hostname"] = socket.gethostname()
     version_info["pid"] = os.getpid()
+    version_info["capabilities"] = [
+        EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY,
+    ]
     return normalise_worker_build_identity(version_info, worker_id=worker_id)
 
 

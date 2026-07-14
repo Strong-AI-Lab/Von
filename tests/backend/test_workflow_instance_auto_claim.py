@@ -129,6 +129,108 @@ def test_mirror_instance_resists_legacy_claim_query():
     assert coll.find_one(legacy_query) is None
 
 
+def test_supervised_mirror_lane_can_checkpoint_and_terminalise_directly():
+    """The submitting path retains its narrow sentinel-backed write lane."""
+    manager = WorkflowInstanceManager()
+    completed_id = manager.create_instance(
+        "#V#conversation_turn_execution_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        auto_claim_enabled=False,
+    )
+    failed_id = manager.create_instance(
+        "#V#conversation_turn_execution_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        auto_claim_enabled=False,
+    )
+
+    assert manager.checkpoint(
+        completed_id,
+        current_state="supervised-runtime",
+        workflow_data={"turn_execution_runtime": {"completed": True}},
+    )
+    assert manager.mark_completed(
+        completed_id,
+        outputs={"response": "done"},
+        final_state="completed",
+    )
+    assert manager.checkpoint(
+        failed_id,
+        current_state="supervised-runtime",
+        workflow_data={"turn_execution_runtime": {"completed": False}},
+    )
+    assert manager.mark_failed(
+        failed_id,
+        error="supervised_turn_failed",
+        increment_retry=False,
+    )
+
+    completed = manager.get_instance(completed_id)
+    failed = manager.get_instance(failed_id)
+    assert completed is not None
+    assert completed.status == WorkflowInstanceStatus.COMPLETED
+    assert failed is not None
+    assert failed.status == WorkflowInstanceStatus.FAILED
+
+
+def test_hold_sentinel_does_not_grant_direct_lane_to_auto_claimable_instance():
+    """Only an actual supervised mirror may use the sentinel compatibility lane."""
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#test_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+    )
+    coll = manager._get_instances_collection()
+    assert coll is not None
+    coll.update_one(
+        {"instance_id": instance_id},
+        {
+            "$set": {
+                "status": WorkflowInstanceStatus.RUNNING.value,
+                "locked_by": SUPERVISED_HOLD_LOCK_HOLDER,
+            }
+        },
+    )
+
+    assert manager.mark_completed(instance_id) is False
+    instance = manager.get_instance(instance_id)
+    assert instance is not None
+    assert instance.status == WorkflowInstanceStatus.RUNNING
+
+
+def test_paused_supervised_mirror_rejects_late_direct_finaliser():
+    """An operator pause must fence a late supervised callback."""
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#conversation_turn_execution_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        auto_claim_enabled=False,
+    )
+    assert manager.pause_instance(instance_id)
+
+    assert (
+        manager.checkpoint(
+            instance_id,
+            current_state="late-supervised-checkpoint",
+            workflow_data={"writer": "late-supervised-callback"},
+        )
+        is False
+    )
+    assert manager.mark_completed(instance_id) is False
+    assert manager.mark_failed(instance_id, error="late supervised failure") is False
+    paused = manager.get_instance(instance_id)
+    assert paused is not None
+    assert paused.status == WorkflowInstanceStatus.PAUSED
+    assert paused.current_state != "late-supervised-checkpoint"
+
+
 def test_create_instance_for_event_threads_auto_claim_flag():
     manager = WorkflowInstanceManager()
     instance_id, created_new = manager.create_instance_for_event(

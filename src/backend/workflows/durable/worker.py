@@ -7,19 +7,23 @@ Supports graceful shutdown and automatic lock heartbeat.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import socket
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ...db.transient_errors import run_with_transient_mongo_retry
 from ...security.access_control import override_current_actor
-from ..engine import WorkflowDefinition
 from ..action_registry import ActionRegistry
 from .instance_manager import WorkflowInstanceManager
-from .durable_executor import DurableWorkflowExecutor, DurableWorkflowResult
+from .durable_executor import (
+    DurableWorkflowExecutor,
+    DurableWorkflowResult,
+    _project_executed_workflow_definition_identity,
+)
 from .failed_output_diagnostics import (
     build_completed_workflow_outputs,
     build_failed_workflow_outputs,
@@ -33,7 +37,101 @@ logger = logging.getLogger(__name__)
 # Type for workflow definition loaders. Durable execution must resolve the
 # definition under the actor persisted on the instance, rather than trusting a
 # process-global registry entry that may have been warmed by another actor.
-WorkflowDefinitionLoader = Callable[..., WorkflowDefinition | None]
+WorkflowDefinitionLoader = Callable[..., Any]
+
+
+def _loader_explicitly_supports_authority_resolution(loader: Any) -> bool:
+    """Return whether a loader explicitly opts into the authority-result protocol.
+
+    Legacy loaders often accept ``**kwargs`` only to tolerate actor fields. Do
+    not send the new flag through that catch-all: an explicit parameter keeps
+    existing custom loaders unchanged and fail-closed for identity stamping.
+    """
+
+    try:
+        signature = inspect.signature(loader)
+    except (TypeError, ValueError):
+        return False
+    parameter = signature.parameters.get("include_authority_resolution")
+    return parameter is not None and parameter.kind in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
+
+
+def _normalise_loaded_definition_and_identity(
+    loaded: Any,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Separate a legacy definition from a definition-authority resolution.
+
+    The canonical resolution already computed an identity from the exact
+    definition it returns. Recompute only the runtime definition hash locally
+    to reject a stale or spliced resolution; never perform another Vontology
+    lookup from the worker.
+    """
+
+    missing = object()
+    resolved_definition = getattr(loaded, "definition", missing)
+    if resolved_definition is missing:
+        return loaded, None
+    if resolved_definition is None:
+        return None, None
+
+    raw_identity = getattr(loaded, "definition_identity", None)
+    if not isinstance(raw_identity, Mapping):
+        return resolved_definition, None
+    workflow_id = getattr(resolved_definition, "workflow_id", None)
+    if (
+        not isinstance(workflow_id, str)
+        or not workflow_id.strip()
+        or raw_identity.get("workflow_id") != workflow_id
+    ):
+        return resolved_definition, None
+
+    try:
+        from ..workflow_definition_identity_service import (
+            build_workflow_definition_identity,
+        )
+
+        runtime_identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source=str(raw_identity.get("source") or "unknown"),
+            definition=resolved_definition,
+            authoritative_definition=None,
+        )
+    except Exception:
+        logger.warning(
+            "[durable_worker] Could not validate loaded definition identity for %s",
+            workflow_id,
+            exc_info=True,
+        )
+        return resolved_definition, None
+    runtime_hash = runtime_identity.get("runtime_definition_hash")
+    source = str(raw_identity.get("source") or "").strip().lower()
+    authoritative_hash = raw_identity.get("authoritative_definition_hash")
+    if (
+        raw_identity.get("runtime_definition_hash") != runtime_hash
+        or raw_identity.get("definition_hash") != runtime_hash
+        or raw_identity.get("state_count") != runtime_identity.get("state_count")
+        or raw_identity.get("action_count") != runtime_identity.get("action_count")
+        or (source == "vontology" and authoritative_hash != runtime_hash)
+    ):
+        logger.warning(
+            "[durable_worker] Refusing stale or spliced definition identity for %s",
+            workflow_id,
+        )
+        return resolved_definition, None
+    projected_identity = _project_executed_workflow_definition_identity(
+        raw_identity,
+        workflow_id=workflow_id,
+    )
+    if projected_identity is None:
+        logger.warning(
+            "[durable_worker] Refusing invalid definition identity for %s",
+            workflow_id,
+        )
+        return resolved_definition, None
+    return resolved_definition, projected_identity
 
 
 def _default_live_load_getter() -> int:
@@ -96,6 +194,9 @@ class DurableWorkflowWorker:
         self._instance_manager = instance_manager
         self._registry = registry
         self._definition_loader = definition_loader
+        self._definition_loader_supports_authority_resolution = (
+            _loader_explicitly_supports_authority_resolution(definition_loader)
+        )
         self._poll_interval = poll_interval_seconds
         self._batch_size = batch_size
         self._heartbeat_interval = heartbeat_interval_seconds
@@ -117,6 +218,7 @@ class DurableWorkflowWorker:
         self._running = False
         self._shutdown_event = threading.Event()
         self._current_instances: dict[str, threading.Thread] = {}
+        self._current_claim_tokens: dict[str, str] = {}
         self._lock = threading.Lock()
 
         # Callbacks for observability
@@ -356,6 +458,10 @@ class DurableWorkflowWorker:
                     daemon=True,
                 )
                 self._current_instances[instance.instance_id] = thread
+                if instance.claim_token:
+                    self._current_claim_tokens[instance.instance_id] = (
+                        instance.claim_token
+                    )
                 thread.start()
                 return True
 
@@ -408,6 +514,7 @@ class DurableWorkflowWorker:
             instance: The instance to process.
         """
         instance_id = instance.instance_id
+        claim_token = instance.claim_token
         logger.info(
             "[durable_worker] Processing instance %s (workflow=%s)",
             instance_id,
@@ -428,25 +535,38 @@ class DurableWorkflowWorker:
             increment_retry: bool = True,
             outputs: dict[str, Any] | None = None,
             execution_trace_id: str | None = None,
-        ) -> None:
+        ) -> bool:
             try:
-                self._instance_manager.mark_failed(
-                    instance_id,
-                    error=error,
-                    error_step=error_step,
-                    increment_retry=increment_retry,
-                    outputs=outputs,
-                    execution_trace_id=execution_trace_id,
+                return bool(
+                    self._instance_manager.mark_failed(
+                        instance_id,
+                        error=error,
+                        error_step=error_step,
+                        increment_retry=increment_retry,
+                        outputs=outputs,
+                        execution_trace_id=execution_trace_id,
+                        worker_id=self._worker_id,
+                        claim_token=claim_token,
+                    )
                 )
             except Exception:
                 logger.exception(
                     "[durable_worker] Failed to persist FAILED status for %s",
                     instance_id,
                 )
+                return False
 
         def _best_effort_release_lock() -> None:
             try:
-                self._instance_manager.release_lock(instance_id, self._worker_id)
+                self._instance_manager.release_lock(
+                    instance_id,
+                    self._worker_id,
+                    **(
+                        {"claim_token": claim_token}
+                        if claim_token is not None
+                        else {}
+                    ),
+                )
             except Exception:
                 logger.exception(
                     "[durable_worker] Failed to release lock for %s",
@@ -466,14 +586,26 @@ class DurableWorkflowWorker:
             # run* so LLM prompt resolution, nested workflow loading, explicit
             # actions, and fallback tools all enforce the same authority.
             with override_current_actor(instance.user_id, instance.org_id):
-                definition = _retry_store_call(
-                    "load_definition",
-                    lambda: self._definition_loader(
+                def _load_definition_with_authority() -> tuple[
+                    Any,
+                    dict[str, Any] | None,
+                ]:
+                    loader_kwargs: dict[str, Any] = {
+                        "actor_user_id": instance.user_id,
+                        "actor_org_id": instance.org_id,
+                        "actor_namespace": instance.namespace,
+                    }
+                    if self._definition_loader_supports_authority_resolution:
+                        loader_kwargs["include_authority_resolution"] = True
+                    loaded = self._definition_loader(
                         instance.workflow_id,
-                        actor_user_id=instance.user_id,
-                        actor_org_id=instance.org_id,
-                        actor_namespace=instance.namespace,
-                    ),
+                        **loader_kwargs,
+                    )
+                    return _normalise_loaded_definition_and_identity(loaded)
+
+                definition, workflow_definition_identity = _retry_store_call(
+                    "load_definition",
+                    _load_definition_with_authority,
                 )
 
                 result = (
@@ -481,7 +613,9 @@ class DurableWorkflowWorker:
                         instance_id,
                         definition,
                         worker_id=self._worker_id,
+                        claim_token=claim_token,
                         resume_from_checkpoint=True,
+                        workflow_definition_identity=workflow_definition_identity,
                     )
                     if definition is not None
                     else None
@@ -489,11 +623,11 @@ class DurableWorkflowWorker:
 
             if definition is None:
                 error = f"workflow_definition_not_found:{instance.workflow_id}"
-                _best_effort_mark_failed(
+                failure_saved = _best_effort_mark_failed(
                     error=error,
                     increment_retry=False,
                 )
-                if self._on_instance_failed:
+                if failure_saved and self._on_instance_failed:
                     try:
                         self._on_instance_failed(instance_id, error)
                     except Exception:
@@ -513,15 +647,23 @@ class DurableWorkflowWorker:
                     final_state=result.final_state,
                     execution_trace_id=result.execution_trace_id,
                 )
-                _retry_store_call(
+                completion_saved = _retry_store_call(
                     "mark_completed",
                     lambda: self._instance_manager.mark_completed(
                         instance_id,
                         outputs=completed_outputs,
                         final_state=result.final_state,
                         execution_trace_id=result.execution_trace_id,
+                        worker_id=self._worker_id,
+                        claim_token=claim_token,
                     ),
                 )
+                if completion_saved is not True:
+                    logger.warning(
+                        "[durable_worker] Completion fenced after lease loss for %s",
+                        instance_id,
+                    )
+                    return
                 if self._on_instance_completed:
                     try:
                         self._on_instance_completed(instance_id, result)
@@ -533,37 +675,50 @@ class DurableWorkflowWorker:
                 # Already marked as cancelled
                 logger.info("[durable_worker] Instance %s was cancelled", instance_id)
 
+            elif result.error == "durable_lock_lost":
+                logger.warning(
+                    "[durable_worker] Lease lost while processing %s; "
+                    "leaving persistence to the current claim holder",
+                    instance_id,
+                )
+
             else:
                 failed_outputs = build_failed_workflow_outputs(
                     result.data,
                     error=result.error or "unknown_error",
                     error_step=result.final_state,
                 )
-                _best_effort_mark_failed(
+                failure_saved = _best_effort_mark_failed(
                     error=result.error or "unknown_error",
                     error_step=result.final_state,
                     outputs=failed_outputs,
                     execution_trace_id=result.execution_trace_id,
                 )
-                if self._on_instance_failed:
+                if failure_saved and self._on_instance_failed:
                     try:
                         self._on_instance_failed(instance_id, result.error or "unknown")
                     except Exception:
                         pass
-                logger.warning(
-                    "[durable_worker] Instance %s failed: %s",
-                    instance_id,
-                    result.error,
-                )
+                if failure_saved:
+                    logger.warning(
+                        "[durable_worker] Instance %s failed: %s",
+                        instance_id,
+                        result.error,
+                    )
+                else:
+                    logger.warning(
+                        "[durable_worker] Failure fenced after lease loss for %s",
+                        instance_id,
+                    )
 
         except Exception as e:
             logger.exception(
                 "[durable_worker] Unexpected error processing %s", instance_id
             )
-            _best_effort_mark_failed(
+            failure_saved = _best_effort_mark_failed(
                 error=f"worker_exception:{e}",
             )
-            if self._on_instance_failed:
+            if failure_saved and self._on_instance_failed:
                 try:
                     self._on_instance_failed(instance_id, str(e))
                 except Exception:
@@ -572,6 +727,7 @@ class DurableWorkflowWorker:
         finally:
             with self._lock:
                 self._current_instances.pop(instance_id, None)
+                self._current_claim_tokens.pop(instance_id, None)
             # Stop heartbeat extension before best-effort unlock so a dead worker
             # thread cannot keep a stale RUNNING row alive after teardown starts.
             _best_effort_release_lock()
@@ -587,12 +743,24 @@ class DurableWorkflowWorker:
             self._record_worker_heartbeat()
 
             for instance_id in instance_ids:
+                with self._lock:
+                    claim_token = self._current_claim_tokens.get(instance_id)
                 try:
-                    self._instance_manager.extend_lock(
+                    lock_extended = self._instance_manager.extend_lock(
                         instance_id,
                         self._worker_id,
                         extend_seconds=int(self._heartbeat_interval * 2),
+                        **(
+                            {"claim_token": claim_token}
+                            if claim_token is not None
+                            else {}
+                        ),
                     )
+                    if lock_extended is not True:
+                        logger.warning(
+                            "[durable_worker] Heartbeat lease lost for %s",
+                            instance_id,
+                        )
                 except Exception as e:
                     logger.warning(
                         "[durable_worker] Failed to extend lock for %s: %s",
