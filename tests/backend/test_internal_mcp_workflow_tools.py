@@ -1659,9 +1659,15 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
         "workflow_id": "#V#meeting_invitation_testing_workflow",
         "instance_id": "#V#wf_instance_1",
         "status": "completed",
-        "start_time": "2026-03-21T00:00:00+00:00",
-        "end_time": "2026-03-21T00:00:02+00:00",
-        "steps": [{"step_id": "dispatch", "status": "success"}],
+        "start_time": datetime(2026, 3, 21, tzinfo=timezone.utc),
+        "end_time": datetime(2026, 3, 21, 0, 0, 2, tzinfo=timezone.utc),
+        "steps": [
+            {
+                "step_id": "dispatch",
+                "status": "success",
+                "timestamp": datetime(2026, 3, 21, 0, 0, 1, tzinfo=timezone.utc),
+            }
+        ],
     }
     monkeypatch.setattr(
         "src.backend.workflows.durable.execution_observability.get_workflow_execution_trace",
@@ -1744,7 +1750,14 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
     metadata = execution.get("metadata_validation") or {}
     assert metadata.get("summary", {}).get("event_count") == 1
     assert execution.get("execution_trace_id") == "trace-1550"
-    assert payload.get("execution_trace", {}).get("execution_id") == "trace-1550"
+    execution_trace = payload.get("execution_trace", {})
+    assert execution_trace.get("execution_id") == "trace-1550"
+    assert execution_trace.get("start_time") == "2026-03-21T00:00:00+00:00"
+    assert execution_trace.get("end_time") == "2026-03-21T00:00:02+00:00"
+    assert execution_trace.get("steps", [])[0].get("timestamp") == (
+        "2026-03-21T00:00:01+00:00"
+    )
+    json.dumps(payload, allow_nan=False)
     boolean_fields = (
         execution.get("input_normalisation", {}).get("boolean_fields", {})
     )

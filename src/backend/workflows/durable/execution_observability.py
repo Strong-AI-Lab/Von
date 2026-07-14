@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from time import monotonic, sleep
 from typing import Any
 
@@ -34,6 +35,28 @@ def _safe_str(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _json_safe_execution_trace_projection(value: Any) -> Any:
+    """Project persisted trace timestamps onto the JSON transport surface.
+
+    Mongo returns the indexed top-level ``start_time`` as a ``datetime`` even
+    though the rest of a stored workflow trace has already been sanitised.
+    Inline traces are MCP/HTTP transport payloads, so normalise datetime values
+    recursively without weakening downstream evidence validation or coercing
+    arbitrary objects to strings.
+    """
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {
+            key: _json_safe_execution_trace_projection(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_safe_execution_trace_projection(item) for item in value]
+    return value
 
 
 def normalise_workflow_status(value: Any) -> str:
@@ -447,7 +470,7 @@ def build_workflow_execution_response(
 
     trace_id = _safe_str(workflow_execution.get("execution_trace_id")) or None
     if include_trace:
-        payload["execution_trace"] = (
+        payload["execution_trace"] = _json_safe_execution_trace_projection(
             get_workflow_execution_trace(trace_id) if trace_id else None
         )
 
