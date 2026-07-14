@@ -70,7 +70,7 @@ def test_operational_absence_probe_seed_is_read_only_and_deterministic() -> None
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert bundle["seed_version"] == "10"
+    assert bundle["seed_version"] == "11"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
     ] == {
@@ -305,6 +305,14 @@ def test_operational_absence_probe_projects_actual_resolver_result_lineage() -> 
 def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence() -> (
     None
 ):
+    bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
+    assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
+        service.OPERATIONAL_DEGRADED_FAULT_MATRIX_PROBE_WORKFLOW_ID
+    ] == {
+        "10": [
+            "7bc47787f354aa67f657ca120658d78b1e976d997134a934661309743563fdde"
+        ]
+    }
     definition = build_repo_seed_workflow_definitions(
         bundle_paths=[service._WORKFLOW_BUNDLE_PATH],
         target_workflow_ids=[
@@ -418,6 +426,12 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
     assert projected["invalid_argument_evidence"]["mcp_result"][
         "error_code"
     ] == "schema_validation_failed"
+    assert projected["input_requirement_evidence"] == {
+        "schema_version": "represented_input_requirement_evidence.v1",
+        "outcome": "input_required",
+        "required_inputs": ["concept_id"],
+        "source_error": projected["invalid_argument_evidence"],
+    }
     assert projected["mutation_guard_evidence"]["mutation_guardrail_blocked"] is True
     assert projected["wrong_target_evidence"][
         "target_contract_validation_failed"
@@ -442,7 +456,7 @@ def test_operational_checkpoint_interruption_seed_authors_pause_before_resume() 
     probe = workflows[service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID]
     steps = probe["publication_spec"]["steps"]
 
-    assert bundle["seed_version"] == "10"
+    assert bundle["seed_version"] == "11"
     assert "workflow_control.pause_at_checkpoint" in bundle["supported_action_ids"]
     assert steps[0]["state_id"] == "request_checkpoint_pause"
     assert steps[0]["action_id"] == "workflow_control.pause_at_checkpoint"

@@ -1046,7 +1046,10 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
 
     contract = parse_operational_certification_contract(seed)
 
-    assert seed["seed_version"] == 5
+    assert seed["seed_version"] == 6
+    assert seed["known_legacy_authority_payload_sha256_by_seed_version"]["5"] == [
+        "0b2c86e5664bda819ea747a6b44c7cac5f2b14d45c719256ce691dff021f95a1"
+    ]
     assert contract.case_set == "trusted_sail_pilot_v1"
     assert {scenario.scenario_id for scenario in contract.scenarios} == {
         "pilot_kb_relation_rag_read_only",
@@ -1175,6 +1178,15 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
         "input_schema"
     )
     assert degraded_matchers["invalid_argument_not_retryable"]["expected"] is False
+    assert degraded_matchers["input_requirement_outcome_exact"]["expected"] == (
+        "input_required"
+    )
+    assert degraded_matchers["input_requirement_names_concept_id"][
+        "expected"
+    ] == ["concept_id"]
+    assert degraded_matchers[
+        "input_requirement_preserves_source_schema_failure"
+    ]["expected"] == "schema_validation_failed"
     assert degraded_matchers["read_only_mutation_guard_reason_exact"][
         "expected"
     ] == "insufficient_mutation_authority"
@@ -1256,6 +1268,131 @@ def test_repo_seed_declares_generic_transient_mcp_fault_recovery_case() -> None:
     assert scenario.metadata["pilot_acceptance_eligible"] is False
 
 
+def test_negative_readback_control_rejects_all_five_contradictory_trials() -> None:
+    seed = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
+    negative_suite = load_benchmark_suite_case_set(
+        suite_concept_id="#V#operational_certification_benchmark_suite",
+        case_set="certification_negative_controls_v1",
+        fixture_path=_SEED_PATH,
+    )
+    contract = parse_operational_certification_contract(negative_suite)
+    scenario = contract.scenarios[0]
+    trusted_degraded = next(
+        item
+        for item in seed["case_sets"]["trusted_sail_pilot_v1"]
+        if item["scenario_id"] == "pilot_represented_degraded_fault_matrix"
+    )
+
+    assert scenario.scenario_id == "negative_readback_mismatch_must_not_certify"
+    assert scenario.fault_injection == {
+        "fault_classes": ["readback_mismatch"],
+        "recoverable": False,
+        "injection_surface": "represented_scenario_postcondition_expectation",
+    }
+    assert scenario.metadata["negative_control"] is True
+    assert scenario.metadata["expected_campaign_certified"] is False
+    assert (
+        scenario.reset_policy["authoritative_postcondition_probe"][
+            "expected_description"
+        ]
+        != trusted_degraded["reset_policy"]["authoritative_postcondition_probe"][
+            "expected_description"
+        ]
+    )
+
+    trial_results = []
+    for trial_index in range(1, 6):
+        observation = {
+            "scenario_id": scenario.scenario_id,
+            "trial_index": trial_index,
+            "path_analysis": {
+                "workflow_id": "#V#operational_degraded_fault_matrix_probe_workflow",
+                "execution": {
+                    "workflow_output": {
+                        "represented_operational_degraded_fault_matrix_result": {
+                            "committed_effect_count": 1,
+                            "readback_concept_id": (
+                                f"#V#negative_control_marker_{trial_index}"
+                            ),
+                        }
+                    }
+                },
+            },
+            "authoritative_postcondition_probe": {
+                "verified": False,
+                "expected_description": (
+                    "Deliberately contradictory certification marker "
+                    f"negative-control-{trial_index}"
+                ),
+                "observed_description": (
+                    "Trusted SAIL pilot certification marker "
+                    f"negative-control-{trial_index}"
+                ),
+            },
+            "final_state_snapshot": {
+                "committed_effects": [
+                    {"concept_id": f"#V#negative_control_marker_{trial_index}"}
+                ]
+            },
+            "represented_safety_audits": {
+                "forbidden_effects": [],
+                "namespace_violations": [],
+                "false_success_claims": [],
+                "fabricated_evidence": [],
+            },
+            "operational_metrics": {
+                "duration_ms": 25,
+                "follow_up_request_count": 0,
+            },
+            "represented_evaluator_results": {
+                "#V#operational_state_evidence_evaluator": {
+                    "schema_version": (
+                        REPRESENTED_OPERATIONAL_EVALUATOR_RESULT_SCHEMA_VERSION
+                    ),
+                    "evaluator_id": "#V#operational_state_evidence_evaluator",
+                    "scenario_id": scenario.scenario_id,
+                    "trial_index": trial_index,
+                    "verdict": "fail",
+                    "terminal_state": "readback_mismatch",
+                    "evidence": [
+                        {
+                            "kind": "authoritative_postcondition_readback",
+                            "verified": False,
+                        }
+                    ],
+                }
+            },
+        }
+        result = evaluate_scenario_trial(
+            contract,
+            scenario_id=scenario.scenario_id,
+            observation=observation,
+        )
+        checks = {item["matcher_id"]: item for item in result["check_results"]}
+
+        assert result["valid_evaluator_result_count"] == 1
+        assert result["passing_evaluator_count"] == 0
+        assert checks["authoritative_postcondition_probe_verified"]["matched"] is False
+        assert result["passed"] is False
+        trial_results.append(result)
+
+    report = aggregate_five_trial_campaign(
+        contract,
+        {scenario.scenario_id: trial_results},
+    )
+
+    assert report["represented_evaluator_coverage_rate"] == 1.0
+    assert report["blocking_minefield_trigger_count"] == 0
+    assert report["blocking_budget_violation_count"] == 0
+    assert report["scenarios"][scenario.scenario_id]["pass_windows"] == {
+        "pass^1": False,
+        "pass^3": False,
+        "pass^5": False,
+    }
+    assert "overall_pass_three_minimum" in report["failed_certification_gate_ids"]
+    assert report["certified"] is False
+
+
 def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> None:
     definition = load_benchmark_suite_definition_from_seed_fixture(_SEED_PATH)
     selected_case_set = load_benchmark_suite_case_set(
@@ -1268,5 +1405,5 @@ def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> Non
 
     assert definition_contract.contract_sha256 == selected_contract.contract_sha256
     assert selected_contract.source == "seed_bundle_import_fixture"
-    assert definition["seed_version"] == 5
-    assert selected_case_set["seed_version"] == 5
+    assert definition["seed_version"] == 6
+    assert selected_case_set["seed_version"] == 6

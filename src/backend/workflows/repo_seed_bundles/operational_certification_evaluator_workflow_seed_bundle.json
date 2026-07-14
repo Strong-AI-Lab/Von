@@ -2,7 +2,7 @@
   "family_id": "operational_certification_evaluator_workflow_seed_bundle",
   "managed_by": "operational_certification_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "10",
+  "seed_version": "11",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#operational_state_evidence_evaluator": {
       "1": [
@@ -21,6 +21,11 @@
       ],
       "6": [
         "e53bf609a1c28f392a9d9137f660ce8d6a169bf6d4f1f10acd01a2c236ba5fa6"
+      ]
+    },
+    "#V#operational_degraded_fault_matrix_probe_workflow": {
+      "10": [
+        "7bc47787f354aa67f657ca120658d78b1e976d997134a934661309743563fdde"
       ]
     }
   },
@@ -1999,6 +2004,7 @@
                   "committed_marker_concept_id",
                   "authoritative_empty_status",
                   "invalid_argument_evidence",
+                  "input_requirement_evidence",
                   "mutation_guard_evidence",
                   "wrong_target_evidence",
                   "readback_concept_id",
@@ -2032,6 +2038,16 @@
                   },
                   "invalid_argument_evidence": {
                     "$context_key": "invalid_argument_evidence"
+                  },
+                  "input_requirement_evidence": {
+                    "schema_version": "represented_input_requirement_evidence.v1",
+                    "outcome": "input_required",
+                    "required_inputs": [
+                      "concept_id"
+                    ],
+                    "source_error": {
+                      "$context_key": "invalid_argument_evidence"
+                    }
                   },
                   "mutation_guard_evidence": {
                     "$context_key": "mutation_guard_evidence"
