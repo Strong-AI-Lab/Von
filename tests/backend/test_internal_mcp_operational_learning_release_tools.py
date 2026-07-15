@@ -11,6 +11,9 @@ from src.backend.integrations.internal_mcp.gateway import (
 from src.backend.integrations.internal_mcp.schemas import SchemaValidationError
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.services import (
+    operational_learning_release_service as release_service,
+)
+from src.backend.services import (
     operational_learning_release_vontology_service as service,
 )
 from src.backend.security.access_control import override_current_actor
@@ -37,6 +40,7 @@ def test_learning_release_catalogue_methods_are_strict_and_correctly_categorised
         "operational_learning_build_failure_evidence_packets": "read",
         "operational_learning_build_experiment_evidence": "read",
         "operational_learning_build_certification_evidence": "read",
+        "operational_learning_build_release_evaluator_evidence_projection": "read",
         "operational_learning_release_get_state": "read",
         "operational_learning_release_resolve_candidate": "read",
         "operational_learning_release_resolve_active": "read",
@@ -104,6 +108,46 @@ def test_get_state_tool_forwards_exact_scope(
         "namespace": NAMESPACE,
         "user_id": USER_ID,
         "org_id": ORG_ID,
+    }
+
+
+def test_release_evaluator_projection_tool_forwards_exact_wrappers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    def build_projection(**kwargs):
+        captured.update(kwargs)
+        return {"schema_version": "represented_projection.v1"}
+
+    monkeypatch.setattr(
+        release_service,
+        "build_learning_release_evaluator_evidence_projection",
+        build_projection,
+    )
+    candidate = {"candidate_id": "candidate-1"}
+    experiment = {"evidence_sha256": "a" * 64}
+    certification = {"evidence_sha256": "b" * 64}
+    result = (
+        build_default_catalogue()
+        .get("operational_learning_build_release_evaluator_evidence_projection")
+        .handler(
+            candidate=candidate,
+            experiment_evidence=experiment,
+            certification_evidence=certification,
+        )
+    )
+
+    assert result == {
+        "success": True,
+        "represented_learning_release_evaluator_evidence_projection": {
+            "schema_version": "represented_projection.v1"
+        },
+    }
+    assert captured == {
+        "candidate": candidate,
+        "experiment_evidence": experiment,
+        "certification_evidence": certification,
     }
 
 

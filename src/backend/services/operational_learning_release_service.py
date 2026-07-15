@@ -48,6 +48,12 @@ LEARNING_RELEASE_EXPERIMENT_EVIDENCE_SCHEMA_VERSION = (
 LEARNING_RELEASE_CERTIFICATION_EVIDENCE_SCHEMA_VERSION = (
     "learning_release_certification_evidence.v1"
 )
+LEARNING_RELEASE_EVALUATOR_EVIDENCE_PROJECTION_SCHEMA_VERSION = (
+    "represented_learning_release_evaluator_evidence_projection.v1"
+)
+LEARNING_RELEASE_EVALUATOR_DIGEST_ONLY_REFERENCE_SCHEMA_VERSION = (
+    "represented_learning_release_evaluator_digest_only_reference.v1"
+)
 HUMAN_LEARNING_RELEASE_APPROVAL_SCHEMA_VERSION = "human_learning_release_approval.v1"
 AUTHENTICATED_HUMAN_APPROVAL_RECEIPT_SCHEMA_VERSION = (
     "authenticated_human_approval_receipt.v1"
@@ -1023,6 +1029,140 @@ def _validate_evidence_wrapper(
     return experiment, certification
 
 
+def _evaluator_digest_only_reference(
+    value: Any,
+    *,
+    source_path: str,
+) -> dict[str, Any]:
+    """Describe omitted evaluator material without silently discarding it."""
+
+    projected = _json_projection(value)
+    encoded = json.dumps(
+        projected,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    reference: dict[str, Any] = {
+        "schema_version": (
+            LEARNING_RELEASE_EVALUATOR_DIGEST_ONLY_REFERENCE_SCHEMA_VERSION
+        ),
+        "source_path": source_path,
+        "source_sha256": hashlib.sha256(encoded).hexdigest(),
+        "source_json_bytes": len(encoded),
+        "inline": False,
+        "evidence_availability": "digest_only",
+    }
+    if isinstance(projected, Mapping):
+        reference["source_kind"] = "mapping"
+        reference["source_mapping_keys"] = sorted(projected)
+    elif _is_sequence(projected):
+        reference["source_kind"] = "sequence"
+        reference["source_item_count"] = len(projected)
+    elif isinstance(projected, str):
+        reference["source_kind"] = "string"
+        reference["source_character_count"] = len(projected)
+    else:
+        reference["source_kind"] = type(projected).__name__
+    return reference
+
+
+def build_learning_release_evaluator_evidence_projection(
+    *,
+    candidate: Mapping[str, Any],
+    experiment_evidence: Mapping[str, Any],
+    certification_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project validated evidence for represented evaluator LLM context.
+
+    The full immutable wrappers remain the persistence authority.  This
+    projection removes only the two large, repeated support payloads within
+    experiment observations.  Their exact digests, sizes, kinds and keys stay
+    visible so the represented evaluator can recognise digest-only evidence as
+    unavailable rather than silently treating omitted material as supportive.
+    """
+
+    resolved_candidate = _validate_candidate(candidate)
+    experiment, certification = _validate_evidence_wrapper(
+        candidate=resolved_candidate,
+        experiment_evidence=experiment_evidence,
+        certification_evidence=certification_evidence,
+    )
+    experiment_run = experiment["experiment_run"]
+    run_fields = {
+        key: copy.deepcopy(value)
+        for key, value in experiment_run.items()
+        if key != "observations"
+    }
+    observation_projections: list[dict[str, Any]] = []
+    digest_only_material: list[dict[str, Any]] = []
+    for index, raw_observation in enumerate(experiment_run.get("observations") or []):
+        observation_path = f"experiment_run.observations[{index}]"
+        if not isinstance(raw_observation, Mapping):
+            reference = _evaluator_digest_only_reference(
+                raw_observation,
+                source_path=observation_path,
+            )
+            observation_projections.append(
+                {
+                    "source_observation_sha256": operational_learning_release_digest(
+                        raw_observation
+                    ),
+                    "projected_observation": reference,
+                    "digest_only_fields": [observation_path],
+                }
+            )
+            digest_only_material.append(reference)
+            continue
+
+        projected_observation = _json_projection(raw_observation)
+        digest_only_fields: list[str] = []
+        for field_name in ("evidence", "execution_provenance"):
+            if field_name not in projected_observation:
+                continue
+            source_path = f"{observation_path}.{field_name}"
+            reference = _evaluator_digest_only_reference(
+                projected_observation[field_name],
+                source_path=source_path,
+            )
+            projected_observation[field_name] = reference
+            digest_only_fields.append(source_path)
+            digest_only_material.append(copy.deepcopy(reference))
+        observation_projections.append(
+            {
+                "source_observation_sha256": operational_learning_release_digest(
+                    raw_observation
+                ),
+                "projected_observation": projected_observation,
+                "digest_only_fields": digest_only_fields,
+            }
+        )
+
+    projection: dict[str, Any] = {
+        "schema_version": (
+            LEARNING_RELEASE_EVALUATOR_EVIDENCE_PROJECTION_SCHEMA_VERSION
+        ),
+        "candidate_binding": {
+            "candidate_id": resolved_candidate["candidate_id"],
+            "candidate_release_sha256": resolved_candidate["release_sha256"],
+        },
+        "experiment_evidence": {
+            "schema_version": experiment["schema_version"],
+            "candidate_id": experiment["candidate_id"],
+            "candidate_release_sha256": experiment["candidate_release_sha256"],
+            "evidence_sha256": experiment["evidence_sha256"],
+            "experiment_run_sha256": experiment["experiment_run_sha256"],
+            "experiment_run_fields": run_fields,
+            "observation_projections": observation_projections,
+        },
+        "certification_evidence": copy.deepcopy(certification),
+        "digest_only_material": digest_only_material,
+    }
+    projection["projection_sha256"] = operational_learning_release_digest(projection)
+    return projection
+
+
 def _validate_represented_decision(
     value: Any,
     *,
@@ -1669,9 +1809,8 @@ def rollback_operational_learning_release(
         resulting_previous=rolled_back_pointer,
         recorded_at=now_iso,
     )
-    if (
-        receipt["resulting_active"]["release_sha256"]
-        != (restored_reference["release_sha256"])
+    if receipt["resulting_active"]["release_sha256"] != (
+        restored_reference["release_sha256"]
     ):
         raise LearningReleaseValidationError("rollback_exact_hash_restore_failed")
     working["decision_receipts"].append(receipt)
@@ -1685,6 +1824,8 @@ __all__ = [
     "HUMAN_APPROVAL_REQUIRED_RISK_CLASSES",
     "HUMAN_LEARNING_RELEASE_APPROVAL_SCHEMA_VERSION",
     "LEARNING_RELEASE_CERTIFICATION_EVIDENCE_SCHEMA_VERSION",
+    "LEARNING_RELEASE_EVALUATOR_DIGEST_ONLY_REFERENCE_SCHEMA_VERSION",
+    "LEARNING_RELEASE_EVALUATOR_EVIDENCE_PROJECTION_SCHEMA_VERSION",
     "LEARNING_RELEASE_EXPERIMENT_EVIDENCE_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_CANDIDATE_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_POINTER_SCHEMA_VERSION",
@@ -1696,6 +1837,7 @@ __all__ = [
     "build_empty_operational_learning_release_state",
     "build_failure_evidence_packets",
     "build_learning_release_certification_evidence",
+    "build_learning_release_evaluator_evidence_projection",
     "build_learning_release_experiment_evidence",
     "operational_learning_release_digest",
     "project_learning_release_recovery_affordances",

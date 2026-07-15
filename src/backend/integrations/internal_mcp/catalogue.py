@@ -29314,6 +29314,26 @@ def _operational_learning_build_certification_evidence(**kwargs):
         return _operational_learning_release_error_response(exc)
 
 
+def _operational_learning_build_release_evaluator_evidence_projection(**kwargs):
+    from ...services.operational_learning_release_service import (
+        build_learning_release_evaluator_evidence_projection,
+    )
+
+    try:
+        return {
+            "success": True,
+            "represented_learning_release_evaluator_evidence_projection": (
+                build_learning_release_evaluator_evidence_projection(
+                    candidate=kwargs["candidate"],
+                    experiment_evidence=kwargs["experiment_evidence"],
+                    certification_evidence=kwargs["certification_evidence"],
+                )
+            ),
+        }
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
 def _operational_learning_release_get_state(**kwargs):
     from ...services.operational_learning_release_vontology_service import (
         load_operational_learning_release_state,
@@ -29735,6 +29755,36 @@ def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
             description=(
                 "Validate and hash certification evidence; live release still "
                 "requires trusted-runner attestation and canonical readback."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_build_release_evaluator_evidence_projection",
+            handler=_operational_learning_build_release_evaluator_evidence_projection,
+            input_schema=Schema(
+                required={
+                    "candidate": dict,
+                    "experiment_evidence": dict,
+                    "certification_evidence": dict,
+                },
+                optional={},
+                allow_unknown=False,
+                description=(
+                    "Validate the exact evidence wrappers and expose a transparent "
+                    "digest-bound projection for the represented release evaluator."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "represented_learning_release_evaluator_evidence_projection": dict
+                },
+                allow_unknown=True,
+            ),
+            category="read",
+            description=(
+                "Keep canonical wrappers unchanged while removing repeated bulky "
+                "observation payloads from LLM context with explicit digest-only "
+                "references."
             ),
         ),
         MethodDefinition(

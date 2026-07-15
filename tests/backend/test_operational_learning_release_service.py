@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 import pytest
@@ -9,12 +10,15 @@ import pytest
 from src.backend.services.operational_learning_release_service import (
     AUTHENTICATED_HUMAN_APPROVAL_RECEIPT_SCHEMA_VERSION,
     HUMAN_LEARNING_RELEASE_APPROVAL_SCHEMA_VERSION,
+    LEARNING_RELEASE_EVALUATOR_DIGEST_ONLY_REFERENCE_SCHEMA_VERSION,
+    LEARNING_RELEASE_EVALUATOR_EVIDENCE_PROJECTION_SCHEMA_VERSION,
     OPERATIONAL_LEARNING_RELEASE_RECEIPT_SCHEMA_VERSION,
     REPRESENTED_AUTHORITY_REFERENCE_SCHEMA_VERSION,
     REPRESENTED_LEARNING_RELEASE_DECISION_SCHEMA_VERSION,
     LearningReleaseValidationError,
     build_failure_evidence_packets,
     build_learning_release_certification_evidence,
+    build_learning_release_evaluator_evidence_projection,
     build_learning_release_experiment_evidence,
     operational_learning_release_digest,
     promote_operational_learning_release_candidate,
@@ -485,7 +489,7 @@ def test_certification_candidate_id_without_exact_release_hash_fails_closed() ->
     campaign = _campaign_result(candidate)
     campaign["represented_campaign_evidence"][
         "evaluated_learning_release_candidate_bindings"
-    ][0]["candidate_release_sha256"] = "f" * 64
+    ][0]["candidate_release_sha256"] = ("f" * 64)
     campaign.pop("report_sha256")
     campaign["report_sha256"] = operational_learning_release_digest(campaign)
 
@@ -957,6 +961,112 @@ def test_experiment_evidence_rejects_cross_scope_run(
         )
 
 
+def test_evaluator_evidence_projection_is_bounded_transparent_and_exactly_bound() -> (
+    None
+):
+    state: dict[str, Any] = {}
+    candidate = _register_candidate(state, suffix="evaluator-projection")
+    run = _experiment_run(candidate)
+    repeated_evidence = "candidate execution evidence " * 4_000
+    repeated_provenance = "repeated execution provenance " * 800
+    run["observations"][0]["evidence"] = {
+        "raw_execution_material": repeated_evidence,
+        "typed_blockers": ["represented_evidence_incomplete"],
+    }
+    run["observations"][0]["execution_provenance"] = {
+        "raw_trace_material": repeated_provenance,
+        "authority_execution_request_id": "request-evidence-1",
+    }
+    experiment = build_learning_release_experiment_evidence(
+        candidate=candidate,
+        experiment_run=run,
+    )
+    certification = build_learning_release_certification_evidence(
+        candidate=candidate,
+        campaign_result=_campaign_result(candidate, certified=False),
+        execution_provenance={
+            "effective_namespace": NAMESPACE,
+            "effective_user_id": USER_ID,
+            "effective_org_id": ORG_ID,
+        },
+    )
+
+    projection = build_learning_release_evaluator_evidence_projection(
+        candidate=candidate,
+        experiment_evidence=experiment,
+        certification_evidence=certification,
+    )
+
+    assert projection["schema_version"] == (
+        LEARNING_RELEASE_EVALUATOR_EVIDENCE_PROJECTION_SCHEMA_VERSION
+    )
+    assert projection["candidate_binding"] == {
+        "candidate_id": candidate["candidate_id"],
+        "candidate_release_sha256": candidate["release_sha256"],
+    }
+    projected_experiment = projection["experiment_evidence"]
+    assert projected_experiment["evidence_sha256"] == experiment["evidence_sha256"]
+    assert projected_experiment["experiment_run_sha256"] == (
+        experiment["experiment_run_sha256"]
+    )
+    assert projected_experiment["experiment_run_fields"]["verdict"] == "pass"
+    assert projection["certification_evidence"] == certification
+    assert projection["certification_evidence"]["campaign_result"]["certified"] is (
+        False
+    )
+
+    observation = projected_experiment["observation_projections"][0]
+    assert observation["source_observation_sha256"] == (
+        operational_learning_release_digest(run["observations"][0])
+    )
+    assert observation["projected_observation"]["verdict"] == "pass"
+    evidence_reference = observation["projected_observation"]["evidence"]
+    provenance_reference = observation["projected_observation"]["execution_provenance"]
+    assert evidence_reference["schema_version"] == (
+        LEARNING_RELEASE_EVALUATOR_DIGEST_ONLY_REFERENCE_SCHEMA_VERSION
+    )
+    assert evidence_reference["source_sha256"] == operational_learning_release_digest(
+        run["observations"][0]["evidence"]
+    )
+    assert evidence_reference["source_mapping_keys"] == [
+        "raw_execution_material",
+        "typed_blockers",
+    ]
+    assert provenance_reference["source_sha256"] == (
+        operational_learning_release_digest(
+            run["observations"][0]["execution_provenance"]
+        )
+    )
+    assert len(projection["digest_only_material"]) == 2
+    encoded_projection = json.dumps(projection, sort_keys=True)
+    encoded_experiment = json.dumps(experiment, sort_keys=True)
+    assert repeated_evidence not in encoded_projection
+    assert repeated_provenance not in encoded_projection
+    assert len(encoded_projection) < len(encoded_experiment) // 4
+    digest_basis = copy.deepcopy(projection)
+    projection_sha256 = digest_basis.pop("projection_sha256")
+    assert projection_sha256 == operational_learning_release_digest(digest_basis)
+
+
+def test_evaluator_evidence_projection_rejects_tampered_wrapper() -> None:
+    state: dict[str, Any] = {}
+    candidate = _register_candidate(state, suffix="tampered-evaluator-projection")
+    experiment, certification = _evidence(candidate)
+    experiment["experiment_run"]["observations"][0]["evidence"] = {
+        "request_id": "tampered-request"
+    }
+
+    with pytest.raises(
+        LearningReleaseValidationError,
+        match="learning_release_experiment_evidence_hash_mismatch",
+    ):
+        build_learning_release_evaluator_evidence_projection(
+            candidate=candidate,
+            experiment_evidence=experiment,
+            certification_evidence=certification,
+        )
+
+
 @pytest.mark.parametrize(
     ("provenance_field", "foreign_value"),
     [
@@ -1263,9 +1373,9 @@ def test_tampered_pointer_scope_blocks_further_release_transitions() -> None:
     state: dict[str, Any] = {}
     active = _register_candidate(state, suffix="pointer-integrity")
     _promote(state, active, suffix="pointer-integrity")
-    state["release_pointers"][ARTIFACT_ID]["active"]["namespace"] = (
-        "#V#other_user@other_org"
-    )
+    state["release_pointers"][ARTIFACT_ID]["active"][
+        "namespace"
+    ] = "#V#other_user@other_org"
     tampered_state = copy.deepcopy(state)
 
     with pytest.raises(
