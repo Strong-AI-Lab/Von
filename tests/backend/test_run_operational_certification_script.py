@@ -269,7 +269,7 @@ def test_pilot_unique_state_scenario_declares_exact_postcondition_probe() -> Non
         "required_tool_names": [
             "resolve_concept_by_name",
             "fetch_concept",
-            "get_text_relations_summary",
+            "get_text_relations",
         ],
         "expected_cardinality": 1,
         "expected_name": "Operational certification {{isolation_id}}",

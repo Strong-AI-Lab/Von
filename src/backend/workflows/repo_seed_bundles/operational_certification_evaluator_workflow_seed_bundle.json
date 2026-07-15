@@ -599,10 +599,6 @@
                 ]
               ],
               [
-                "include_empty_fields",
-                true
-              ],
-              [
                 "field_sources",
                 {
                   "schema_version": "represented_operational_state_probe_result.v1",
@@ -959,6 +955,10 @@
                   "text_relation_group_count",
                   "evidence"
                 ]
+              ],
+              [
+                "include_empty_fields",
+                true
               ],
               [
                 "field_sources",
