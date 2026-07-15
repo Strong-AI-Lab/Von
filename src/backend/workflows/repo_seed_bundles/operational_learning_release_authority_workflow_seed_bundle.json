@@ -2,7 +2,7 @@
   "family_id": "operational_learning_release_authority_workflow_seed_bundle",
   "managed_by": "operational_learning_release_authority_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "5",
+  "seed_version": "7",
   "source_tag": "JVNAUTOSCI-2575",
   "supported_action_ids": [
     "llm.action",
@@ -170,7 +170,7 @@
               {
                 "concept_id": "#V#workflow_mapping_operational_learning_candidate_context_parent_release_sha256_to_parent_release_sha256",
                 "context_key": "parent_release_sha256",
-                "tool_output_field": "result.candidate_context.candidate_snapshot.parent_release.release_sha256"
+                "tool_output_field": "result.candidate_context.parent_release_sha256"
               },
               {
                 "concept_id": "#V#workflow_mapping_operational_learning_candidate_context_snapshot_sha256_to_candidate_snapshot_sha256",
@@ -283,6 +283,9 @@
                   "org_id": {
                     "$context_key": "resolved_org_id"
                   },
+                  "parent_release_sha256": {
+                    "$context_key": "parent_release_sha256"
+                  },
                   "release_payload": {
                     "$context_key": "release_payload"
                   },
@@ -308,6 +311,10 @@
                 true
               ],
               [
+                "include_null_fields",
+                true
+              ],
+              [
                 "required_fields",
                 [
                   "schema_version",
@@ -323,6 +330,7 @@
                   "candidate_snapshot_sha256",
                   "release_payload",
                   "release_payload_sha256",
+                  "parent_release_sha256",
                   "authority",
                   "binding",
                   "context_sha256"

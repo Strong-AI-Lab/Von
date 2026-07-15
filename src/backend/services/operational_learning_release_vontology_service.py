@@ -867,6 +867,18 @@ def resolve_operational_learning_release_candidate_in_vontology(
     )
     release_payload = copy.deepcopy(candidate.get("release_payload"))
     release_payload_sha256 = operational_learning_release_digest(release_payload)
+    parent_release = candidate.get("parent_release")
+    if parent_release is None:
+        parent_release_sha256 = None
+    elif isinstance(parent_release, Mapping):
+        parent_release_sha256 = _require_sha256(
+            parent_release.get("release_sha256"),
+            code="operational_learning_release_parent_hash_missing",
+        )
+    else:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_parent_invalid"
+        )
     binding = _release_context_binding(
         candidate=candidate,
         candidate_snapshot_sha256=candidate_snapshot_sha256,
@@ -884,6 +896,7 @@ def resolve_operational_learning_release_candidate_in_vontology(
         "candidate_snapshot_sha256": candidate_snapshot_sha256,
         "release_payload": release_payload,
         "release_payload_sha256": release_payload_sha256,
+        "parent_release_sha256": parent_release_sha256,
         "authority": _release_context_authority(record),
         "binding": binding,
     }

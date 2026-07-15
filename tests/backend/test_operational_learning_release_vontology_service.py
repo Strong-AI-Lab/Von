@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -204,12 +205,50 @@ def test_candidate_resolver_projects_exact_immutable_context_without_writing(
     assert context["release_payload_sha256"] == operational_learning_release_digest(
         candidate["release_payload"]
     )
+    assert "parent_release_sha256" in context
+    assert context["parent_release_sha256"] is None
     assert context["binding"]["candidate_id"] == "candidate-1"
     assert context["authority"]["record_sha256"] == registered["record_sha256"]
     digest_basis = copy.deepcopy(context)
     observed_digest = digest_basis.pop("context_sha256")
     assert observed_digest == operational_learning_release_digest(digest_basis)
     assert len(vontology_store["writes"]) == write_count
+
+
+def test_candidate_context_workflow_projects_nullable_parent_release_fact() -> None:
+    bundle_path = (
+        Path(service.__file__).resolve().parents[1]
+        / "workflows"
+        / "repo_seed_bundles"
+        / "operational_learning_release_authority_workflow_seed_bundle.json"
+    )
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    workflow = next(
+        item
+        for item in bundle["workflows"]
+        if item["workflow_id"]
+        == "#V#operational_learning_candidate_context_resolution_workflow"
+    )
+    steps = {
+        item["state_id"]: item for item in workflow["publication_spec"]["steps"]
+    }
+    resolve_step = steps["resolve_candidate"]
+    parent_mapping = next(
+        item
+        for item in resolve_step["tool_output_mapping_specs"]
+        if item["context_key"] == "parent_release_sha256"
+    )
+    assert parent_mapping["tool_output_field"] == (
+        "result.candidate_context.parent_release_sha256"
+    )
+    assert "parent_release_sha256" in resolve_step["writes_context_keys"]
+
+    project_bindings = dict(steps["project_candidate_context"]["static_input_bindings"])
+    assert project_bindings["field_sources"]["parent_release_sha256"] == {
+        "$context_key": "parent_release_sha256"
+    }
+    assert "parent_release_sha256" in project_bindings["required_fields"]
+    assert project_bindings["include_null_fields"] is True
 
 
 def test_candidate_resolver_fails_closed_on_release_binding_mismatch(

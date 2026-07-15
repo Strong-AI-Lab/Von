@@ -447,6 +447,45 @@ def test_context_project_reports_missing_contract_fields() -> None:
     assert result.outputs["projected_item_projection"]["missing_fields"] == ["doi"]
 
 
+def test_context_project_preserves_explicit_null_only_when_requested() -> None:
+    registry = _build_context_set_registry()
+
+    default_result = registry.execute(
+        "workflow_control.context_project",
+        inputs={
+            "target_key": "projected_item",
+            "required_fields": ["nullable_parent"],
+            "field_sources": {"nullable_parent": None},
+            "include_missing_fields": True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+    nullable_result = registry.execute(
+        "workflow_control.context_project",
+        inputs={
+            "target_key": "projected_item",
+            "required_fields": ["nullable_parent"],
+            "field_sources": {"nullable_parent": None},
+            "include_missing_fields": True,
+            "include_null_fields": True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert default_result.status == "success"
+    assert default_result.outputs["projected_item"] == {
+        "_missing_fields": ["nullable_parent"]
+    }
+    assert nullable_result.status == "success"
+    assert nullable_result.outputs["projected_item"] == {"nullable_parent": None}
+    projection = nullable_result.outputs["projected_item_projection"]
+    assert projection["selected_fields"] == ["nullable_parent"]
+    assert projection["missing_fields"] == []
+    assert projection["include_null_fields"] is True
+
+
 def test_context_template_renders_context_request_and_json_values() -> None:
     registry = _build_context_set_registry()
     result = registry.execute(
