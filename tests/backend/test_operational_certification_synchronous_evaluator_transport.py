@@ -205,7 +205,10 @@ def _execute(*, requested_model: str | None = None) -> dict[str, Any]:
             "trial_index": 1,
             "trial_observation": {"namespace": "foreign"},
             "namespace": "foreign",
+            "user_id": "#V#foreign_user",
+            "org_id": "#V#foreign_org",
             "user_concept_id": "#V#foreign_user",
+            "org_concept_id": "#V#foreign_org",
         },
         namespace=NAMESPACE,
         user_id=USER_ID,
@@ -236,6 +239,8 @@ def test_synchronous_evaluator_uses_live_authority_exact_scope_and_persisted_tra
     assert execution["trace_persisted"] is True
     assert execution["execution_trace_id"]
     assert execution["workflow_output"]["namespace"] == NAMESPACE
+    assert execution["workflow_output"]["user_id"] == USER_ID
+    assert execution["workflow_output"]["org_id"] == ORG_ID
     assert execution["workflow_output"]["user_concept_id"] == USER_ID
     assert execution["workflow_output"]["org_concept_id"] == ORG_ID
     assert captures["snapshot_workflow_ids"] == [WORKFLOW_ID]

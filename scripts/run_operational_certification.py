@@ -960,6 +960,8 @@ def _execute_represented_workflow_synchronously(
             # cannot substitute a different actor or namespace.
             workflow_data["namespace"] = namespace_text
             workflow_data["user_namespace"] = namespace_text
+            workflow_data["user_id"] = user_id_text
+            workflow_data["org_id"] = org_id_text
             workflow_data["user_concept_id"] = user_id_text
             workflow_data["org_concept_id"] = org_id_text
             workflow_data["source_event_type"] = _text(source_event_type)
