@@ -25,6 +25,9 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   2026-06-09 evidence that `workflow_selector.py` has Python-owned
   single-specialised-candidate recovery and fallback reasoning; update this
   task instead of filing duplicate selector-recovery drift.
+- `JVNAUTOSCI-2574` - prior-turn evidence/obligation context boundary. Update
+  this instead of filing a duplicate when Python carry-forward token aliases or
+  structural defaults remain in `turn_expected_outcome_obligation_carry_forward.py`.
 
 ## Drift Tasks Filed By This Automation
 
@@ -121,3 +124,6 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   `active_llm` primary fallback, fallback-hop default, compatibility mode, and
   local-only parsing semantics live in Python instead of represented
   workflow-stage/model-policy authority.
+- `JVNAUTOSCI-2586` - operational certification aggregation and learning-release
+  promotion gates: fixed trial/pass-window shape and named release gates live in
+  Python rather than represented benchmark/release authority.

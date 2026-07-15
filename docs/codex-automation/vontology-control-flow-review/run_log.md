@@ -258,3 +258,38 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   child/user responses by Python field order and `Execution status:` filtering
   in selected-workflow/completion-gate surfaces.
 - No production code was changed by this review run.
+
+## 2026-07-16T10:53:42.3898329+12:00
+
+- Read required repo guidance, security guidance, design index, workflow manual,
+  enduring-memory guide, authority-alignment guide, fallback automation memory,
+  and all repo-local review memory files.
+- Current `main` matched `origin/main` at `0749b43a`; the only pre-existing
+  dirty file was `Von.code-workspace`, which this review did not edit or stage.
+- Reviewed commits since the 2026-06-17 automation marker, focusing on
+  actor-scoped workflow authority, represented structured tool transport,
+  context-adjudication/required-tool reliability, and operational
+  certification/learning-release services.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`.
+  All workflow/prompt/source/policy counters were `0`, but the gate failed the
+  monolith ratchet: orchestrator `49436` vs baseline `45441`, catalogue `34898`
+  vs `32670`, and von_routes `18862` vs `18136`. Commented this on
+  `JVNAUTOSCI-1913`; no size-only task was filed.
+- Runtime attribution companion was attempted with
+  `.venv\Scripts\python.exe scripts\report_turn_decision_attribution.py --limit 50`
+  and timed out before producing a report.
+- Created `JVNAUTOSCI-2586` under `JVNAUTOSCI-2575` for operational
+  certification/release gate drift: `aggregate_five_trial_campaign()` fixes
+  five trials and pass windows `1,3,5`, while
+  `promote_operational_learning_release_candidate()` requires specific pass,
+  certified, live-source, persisted-evidence, and `live_release_evidence_eligible`
+  gate semantics in Python. Linked it to `JVNAUTOSCI-2578` and `JVNAUTOSCI-1913`.
+- Added fresh prior-turn obligation carry-forward evidence to active
+  `JVNAUTOSCI-2574` instead of filing a duplicate: Python token aliases and
+  structural defaults in `turn_expected_outcome_obligation_carry_forward.py`
+  still decide carry/suppress behaviour that should become a structured
+  represented context-adjudication directive.
+- Treated `turn_contract_dispatch_policy_service.py` as a non-issue because it
+  resolves represented `#V#turn_contract_dispatch_policy` and fails closed
+  rather than inventing dispatch rules.
+- No production code was changed by this review run.
