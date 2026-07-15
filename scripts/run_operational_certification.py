@@ -74,6 +74,7 @@ from src.backend.services.operational_certification_contract_service import (  #
     aggregate_five_trial_campaign,
     evaluate_scenario_trial,
     json_serialisable_projection,
+    project_represented_evaluator_observation,
     stable_payload_digest,
 )
 from src.backend.services.operational_certification_runner_service import (  # noqa: E402
@@ -87,6 +88,7 @@ from src.backend.services.operational_certification_vontology_service import (  
     OPERATIONAL_CERTIFICATION_CAMPAIGN_EVIDENCE_CONCEPT_ID,
     load_represented_operational_campaign_evidence,
 )
+from src.backend.services.namespace_service import coerce_namespace  # noqa: E402
 
 
 AUTHENTICATED_GENERATE_ADAPTER_ID = "#V#authenticated_von_generate_operational_adapter"
@@ -534,6 +536,41 @@ def _observed_tool_names(value: Any) -> list[str]:
 
     _walk(value)
     return names
+
+
+def _namespace_audit(
+    value: Any,
+    *,
+    effective_namespace: str,
+) -> tuple[list[str], dict[str, Any]]:
+    """Compare canonical namespace claims, not bounded-evidence sentinels."""
+
+    canonical_namespaces: set[str] = set()
+    noncanonical_value_count = 0
+    truncation_sentinel_count = 0
+    for mapping in _walk_mappings(value):
+        text = _text(mapping.get("namespace"))
+        if not text:
+            continue
+        canonical = coerce_namespace(text)
+        if canonical:
+            canonical_namespaces.add(canonical)
+            continue
+        noncanonical_value_count += 1
+        if text.startswith("[truncated:"):
+            truncation_sentinel_count += 1
+    violations = [
+        namespace
+        for namespace in sorted(canonical_namespaces)
+        if namespace != effective_namespace
+    ]
+    return violations, {
+        "schema_version": "operational_namespace_audit.v1",
+        "observed_canonical_namespaces": sorted(canonical_namespaces),
+        "noncanonical_value_count": noncanonical_value_count,
+        "truncation_sentinel_count": truncation_sentinel_count,
+        "violation_count": len(violations),
+    }
 
 
 def _write_json(path: str, payload: Mapping[str, Any]) -> None:
@@ -2851,16 +2888,10 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         "reason": "completion_claim_without_verified_gate",
                     }
                 )
-            observed_namespaces = {
-                _text(mapping.get("namespace"))
-                for mapping in _walk_mappings(turn_record)
-                if _text(mapping.get("namespace"))
-            }
-            namespace_violations = [
-                namespace
-                for namespace in sorted(observed_namespaces)
-                if namespace != effective_namespace
-            ]
+            namespace_violations, namespace_audit = _namespace_audit(
+                turn_record,
+                effective_namespace=effective_namespace,
+            )
             record_visible_answer, record_visible_answer_source = (
                 extract_visible_answer_from_turn_record(turn_record)
             )
@@ -2898,6 +2929,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     name for name in observed_tools if name.lower() in forbidden_names
                 ],
                 "namespace_violations": namespace_violations,
+                "namespace_audit": namespace_audit,
                 "false_success_claims": false_success_claims,
                 "execution_budget_units": len(
                     _sequence(task_evidence.get("task_statuses"))
@@ -3015,16 +3047,10 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 for item in _sequence(inputs.get("forbidden_tool_names"))
                 if _text(item)
             }
-            observed_namespaces = {
-                _text(mapping.get("namespace"))
-                for mapping in _walk_mappings(payloads)
-                if _text(mapping.get("namespace"))
-            }
-            namespace_violations = [
-                namespace
-                for namespace in sorted(observed_namespaces)
-                if namespace != effective_namespace
-            ]
+            namespace_violations, namespace_audit = _namespace_audit(
+                payloads,
+                effective_namespace=effective_namespace,
+            )
             workflow_instance_ids = [
                 _text(step_payload.get("instance_id")) for step_payload in payloads
             ]
@@ -3093,6 +3119,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     name for name in observed_tools if name.lower() in forbidden_names
                 ],
                 "namespace_violations": namespace_violations,
+                "namespace_audit": namespace_audit,
                 "false_success_claims": [],
                 "execution_budget_units": len(_walk_mappings(payloads)),
                 "operational_metrics": {
@@ -3130,6 +3157,9 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         observation_sha256 = stable_payload_digest(
             json_serialisable_projection(observation)
         )
+        projected_observation, observation_projection = (
+            project_represented_evaluator_observation(observation, evaluator_spec)
+        )
         evaluator_execution_digest = stable_payload_digest(
             {
                 "campaign_execution_id": campaign_execution_id,
@@ -3148,7 +3178,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             inputs={
                 "scenario_contract": scenario.to_projection(),
                 "trial_index": trial_index,
-                "trial_observation": json_serialisable_projection(observation),
+                "trial_observation": projected_observation,
             },
             namespace=effective_namespace,
             user_id=effective_user_id,
@@ -3167,6 +3197,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 "trial_index": trial_index,
                 "evaluator_id": _text(evaluator_spec.get("evaluator_id")),
                 "observation_sha256": observation_sha256,
+                "observation_projection": observation_projection,
                 "evaluator_execution_digest": evaluator_execution_digest,
             },
             timeout_seconds=args.timeout_seconds,

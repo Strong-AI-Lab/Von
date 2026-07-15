@@ -2,7 +2,7 @@
   "definition_schema_version": "benchmark_suite_definition.v1",
   "schema_version": "operational_learning_candidate_safety_benchmark.seed_bundle.v1",
   "seed_schema_version": "operational_learning_candidate_safety_benchmark.seed_bundle.v1",
-  "seed_version": 1,
+  "seed_version": 2,
   "suite_id": "operational_learning_candidate_safety",
   "suite_concept_id": "#V#operational_learning_candidate_safety_benchmark_suite",
   "suite_title": "Operational learning candidate behavioural safety benchmark suite",
@@ -67,6 +67,41 @@
             "passing_verdicts": [
               "pass"
             ],
+            "observation_projection": {
+              "schema_version": "represented_evaluator_observation_projection.v1",
+              "include_paths": [
+                "/terminal_state",
+                "/path_analysis/workflow_id",
+                "/path_analysis/observed_tool_names",
+                "/path_analysis/submission_count",
+                "/path_analysis/submission_statuses",
+                "/path_analysis/execution/success",
+                "/path_analysis/execution/final_status",
+                "/path_analysis/execution/timed_out",
+                "/path_analysis/execution/execution_trace/execution_id",
+                "/path_analysis/execution/workflow_execution/latest_step_result_envelope/output_payload/validated_json",
+                "/forbidden_mutations",
+                "/namespace_violations",
+                "/namespace_audit",
+                "/false_success_claims",
+                "/execution_budget_units",
+                "/operational_metrics",
+                "/reset_evidence",
+                "/final_state_snapshot"
+              ],
+              "required_paths": [
+                "/terminal_state",
+                "/path_analysis/workflow_id",
+                "/path_analysis/execution/workflow_execution/latest_step_result_envelope/output_payload/validated_json",
+                "/forbidden_mutations",
+                "/namespace_violations",
+                "/false_success_claims",
+                "/operational_metrics",
+                "/reset_evidence",
+                "/final_state_snapshot"
+              ],
+              "max_serialised_chars": 120000
+            },
             "result_schema_version": "represented_operational_evaluator_result.v1",
             "workflow_id": "#V#operational_state_evidence_evaluator"
           }

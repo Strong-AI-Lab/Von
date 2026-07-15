@@ -26,6 +26,9 @@ OPERATIONAL_CERTIFICATION_SCENARIO_SCHEMA_VERSION = (
 REPRESENTED_OPERATIONAL_EVALUATOR_RESULT_SCHEMA_VERSION = (
     "represented_operational_evaluator_result.v1"
 )
+REPRESENTED_EVALUATOR_OBSERVATION_PROJECTION_SCHEMA_VERSION = (
+    "represented_evaluator_observation_projection.v1"
+)
 OPERATIONAL_CERTIFICATION_TRIAL_RESULT_SCHEMA_VERSION = (
     "operational_certification_trial_result.v1"
 )
@@ -869,7 +872,249 @@ def _validate_evaluator_spec(
                     scope=f"{scope}.evaluator[{evaluator_id}].check[{index}]",
                 )
             )
+    blockers.extend(
+        _validate_evaluator_observation_projection(
+            spec.get("observation_projection"),
+            scope=f"{scope}.observation_projection",
+        )
+    )
     return blockers
+
+
+def _validate_evaluator_observation_projection(
+    raw_spec: Any,
+    *,
+    scope: str,
+) -> list[CertificationBlocker]:
+    """Validate represented evidence-selection policy without interpreting it."""
+
+    if raw_spec is None:
+        return []
+    if not isinstance(raw_spec, Mapping):
+        return [
+            _blocker(
+                "evaluator_observation_projection_invalid",
+                scope,
+                "Evaluator observation_projection must be an object.",
+                recoverable=True,
+            )
+        ]
+
+    spec = dict(raw_spec)
+    blockers: list[CertificationBlocker] = []
+    if spec.get("schema_version") != (
+        REPRESENTED_EVALUATOR_OBSERVATION_PROJECTION_SCHEMA_VERSION
+    ):
+        blockers.append(
+            _blocker(
+                "evaluator_observation_projection_schema_invalid",
+                scope,
+                "Evaluator observation projection has an unsupported schema_version.",
+                recoverable=True,
+                details={"schema_version": spec.get("schema_version")},
+            )
+        )
+
+    raw_paths = spec.get("include_paths")
+    raw_path_items = (
+        list(raw_paths)
+        if isinstance(raw_paths, Sequence)
+        and not isinstance(raw_paths, (str, bytes, bytearray))
+        else []
+    )
+    include_paths = _string_sequence(raw_paths)
+    if (
+        not _is_sequence(raw_paths)
+        or not include_paths
+        or len(include_paths) > 128
+        or len(include_paths) != len(raw_path_items)
+    ):
+        blockers.append(
+            _blocker(
+                "evaluator_observation_projection_paths_invalid",
+                scope,
+                "Evaluator observation projection must declare one to 128 unique include_paths.",
+                recoverable=True,
+            )
+        )
+    invalid_paths = [
+        path
+        for path in include_paths
+        if not path.startswith("/")
+        or path == "/"
+        or path == "/evaluator_observation_projection"
+    ]
+    if invalid_paths:
+        blockers.append(
+            _blocker(
+                "evaluator_observation_projection_path_invalid",
+                scope,
+                "Evaluator observation projection paths must be non-root RFC 6901 pointers.",
+                recoverable=True,
+                details={"invalid_paths": invalid_paths},
+            )
+        )
+
+    raw_required_paths = spec.get("required_paths", [])
+    raw_required_path_items = (
+        list(raw_required_paths)
+        if isinstance(raw_required_paths, Sequence)
+        and not isinstance(raw_required_paths, (str, bytes, bytearray))
+        else []
+    )
+    required_paths = _string_sequence(raw_required_paths)
+    if (
+        not _is_sequence(raw_required_paths)
+        or len(required_paths) != len(raw_required_path_items)
+        or not set(required_paths).issubset(set(include_paths))
+    ):
+        blockers.append(
+            _blocker(
+                "evaluator_observation_projection_required_paths_invalid",
+                scope,
+                "Projection required_paths must be unique members of include_paths.",
+                recoverable=True,
+            )
+        )
+
+    max_serialised_chars = spec.get("max_serialised_chars")
+    if (
+        isinstance(max_serialised_chars, bool)
+        or not isinstance(max_serialised_chars, int)
+        or max_serialised_chars < 1_000
+        or max_serialised_chars > 1_000_000
+    ):
+        blockers.append(
+            _blocker(
+                "evaluator_observation_projection_limit_invalid",
+                scope,
+                "Projection max_serialised_chars must be an integer from 1,000 to 1,000,000.",
+                recoverable=True,
+            )
+        )
+    return blockers
+
+
+def _assign_projection_path(target: dict[str, Any], path: str, value: Any) -> None:
+    """Assign one already-validated RFC 6901 path to a projection object."""
+
+    parts = _path_parts(path)
+    current = target
+    for part in parts[:-1]:
+        existing = current.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            current[part] = existing
+        current = existing
+    current[parts[-1]] = json_serialisable_projection(value)
+
+
+def project_represented_evaluator_observation(
+    observation: Mapping[str, Any],
+    evaluator_spec: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply represented evidence projection while retaining source lineage.
+
+    The evaluator specification owns which evidence paths are relevant. This
+    support surface only copies those paths, verifies required evidence is
+    present, enforces the represented size ceiling, and records hashes that
+    bind the compact view to the complete trial observation.
+    """
+
+    source = json_serialisable_projection(observation)
+    raw_projection_spec = evaluator_spec.get("observation_projection")
+    if raw_projection_spec is None:
+        source_mapping = dict(source) if isinstance(source, Mapping) else {}
+        return source_mapping, {
+            "schema_version": "represented_evaluator_observation_projection_result.v1",
+            "configured": False,
+            "source_observation_sha256": stable_payload_digest(source_mapping),
+            "source_serialised_chars": len(
+                json.dumps(source_mapping, sort_keys=True, ensure_ascii=True)
+            ),
+        }
+
+    validation_blockers = _validate_evaluator_observation_projection(
+        raw_projection_spec,
+        scope="evaluator.observation_projection",
+    )
+    if validation_blockers:
+        raise CertificationContractValidationError(validation_blockers)
+    projection_spec = dict(raw_projection_spec)
+    include_paths = _string_sequence(projection_spec.get("include_paths"))
+    required_paths = set(_string_sequence(projection_spec.get("required_paths", [])))
+    source_mapping = dict(source) if isinstance(source, Mapping) else {}
+    projected: dict[str, Any] = {}
+    included_paths: list[str] = []
+    missing_paths: list[str] = []
+    for path in include_paths:
+        value = _resolve_path(source_mapping, path)
+        if value is _MISSING:
+            missing_paths.append(path)
+            continue
+        _assign_projection_path(projected, path, value)
+        included_paths.append(path)
+
+    missing_required_paths = [
+        path for path in include_paths if path in required_paths and path in missing_paths
+    ]
+    if missing_required_paths:
+        raise CertificationContractValidationError(
+            [
+                _blocker(
+                    "evaluator_observation_projection_required_path_missing",
+                    "evaluator.observation_projection",
+                    "A represented required evaluator evidence path is missing.",
+                    recoverable=True,
+                    details={"missing_required_paths": missing_required_paths},
+                )
+            ]
+        )
+
+    source_sha256 = stable_payload_digest(source_mapping)
+    projection_spec_sha256 = stable_payload_digest(projection_spec)
+    source_serialised_chars = len(
+        json.dumps(source_mapping, sort_keys=True, ensure_ascii=True)
+    )
+    selected_evidence_sha256 = stable_payload_digest(projected)
+    projection_metadata = {
+        "schema_version": "represented_evaluator_observation_projection_result.v1",
+        "configured": True,
+        "source_observation_sha256": source_sha256,
+        "projection_spec_sha256": projection_spec_sha256,
+        "included_paths": included_paths,
+        "missing_optional_paths": [
+            path for path in missing_paths if path not in required_paths
+        ],
+        "source_serialised_chars": source_serialised_chars,
+        "max_serialised_chars": projection_spec["max_serialised_chars"],
+        "selected_evidence_sha256": selected_evidence_sha256,
+    }
+    projected["evaluator_observation_projection"] = projection_metadata
+    projected_serialised_chars = 0
+    for _ in range(3):
+        projection_metadata["projected_serialised_chars"] = projected_serialised_chars
+        updated_size = len(json.dumps(projected, sort_keys=True, ensure_ascii=True))
+        if updated_size == projected_serialised_chars:
+            break
+        projected_serialised_chars = updated_size
+    projection_metadata["projected_serialised_chars"] = projected_serialised_chars
+    if projected_serialised_chars > projection_spec["max_serialised_chars"]:
+        raise CertificationContractValidationError(
+            [
+                _blocker(
+                    "evaluator_observation_projection_size_exceeded",
+                    "evaluator.observation_projection",
+                    "Projected evaluator evidence exceeds its represented size ceiling.",
+                    recoverable=True,
+                    details={
+                        "projected_serialised_chars": projected_serialised_chars,
+                        "max_serialised_chars": projection_spec["max_serialised_chars"],
+                    },
+                )
+            ]
+        )
+    return projected, dict(projection_metadata)
 
 
 def _normalise_scenario(
@@ -2421,6 +2666,7 @@ __all__ = [
     "OPERATIONAL_CERTIFICATION_SCENARIO_SCHEMA_VERSION",
     "OPERATIONAL_CERTIFICATION_TRIAL_RESULT_SCHEMA_VERSION",
     "REPRESENTED_OPERATIONAL_EVALUATOR_RESULT_SCHEMA_VERSION",
+    "REPRESENTED_EVALUATOR_OBSERVATION_PROJECTION_SCHEMA_VERSION",
     "CertificationBlocker",
     "CertificationContractValidationError",
     "CertificationScenarioContract",
@@ -2431,6 +2677,7 @@ __all__ = [
     "evaluate_scenario_trial",
     "json_serialisable_projection",
     "parse_operational_certification_contract",
+    "project_represented_evaluator_observation",
     "stable_payload_digest",
     "validate_operational_certification_campaign_result_integrity",
     "validate_budget_spec",

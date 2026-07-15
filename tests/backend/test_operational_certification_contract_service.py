@@ -20,6 +20,7 @@ from src.backend.services.operational_certification_contract_service import (
     evaluate_scenario_trial,
     json_serialisable_projection,
     parse_operational_certification_contract,
+    project_represented_evaluator_observation,
     stable_payload_digest,
 )
 
@@ -253,6 +254,95 @@ def test_parse_contract_projects_stable_digests_and_topological_order() -> None:
     assert reordered_contract.source_definition_sha256 == (
         contract.source_definition_sha256
     )
+
+
+def test_represented_evaluator_observation_projection_bounds_duplicate_evidence() -> (
+    None
+):
+    scenario = _scenario()
+    scenario["evaluator_specs"][0]["observation_projection"] = {
+        "schema_version": "represented_evaluator_observation_projection.v1",
+        "include_paths": [
+            "/terminal_state",
+            "/path_analysis/validated_result",
+            "/namespace_violations",
+        ],
+        "required_paths": [
+            "/terminal_state",
+            "/path_analysis/validated_result",
+        ],
+        "max_serialised_chars": 10_000,
+    }
+    contract = parse_operational_certification_contract(_suite(scenarios=[scenario]))
+    evaluator_spec = contract.scenarios[0].evaluator_specs[0]
+    observation = {
+        "terminal_state": "completed",
+        "path_analysis": {
+            "validated_result": {
+                "schema_version": "represented_example_result.v1",
+                "verdict": "pass",
+            },
+            "duplicated_trace": "x" * 500_000,
+        },
+        "namespace_violations": [],
+        "workflow_submissions": [{"duplicated_trace": "x" * 500_000}],
+    }
+
+    projected, diagnostics = project_represented_evaluator_observation(
+        observation,
+        evaluator_spec,
+    )
+
+    assert projected["terminal_state"] == "completed"
+    assert projected["path_analysis"]["validated_result"]["verdict"] == "pass"
+    assert "duplicated_trace" not in projected["path_analysis"]
+    assert "workflow_submissions" not in projected
+    assert diagnostics["configured"] is True
+    assert diagnostics["source_serialised_chars"] > 1_000_000
+    assert diagnostics["projected_serialised_chars"] < 10_000
+    assert diagnostics["source_observation_sha256"] == stable_payload_digest(
+        observation
+    )
+
+
+def test_represented_evaluator_observation_projection_fails_closed_on_missing_evidence() -> (
+    None
+):
+    evaluator_spec = {
+        "observation_projection": {
+            "schema_version": "represented_evaluator_observation_projection.v1",
+            "include_paths": ["/required_evidence"],
+            "required_paths": ["/required_evidence"],
+            "max_serialised_chars": 10_000,
+        }
+    }
+
+    with pytest.raises(CertificationContractValidationError) as exc_info:
+        project_represented_evaluator_observation({}, evaluator_spec)
+
+    assert "evaluator_observation_projection_required_path_missing" in _blocker_codes(
+        exc_info.value
+    )
+
+
+def test_contract_rejects_unbounded_or_malformed_evaluator_projection() -> None:
+    scenario = _scenario()
+    scenario["evaluator_specs"][0]["observation_projection"] = {
+        "schema_version": "wrong.v1",
+        "include_paths": ["not-a-pointer"],
+        "required_paths": ["/missing-from-includes"],
+        "max_serialised_chars": 0,
+    }
+
+    with pytest.raises(CertificationContractValidationError) as exc_info:
+        parse_operational_certification_contract(_suite(scenarios=[scenario]))
+
+    assert {
+        "evaluator_observation_projection_schema_invalid",
+        "evaluator_observation_projection_path_invalid",
+        "evaluator_observation_projection_required_paths_invalid",
+        "evaluator_observation_projection_limit_invalid",
+    }.issubset(_blocker_codes(exc_info.value))
 
 
 def test_parse_contract_accepts_selected_case_set_loader_projection() -> None:

@@ -1682,6 +1682,27 @@ def test_task_evidence_projection_excludes_embedded_result_and_debug_payload() -
     assert "private-debug" not in json.dumps(projected)
 
 
+def test_namespace_audit_ignores_bounded_trace_sentinel_but_detects_foreign_scope() -> (
+    None
+):
+    expected = "#V#unit_user@unit_org"
+    violations, audit = certification_script._namespace_audit(
+        {
+            "namespace": expected,
+            "nested": [
+                {"namespace": "[truncated: max depth reached]"},
+                {"namespace": "#V#foreign_user@foreign_org"},
+            ],
+        },
+        effective_namespace=expected,
+    )
+
+    assert violations == ["#V#foreign_user@foreign_org"]
+    assert audit["truncation_sentinel_count"] == 1
+    assert audit["noncanonical_value_count"] == 1
+    assert audit["violation_count"] == 1
+
+
 def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
