@@ -13,7 +13,51 @@ from src.backend.workflows.engine import (
     WorkflowExecutor,
     WorkflowStateSpec,
     WorkflowTransitionSpec,
+    resolve_action_inputs_from_context,
 )
+
+
+def test_static_context_bindings_resolve_shared_dotted_paths() -> None:
+    resolved = resolve_action_inputs_from_context(
+        action_inputs={
+            "scenario_id": {"$context_key": "scenario_contract.scenario_id"},
+            "verdict": {
+                "$context_key": "represented_operational_evaluator_draft.verdict"
+            },
+            "first_evidence": {
+                "$context_key": (
+                    "represented_operational_evaluator_draft.evidence.0.kind"
+                )
+            },
+        },
+        context={
+            "scenario_contract": {"scenario_id": "scenario-a"},
+            "represented_operational_evaluator_draft": {
+                "verdict": "pass",
+                "evidence": [{"kind": "trace_readback"}],
+            },
+        },
+    )
+
+    assert resolved == {
+        "scenario_id": "scenario-a",
+        "verdict": "pass",
+        "first_evidence": "trace_readback",
+    }
+
+
+def test_static_context_bindings_preserve_literal_dotted_key_precedence() -> None:
+    resolved = resolve_action_inputs_from_context(
+        action_inputs={"value": {"$context_key": "receipt.status"}},
+        context={
+            "facts": {
+                "receipt.status": "legacy-literal",
+                "receipt": {"status": "nested-path"},
+            }
+        },
+    )
+
+    assert resolved == {"value": "legacy-literal"}
 
 
 def test_workflow_executor_emits_step_and_workflow_result_envelopes() -> None:

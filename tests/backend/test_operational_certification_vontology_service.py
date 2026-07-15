@@ -70,7 +70,7 @@ def test_operational_absence_probe_seed_is_read_only_and_deterministic() -> None
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert bundle["seed_version"] == "14"
+    assert bundle["seed_version"] == "15"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
     ] == {
@@ -542,7 +542,7 @@ def test_operational_checkpoint_interruption_seed_authors_pause_before_resume() 
     probe = workflows[service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID]
     steps = probe["publication_spec"]["steps"]
 
-    assert bundle["seed_version"] == "14"
+    assert bundle["seed_version"] == "15"
     assert "workflow_control.pause_at_checkpoint" in bundle["supported_action_ids"]
     assert steps[0]["state_id"] == "request_checkpoint_pause"
     assert steps[0]["action_id"] == "workflow_control.pause_at_checkpoint"
@@ -773,6 +773,11 @@ def test_operational_evaluator_loads_bounded_experience_context_before_judging()
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
     assert "workflow_invoke_subworkflow" in bundle["supported_action_ids"]
+    assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
+        service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID
+    ]["14"] == [
+        "3b47933d98345d14ea26717e44596af1c683834c58c5912b70fc18cb72bed17d"
+    ]
     evaluator = workflows[service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID]
     publication = evaluator["publication_spec"]
     assert publication["initial_state"] == "workflow_experience_context_prelude"
@@ -845,6 +850,17 @@ def test_operational_evaluator_loads_bounded_experience_context_before_judging()
     assert "must not weaken evaluation checks" in evaluate_context_fields[
         "workflow_low_imposition_exploration_history"
     ]
+    project = steps["project_evaluator_envelope"]
+    assert project["action_id"] == "workflow_control.context_project"
+    assert project["next_state"] == "completed"
+    field_sources = dict(project["static_input_bindings"])["field_sources"]
+    assert field_sources["scenario_id"] == {
+        "$context_key": "scenario_contract.scenario_id"
+    }
+    assert field_sources["trial_index"] == {"$context_key": "trial_index"}
+    assert field_sources["verdict"] == {
+        "$context_key": "represented_operational_evaluator_draft.verdict"
+    }
 
 
 def test_operational_evaluator_projects_experience_guidance_into_llm_prompt(
@@ -871,6 +887,7 @@ def test_operational_evaluator_projects_experience_guidance_into_llm_prompt(
         return WorkflowActionResult(status="success", outputs={"result": guidance})
 
     registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
     registry.register(
         ActionSpec(
             action_id="workflow_invoke_subworkflow",
@@ -909,9 +926,9 @@ def test_operational_evaluator_projects_experience_guidance_into_llm_prompt(
     )
     represented_result = {
         "schema_version": "represented_operational_evaluator_result.v1",
-        "evaluator_id": service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID,
-        "scenario_id": "scenario-a",
-        "trial_index": 1,
+        "evaluator_id": "#V#model_mistyped_evaluator_id",
+        "scenario_id": "scenario-a-model-paraphrase",
+        "trial_index": 99,
         "verdict": "pass",
         "terminal_state": "verified",
         "typed_terminal_outcome_available": True,
@@ -970,6 +987,14 @@ def test_operational_evaluator_projects_experience_guidance_into_llm_prompt(
     assert "#V#evaluator_model_profile" in prompt
     assert "Prefer exact semantic evidence." in prompt
     assert result.data["represented_active_learning_release"] == active_release
+    assert result.data["represented_operational_evaluator_draft"] == represented_result
+    projected = result.data["represented_operational_evaluator_result"]
+    assert projected == {
+        **represented_result,
+        "evaluator_id": service.OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID,
+        "scenario_id": "scenario-a",
+        "trial_index": 1,
+    }
 
 
 def test_campaign_evidence_loader_returns_none_when_authority_is_absent(

@@ -2,7 +2,7 @@
   "family_id": "operational_certification_evaluator_workflow_seed_bundle",
   "managed_by": "operational_certification_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "14",
+  "seed_version": "15",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#operational_state_evidence_evaluator": {
       "1": [
@@ -13,6 +13,9 @@
       ],
       "7": [
         "2f292c7eec1630d338b64cc65693b1b7ee5e6c39052aeeaebcf1f6cd1b4f9c81"
+      ],
+      "14": [
+        "3b47933d98345d14ea26717e44596af1c683834c58c5912b70fc18cb72bed17d"
       ]
     },
     "#V#operational_marker_absence_probe_workflow": {
@@ -60,8 +63,8 @@
     {
       "workflow_id": "#V#operational_state_evidence_evaluator",
       "display_name": "Operational State Evidence Evaluator",
-      "description": "Represented strict evaluator for one operational certification trial, reconciling final state, visible answer, path, receipts, safety audits and recovery evidence without Python-owned success policy.",
-      "content": "Strict represented operational evaluator. The prompt and scenario contract own semantic judgement; the durable runtime supplies evidence transport and JSON validation.",
+      "description": "Represented strict evaluator for one operational certification trial, reconciling final state, visible answer, path, receipts, safety audits and recovery evidence without Python-owned success policy. The workflow binds immutable evaluator, scenario and trial identities from its represented input envelope while preserving the model-authored semantic draft for telemetry.",
+      "content": "Strict represented operational evaluator. The prompt and scenario contract own semantic judgement; the durable runtime supplies evidence transport and JSON validation. The represented workflow projects immutable envelope identities from scenario inputs after the model judgement without rewriting verdict or evidence semantics.",
       "type_ids": [
         "#V#ai_workflow",
         "#V#durable_workflow"
@@ -273,7 +276,7 @@
               ]
             },
             "mutation_authority": null,
-            "next_state": "completed",
+            "next_state": "project_evaluator_envelope",
             "on_approval_required_state": null,
             "on_break_state": null,
             "on_continue_state": null,
@@ -290,7 +293,7 @@
             "tool_output_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_operational_certification_evaluator_validated_json_to_result",
-                "context_key": "represented_operational_evaluator_result",
+                "context_key": "represented_operational_evaluator_draft",
                 "tool_output_field": "validated_json"
               }
             ],
@@ -316,8 +319,109 @@
               ]
             },
             "writes_context_keys": [
-              "represented_operational_evaluator_result"
+              "represented_operational_evaluator_draft"
             ]
+          },
+          {
+            "state_id": "project_evaluator_envelope",
+            "action_id": "workflow_control.context_project",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "target_key",
+                "represented_operational_evaluator_result"
+              ],
+              [
+                "required_fields",
+                [
+                  "schema_version",
+                  "evaluator_id",
+                  "scenario_id",
+                  "trial_index",
+                  "verdict",
+                  "terminal_state",
+                  "typed_terminal_outcome_available",
+                  "causal_stage_evidence_complete",
+                  "explicitly_inconclusive",
+                  "recoverable_fault_recovered",
+                  "evidence",
+                  "fabricated_evidence",
+                  "forbidden_effects",
+                  "namespace_violations",
+                  "false_success_claims",
+                  "reason"
+                ]
+              ],
+              [
+                "include_null_fields",
+                true
+              ],
+              [
+                "include_empty_fields",
+                true
+              ],
+              [
+                "field_sources",
+                {
+                  "schema_version": "represented_operational_evaluator_result.v1",
+                  "evaluator_id": "#V#operational_state_evidence_evaluator",
+                  "scenario_id": {
+                    "$context_key": "scenario_contract.scenario_id"
+                  },
+                  "trial_index": {
+                    "$context_key": "trial_index"
+                  },
+                  "verdict": {
+                    "$context_key": "represented_operational_evaluator_draft.verdict"
+                  },
+                  "terminal_state": {
+                    "$context_key": "represented_operational_evaluator_draft.terminal_state"
+                  },
+                  "typed_terminal_outcome_available": {
+                    "$context_key": "represented_operational_evaluator_draft.typed_terminal_outcome_available"
+                  },
+                  "causal_stage_evidence_complete": {
+                    "$context_key": "represented_operational_evaluator_draft.causal_stage_evidence_complete"
+                  },
+                  "explicitly_inconclusive": {
+                    "$context_key": "represented_operational_evaluator_draft.explicitly_inconclusive"
+                  },
+                  "recoverable_fault_recovered": {
+                    "$context_key": "represented_operational_evaluator_draft.recoverable_fault_recovered"
+                  },
+                  "evidence": {
+                    "$context_key": "represented_operational_evaluator_draft.evidence"
+                  },
+                  "fabricated_evidence": {
+                    "$context_key": "represented_operational_evaluator_draft.fabricated_evidence"
+                  },
+                  "forbidden_effects": {
+                    "$context_key": "represented_operational_evaluator_draft.forbidden_effects"
+                  },
+                  "namespace_violations": {
+                    "$context_key": "represented_operational_evaluator_draft.namespace_violations"
+                  },
+                  "false_success_claims": {
+                    "$context_key": "represented_operational_evaluator_draft.false_success_claims"
+                  },
+                  "reason": {
+                    "$context_key": "represented_operational_evaluator_draft.reason"
+                  }
+                }
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_certification_evaluator_projected_envelope_to_result",
+                "tool_output_field": "represented_operational_evaluator_result",
+                "context_key": "represented_operational_evaluator_result"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_operational_evaluator_result"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
           },
           {
             "action_concept_id": null,
@@ -345,6 +449,11 @@
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "state_id": "failed",
+            "action_id": null,
             "writes_context_keys": []
           }
         ]

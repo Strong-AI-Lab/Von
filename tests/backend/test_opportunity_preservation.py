@@ -76,7 +76,11 @@ from src.backend.workflows.durable.models import (
     WorkflowInstance,
     WorkflowInstanceStatus,
 )
-from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
+from src.backend.workflows.engine import (
+    WorkflowDefinition,
+    WorkflowStateSpec,
+    resolve_action_inputs_from_context,
+)
 from src.backend.workflows.workflow_registry import (
     WorkflowRegistration,
     WorkflowRegistry,
@@ -95,6 +99,30 @@ from src.backend.languagemodels.structured_tool_calling.providers import OpenAIC
 
 
 # --- retrieval barriers remain inspectable and recoverable ------------------
+
+
+def test_nested_represented_evidence_remains_available_for_projection() -> None:
+    resolved = resolve_action_inputs_from_context(
+        action_inputs={
+            "terminal_state": {
+                "$context_key": "represented_evidence.receipt.terminal_state"
+            },
+            "trace_kind": {
+                "$context_key": "represented_evidence.traces.0.kind"
+            },
+        },
+        context={
+            "represented_evidence": {
+                "receipt": {"terminal_state": "verified"},
+                "traces": [{"kind": "durable_readback"}],
+            }
+        },
+    )
+
+    assert resolved == {
+        "terminal_state": "verified",
+        "trace_kind": "durable_readback",
+    }
 
 
 def test_final_answer_tool_evidence_remains_available_to_external_evaluation() -> None:

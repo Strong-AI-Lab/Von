@@ -139,6 +139,21 @@ def _resolve_context_symbol(
                 return True, container[symbol]
             if symbol_without_prefix in container:
                 return True, container[symbol_without_prefix]
+
+    # Represented static bindings use the same dotted context paths as
+    # transition, context-set, iterator and idempotency surfaces. Resolve that
+    # shared path language after legacy exact-key lookup so literal dotted keys
+    # keep their existing precedence.
+    found, resolved = resolve_context_path(context=context, path=symbol)
+    if found:
+        return True, resolved
+    if symbol_without_prefix != symbol:
+        found, resolved = resolve_context_path(
+            context=context,
+            path=symbol_without_prefix,
+        )
+        if found:
+            return True, resolved
     return False, None
 
 
