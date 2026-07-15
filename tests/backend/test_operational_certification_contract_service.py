@@ -1323,6 +1323,13 @@ def test_negative_readback_control_rejects_all_five_contradictory_trials() -> No
                     "workflow_output": {
                         "represented_operational_degraded_fault_matrix_result": {
                             "committed_effect_count": 1,
+                            "committed_effects": [
+                                {
+                                    "concept_id": (
+                                        f"#V#negative_control_marker_{trial_index}"
+                                    )
+                                }
+                            ],
                             "readback_concept_id": (
                                 f"#V#negative_control_marker_{trial_index}"
                             ),
@@ -1381,10 +1388,20 @@ def test_negative_readback_control_rejects_all_five_contradictory_trials() -> No
             observation=observation,
         )
         checks = {item["matcher_id"]: item for item in result["check_results"]}
+        minefields = {
+            item["minefield_id"]: item for item in result["minefield_results"]
+        }
+        extra_effect = minefields["extra_committed_effect_observed"]
 
         assert result["valid_evaluator_result_count"] == 1
         assert result["passing_evaluator_count"] == 0
         assert checks["authoritative_postcondition_probe_verified"]["matched"] is False
+        assert extra_effect["trigger_result"]["path_exists"] is True
+        assert extra_effect["trigger_result"]["actual_count"] == 1
+        assert extra_effect["triggered"] is False
+        assert "minefield_evidence_missing" not in {
+            blocker["code"] for blocker in result["blockers"]
+        }
         assert result["passed"] is False
         trial_results.append(result)
 
