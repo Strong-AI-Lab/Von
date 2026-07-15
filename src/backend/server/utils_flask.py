@@ -909,14 +909,14 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 benchmark_suite_bootstrap_report,
             )
         if not bool(
-            operational_learning_release_authority_bootstrap_report.get(
+            operational_learning_release_bootstrap_report.get(
                 "success", False
             )
         ):
             app_logger.warning(
                 "[durable_workflows] operational learning release authority "
                 "bootstrap failed: %s",
-                operational_learning_release_authority_bootstrap_report,
+                operational_learning_release_bootstrap_report,
             )
         if not bool(
             ai_chat_session_source_profile_bootstrap_report.get("success", False)

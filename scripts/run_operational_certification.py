@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 import copy
 from dataclasses import replace
 from datetime import datetime
@@ -32,9 +33,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.live_test_server_defaults import (
+from scripts.live_test_server_defaults import (  # noqa: E402
     get_default_agent_test_base_url,
-)  # noqa: E402
+)
 from scripts.run_authenticated_browser_workflow_replay import (  # noqa: E402
     ReplayCase,
     apply_target_session_context,
@@ -82,6 +83,9 @@ from src.backend.services.operational_certification_contract_service import (  #
 from src.backend.services.operational_certification_runner_service import (  # noqa: E402
     run_operational_certification_campaign,
     validate_campaign_experiment_observation,
+)
+from src.backend.services.turn_execution_record_service import (  # noqa: E402
+    project_final_answer_tool_evidence,
 )
 from src.backend.services.operational_certification_attestation_service import (  # noqa: E402
     verify_operational_certification_runner_attestation,
