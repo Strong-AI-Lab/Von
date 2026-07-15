@@ -197,7 +197,11 @@ def _patch_synchronous_runtime(
     return captures
 
 
-def _execute(*, requested_model: str | None = None) -> dict[str, Any]:
+def _execute(
+    *,
+    requested_model: str | None = None,
+    execution_request_id: str | None = None,
+) -> dict[str, Any]:
     return certification_script._execute_represented_workflow_synchronously(
         workflow_id=WORKFLOW_ID,
         inputs={
@@ -223,6 +227,7 @@ def _execute(*, requested_model: str | None = None) -> dict[str, Any]:
             "observation_sha256": "b" * 64,
         },
         requested_model=requested_model,
+        execution_request_id=execution_request_id,
     )
 
 
@@ -281,6 +286,30 @@ def test_synchronous_evaluator_uses_live_authority_exact_scope_and_persisted_tra
     )
     assert represented_result["execution_evidence"]["exact_scope_sha256"] == (
         execution["exact_scope_sha256"]
+    )
+
+
+def test_synchronous_evaluator_binds_caller_execution_request_id_to_trace(
+    monkeypatch,
+) -> None:
+    captures = _patch_synchronous_runtime(monkeypatch)
+    execution_request_id = "represented-decision-request-1"
+
+    execution = _execute(execution_request_id=execution_request_id)
+
+    assert execution["success"] is True
+    assert execution["caller_supplied_execution_request_id"] == execution_request_id
+    assert execution["execution_trace_id"] == execution_request_id
+    assert execution["attempted_execution_trace_id"] == execution_request_id
+    assert captures["trace_document"]["execution_id"] == execution_request_id
+
+
+def test_synchronous_evaluator_rejects_blank_caller_execution_request_id() -> None:
+    execution = _execute(execution_request_id="   ")
+
+    assert execution["success"] is False
+    assert execution["error_code"] == (
+        "synchronous_workflow_execution_request_id_invalid"
     )
 
 

@@ -743,6 +743,40 @@ def _runtime_binding_requirements(contract: Any) -> tuple[str, ...]:
     )
 
 
+def _learning_release_candidate_experiment_metadata(
+    represented_campaign_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Project one exact represented candidate binding into run metadata."""
+
+    evidence = _mapping(represented_campaign_evidence)
+    bindings = {
+        (
+            _text(item.get("candidate_id")),
+            _text(item.get("candidate_release_sha256")).lower(),
+        )
+        for item in _sequence(
+            evidence.get("evaluated_learning_release_candidate_bindings")
+        )
+        if isinstance(item, Mapping)
+        and _text(item.get("candidate_id"))
+        and re.fullmatch(
+            r"[0-9a-fA-F]{64}",
+            _text(item.get("candidate_release_sha256")),
+        )
+    }
+    if len(bindings) != 1:
+        return {}
+    candidate_id, release_sha256 = next(iter(bindings))
+    return {
+        "learning_release_candidate_id": candidate_id,
+        "learning_release_candidate_release_sha256": release_sha256,
+        "learning_release_candidate_binding_source": "represented_campaign_evidence",
+        "learning_release_candidate_binding_source_sha256": evidence.get(
+            "evidence_sha256"
+        ),
+    }
+
+
 def _unresolved_runtime_placeholders(value: Any) -> tuple[str, ...]:
     placeholders: set[str] = set()
 
@@ -849,6 +883,7 @@ def _execute_represented_workflow_synchronously(
     timeout_seconds: float = 600.0,
     require_policy_identity: bool = True,
     requested_model: str | None = None,
+    execution_request_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one live-Vontology workflow without relying on a durable worker.
 
@@ -888,6 +923,7 @@ def _execute_represented_workflow_synchronously(
     namespace_text = _text(namespace)
     user_id_text = _text(user_id)
     org_id_text = _text(org_id)
+    execution_request_id_text = _text(execution_request_id)
     exact_scope = {
         "namespace": namespace_text or None,
         "user_id": user_id_text or None,
@@ -904,7 +940,11 @@ def _execute_represented_workflow_synchronously(
         "exact_scope": exact_scope,
         "exact_scope_sha256": stable_payload_digest(exact_scope),
         "policy_identity_required": require_policy_identity,
+        "caller_supplied_execution_request_id": (execution_request_id_text or None),
     }
+    if execution_request_id is not None and not execution_request_id_text:
+        response["error_code"] = "synchronous_workflow_execution_request_id_invalid"
+        return response
     missing_scope_fields = [
         key
         for key, value in (
@@ -935,7 +975,7 @@ def _execute_represented_workflow_synchronously(
     response["timeout_seconds"] = effective_timeout_seconds
     trace = WorkflowExecutionTrace(
         workflow_id=workflow_id_text,
-        execution_id=str(uuid.uuid4()),
+        execution_id=execution_request_id_text or str(uuid.uuid4()),
         user_namespace=namespace_text,
         org_id=org_id_text,
         metadata={
@@ -2290,6 +2330,30 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             DURABLE_WORKFLOW_ADAPTER_ID,
         ],
     }
+    from src.backend.security.access_control import override_current_actor
+
+    with override_current_actor(effective_user_id, effective_org_id):
+        represented_campaign_evidence = load_represented_operational_campaign_evidence(
+            concept_id=args.campaign_evidence_concept_id,
+            expected_namespace=effective_namespace,
+            expected_user_id=effective_user_id,
+            expected_org_id=effective_org_id,
+        )
+    execution_provenance["campaign_evidence_concept_id"] = (
+        args.campaign_evidence_concept_id
+    )
+    execution_provenance["campaign_evidence_sha256"] = (
+        represented_campaign_evidence.get("evidence_sha256")
+        if isinstance(represented_campaign_evidence, Mapping)
+        else None
+    )
+    execution_provenance.update(
+        _learning_release_candidate_experiment_metadata(
+            represented_campaign_evidence
+            if isinstance(represented_campaign_evidence, Mapping)
+            else None
+        )
+    )
 
     experiment_spec_id = (
         f"#V#operational_certification_experiment_spec_{contract.contract_sha256[:20]}"
@@ -2363,23 +2427,6 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             )
         experiment_run_id = _text(run_result.get("run_id"))
     execution_provenance["experiment_run_id"] = experiment_run_id
-    from src.backend.security.access_control import override_current_actor
-
-    with override_current_actor(effective_user_id, effective_org_id):
-        represented_campaign_evidence = load_represented_operational_campaign_evidence(
-            concept_id=args.campaign_evidence_concept_id,
-            expected_namespace=effective_namespace,
-            expected_user_id=effective_user_id,
-            expected_org_id=effective_org_id,
-        )
-    execution_provenance["campaign_evidence_concept_id"] = (
-        args.campaign_evidence_concept_id
-    )
-    execution_provenance["campaign_evidence_sha256"] = (
-        represented_campaign_evidence.get("evidence_sha256")
-        if isinstance(represented_campaign_evidence, Mapping)
-        else None
-    )
     used_conversation_session_ids: set[str] = set()
 
     def _unique_state_binding_verified(

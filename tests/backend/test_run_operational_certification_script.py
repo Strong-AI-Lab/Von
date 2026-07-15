@@ -172,6 +172,62 @@ def test_candidate_safety_suite_declares_all_exact_runtime_bindings() -> None:
     )
 
 
+def test_learning_release_candidate_binding_is_projected_into_experiment_metadata() -> (
+    None
+):
+    metadata = certification_script._learning_release_candidate_experiment_metadata(
+        {
+            "evidence_sha256": "a" * 64,
+            "evaluated_learning_release_candidate_bindings": [
+                {
+                    "candidate_id": "candidate-1",
+                    "candidate_release_sha256": "B" * 64,
+                }
+            ],
+        }
+    )
+
+    assert metadata == {
+        "learning_release_candidate_id": "candidate-1",
+        "learning_release_candidate_release_sha256": "b" * 64,
+        "learning_release_candidate_binding_source": "represented_campaign_evidence",
+        "learning_release_candidate_binding_source_sha256": "a" * 64,
+    }
+
+
+def test_learning_release_candidate_metadata_requires_one_exact_binding() -> None:
+    assert (
+        certification_script._learning_release_candidate_experiment_metadata(
+            {
+                "evaluated_learning_release_candidate_bindings": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "candidate_release_sha256": "not-a-sha256",
+                    }
+                ]
+            }
+        )
+        == {}
+    )
+    assert (
+        certification_script._learning_release_candidate_experiment_metadata(
+            {
+                "evaluated_learning_release_candidate_bindings": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "candidate_release_sha256": "a" * 64,
+                    },
+                    {
+                        "candidate_id": "candidate-2",
+                        "candidate_release_sha256": "b" * 64,
+                    },
+                ]
+            }
+        )
+        == {}
+    )
+
+
 def test_every_repo_unique_state_scenario_declares_executable_absence_probe() -> None:
     contract = _repo_seed_contract()
 
