@@ -36,13 +36,19 @@ class _RouteRegistry:
 
 
 class _TerminalTurnManager:
-    def __init__(self, instance: Any) -> None:
+    def __init__(self, instance: Any, *, hydrated_instance: Any = None) -> None:
         self.instance = instance
+        self.hydrated_instance = hydrated_instance or instance
         self.calls: list[dict[str, Any]] = []
+        self.get_calls: list[str] = []
 
     def list_instances(self, **kwargs: Any) -> list[Any]:
         self.calls.append(dict(kwargs))
         return [self.instance]
+
+    def get_instance(self, instance_id: str) -> Any:
+        self.get_calls.append(instance_id)
+        return self.hydrated_instance
 
 
 def _make_app(
@@ -98,8 +104,62 @@ def test_background_status_reconciles_terminal_durable_turn(monkeypatch) -> None
     assert body["status"] == "completed"
     assert body["has_result"] is True
     assert body["progress"]["workflow_instance_id"] == "instance-123"
+    assert body["progress"]["workflow_lifecycle_status"] == "completed"
+    assert body["progress"]["user_outcome_status"] == "unknown"
+    assert body["progress"]["user_outcome_source"] == (
+        "missing_terminal_outcome_evidence"
+    )
     assert registry.mark_calls[0]["task_id"] == "turn-123"
     assert manager.calls[0]["source_event_id"] == "turn-123"
+
+
+def test_background_status_does_not_call_lifecycle_completion_user_success(
+    monkeypatch,
+) -> None:
+    registry = _RouteRegistry(
+        TaskStatus(
+            task_id="turn-2494",
+            status="completed",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            result={"response": ""},
+            progress={"status": "completed"},
+        )
+    )
+    instance = SimpleNamespace(
+        instance_id="instance-2494",
+        status=WorkflowInstanceStatus.COMPLETED,
+        current_state="context_adjudication",
+        error=None,
+        source_event_id="turn-2494",
+        inputs={"conversation_session_id": "session-2494"},
+        outputs={
+            "request_id": "turn-2494",
+            "session_id": "session-2494",
+            "last_action_failed": True,
+            "last_action_error": (
+                "subworkflow_failed:#V#turn_context_adjudication_workflow:"
+                "workflow_llm_step_timeout:context_adjudication"
+            ),
+        },
+    )
+    manager = _TerminalTurnManager(instance)
+    app = _make_app(monkeypatch, registry, manager)
+
+    response = app.test_client().get("/von/api/task/status/turn-2494")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "completed"
+    assert body["progress"]["workflow_lifecycle_status"] == "completed"
+    assert body["progress"]["user_outcome_status"] == "terminal_failure"
+    assert body["progress"]["user_outcome_source"] == "workflow_failure_evidence"
+    assert body["progress"]["safe_to_claim_completion"] is None
+    assert registry.status is not None
+    assert registry.status.result["llm_debug"]["workflow_failure_evidence"][
+        "last_action_error"
+    ].startswith("subworkflow_failed:")
 
 
 def test_background_result_returns_reconciled_durable_payload(monkeypatch) -> None:
@@ -146,6 +206,143 @@ def test_background_result_returns_reconciled_durable_payload(monkeypatch) -> No
     assert body["result"]["llm_debug"]["background_result_source"] == (
         "durable_conversation_turn_instance"
     )
+
+
+def test_background_result_hydrates_compact_terminal_instance_before_projection(
+    monkeypatch,
+) -> None:
+    registry = _RouteRegistry(
+        TaskStatus(
+            task_id="turn-offloaded",
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    compact_instance = SimpleNamespace(
+        instance_id="instance-offloaded",
+        status=WorkflowInstanceStatus.COMPLETED,
+        current_state="context_adjudication",
+        error=None,
+        source_event_id="turn-offloaded",
+        inputs={"conversation_session_id": "session-offloaded"},
+        outputs={
+            "response": {
+                "schema_version": "workflow_payload_blob_ref.v1",
+                "blob_ref": {"key": "blob-response"},
+            },
+            "turn_execution_record": {
+                "schema_version": "workflow_payload_blob_ref.v1",
+                "blob_ref": {"key": "blob-ter"},
+            },
+        },
+    )
+    failure = (
+        "subworkflow_failed:#V#turn_context_adjudication_workflow:"
+        "workflow_llm_step_timeout:context_adjudication"
+    )
+    hydrated_instance = SimpleNamespace(
+        **{
+            **compact_instance.__dict__,
+            "outputs": {
+                "request_id": "turn-offloaded",
+                "session_id": "session-offloaded",
+                "response": "The context-adjudication model timed out.",
+                "final_response": "The context-adjudication model timed out.",
+                "response_channels": {
+                    "screen": "The context-adjudication model timed out.",
+                    "spoken": "The model timed out.",
+                },
+                "last_action_failed": True,
+                "last_action_error": failure,
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                },
+                "turn_execution_record": {
+                    "schema_version": "turn_execution_record.v1",
+                    "completion_gate": {
+                        "decision": "escalation_required",
+                        "safe_to_claim_completion": False,
+                    },
+                },
+            },
+        }
+    )
+    manager = _TerminalTurnManager(
+        compact_instance,
+        hydrated_instance=hydrated_instance,
+    )
+    app = _make_app(monkeypatch, registry, manager)
+
+    response = app.test_client().get("/von/api/task/result/turn-offloaded")
+
+    assert response.status_code == 200
+    result = response.get_json()["result"]
+    assert result["response"] == "The context-adjudication model timed out."
+    assert result["response_channels"]["screen"] == (
+        "The context-adjudication model timed out."
+    )
+    assert result["llm_debug"]["turn_execution_record"]["schema_version"] == (
+        "turn_execution_record.v1"
+    )
+    assert (
+        result["llm_debug"]["workflow_failure_evidence"]["last_action_error"] == failure
+    )
+    assert result["workflow_lifecycle_status"] == "completed"
+    assert result["user_outcome_status"] == "non_success"
+    assert result["safe_to_claim_completion"] is False
+    assert result["response_availability"]["status"] == "available"
+    assert result["diagnostics_availability"]["status"] == "available"
+    assert manager.get_calls == ["instance-offloaded"]
+
+
+def test_background_result_types_unavailable_compact_payload_when_hydration_fails(
+    monkeypatch,
+) -> None:
+    registry = _RouteRegistry(
+        TaskStatus(
+            task_id="turn-unavailable",
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    blob_ref = {
+        "schema_version": "workflow_payload_blob_ref.v1",
+        "blob_ref": {"key": "blob-unavailable"},
+    }
+    compact_instance = SimpleNamespace(
+        instance_id="instance-unavailable",
+        status=WorkflowInstanceStatus.COMPLETED,
+        current_state="responded",
+        error=None,
+        source_event_id="turn-unavailable",
+        inputs={"conversation_session_id": "session-unavailable"},
+        outputs={"response": blob_ref, "turn_execution_record": blob_ref},
+    )
+    manager = _TerminalTurnManager(compact_instance)
+
+    def _fail_hydration(_instance_id: str) -> Any:
+        raise RuntimeError("blob backend unavailable")
+
+    monkeypatch.setattr(manager, "get_instance", _fail_hydration)
+    app = _make_app(monkeypatch, registry, manager)
+
+    response = app.test_client().get("/von/api/task/result/turn-unavailable")
+
+    assert response.status_code == 200
+    result = response.get_json()["result"]
+    assert result["response"] == ""
+    assert result["response_availability"]["status"] == "response_unavailable"
+    assert result["diagnostics_availability"]["status"] == ("diagnostics_unavailable")
+    assert result["payload_hydration"] == {
+        "status": "unresolved_blob_references",
+        "unresolved_output_fields": ["response", "turn_execution_record"],
+    }
+    assert result["workflow_lifecycle_status"] == "completed"
+    assert result["user_outcome_status"] == "unknown"
 
 
 def test_background_result_prefers_user_answer_over_machine_json_response(

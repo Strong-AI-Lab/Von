@@ -2219,7 +2219,7 @@ def test_bounded_llm_step_progress_event_does_not_block_execution_guard(
     assert progress_entered.wait(1.0)
 
 
-def test_direct_llm_step_passes_timeout_to_client_llm_params() -> None:
+def test_direct_llm_step_passes_separate_hard_guard_to_client_llm_params() -> None:
     captured: dict[str, object] = {}
 
     class _CapturingClient:
@@ -2246,7 +2246,45 @@ def test_direct_llm_step_passes_timeout_to_client_llm_params() -> None:
     result = execute_llm_step(request)
 
     assert result.status == "success"
-    assert captured["llm_params"] == {"timeout_seconds": 12.0}
+    assert captured["llm_params"] == {"request_timeout_seconds": 13.0}
+
+
+def test_llm_call_can_finish_after_advisory_budget_before_hard_guard() -> None:
+    import time
+
+    import src.backend.workflows.llm_step_executor as mod
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), model="gpt-test"),
+        data={"aux_llm_calls": []},
+        workflow_id="#V#workflow",
+        workflow_state_id="#V#step",
+    )
+
+    result = mod._run_llm_call_with_timeout(
+        request,
+        operation=lambda: (time.sleep(0.3), "completed")[1],
+        stage="test_stage",
+        prompt_id="#V#prompt",
+        selected_model="gpt-test",
+        selected_candidate={"provider": "openai"},
+        timeout_seconds=0.02,
+        hard_guard_timeout_seconds=0.6,
+        llm_calls=[],
+    )
+
+    assert result == "completed"
+    advisory_entries = [
+        entry
+        for entry in request.data["aux_llm_calls"]
+        if entry.get("type") == "workflow_llm_advisory_budget"
+    ]
+    assert len(advisory_entries) == 1
+    assert advisory_entries[0]["status"] == "exceeded_continuing"
+    assert advisory_entries[0]["advisory_timeout_seconds"] == 0.02
+    assert advisory_entries[0]["hard_guard_timeout_seconds"] == 0.6
 
 
 def test_execute_llm_step_returns_failed_result_on_gateway_llm_timeout(
@@ -2661,7 +2699,9 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_direct_client(
     )
     assert envelope["selected_model"] == "gpt-4.1-mini"
     assert envelope["selected_model_candidate"]["provider"] == "openai"
-    assert envelope["timeout_seconds"] == 1.0
+    assert envelope["timeout_seconds"] == 2.0
+    assert envelope["advisory_timeout_seconds"] == 1.0
+    assert envelope["hard_guard_timeout_seconds"] == 2.0
     assert envelope["fail_closed"] is True
     timeout_entries = [
         entry
@@ -2671,7 +2711,8 @@ def test_execute_llm_step_bounds_blocked_context_adjudication_direct_client(
     assert len(timeout_entries) == 1
     assert timeout_entries[0]["stage"] == "context_adjudication"
     assert timeout_entries[0]["provider"] == "openai"
-    assert timeout_entries[0]["timeout_seconds"] == 1.0
+    assert timeout_entries[0]["timeout_seconds"] == 2.0
+    assert timeout_entries[0]["advisory_timeout_seconds"] == 1.0
 
 
 def test_execute_llm_step_bounds_blocked_context_adjudication_tool_planner(

@@ -55,6 +55,7 @@ from ...integrations.internal_mcp import (
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
 from ...services.background_task_service import background_task_registry
+from ...services.workflow_payload_store import is_workflow_payload_blob_ref
 from ...services.live_request_load import (
     decrement_live_turns,
     increment_live_turns,
@@ -4369,7 +4370,9 @@ def _terminal_tool_progress_payload_from_task_status(
     if not result_summary and progress_status == "completed":
         result_summary = "Completed task result is available."
     elif not result_summary:
-        result_summary = _progress_str(getattr(task_status, "error", None)) or phase_label
+        result_summary = (
+            _progress_str(getattr(task_status, "error", None)) or phase_label
+        )
 
     payload: dict[str, Any] = {
         "status": progress_status,
@@ -6098,6 +6101,8 @@ def _select_durable_turn_response_text(
         _extract_durable_display_text(display_elements),
         outputs.get("response_preview"),
     ):
+        if is_workflow_payload_blob_ref(value):
+            continue
         candidate = coerce_user_visible_response_text(value)
         if candidate:
             return candidate
@@ -6114,6 +6119,67 @@ def _select_durable_turn_response_text(
 
     error_text = _normalise_non_empty_text(outputs.get("error"))
     return error_text or ""
+
+
+def _project_durable_turn_semantic_outcome(
+    *,
+    outputs: Mapping[str, Any],
+    workflow_lifecycle_status: str,
+    instance_error: Any,
+) -> dict[str, Any]:
+    """Keep workflow lifecycle completion distinct from the authored outcome."""
+
+    completion_gate = outputs.get("completion_gate")
+    if not isinstance(completion_gate, Mapping):
+        completion_gate = outputs.get("completion_gate_verdict")
+    safe_to_claim = (
+        completion_gate.get("safe_to_claim_completion")
+        if isinstance(completion_gate, Mapping)
+        else None
+    )
+    receipt = outputs.get("terminal_outcome_receipt")
+    receipt_validation = outputs.get("terminal_outcome_receipt_validation")
+    receipt_valid = bool(
+        isinstance(receipt_validation, Mapping)
+        and receipt_validation.get("valid") is True
+    )
+    receipt_outcome = (
+        _normalise_non_empty_text(receipt.get("outcome"))
+        if isinstance(receipt, Mapping) and receipt_valid
+        else None
+    )
+    failure_detail = (
+        _normalise_non_empty_text(outputs.get("last_action_error"))
+        or _normalise_non_empty_text(outputs.get("error"))
+        or _normalise_non_empty_text(instance_error)
+    )
+
+    if receipt_outcome:
+        semantic_status = receipt_outcome
+        source = "terminal_outcome_receipt"
+    elif safe_to_claim is False:
+        semantic_status = "non_success"
+        source = "completion_gate"
+    elif failure_detail or outputs.get("last_action_failed") is True:
+        semantic_status = "terminal_failure"
+        source = "workflow_failure_evidence"
+    elif safe_to_claim is True:
+        semantic_status = "completion_gate_passed"
+        source = "completion_gate"
+    else:
+        semantic_status = "unknown"
+        source = "missing_terminal_outcome_evidence"
+
+    return {
+        "workflow_lifecycle_status": workflow_lifecycle_status,
+        "user_outcome_status": semantic_status,
+        "user_outcome_source": source,
+        "safe_to_claim_completion": (
+            safe_to_claim if isinstance(safe_to_claim, bool) else None
+        ),
+        "terminal_outcome_receipt_available": bool(receipt_outcome),
+        "semantic_failure_detail": failure_detail,
+    }
 
 
 def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
@@ -6136,19 +6202,84 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
     if not isinstance(request_id, str) or not request_id.strip():
         request_id = getattr(instance, "source_event_id", None)
 
+    workflow_lifecycle_status = getattr(
+        getattr(instance, "status", None), "value", None
+    ) or str(getattr(instance, "status", "") or "")
+    semantic_outcome = _project_durable_turn_semantic_outcome(
+        outputs=outputs,
+        workflow_lifecycle_status=workflow_lifecycle_status,
+        instance_error=getattr(instance, "error", None),
+    )
     claim_diagnostics = build_workflow_instance_claim_diagnostics(instance)
     llm_debug: dict[str, Any] = {
         "response": response_text,
         "request_id": request_id,
         "workflow_instance_id": getattr(instance, "instance_id", None),
-        "workflow_instance_status": getattr(
-            getattr(instance, "status", None), "value", None
-        )
-        or str(getattr(instance, "status", "") or ""),
+        "workflow_instance_status": workflow_lifecycle_status,
         "workflow_instance_current_state": getattr(instance, "current_state", None),
         "background_result_source": "durable_conversation_turn_instance",
+        **semantic_outcome,
         **claim_diagnostics,
     }
+    response_availability = {
+        "status": "available" if response_text else "response_unavailable",
+        "source": (
+            "hydrated_durable_instance_outputs"
+            if response_text
+            else "terminal_instance_outputs_missing_response"
+        ),
+    }
+    unresolved_blob_fields = [
+        key for key, value in outputs.items() if is_workflow_payload_blob_ref(value)
+    ]
+    diagnostics_available = any(
+        isinstance(outputs.get(key), Mapping)
+        and not is_workflow_payload_blob_ref(outputs.get(key))
+        for key in (
+            "turn_execution_record",
+            "turn_execution_diagnostics",
+            "completion_gate",
+            "completion_gate_verdict",
+            "completion_report",
+            "terminal_outcome_receipt",
+        )
+    )
+    diagnostics_availability = {
+        "status": "available" if diagnostics_available else "diagnostics_unavailable",
+        "source": (
+            "hydrated_durable_instance_outputs"
+            if diagnostics_available
+            else "terminal_instance_outputs_missing_diagnostics"
+        ),
+    }
+    llm_debug["response_availability"] = response_availability
+    llm_debug["diagnostics_availability"] = diagnostics_availability
+    payload_hydration = {
+        "status": (
+            "unresolved_blob_references"
+            if unresolved_blob_fields
+            else "hydrated_or_inline"
+        ),
+        "unresolved_output_fields": unresolved_blob_fields,
+    }
+    llm_debug["payload_hydration"] = payload_hydration
+    workflow_failure_evidence = {
+        key: outputs.get(key)
+        for key in (
+            "last_action_error",
+            "last_action_failed",
+            "last_failed_action_outputs",
+            "last_workflow_step_result_envelope",
+            "workflow_step_result_envelopes",
+            "workflow_events",
+            "workflow_result_envelope",
+        )
+        if outputs.get(key) not in (None, "", [], {})
+    }
+    if getattr(instance, "error", None):
+        workflow_failure_evidence["error"] = getattr(instance, "error", None)
+    if workflow_failure_evidence:
+        llm_debug["workflow_failure_evidence"] = workflow_failure_evidence
     for key in (
         "workflow_discovery",
         "workflow_routing",
@@ -6162,6 +6293,8 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
         "terminal_outcome_receipt",
         "terminal_outcome_receipt_validation",
         "response_transformations",
+        "presenter_channels",
+        "response_channels",
     ):
         value = outputs.get(key)
         if isinstance(value, Mapping):
@@ -6188,21 +6321,29 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
             "evidence_payload": outputs.get("completion_gate_evidence_payload"),
         }
 
-    return {
+    result_payload = {
         "request_id": request_id,
         "session_id": session_id,
         "conversation_session_id": session_id,
         "conversation_session_name": None,
         "conversation_session_created": False,
         "response": response_text,
+        "response_availability": response_availability,
+        "diagnostics_availability": diagnostics_availability,
+        "payload_hydration": payload_hydration,
         "response_channels": None,
         "llm_debug": llm_debug,
         "display_elements": dict(display_elements) if display_elements else None,
         "rag_trace": None,
         "background_result_source": "durable_conversation_turn_instance",
         "workflow_instance_id": getattr(instance, "instance_id", None),
+        **semantic_outcome,
         **claim_diagnostics,
     }
+    response_channels = outputs.get("response_channels")
+    if isinstance(response_channels, Mapping):
+        result_payload["response_channels"] = dict(response_channels)
+    return result_payload
 
 
 def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
@@ -6219,6 +6360,28 @@ def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
             ),
             limit=1,
         )
+        if not instances:
+            return None
+        compact_instance = instances[0]
+        instance_id = _normalise_non_empty_text(
+            getattr(compact_instance, "instance_id", None)
+        )
+        get_instance = getattr(manager, "get_instance", None)
+        if instance_id and callable(get_instance):
+            try:
+                hydrated_instance = get_instance(instance_id)
+            except Exception as exc:
+                current_app.logger.warning(
+                    "[background_task] Durable turn payload hydration failed for "
+                    "%s/%s: %s",
+                    task_id,
+                    instance_id,
+                    exc,
+                )
+            else:
+                if hydrated_instance is not None:
+                    return hydrated_instance
+        return compact_instance
     except Exception as exc:
         current_app.logger.warning(
             "[background_task] Durable turn reconciliation failed for task %s: %s",
@@ -6226,12 +6389,15 @@ def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
             exc,
         )
         return None
-    return instances[0] if instances else None
 
 
 def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> Any:
     if status is not None and getattr(status, "status", None) == "completed":
-        return status
+        progress = getattr(status, "progress", None)
+        if isinstance(progress, Mapping) and _normalise_non_empty_text(
+            progress.get("user_outcome_status")
+        ):
+            return status
 
     instance = _find_terminal_durable_turn_instance(task_id)
     if instance is None:
@@ -6255,6 +6421,13 @@ def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> A
         "workflow_instance_id": getattr(instance, "instance_id", None),
         "workflow_status": workflow_status,
         "workflow_current_state": getattr(instance, "current_state", None),
+        "workflow_lifecycle_status": result.get("workflow_lifecycle_status"),
+        "user_outcome_status": result.get("user_outcome_status"),
+        "user_outcome_source": result.get("user_outcome_source"),
+        "safe_to_claim_completion": result.get("safe_to_claim_completion"),
+        "response_availability": result.get("response_availability"),
+        "diagnostics_availability": result.get("diagnostics_availability"),
+        "payload_hydration": result.get("payload_hydration"),
     }
     error = getattr(instance, "error", None) if task_status != "completed" else None
     marker = getattr(background_task_registry, "mark_terminal_external", None)
@@ -6509,7 +6682,9 @@ def _resolve_generate_requested_model(
             resolved_setting = None
         if isinstance(resolved_setting, Mapping):
             active_llm_setting = resolved_setting
-            active_provider = str(resolved_setting.get("provider") or "").strip().lower()
+            active_provider = (
+                str(resolved_setting.get("provider") or "").strip().lower()
+            )
             if active_provider in {"openai", "ollama", "gemini"}:
                 explicit_client_type = active_provider
         model_name = get_active_model_name(
@@ -7580,18 +7755,15 @@ def _finalise_llm_debug_info(
                     else None
                 )
             ),
+            workflow_failure_evidence=llm_debug_info,
         )
         llm_debug_info["turn_execution_record"] = turn_execution_record
-        terminal_outcome_receipt = turn_execution_record.get(
-            "terminal_outcome_receipt"
-        )
+        terminal_outcome_receipt = turn_execution_record.get("terminal_outcome_receipt")
         terminal_outcome_receipt_validation = turn_execution_record.get(
             "terminal_outcome_receipt_validation"
         )
         if isinstance(terminal_outcome_receipt, Mapping):
-            llm_debug_info["terminal_outcome_receipt"] = dict(
-                terminal_outcome_receipt
-            )
+            llm_debug_info["terminal_outcome_receipt"] = dict(terminal_outcome_receipt)
             llm_debug_info["terminal_outcome_receipt_validation"] = (
                 dict(terminal_outcome_receipt_validation)
                 if isinstance(terminal_outcome_receipt_validation, Mapping)
@@ -7606,12 +7778,8 @@ def _finalise_llm_debug_info(
                     else None
                 ),
             )
-            llm_debug_info["tool_observation_ledger"] = dict(
-                tool_observation_ledger
-            )
-            diagnostics_payload = llm_debug_info.get(
-                "turn_execution_diagnostics"
-            )
+            llm_debug_info["tool_observation_ledger"] = dict(tool_observation_ledger)
+            diagnostics_payload = llm_debug_info.get("turn_execution_diagnostics")
             if isinstance(diagnostics_payload, dict):
                 diagnostics_payload["terminal_outcome_receipt"] = dict(
                     terminal_outcome_receipt
@@ -10040,7 +10208,9 @@ def _maybe_handle_tool_inventory_fastpath(
         namespace=prompt_namespace,
         user_id=history_user_id or user_concept_id,
         org_id=org_concept_id,
-        method_catalogue=methods_snapshot if isinstance(methods_snapshot, dict) else None,
+        method_catalogue=(
+            methods_snapshot if isinstance(methods_snapshot, dict) else None
+        ),
     )
 
     if history_user_id:
@@ -10300,9 +10470,7 @@ def onboard_new_member():
             allow_unscoped_claims=False,
         )
     except WorkflowActorScopeError as exc:
-        status_code = (
-            400 if exc.reason == "workflow_actor_namespace_invalid" else 403
-        )
+        status_code = 400 if exc.reason == "workflow_actor_namespace_invalid" else 403
         return (
             jsonify(
                 {
@@ -11437,12 +11605,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         if not screen_prompt_text:
             try:
-                resolved_screen_prompt_id, resolved_screen_prompt_text = (
-                    PromptTemplateService(default_max_chars=24000).resolve_prompt_text(
-                        SCREEN_BACKFILL_STAGE_PROMPT_IDS,
-                        fallback=None,
-                        max_chars=24000,
-                    )
+                (
+                    resolved_screen_prompt_id,
+                    resolved_screen_prompt_text,
+                ) = PromptTemplateService(default_max_chars=24000).resolve_prompt_text(
+                    SCREEN_BACKFILL_STAGE_PROMPT_IDS,
+                    fallback=None,
+                    max_chars=24000,
                 )
                 if isinstance(resolved_screen_prompt_text, str) and (
                     resolved_screen_prompt_text.strip()
@@ -13121,16 +13290,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                         stage="screen_backfill",
                                         component="presenter_routes",
                                         function="_presenter_llm_screen_synthesis",
-                                        decision_class=(
-                                            "presenter_support_invocation"
-                                        ),
+                                        decision_class=("presenter_support_invocation"),
                                         decision_source=(
                                             "represented_prompt_authority"
                                         ),
                                         changed_outcome=True,
-                                        reason_code=(
-                                            "screen_backfill_prompt_invoked"
-                                        ),
+                                        reason_code=("screen_backfill_prompt_invoked"),
                                         possible_inappropriate_python_code_use=False,
                                     )
                                 )
@@ -18660,7 +18825,9 @@ def _perform_legacy_spoken_backfill(
     )
 
 
-def _llm_generate_spoken_backfill(llm_client, system, user, model, model_parameters=None):
+def _llm_generate_spoken_backfill(
+    llm_client, system, user, model, model_parameters=None
+):
     kwargs = {
         "prompt": "Generate <spoken> talk track",
         "context": [

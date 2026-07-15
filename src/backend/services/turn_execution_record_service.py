@@ -332,6 +332,115 @@ def _normalise_failure_codes(raw_codes: Any) -> list[str]:
     return ordered
 
 
+_CRITICAL_WORKFLOW_FAILURE_CODES: tuple[str, ...] = (
+    "workflow_execution_failed",
+    "workflow_llm_step_timeout",
+    "workflow_llm_step_failed",
+    "model_readiness_wait_budget_exhausted",
+    "ollama_request_timeout",
+    "subworkflow_failed",
+)
+
+
+def _extract_critical_workflow_failure_evidence(
+    payload: Mapping[str, Any] | None,
+) -> tuple[list[str], str | None]:
+    """Extract typed terminal failures from bounded workflow evidence surfaces."""
+
+    if not isinstance(payload, Mapping):
+        return [], None
+    queue: list[tuple[Mapping[str, Any], int]] = [(payload, 0)]
+    seen: set[int] = set()
+    codes: list[str] = []
+    detail: str | None = None
+    text_keys = (
+        "error",
+        "error_code",
+        "failure_code",
+        "failure_reason",
+        "failure_detail",
+        "last_action_error",
+        "action_error",
+        "subworkflow_error",
+        "child_error",
+        "timeout_detail",
+    )
+    while queue and len(seen) < 250:
+        surface, depth = queue.pop(0)
+        identity = id(surface)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        surface_status = (_safe_str(surface.get("status")) or "").lower()
+        surface_outcome = (_safe_str(surface.get("action_outcome")) or "").lower()
+        terminal_failure_surface = bool(
+            surface.get("last_action_failed") is True
+            or surface.get("completed") is False
+            or surface.get("child_completed") is False
+            or surface.get("effective_completed") is False
+            or surface_outcome in {"failure", "failed", "error"}
+            or surface_status in {"failure", "failed", "timed_out", "error"}
+            or (_safe_str(surface.get("dispatch_terminal_status")) or "").lower()
+            in {"failure", "failed", "error"}
+            or (depth == 0 and _safe_str(surface.get("error")))
+        )
+        if terminal_failure_surface:
+            termination_reason = surface.get("termination_reason")
+            if isinstance(termination_reason, Mapping):
+                termination_code = _safe_str(termination_reason.get("code"))
+                termination_detail = _safe_str(termination_reason.get("detail"))
+                if termination_code or termination_detail:
+                    if "workflow_execution_failed" not in codes:
+                        codes.append("workflow_execution_failed")
+                    if detail is None:
+                        detail = ": ".join(
+                            value
+                            for value in (termination_code, termination_detail)
+                            if value
+                        )
+            for key in text_keys:
+                text_value = _safe_str(surface.get(key))
+                if not text_value:
+                    continue
+                lowered = text_value.lower()
+                matched = False
+                for code in _CRITICAL_WORKFLOW_FAILURE_CODES:
+                    if code in lowered and code not in codes:
+                        codes.append(code)
+                        matched = True
+                if matched and detail is None:
+                    detail = text_value
+            raw_codes = surface.get("failure_codes")
+            if isinstance(raw_codes, list):
+                for raw_code in raw_codes:
+                    code_value = (_safe_str(raw_code) or "").lower()
+                    for code in _CRITICAL_WORKFLOW_FAILURE_CODES:
+                        if code_value == code and code not in codes:
+                            codes.append(code)
+        if depth >= 5:
+            continue
+        for key, value in surface.items():
+            if key in {
+                "prompt",
+                "prompt_text",
+                "response",
+                "response_text",
+                # Candidate/provider attempts can fail before represented
+                # fallback succeeds. They are duration evidence, not terminal
+                # turn evidence by themselves.
+                "aux_llm_calls",
+                "llm_calls",
+            }:
+                continue
+            if isinstance(value, Mapping):
+                queue.append((value, depth + 1))
+            elif isinstance(value, list):
+                for item in value[-50:]:
+                    if isinstance(item, Mapping):
+                        queue.append((item, depth + 1))
+    return codes, detail
+
+
 def _custom_workflow_execution_progress_observed(
     custom_workflow_execution: Mapping[str, Any] | None,
 ) -> bool:
@@ -442,6 +551,30 @@ def _derive_execution_signal_completion_blocker(
             "status_reason": decision_reason,
             "failure_code": "workflow_llm_step_timeout",
             "failure_codes": ["workflow_llm_step_timeout"],
+            "decision": "escalation_required",
+            "decision_reason": decision_reason,
+            "repeat_eligible": False,
+            "source": "execution_signals",
+            "workflow_id": dispatch_workflow_id or None,
+        }
+
+    critical_workflow_failure_codes = [
+        code
+        for code in failure_codes
+        if code.lower() in set(_CRITICAL_WORKFLOW_FAILURE_CODES)
+    ]
+    if critical_workflow_failure_codes:
+        decision_reason = (
+            dispatch_terminal_failure_detail
+            or "A critical workflow stage failed before completion could be verified."
+        )
+        return {
+            "effect_id": "effect_critical_workflow_failure_1",
+            "effect_type": "workflow_execution",
+            "status": "not_executed",
+            "status_reason": decision_reason,
+            "failure_code": critical_workflow_failure_codes[0],
+            "failure_codes": list(critical_workflow_failure_codes),
             "decision": "escalation_required",
             "decision_reason": decision_reason,
             "repeat_eligible": False,
@@ -4879,6 +5012,7 @@ def _summarise_tool_execution_context(
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
     serialised_invocations: Sequence[Mapping[str, Any]],
     selected_workflow_trace: Mapping[str, Any] | None = None,
+    workflow_failure_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected_workflow_id = (
         _safe_str(workflow_routing.get("workflow_id"))
@@ -5250,6 +5384,18 @@ def _summarise_tool_execution_context(
             dispatch_terminal_failure_reason = "child_workflow_failed"
 
     failure_codes: list[str] = []
+    critical_failure_codes, critical_failure_detail = (
+        _extract_critical_workflow_failure_evidence(workflow_failure_evidence)
+    )
+    failure_codes.extend(critical_failure_codes)
+    if critical_failure_codes:
+        if not dispatch_terminal_status:
+            dispatch_terminal_status = "failed"
+            dispatch_terminal_completed = False
+        if not dispatch_terminal_failure_reason:
+            dispatch_terminal_failure_reason = critical_failure_codes[0]
+        if critical_failure_detail and not dispatch_terminal_failure_detail:
+            dispatch_terminal_failure_detail = critical_failure_detail
     worker_unavailable_with_tool_expectation = (
         tool_plan_stage_event_count > 0
         or tool_execute_stage_event_count > 0
@@ -6131,9 +6277,9 @@ def _normalise_representation_decision_policy(raw: Any) -> dict[str, bool]:
     return policy
 
 
-def _load_representation_domain_profiles_from_vontology() -> tuple[
-    list[dict[str, Any]], dict[str, Any]
-]:
+def _load_representation_domain_profiles_from_vontology() -> (
+    tuple[list[dict[str, Any]], dict[str, Any]]
+):
     requested_profile_concept_ids = list(canonical_representation_profile_concept_ids())
     loaded_profiles, diagnostics = (
         load_representation_contract_profiles_from_concept_ids(
@@ -8487,9 +8633,7 @@ def _derive_completion_gate(
         "completion_outcome": (
             "success"
             if decision == "completed"
-            else "inconclusive"
-            if decision == "partial"
-            else "failure"
+            else "inconclusive" if decision == "partial" else "failure"
         ),
     }
     return {
@@ -8532,6 +8676,7 @@ def build_turn_execution_record(
     required_tool_obligation_ledger: Mapping[str, Any] | None = None,
     tool_observation_ledger: Mapping[str, Any] | None = None,
     method_catalogue: Mapping[str, Any] | None = None,
+    workflow_failure_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
         actor_concept_id=actor_concept_id,
@@ -8595,15 +8740,19 @@ def build_turn_execution_record(
             ("aux_llm_calls", {"aux_llm_calls": list(aux_llm_calls or ())}),
             (
                 "turn_execution_diagnostics",
-                turn_execution_diagnostics
-                if isinstance(turn_execution_diagnostics, Mapping)
-                else None,
+                (
+                    turn_execution_diagnostics
+                    if isinstance(turn_execution_diagnostics, Mapping)
+                    else None
+                ),
             ),
             (
                 "selected_workflow_trace",
-                selected_workflow_trace
-                if isinstance(selected_workflow_trace, Mapping)
-                else None,
+                (
+                    selected_workflow_trace
+                    if isinstance(selected_workflow_trace, Mapping)
+                    else None
+                ),
             ),
             (
                 "completion_report",
@@ -8736,6 +8885,7 @@ def build_turn_execution_record(
         aux_llm_calls=aux_llm_calls,
         serialised_invocations=serialised_invocations,
         selected_workflow_trace=selected_workflow_trace_payload,
+        workflow_failure_evidence=workflow_failure_evidence,
     )
     dispatched_workflow_id = _safe_str(execution_summary.get("dispatch_workflow_id"))
     if dispatched_workflow_id and not selected_workflow_id:
@@ -9375,21 +9525,27 @@ def build_turn_execution_record(
         (
             (
                 "turn_execution_diagnostics",
-                turn_execution_diagnostics
-                if isinstance(turn_execution_diagnostics, Mapping)
-                else None,
+                (
+                    turn_execution_diagnostics
+                    if isinstance(turn_execution_diagnostics, Mapping)
+                    else None
+                ),
             ),
             (
                 "selected_workflow_trace",
-                selected_workflow_trace_payload
-                if isinstance(selected_workflow_trace_payload, Mapping)
-                else None,
+                (
+                    selected_workflow_trace_payload
+                    if isinstance(selected_workflow_trace_payload, Mapping)
+                    else None
+                ),
             ),
             (
                 "completion_report",
-                completion_report_payload
-                if isinstance(completion_report_payload, Mapping)
-                else None,
+                (
+                    completion_report_payload
+                    if isinstance(completion_report_payload, Mapping)
+                    else None
+                ),
             ),
         )
     )

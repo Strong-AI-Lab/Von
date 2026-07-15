@@ -1287,6 +1287,19 @@ That note is the preferred operational runbook when you need to keep replaying
 the real server path, inspecting exact turn telemetry, and iterating until the
 behaviour is both user-correct and telemetry-consistent.
 
+### 7.8 Durable background-result read-back
+
+Treat `list_instances` as a compact locator surface, not as proof that large
+durable inputs, outputs, or diagnostics are hydrated. Before projecting a
+terminal conversation-turn instance into `/von/api/task/result`, fetch the
+canonical instance by ID so workflow-payload blob references are resolved.
+
+If hydration remains unavailable, expose typed `response_unavailable`,
+`diagnostics_unavailable`, and unresolved-blob facts. Do not render a blob
+reference as response text or turn a lifecycle `completed` status into a claim
+of user-task success. Report workflow lifecycle and the represented terminal
+outcome/completion-gate evidence as separate fields.
+
 ## 8. Practical Refactoring and Consistency Habits
 
 - Search first before adding helpers or parallel pathways.

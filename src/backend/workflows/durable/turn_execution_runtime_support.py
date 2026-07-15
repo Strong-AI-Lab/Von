@@ -314,6 +314,64 @@ def _text_contains_workflow_llm_timeout(value: Any) -> bool:
     return bool(text and "workflow_llm_step_timeout" in text.lower())
 
 
+def _iter_bounded_failure_surfaces(
+    *payloads: Mapping[str, Any] | None,
+) -> list[Mapping[str, Any]]:
+    """Return bounded nested execution surfaces that may carry failure facts."""
+
+    nested_mapping_keys = {
+        "completion_report",
+        "completion_gate",
+        "completion_gate_verdict",
+        "evidence_payload",
+        "selected_workflow_trace",
+        "workflow_routing",
+        "workflow_routing_diagnostics",
+        "orchestrator_result",
+        "last_failed_action_outputs",
+        "last_workflow_step_result_envelope",
+        "llm_step_envelope",
+        "subworkflow_invocation",
+        "subworkflow_result_envelope",
+        "workflow_result_envelope",
+        "result_envelope",
+        "result",
+    }
+    nested_sequence_keys = {
+        "aux_llm_calls",
+        "llm_calls",
+        "workflow_events",
+        "runtime_events",
+        "workflow_step_result_envelopes",
+    }
+    queue: list[tuple[Mapping[str, Any], int]] = [
+        (payload, 0) for payload in payloads if isinstance(payload, Mapping)
+    ]
+    surfaces: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+    while queue and len(surfaces) < 250:
+        surface, depth = queue.pop(0)
+        identity = id(surface)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        surfaces.append(surface)
+        if depth >= 5:
+            continue
+        for key in nested_mapping_keys:
+            nested = surface.get(key)
+            if isinstance(nested, Mapping):
+                queue.append((nested, depth + 1))
+        for key in nested_sequence_keys:
+            nested_items = surface.get(key)
+            if not isinstance(nested_items, list):
+                continue
+            for nested in nested_items[-50:]:
+                if isinstance(nested, Mapping):
+                    queue.append((nested, depth + 1))
+    return surfaces
+
+
 def _workflow_llm_timeout_blocker_from_turn_data(
     *,
     data: Mapping[str, Any],
@@ -321,19 +379,7 @@ def _workflow_llm_timeout_blocker_from_turn_data(
 ) -> dict[str, Any] | None:
     """Detect structured workflow-LLM timeouts that make completion unsafe."""
 
-    surfaces: list[Mapping[str, Any]] = [data]
-    if isinstance(record, Mapping):
-        surfaces.append(record)
-    for key in (
-        "completion_report",
-        "selected_workflow_trace",
-        "workflow_routing",
-        "workflow_routing_diagnostics",
-        "orchestrator_result",
-    ):
-        surface = data.get(key)
-        if isinstance(surface, Mapping):
-            surfaces.append(surface)
+    surfaces = _iter_bounded_failure_surfaces(data, record)
 
     timeout_detail: str | None = None
     timeout_stage: str | None = None
@@ -365,6 +411,11 @@ def _workflow_llm_timeout_blocker_from_turn_data(
             "workflow_failure_detail",
             "selected_workflow_failure_detail",
             "llm_step_error",
+            "last_action_error",
+            "action_error",
+            "subworkflow_error",
+            "child_error",
+            "timeout_detail",
             "final_response",
             "response_text",
             "current_response",
@@ -376,29 +427,6 @@ def _workflow_llm_timeout_blocker_from_turn_data(
                 break
         if timeout_detail:
             break
-
-    if not timeout_detail:
-        for collection_key in ("aux_llm_calls", "llm_calls", "workflow_events"):
-            collection = data.get(collection_key)
-            if not isinstance(collection, list):
-                continue
-            for item in collection:
-                if not isinstance(item, Mapping):
-                    continue
-                if (
-                    _text_contains_workflow_llm_timeout(item.get("error"))
-                    or _text_contains_workflow_llm_timeout(item.get("failure_code"))
-                    or _text_contains_workflow_llm_timeout(item.get("note"))
-                ):
-                    timeout_detail = (
-                        _safe_str(item.get("error"))
-                        or _safe_str(item.get("failure_code"))
-                        or _safe_str(item.get("note"))
-                    )
-                    timeout_stage = _safe_str(item.get("stage"))
-                    break
-            if timeout_detail:
-                break
 
     if not timeout_detail:
         return None
@@ -2967,9 +2995,7 @@ def run_turn_execution_critic(
     effective_critic_verdict = (
         data.get("critic_verdict")
         if isinstance(data.get("critic_verdict"), Mapping)
-        else critic_verdict_input
-        if isinstance(critic_verdict_input, Mapping)
-        else None
+        else critic_verdict_input if isinstance(critic_verdict_input, Mapping) else None
     )
 
     turn_execution_record = build_turn_execution_record(
@@ -3018,6 +3044,7 @@ def run_turn_execution_critic(
             else None
         ),
         method_catalogue=method_catalogue,
+        workflow_failure_evidence=data,
     )
 
     completion_gate = turn_execution_record.get("completion_gate")

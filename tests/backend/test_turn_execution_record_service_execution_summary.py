@@ -104,9 +104,7 @@ def test_turn_record_carries_decision_attribution_payload() -> None:
     )
 
     attribution = record["decision_attribution"]
-    assert (
-        attribution["schema_version"] == TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION
-    )
+    assert attribution["schema_version"] == TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION
     summary = attribution["summary"]
     assert set(summary["decision_kind_breakdown"]) == set(DECISION_KINDS)
     assert summary["decision_kind_breakdown"]["discovery"] == "represented"
@@ -2185,6 +2183,86 @@ def test_build_turn_execution_correctness_summary_marks_workflow_llm_timeout_fal
     assert summary["failure_mode"] == "false_completion_gate_state"
     assert summary["overall_outcome"] == "false_success"
     assert summary["metric_labels"]["false_success"] is True
+
+
+def test_turn_record_fails_closed_on_nested_pre_dispatch_subworkflow_timeout() -> None:
+    record = build_turn_execution_record(
+        request_id="req-2494-timeout",
+        session_id="session-2494-timeout",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Find the latest unrepresented paper in recent email.",
+        response_text="",
+        interaction_timestamp_utc="2026-07-15T00:00:00Z",
+        workflow_failure_evidence={
+            "last_action_failed": True,
+            "last_action_error": (
+                "subworkflow_failed:#V#turn_context_adjudication_workflow:"
+                "workflow_llm_step_timeout:context_adjudication"
+            ),
+            "last_failed_action_outputs": {
+                "subworkflow_invocation": {
+                    "child_workflow_id": "#V#turn_context_adjudication_workflow",
+                    "child_completed": False,
+                    "child_error": (
+                        "workflow_llm_step_timeout:LLM call timed out after 45s"
+                    ),
+                }
+            },
+        },
+    )
+
+    dispatch = record["workflow_routing_diagnostics"]["dispatch"]
+    assert "workflow_llm_step_timeout" in dispatch["failure_codes"]
+    assert "subworkflow_failed" in dispatch["failure_codes"]
+    assert dispatch["dispatch_terminal_status"] == "failed"
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+    assert record["completion_gate"]["requires_follow_up"] is True
+    assert (
+        record["execution_correctness"]["metric_labels"]["successful_completion"]
+        is False
+    )
+
+
+def test_turn_record_fails_closed_on_terminal_workflow_use_episode() -> None:
+    record = build_turn_execution_record(
+        request_id="req-2494-provider-failure",
+        session_id="session-2494-provider-failure",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Retrieve represented information about an organisation.",
+        response_text="The authoritative workflow failed before discovery.",
+        interaction_timestamp_utc="2026-07-15T00:00:00Z",
+        workflow_failure_evidence={
+            "workflow_use_episodes": [
+                {
+                    "workflow_id": "#V#conversation_turn_execution_workflow",
+                    "source": "conversation_turn_supervised",
+                    "completed": False,
+                    "final_state": "expected_outcome_inference",
+                    "termination_reason": {
+                        "code": "provider_unavailable",
+                        "detail": "All represented model-policy candidates failed.",
+                    },
+                }
+            ]
+        },
+    )
+
+    dispatch = record["workflow_routing_diagnostics"]["dispatch"]
+    assert "workflow_execution_failed" in dispatch["failure_codes"]
+    assert dispatch["dispatch_terminal_status"] == "failed"
+    assert dispatch["dispatch_terminal_failure_detail"] == (
+        "provider_unavailable: All represented model-policy candidates failed."
+    )
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+    assert record["completion_gate"]["requires_follow_up"] is True
+    assert (
+        record["execution_correctness"]["metric_labels"]["successful_completion"]
+        is False
+    )
 
 
 def test_build_turn_execution_correctness_summary_marks_missing_custom_dispatch_false_success() -> (

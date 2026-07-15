@@ -239,6 +239,26 @@ def _build_auto_pull_error_message(
     )
 
 
+def _split_request_timeout_from_llm_params(
+    llm_params: Optional[Mapping[str, Any]],
+) -> tuple[Dict[str, Any], float | None]:
+    """Separate provider options from the caller-owned request budget."""
+
+    if not isinstance(llm_params, Mapping):
+        return {}, None
+    params = dict(llm_params)
+    raw_timeout = params.pop("timeout_seconds", None)
+    if raw_timeout is None:
+        raw_timeout = params.pop("request_timeout_seconds", None)
+    try:
+        timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+    except (TypeError, ValueError):
+        timeout_seconds = None
+    if timeout_seconds is not None:
+        timeout_seconds = max(1.0, min(600.0, timeout_seconds))
+    return params, timeout_seconds
+
+
 def get_ollama_auto_pull_state_snapshot() -> Dict[str, Any]:
     """Return diagnostics for recent Ollama model auto-pull activity."""
     with _OLLAMA_AUTO_PULL_LOCK:
@@ -253,6 +273,12 @@ def get_ollama_auto_pull_state_snapshot() -> Dict[str, Any]:
                 "window_started_at_monotonic": state.get("window_started_at_monotonic"),
                 "attempts_in_window": int(state.get("attempts_in_window", 0) or 0),
                 "last_waiter_count": int(state.get("last_waiter_count", 0) or 0),
+                "last_caller_wait_timeout_seconds": state.get(
+                    "last_caller_wait_timeout_seconds"
+                ),
+                "caller_wait_timeout_count": int(
+                    state.get("caller_wait_timeout_count", 0) or 0
+                ),
             }
     return {
         "enabled": bool(_OLLAMA_AUTO_PULL_ENABLED),
@@ -914,6 +940,21 @@ class OllamaClient(LLMInterface):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
+        ollama_params, request_timeout_seconds = _split_request_timeout_from_llm_params(
+            llm_params
+        )
+        request_started = time.monotonic()
+        request_deadline = (
+            request_started + request_timeout_seconds
+            if request_timeout_seconds is not None
+            else None
+        )
+
+        def _remaining_request_seconds(*, reserve_seconds: float = 0.0) -> float | None:
+            if request_deadline is None:
+                return None
+            return max(0.0, request_deadline - time.monotonic() - reserve_seconds)
+
         # JVNAUTOSCI-2506: opt-in exact-match response cache for test/replay
         # loops. Enabled only via VON_LLM_RESPONSE_CACHE or on agent-test
         # instances; hits are logged and counted so telemetry can expose them.
@@ -935,7 +976,7 @@ class OllamaClient(LLMInterface):
                 host=self.host,
                 model=target_model,
                 messages=_cache_messages,
-                options=llm_params,
+                options=ollama_params,
             )
             response_prompt_key = build_llm_prompt_key(
                 messages=_cache_messages,
@@ -973,7 +1014,7 @@ class OllamaClient(LLMInterface):
         messages = to_ollama_messages(conv)
 
         ollama_options = {}
-        if llm_params:  # REFACTORING_NOTE: Ensure llm_params are processed correctly
+        if ollama_params:
             # Only pass parameters that are valid for ollama.Client.chat options
             valid_ollama_options = [
                 "mirostat",
@@ -992,7 +1033,7 @@ class OllamaClient(LLMInterface):
                 "top_k",
                 "top_p",
             ]
-            for key, value in llm_params.items():
+            for key, value in ollama_params.items():
                 if key in valid_ollama_options:
                     ollama_options[key] = value
                 else:
@@ -1010,7 +1051,28 @@ class OllamaClient(LLMInterface):
                 # self._ensure_model_pulled(target_model)
 
                 _generate_started = time.perf_counter()
-                response = self.client.chat(
+                remaining_request_seconds = _remaining_request_seconds()
+                if (
+                    remaining_request_seconds is not None
+                    and remaining_request_seconds <= 0
+                ):
+                    raise TimeoutError(
+                        "ollama_request_timeout: caller request budget exhausted"
+                    )
+                request_client = self.client
+                if remaining_request_seconds is not None:
+                    _ollama_mod = _import_ollama()
+                    client_type = (
+                        getattr(_ollama_mod, "Client", None)
+                        if _ollama_mod is not None
+                        else None
+                    )
+                    if callable(client_type):
+                        request_client = client_type(
+                            host=self.host,
+                            timeout=max(0.1, remaining_request_seconds),
+                        )
+                response = request_client.chat(
                     model=target_model,
                     messages=messages,
                     options=(
@@ -1055,7 +1117,12 @@ class OllamaClient(LLMInterface):
                         and not auto_pull_retry_consumed
                     ):
                         auto_pull_retry_consumed = True
-                        auto_pull_result = self._attempt_model_auto_pull(target_model)
+                        auto_pull_result = self._attempt_model_auto_pull(
+                            target_model,
+                            wait_timeout_seconds=_remaining_request_seconds(
+                                reserve_seconds=0.5
+                            ),
+                        )
                         if bool(auto_pull_result.get("succeeded")):
                             logger.info(
                                 "Ollama auto-pull recovered missing model for generation model=%s details=%s",
@@ -1089,6 +1156,15 @@ class OllamaClient(LLMInterface):
                         and attempt < max_retries - 1
                     ):
                         delay = base_delay * (2**attempt)
+                        remaining_request_seconds = _remaining_request_seconds()
+                        if (
+                            remaining_request_seconds is not None
+                            and remaining_request_seconds <= delay
+                        ):
+                            raise RuntimeError(
+                                "ollama_request_timeout: retry backoff would exceed "
+                                "the caller request budget"
+                            ) from e
                         logger.info(
                             f"Retrying after {delay} seconds due to CUDA error (500)..."
                         )
@@ -1106,6 +1182,15 @@ class OllamaClient(LLMInterface):
                 )
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)
+                    remaining_request_seconds = _remaining_request_seconds()
+                    if (
+                        remaining_request_seconds is not None
+                        and remaining_request_seconds <= delay
+                    ):
+                        raise RuntimeError(
+                            "ollama_request_timeout: retry backoff would exceed "
+                            "the caller request budget"
+                        ) from e
                     logger.info(
                         f"Retrying after {delay} seconds due to unexpected error..."
                     )
@@ -1341,9 +1426,11 @@ class OllamaClient(LLMInterface):
             # Fall back to Python client pull if CLI is unavailable.
             self.client.pull(model_name)
             return
-        except Exception:
-            self.client.pull(model_name)
-            return
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"ollama pull timed out for {model_name} after "
+                f"{_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS:.1f}s"
+            ) from exc
 
         if process.returncode != 0:
             stderr_text = str(process.stderr or "").strip()
@@ -1351,7 +1438,46 @@ class OllamaClient(LLMInterface):
             detail = stderr_text or stdout_text or f"return_code={process.returncode}"
             raise RuntimeError(f"ollama pull failed for {model_name}: {detail}")
 
-    def _attempt_model_auto_pull(self, model_name: str) -> Dict[str, Any]:
+    def _complete_model_auto_pull(
+        self,
+        *,
+        model_token: str,
+        event: threading.Event,
+    ) -> None:
+        """Complete one shared pull without retaining any caller's deadline."""
+
+        pull_started = time.monotonic()
+        pull_error: str | None = None
+        pull_succeeded = False
+        try:
+            if not self._is_model_available(model_token):
+                self._pull_model(model_token)
+            pull_succeeded = self._is_model_available(model_token)
+            if not pull_succeeded:
+                pull_error = (
+                    f"Model '{model_token}' still unavailable after auto-pull attempt."
+                )
+        except Exception as exc:
+            pull_error = str(exc)
+            pull_succeeded = False
+        pull_elapsed = round(time.monotonic() - pull_started, 3)
+
+        with _OLLAMA_AUTO_PULL_LOCK:
+            state = _OLLAMA_AUTO_PULL_STATE.get(model_token, {})
+            if state.get("event") is not event:
+                return
+            state["in_flight"] = False
+            state["last_status"] = "succeeded" if pull_succeeded else "failed"
+            state["last_error"] = pull_error
+            state["last_elapsed_seconds"] = pull_elapsed
+            event.set()
+
+    def _attempt_model_auto_pull(
+        self,
+        model_name: str,
+        *,
+        wait_timeout_seconds: float | None = None,
+    ) -> Dict[str, Any]:
         model_token = str(model_name or "").strip()
         now = time.monotonic()
         result: Dict[str, Any] = {
@@ -1394,6 +1520,8 @@ class OllamaClient(LLMInterface):
                     "last_elapsed_seconds": 0.0,
                     "last_attempt_at_monotonic": None,
                     "last_waiter_count": 0,
+                    "last_caller_wait_timeout_seconds": None,
+                    "caller_wait_timeout_count": 0,
                 },
             )
 
@@ -1408,113 +1536,114 @@ class OllamaClient(LLMInterface):
                     int(state.get("last_waiter_count", 0) or 0) + 1
                 )
                 waiter_event = event
+                owns_pull = False
             else:
-                waiter_event = None
+                owns_pull = True
+                window_started = float(state.get("window_started_at_monotonic") or now)
+                attempts_in_window = int(state.get("attempts_in_window", 0) or 0)
+                if (now - window_started) >= _OLLAMA_AUTO_PULL_COOLDOWN_SECONDS:
+                    window_started = now
+                    attempts_in_window = 0
 
-        if waiter_event is not None:
-            waiter_started = time.monotonic()
-            waiter_event.wait(timeout=_OLLAMA_AUTO_PULL_TIMEOUT_SECONDS)
-            wait_elapsed = round(time.monotonic() - waiter_started, 3)
-            with _OLLAMA_AUTO_PULL_LOCK:
-                state_after_wait = _OLLAMA_AUTO_PULL_STATE.get(model_token, {})
-                status_after_wait = str(state_after_wait.get("last_status") or "")
-                last_error = state_after_wait.get("last_error")
-                last_elapsed = float(
-                    state_after_wait.get("last_elapsed_seconds") or 0.0
+                if attempts_in_window >= _OLLAMA_AUTO_PULL_RETRY_BUDGET:
+                    state["window_started_at_monotonic"] = window_started
+                    state["attempts_in_window"] = attempts_in_window
+                    state["last_status"] = "skipped_retry_budget"
+                    state["last_error"] = (
+                        "Auto-pull retry budget exhausted; wait for cooldown or "
+                        "increase VON_OLLAMA_AUTO_PULL_RETRY_BUDGET."
+                    )
+                    result.update(
+                        {
+                            "attempted": True,
+                            "failed": True,
+                            "retry_outcome": "retry_budget_exhausted",
+                            "error": state["last_error"],
+                        }
+                    )
+                    return result
+
+                state["window_started_at_monotonic"] = window_started
+                state["attempts_in_window"] = attempts_in_window + 1
+                state["last_attempt_at_monotonic"] = now
+                state["in_flight"] = True
+                event = state.get("event")
+                if not isinstance(event, threading.Event):
+                    event = threading.Event()
+                    state["event"] = event
+                event.clear()
+                waiter_event = event
+
+        if owns_pull:
+            threading.Thread(
+                target=self._complete_model_auto_pull,
+                kwargs={"model_token": model_token, "event": waiter_event},
+                name=f"ollama-auto-pull-{model_token}",
+                daemon=True,
+            ).start()
+
+        wait_budget = _OLLAMA_AUTO_PULL_TIMEOUT_SECONDS
+        if wait_timeout_seconds is not None:
+            try:
+                wait_budget = min(wait_budget, max(0.0, float(wait_timeout_seconds)))
+            except (TypeError, ValueError):
+                pass
+        waiter_started = time.monotonic()
+        completed = bool(waiter_event and waiter_event.wait(timeout=wait_budget))
+        wait_elapsed = round(time.monotonic() - waiter_started, 3)
+        with _OLLAMA_AUTO_PULL_LOCK:
+            state_after_wait = _OLLAMA_AUTO_PULL_STATE.get(model_token, {})
+            state_after_wait["last_caller_wait_timeout_seconds"] = round(wait_budget, 3)
+            if not completed:
+                state_after_wait["caller_wait_timeout_count"] = (
+                    int(state_after_wait.get("caller_wait_timeout_count", 0) or 0) + 1
                 )
+            status_after_wait = str(state_after_wait.get("last_status") or "")
+            last_error = state_after_wait.get("last_error")
+            last_elapsed = float(state_after_wait.get("last_elapsed_seconds") or 0.0)
+
+        if not completed:
             result.update(
                 {
                     "attempted": True,
+                    "succeeded": False,
+                    "failed": True,
+                    "in_progress": True,
+                    "caller_wait_timed_out": True,
                     "elapsed_seconds": wait_elapsed,
-                    "retry_outcome": "joined_single_flight",
-                    "succeeded": status_after_wait == "succeeded",
-                    "failed": status_after_wait != "succeeded",
-                    "joined_single_flight": True,
-                    "pull_elapsed_seconds": round(last_elapsed, 3),
+                    "wait_timeout_seconds": round(wait_budget, 3),
+                    "retry_outcome": "pull_in_progress_caller_budget_exhausted",
+                    "failure_code": "model_readiness_wait_budget_exhausted",
+                    "joined_single_flight": not owns_pull,
+                    "error": (
+                        "Shared Ollama model pull is still in progress after the "
+                        "caller's wait budget expired."
+                    ),
                 }
             )
-            if last_error:
-                result["error"] = str(last_error)
             return result
 
-        with _OLLAMA_AUTO_PULL_LOCK:
-            state = _OLLAMA_AUTO_PULL_STATE[model_token]
-            window_started = float(state.get("window_started_at_monotonic") or now)
-            attempts_in_window = int(state.get("attempts_in_window", 0) or 0)
-            if (now - window_started) >= _OLLAMA_AUTO_PULL_COOLDOWN_SECONDS:
-                window_started = now
-                attempts_in_window = 0
-
-            if attempts_in_window >= _OLLAMA_AUTO_PULL_RETRY_BUDGET:
-                state["window_started_at_monotonic"] = window_started
-                state["attempts_in_window"] = attempts_in_window
-                state["last_status"] = "skipped_retry_budget"
-                state["last_error"] = (
-                    "Auto-pull retry budget exhausted; wait for cooldown or "
-                    "increase VON_OLLAMA_AUTO_PULL_RETRY_BUDGET."
-                )
-                result.update(
-                    {
-                        "attempted": True,
-                        "failed": True,
-                        "retry_outcome": "retry_budget_exhausted",
-                        "error": state["last_error"],
-                    }
-                )
-                return result
-
-            state["window_started_at_monotonic"] = window_started
-            state["attempts_in_window"] = attempts_in_window + 1
-            state["last_attempt_at_monotonic"] = now
-            state["in_flight"] = True
-            event = state.get("event")
-            if not isinstance(event, threading.Event):
-                event = threading.Event()
-                state["event"] = event
-            event.clear()
-
-        pull_started = time.monotonic()
-        pull_error: str | None = None
-        pull_succeeded = False
-        try:
-            if not self._is_model_available(model_token):
-                self._pull_model(model_token)
-            pull_succeeded = self._is_model_available(model_token)
-            if not pull_succeeded:
-                pull_error = (
-                    f"Model '{model_token}' still unavailable after auto-pull attempt."
-                )
-        except Exception as exc:
-            pull_error = str(exc)
-            pull_succeeded = False
-        pull_elapsed = round(time.monotonic() - pull_started, 3)
-
-        with _OLLAMA_AUTO_PULL_LOCK:
-            state = _OLLAMA_AUTO_PULL_STATE.get(model_token, {})
-            state["in_flight"] = False
-            state["last_status"] = "succeeded" if pull_succeeded else "failed"
-            state["last_error"] = pull_error
-            state["last_elapsed_seconds"] = pull_elapsed
-            event = state.get("event")
-            if isinstance(event, threading.Event):
-                event.set()
-
+        pull_succeeded = status_after_wait == "succeeded"
         result.update(
             {
                 "attempted": True,
                 "succeeded": pull_succeeded,
                 "failed": not pull_succeeded,
-                "elapsed_seconds": pull_elapsed,
-                "retry_outcome": "retried_after_pull"
-                if pull_succeeded
-                else "pull_failed",
+                "elapsed_seconds": wait_elapsed,
+                "retry_outcome": (
+                    "joined_single_flight"
+                    if not owns_pull
+                    else "retried_after_pull" if pull_succeeded else "pull_failed"
+                ),
+                "joined_single_flight": not owns_pull,
+                "pull_elapsed_seconds": round(last_elapsed, 3),
                 "auto_pull_attempted": True,
                 "auto_pull_succeeded": pull_succeeded,
                 "auto_pull_failed": not pull_succeeded,
             }
         )
-        if pull_error:
-            result["error"] = pull_error
+        if last_error:
+            result["error"] = str(last_error)
         return result
 
 
@@ -1562,19 +1691,7 @@ class OpenAIClient(LLMInterface):
     def _split_request_timeout_from_llm_params(
         llm_params: Optional[Dict[str, Any]],
     ) -> tuple[Dict[str, Any], float | None]:
-        if not isinstance(llm_params, dict):
-            return {}, None
-        params = dict(llm_params)
-        raw_timeout = params.pop("timeout_seconds", None)
-        if raw_timeout is None:
-            raw_timeout = params.pop("request_timeout_seconds", None)
-        try:
-            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
-        except (TypeError, ValueError):
-            timeout_seconds = None
-        if timeout_seconds is not None:
-            timeout_seconds = max(1.0, min(600.0, timeout_seconds))
-        return params, timeout_seconds
+        return _split_request_timeout_from_llm_params(llm_params)
 
     def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""

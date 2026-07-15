@@ -1124,6 +1124,7 @@ def _build_subworkflow_handler(
                 "child_workflow_id": child_workflow_id,
                 "child_completed": bool(child_result.completed),
                 "child_final_state": _normalise_text(child_result.final_state),
+                "child_error": _normalise_text(child_result.error) or None,
                 "invocation_count": invocation_count + 1,
                 "invocation_limit": invocation_limit,
             },

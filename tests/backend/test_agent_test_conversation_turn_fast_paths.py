@@ -1725,6 +1725,56 @@ def test_completion_gate_blocks_workflow_llm_timeout_with_zero_required_effects(
     assert evidence["execution_signal_blocker"]["source"] == "workflow_llm_timeout"
 
 
+def test_completion_gate_finds_timeout_inside_failed_subworkflow_outputs(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    request = SimpleNamespace(
+        environment=WorkflowEnvironment(llm_client=_ExplodingLLM()),
+        data={
+            "last_action_failed": True,
+            "last_action_error": (
+                "subworkflow_failed:#V#turn_context_adjudication_workflow:"
+                "workflow_llm_step_timeout:context_adjudication"
+            ),
+            "last_failed_action_outputs": {
+                "subworkflow_invocation": {
+                    "child_completed": False,
+                    "child_error": (
+                        "workflow_llm_step_timeout:LLM call timed out after 45s"
+                    ),
+                }
+            },
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "completed",
+                    "safe_to_claim_completion": True,
+                    "requires_follow_up": False,
+                    "evidence_payload": {"required_effect_count": 0},
+                },
+                "required_effects": [],
+                "critic": {"summary": {}},
+            },
+            "aux_llm_calls": [],
+            "invocations": [],
+        },
+    )
+
+    result = run_turn_execution_completion_gate(
+        request,
+        annotation_component="test",
+        annotation_function="test_nested_subworkflow_timeout",
+        introspection_auto_apply_env="VON_TEST_AUTO_APPLY",
+    )
+
+    assert result.status == "success"
+    assert result.outputs["completion_gate_safe_to_claim_completion"] is False
+    assert result.outputs["completion_gate_requires_follow_up"] is True
+    assert result.outputs["completion_gate_blocking_failure_codes"] == [
+        "workflow_llm_step_timeout"
+    ]
+
+
 def test_agent_test_tool_calling_plan_uses_relation_summary(monkeypatch) -> None:
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())

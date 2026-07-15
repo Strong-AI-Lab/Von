@@ -1049,7 +1049,10 @@ def _model_parameters_with_timeout(
 ) -> Mapping[str, Any] | None:
     params = dict(model_parameters) if isinstance(model_parameters, Mapping) else {}
     if timeout_seconds is not None and timeout_seconds > 0:
-        params["timeout_seconds"] = timeout_seconds
+        params["request_timeout_seconds"] = (
+            _conversation_turn_llm_fallback_guard_timeout_sec(timeout_seconds)
+            or timeout_seconds
+        )
     return params or None
 
 
@@ -1938,6 +1941,28 @@ def _record_workflow_llm_duration_for_entry(
     duration_ms: float | None,
     workflow_stage_id: str | None = None,
 ) -> None:
+    status = _context_string(entry.get("status")).lower()
+    failure_kind = _context_string(entry.get("failure_kind")).lower()
+    if failure_kind == "llm_call_timeout" or status == "timed_out":
+        outcome = "timeout"
+    elif entry.get("success") is True or status in {"success", "succeeded", "ok"}:
+        outcome = "success"
+    elif (
+        entry.get("success") is False
+        or entry.get("error")
+        or status
+        in {
+            "failure",
+            "failed",
+            "error",
+        }
+    ):
+        outcome = "failure"
+    else:
+        # This recorder is invoked after a completed call or with an explicit
+        # timeout/failure entry. A completed entry without error fields is a
+        # successful duration observation.
+        outcome = "success"
     try:
         baseline = record_workflow_llm_step_duration_observation(
             workflow_id=request.workflow_id,
@@ -1948,6 +1973,7 @@ def _record_workflow_llm_duration_for_entry(
             model_name=model_name,
             duration_ms=duration_ms,
             request_id=_request_id_from_data(request.data),
+            outcome=outcome,
         )
     except Exception as exc:
         entry["duration_stats_error"] = exc.__class__.__name__
@@ -2052,11 +2078,18 @@ def _run_llm_call_with_timeout(
     selected_candidate: Mapping[str, Any] | None,
     timeout_seconds: float | None,
     llm_calls: list[dict[str, Any]],
+    hard_guard_timeout_seconds: float | None = None,
+    record_advisory_crossing: bool = True,
 ) -> Any:
     _check_request_cancellation(request)
     started_at = time.perf_counter()
     if timeout_seconds is None or timeout_seconds <= 0:
         return operation()
+    advisory_timeout_seconds = timeout_seconds
+    hard_guard_timeout_seconds = hard_guard_timeout_seconds or (
+        _conversation_turn_llm_fallback_guard_timeout_sec(timeout_seconds)
+        or timeout_seconds
+    )
 
     emit_progress = (
         request.data.get("emit_progress")
@@ -2070,10 +2103,11 @@ def _run_llm_call_with_timeout(
             {
                 "phase": telemetry_phase,
                 "status": "thinking",
-                "subtask": "bounded LLM call",
-                "result_summary": "Running bounded LLM call for workflow step.",
+                "subtask": "LLM call",
+                "result_summary": "Running LLM call for workflow step.",
                 "workflow_state_id": telemetry_phase,
-                "llm_timeout_seconds": timeout_seconds,
+                "llm_advisory_budget_seconds": advisory_timeout_seconds,
+                "llm_hard_guard_seconds": hard_guard_timeout_seconds,
                 "prompt_id": prompt_id,
                 "model_name": selected_model,
                 "provider": (
@@ -2103,9 +2137,46 @@ def _run_llm_call_with_timeout(
         daemon=True,
     )
     thread.start()
+    advisory_crossing_recorded = False
     while not result_event.wait(timeout=0.25):
         _check_request_cancellation(request)
-        if time.perf_counter() - started_at < timeout_seconds:
+        elapsed_seconds = time.perf_counter() - started_at
+        if (
+            elapsed_seconds >= advisory_timeout_seconds
+            and not advisory_crossing_recorded
+            and record_advisory_crossing
+        ):
+            advisory_crossing_recorded = True
+            advisory_entry = {
+                "type": "workflow_llm_advisory_budget",
+                "stage": stage,
+                "workflow_stage_id": request.workflow_state_id,
+                "model_name": selected_model,
+                "status": "exceeded_continuing",
+                "advisory_timeout_seconds": advisory_timeout_seconds,
+                "hard_guard_timeout_seconds": hard_guard_timeout_seconds,
+                "duration_ms": elapsed_seconds * 1000.0,
+                "prompt_id": prompt_id,
+            }
+            _append_workflow_llm_setup_diagnostic(request, advisory_entry)
+            progress_emit(
+                {
+                    "phase": telemetry_phase,
+                    "status": "thinking",
+                    "subtask": "LLM call exceeded advisory budget",
+                    "result_summary": (
+                        "The workflow LLM call is still running beyond its "
+                        "advisory duration budget."
+                    ),
+                    "workflow_state_id": telemetry_phase,
+                    "llm_advisory_budget_seconds": advisory_timeout_seconds,
+                    "llm_hard_guard_seconds": hard_guard_timeout_seconds,
+                    "elapsed_ms": int(elapsed_seconds * 1000.0),
+                    "prompt_id": prompt_id,
+                    "model_name": selected_model,
+                }
+            )
+        if elapsed_seconds < hard_guard_timeout_seconds:
             continue
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         provider = (
@@ -2124,7 +2195,10 @@ def _run_llm_call_with_timeout(
             "error": "workflow_llm_step_timeout",
             "error_class": "TimeoutError",
             "failure_kind": "llm_call_timeout",
-            "timeout_seconds": timeout_seconds,
+            "timeout_seconds": hard_guard_timeout_seconds,
+            "advisory_timeout_seconds": advisory_timeout_seconds,
+            "hard_guard_timeout_seconds": hard_guard_timeout_seconds,
+            "advisory_budget_exceeded": (elapsed_seconds >= advisory_timeout_seconds),
             "prompt_id": prompt_id,
         }
         if provider:
@@ -2149,7 +2223,9 @@ def _run_llm_call_with_timeout(
                 workflow_stage_id=request.workflow_state_id,
             )
         raise TimeoutError(
-            f"LLM call timed out after {timeout_seconds:.1f}s "
+            f"LLM call exceeded the {advisory_timeout_seconds:.1f}s advisory "
+            f"budget and timed out at the {hard_guard_timeout_seconds:.1f}s "
+            "hard guard "
             f"(stage={stage}, state={request.workflow_state_id}, model={selected_model})"
         )
     kind = result_holder.get("kind")
@@ -2201,6 +2277,11 @@ def _run_llm_step_with_timeout(
                 selected_candidate=_selected_candidate_context_from_request(request),
                 timeout_seconds=timeout_seconds,
                 llm_calls=llm_calls,
+                hard_guard_timeout_seconds=(
+                    _conversation_turn_llm_step_guard_timeout_sec(timeout_seconds)
+                    or timeout_seconds
+                ),
+                record_advisory_crossing=False,
             ),
         )
     except TimeoutError as exc:
@@ -2269,9 +2350,11 @@ def _build_gateway_runtime(
         max_tool_invocations=(
             int(max_tool_invocations)
             if max_tool_invocations is not None
-            else int(request.environment.max_tool_invocations)
-            if request.environment.max_tool_invocations is not None
-            else 1
+            else (
+                int(request.environment.max_tool_invocations)
+                if request.environment.max_tool_invocations is not None
+                else 1
+            )
         ),
         max_tool_result_chars=request.environment.max_tool_result_chars,
         max_tool_result_field_chars=request.environment.max_tool_result_field_chars,
@@ -2623,6 +2706,20 @@ def _build_timeout_failure_result(
     prompt_variant_selection: Mapping[str, Any] | None = None,
     prompt_context_diagnostics: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
+    timeout_call = next(
+        (
+            entry
+            for entry in reversed(list(llm_calls))
+            if isinstance(entry, Mapping)
+            and entry.get("failure_kind") == "llm_call_timeout"
+        ),
+        None,
+    )
+    hard_guard_timeout_seconds = (
+        timeout_call.get("hard_guard_timeout_seconds")
+        if isinstance(timeout_call, Mapping)
+        else None
+    )
     llm_step_envelope = {
         "execution_mode": "llm",
         "action_id": request.action_id,
@@ -2652,7 +2749,9 @@ def _build_timeout_failure_result(
         "completion_reason": "timeout",
         "timeout_stage": stage,
         "timeout_detail": timeout_detail,
-        "timeout_seconds": timeout_seconds,
+        "timeout_seconds": hard_guard_timeout_seconds or timeout_seconds,
+        "advisory_timeout_seconds": timeout_seconds,
+        "hard_guard_timeout_seconds": hard_guard_timeout_seconds,
         "timeout_failure_kind": "llm_call_timeout",
         "fail_closed": True,
         "fallback_used": False,
@@ -3946,8 +4045,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         request,
         stage=stage,
         llm_policy_map=llm_policy_map,
-        timeout_seconds=_conversation_turn_llm_step_guard_timeout_sec(timeout_seconds)
-        or timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
 
 

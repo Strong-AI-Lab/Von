@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import threading
+import time
 
 import pytest
 
@@ -47,7 +49,9 @@ def test_explicit_env_can_enable_auto_pull_in_agent_test(monkeypatch) -> None:
     assert reason == "explicit_env"
 
 
-def test_generate_does_not_pull_missing_model_when_auto_pull_disabled(monkeypatch) -> None:
+def test_generate_does_not_pull_missing_model_when_auto_pull_disabled(
+    monkeypatch,
+) -> None:
     import src.backend.languagemodels.llm_interface as mod
 
     class _FakeResponseError(Exception):
@@ -87,6 +91,60 @@ def test_generate_does_not_pull_missing_model_when_auto_pull_disabled(monkeypatc
     assert "auto_pull_disabled" in message
     assert "agent_test_instance" in message
     assert pull_calls["count"] == 0
+
+
+def test_generate_passes_remaining_request_budget_to_model_readiness_wait(
+    monkeypatch,
+) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    class _FakeResponseError(Exception):
+        def __init__(self, message: str, status_code: int) -> None:
+            super().__init__(message)
+            self.status_code = status_code
+
+    class _FakeClient:
+        def chat(self, *, model: str, messages, options=None):
+            raise _FakeResponseError(f"model '{model}' not found", 404)
+
+    client = mod.OllamaClient.__new__(mod.OllamaClient)
+    client.client = _FakeClient()
+    client.default_model = "missing:test"
+    client.host = "http://127.0.0.1:11434"
+    captured: dict[str, float | None] = {}
+
+    def _bounded_attempt(
+        model_name: str,
+        *,
+        wait_timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        captured["wait_timeout_seconds"] = wait_timeout_seconds
+        return {
+            "attempted": True,
+            "succeeded": False,
+            "failed": True,
+            "model": model_name,
+            "failure_code": "model_readiness_wait_budget_exhausted",
+            "retry_outcome": "pull_in_progress_caller_budget_exhausted",
+        }
+
+    monkeypatch.setattr(
+        mod,
+        "_import_ollama",
+        lambda: SimpleNamespace(ResponseError=_FakeResponseError),
+    )
+    monkeypatch.setattr(client, "_attempt_model_auto_pull", _bounded_attempt)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        client.generate(
+            "hello",
+            model="missing:test",
+            llm_params={"timeout_seconds": 2.0},
+        )
+
+    assert captured["wait_timeout_seconds"] is not None
+    assert 0.0 < float(captured["wait_timeout_seconds"] or 0.0) <= 1.5
+    assert "model_readiness_wait_budget_exhausted" in str(exc_info.value)
 
 
 def test_get_embedding_retries_once_after_successful_auto_pull(monkeypatch) -> None:
@@ -197,3 +255,59 @@ def test_auto_pull_retry_budget_prevents_pull_storm(monkeypatch) -> None:
     assert first["failed"] is True
     assert second["retry_outcome"] == "retry_budget_exhausted"
     assert pull_calls["count"] == 1
+
+
+def test_auto_pull_wait_is_bounded_by_caller_budget_while_shared_pull_continues(
+    monkeypatch,
+) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    client = mod.OllamaClient.__new__(mod.OllamaClient)
+    client.client = object()
+    client.default_model = "missing:test"
+    client.host = "http://127.0.0.1:11434"
+
+    pull_started = threading.Event()
+    release_pull = threading.Event()
+    availability_checks = {"count": 0}
+
+    def _is_available(_model_name: str) -> bool:
+        availability_checks["count"] += 1
+        return availability_checks["count"] >= 2
+
+    def _blocked_pull(_model_name: str) -> None:
+        pull_started.set()
+        assert release_pull.wait(timeout=2.0)
+
+    monkeypatch.setattr(mod, "_OLLAMA_AUTO_PULL_ENABLED", True)
+    monkeypatch.setattr(mod, "_OLLAMA_AUTO_PULL_RETRY_BUDGET", 1)
+    monkeypatch.setattr(mod, "_OLLAMA_AUTO_PULL_STATE", {})
+    monkeypatch.setattr(client, "_is_model_available", _is_available)
+    monkeypatch.setattr(client, "_pull_model", _blocked_pull)
+
+    started = time.monotonic()
+    result = client._attempt_model_auto_pull(
+        "missing:test",
+        wait_timeout_seconds=0.03,
+    )
+    elapsed = time.monotonic() - started
+
+    assert pull_started.is_set()
+    assert elapsed < 0.3
+    assert result["failed"] is True
+    assert result["in_progress"] is True
+    assert result["caller_wait_timed_out"] is True
+    assert result["failure_code"] == "model_readiness_wait_budget_exhausted"
+    assert result["retry_outcome"] == "pull_in_progress_caller_budget_exhausted"
+    assert (
+        mod.get_ollama_auto_pull_state_snapshot()["models"]["missing:test"]["in_flight"]
+        is True
+    )
+
+    release_pull.set()
+    state_event = mod._OLLAMA_AUTO_PULL_STATE["missing:test"]["event"]
+    assert state_event.wait(timeout=1.0)
+    snapshot = mod.get_ollama_auto_pull_state_snapshot()["models"]["missing:test"]
+    assert snapshot["in_flight"] is False
+    assert snapshot["last_status"] == "succeeded"
+    assert snapshot["caller_wait_timeout_count"] == 1

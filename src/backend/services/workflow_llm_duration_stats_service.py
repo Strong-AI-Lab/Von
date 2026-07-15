@@ -6,7 +6,6 @@ from typing import Any, Mapping, MutableMapping
 
 from ..db.mongo_client import get_db
 
-
 SCHEMA_VERSION = "workflow_llm_step_duration_stats.v1"
 COLLECTION_NAME = "workflow_llm_step_duration_stats"
 
@@ -55,6 +54,19 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     if isinstance(value, (int, float)) and math.isfinite(float(value)):
         return float(value)
     return default
+
+
+def _normalise_outcome(value: Any) -> str:
+    cleaned = (_clean_text(value) or "unknown").lower()
+    if cleaned in {"success", "succeeded", "ok", "completed"}:
+        return "success"
+    if cleaned in {"timeout", "timed_out"}:
+        return "timeout"
+    if cleaned in {"cancelled", "canceled"}:
+        return "cancelled"
+    if cleaned in {"failure", "failed", "error"}:
+        return "failure"
+    return "unknown"
 
 
 def build_duration_stats_key(
@@ -152,6 +164,21 @@ def build_historical_duration_context(
         "duration_deviation_ratio": _round_metric(deviation_ratio),
         "duration_deviation_stddevs": _round_metric(z_score),
         "duration_deviation_classification": classification,
+        "historical_successful_observation_count": _safe_int(
+            previous.get("successful_observation_count")
+        ),
+        "historical_successful_mean_duration_ms": _round_metric(
+            _safe_float(previous.get("successful_mean_duration_ms"))
+        ),
+        "historical_failed_observation_count": _safe_int(
+            previous.get("failed_observation_count")
+        ),
+        "historical_failed_mean_duration_ms": _round_metric(
+            _safe_float(previous.get("failed_mean_duration_ms"))
+        ),
+        "historical_timeout_observation_count": _safe_int(
+            previous.get("timeout_observation_count")
+        ),
     }
 
 
@@ -161,6 +188,7 @@ def calculate_next_duration_stats(
     duration_ms: Any,
     observed_at_utc: str | None = None,
     request_id: Any = None,
+    outcome: Any = None,
 ) -> dict[str, Any] | None:
     duration = _duration_float(duration_ms)
     if duration is None:
@@ -191,6 +219,27 @@ def calculate_next_duration_stats(
     min_duration = duration if previous_min is None else min(previous_min, duration)
     max_duration = duration if previous_max is None else max(previous_max, duration)
     stddev = _stddev_from_m2(count=count, m2=m2)
+    normalised_outcome = _normalise_outcome(outcome)
+
+    successful_count = _safe_int(previous_map.get("successful_observation_count"))
+    successful_total = _safe_float(previous_map.get("successful_total_duration_ms"))
+    failed_count = _safe_int(previous_map.get("failed_observation_count"))
+    failed_total = _safe_float(previous_map.get("failed_total_duration_ms"))
+    timeout_count = _safe_int(previous_map.get("timeout_observation_count"))
+    cancelled_count = _safe_int(previous_map.get("cancelled_observation_count"))
+    unknown_count = _safe_int(previous_map.get("unknown_outcome_observation_count"))
+    if normalised_outcome == "success":
+        successful_count += 1
+        successful_total += duration
+    elif normalised_outcome in {"failure", "timeout", "cancelled"}:
+        failed_count += 1
+        failed_total += duration
+        if normalised_outcome == "timeout":
+            timeout_count += 1
+        elif normalised_outcome == "cancelled":
+            cancelled_count += 1
+    else:
+        unknown_count += 1
 
     return {
         "observed_count": count,
@@ -206,6 +255,20 @@ def calculate_next_duration_stats(
         "last_duration_ms": _round_metric(duration),
         "last_observed_at_utc": observed_at_utc or _now_utc_iso(),
         "last_request_id": _clean_text(request_id),
+        "last_outcome": normalised_outcome,
+        "successful_observation_count": successful_count,
+        "successful_total_duration_ms": _round_metric(successful_total),
+        "successful_mean_duration_ms": _round_metric(
+            successful_total / successful_count if successful_count else None
+        ),
+        "failed_observation_count": failed_count,
+        "failed_total_duration_ms": _round_metric(failed_total),
+        "failed_mean_duration_ms": _round_metric(
+            failed_total / failed_count if failed_count else None
+        ),
+        "timeout_observation_count": timeout_count,
+        "cancelled_observation_count": cancelled_count,
+        "unknown_outcome_observation_count": unknown_count,
     }
 
 
@@ -248,6 +311,7 @@ def record_workflow_llm_step_duration_observation(
     request_id: Any = None,
     observed_at_utc: str | None = None,
     collection: Any | None = None,
+    outcome: Any = None,
 ) -> dict[str, Any] | None:
     """Persist one observation and return the pre-observation baseline context."""
 
@@ -264,6 +328,7 @@ def record_workflow_llm_step_duration_observation(
         duration_ms=duration_ms,
         observed_at_utc=observed_at_utc,
         request_id=request_id,
+        outcome=outcome,
     )
     if stats_key is None or next_stats is None:
         return None
@@ -284,6 +349,7 @@ def record_workflow_llm_step_duration_observation(
         duration_ms=duration_ms,
         observed_at_utc=observed_at_utc,
         request_id=request_id,
+        outcome=outcome,
     )
     if next_stats is None:
         return baseline
