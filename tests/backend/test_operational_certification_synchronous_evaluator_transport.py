@@ -12,7 +12,7 @@ from src.backend.workflows.action_registry import (
     ActionSpec,
     WorkflowActionResult,
 )
-from src.backend.workflows.durable import registry_factory
+from src.backend.workflows.durable import durable_executor, registry_factory
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -164,10 +164,20 @@ def _patch_synchronous_runtime(
         "get_active_model_name",
         lambda **_kwargs: "gpt-test",
     )
+
+    def _get_llm_client(**kwargs):
+        captures["llm_client_kwargs"] = dict(kwargs)
+        return object()
+
+    monkeypatch.setattr(llm_interface, "get_llm_client", _get_llm_client)
     monkeypatch.setattr(
-        llm_interface,
-        "get_llm_client",
-        lambda **_kwargs: object(),
+        durable_executor,
+        "_resolve_instance_runtime_model_context",
+        lambda *, context, inputs: (
+            context.get("requested_model") or None,
+            "ollama" if context.get("requested_model") else None,
+            {},
+        ),
     )
     monkeypatch.setattr(
         llm_interface,
@@ -187,7 +197,7 @@ def _patch_synchronous_runtime(
     return captures
 
 
-def _execute() -> dict[str, Any]:
+def _execute(*, requested_model: str | None = None) -> dict[str, Any]:
     return certification_script._execute_represented_workflow_synchronously(
         workflow_id=WORKFLOW_ID,
         inputs={
@@ -209,6 +219,7 @@ def _execute() -> dict[str, Any]:
             "trial_index": 1,
             "observation_sha256": "b" * 64,
         },
+        requested_model=requested_model,
     )
 
 
@@ -251,9 +262,8 @@ def test_synchronous_evaluator_uses_live_authority_exact_scope_and_persisted_tra
         "trial_index": 1,
         "observation_sha256": "b" * 64,
     }
-    assert (
-        trace_document["metadata"]["workflow_definition_identity"]
-        == (execution["workflow_definition_identity"])
+    assert trace_document["metadata"]["workflow_definition_identity"] == (
+        execution["workflow_definition_identity"]
     )
 
     represented_result = (
@@ -261,13 +271,11 @@ def test_synchronous_evaluator_uses_live_authority_exact_scope_and_persisted_tra
     )
     assert represented_result is not None
     assert represented_result["verdict"] == "pass"
-    assert (
-        represented_result["execution_evidence"]["execution_trace_id"]
-        == (execution["execution_trace_id"])
+    assert represented_result["execution_evidence"]["execution_trace_id"] == (
+        execution["execution_trace_id"]
     )
-    assert (
-        represented_result["execution_evidence"]["exact_scope_sha256"]
-        == (execution["exact_scope_sha256"])
+    assert represented_result["execution_evidence"]["exact_scope_sha256"] == (
+        execution["exact_scope_sha256"]
     )
 
 
@@ -288,6 +296,25 @@ def test_synchronous_evaluator_rejects_non_vontology_definition(monkeypatch) -> 
     assert (
         certification_script._represented_evaluator_result_from_execution(execution)
         is None
+    )
+
+
+def test_synchronous_evaluator_applies_campaign_model_override(monkeypatch) -> None:
+    captures = _patch_synchronous_runtime(monkeypatch)
+
+    execution = _execute(requested_model="qwen3:8b")
+
+    assert execution["success"] is True
+    assert execution["workflow_output"]["requested_model"] == "qwen3:8b"
+    assert captures["llm_client_kwargs"]["client_type"] == "ollama"
+    assert captures["trace_document"]["metadata"]["requested_model"] == {
+        "redacted": True,
+        "length": len("qwen3:8b"),
+        "sha256": "ef26034c2d11fff5222732b5903a72edf894e9c37673cf082a3726ac42e6c92b",
+    }
+    assert (
+        captures["trace_document"]["metadata"]["requested_model_override_applied"]
+        is True
     )
 
 

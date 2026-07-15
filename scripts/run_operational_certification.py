@@ -811,6 +811,7 @@ def _execute_represented_workflow_synchronously(
     execution_metadata: Mapping[str, Any] | None = None,
     timeout_seconds: float = 600.0,
     require_policy_identity: bool = True,
+    requested_model: str | None = None,
 ) -> dict[str, Any]:
     """Run one live-Vontology workflow without relying on a durable worker.
 
@@ -835,6 +836,9 @@ def _execute_represented_workflow_synchronously(
         build_vontology_workflow_registry_snapshot,
         get_shared_durable_action_registry,
         resolve_workflow_definition_from_authority,
+    )
+    from src.backend.workflows.durable.durable_executor import (
+        _resolve_instance_runtime_model_context,
     )
     from src.backend.workflows.engine import WorkflowExecutor
     from src.backend.workflows.trace_model import WorkflowExecutionTrace
@@ -966,11 +970,34 @@ def _execute_represented_workflow_synchronously(
             )
 
             with override_current_actor(user_id_text, org_id_text):
-                effective_model = get_active_model_name(
+                (
+                    resolved_requested_model,
+                    requested_client_type,
+                    requested_model_parameters,
+                ) = _resolve_instance_runtime_model_context(
+                    context={"requested_model": _text(requested_model)},
+                    inputs=workflow_data,
+                )
+                effective_model = resolved_requested_model or get_active_model_name(
                     user_concept_id=user_id_text,
                     org_concept_id=org_id_text,
                 )
+                if resolved_requested_model:
+                    workflow_data["requested_model"] = resolved_requested_model
+                    trace.metadata["requested_model"] = resolved_requested_model
+                    trace.metadata["requested_model_override_applied"] = True
+                if requested_client_type:
+                    workflow_data["requested_client_type"] = requested_client_type
+                    trace.metadata["requested_client_type"] = requested_client_type
+                if requested_model_parameters:
+                    workflow_data["requested_model_parameters"] = dict(
+                        requested_model_parameters
+                    )
+                    trace.metadata["requested_model_parameters"] = dict(
+                        requested_model_parameters
+                    )
                 llm_client = get_llm_client(
+                    client_type=requested_client_type,
                     user_concept_id=user_id_text,
                     org_concept_id=org_id_text,
                 )
@@ -978,6 +1005,7 @@ def _execute_represented_workflow_synchronously(
                     llm_client=llm_client,
                     gateway=_get_or_build_durable_mcp_gateway(),
                     model=effective_model,
+                    model_parameters=requested_model_parameters or None,
                     user_namespace=namespace_text,
                     user_concept_id=user_id_text,
                     org_concept_id=org_id_text,
@@ -2396,6 +2424,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             },
             timeout_seconds=args.timeout_seconds,
             require_policy_identity=False,
+            requested_model=args.model or None,
         )
         probe_result = _mapping(
             _mapping(payload.get("workflow_output")).get(
@@ -3139,6 +3168,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 "evaluator_execution_digest": evaluator_execution_digest,
             },
             timeout_seconds=args.timeout_seconds,
+            requested_model=args.model or None,
         )
         represented_result = _represented_evaluator_result_from_execution(payload)
         if represented_result is None:
