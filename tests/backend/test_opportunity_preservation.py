@@ -56,17 +56,12 @@ from src.backend.services.tool_metadata_service import (
     ToolRequiredObligationMetadata,
 )
 from src.backend.services.operational_learning_release_service import (
-    build_empty_operational_learning_release_state,
-    operational_learning_release_digest,
     project_learning_release_recovery_affordances,
 )
 from src.backend.services.operational_learning_release_vontology_service import (
+    LearningReleasePersistenceError,
     LearningReleaseStateConflictError,
-    OPERATIONAL_LEARNING_RELEASE_STATE_RECORD_SCHEMA_VERSION,
-    operational_learning_release_state_concept_id,
-)
-from src.backend.services.operational_learning_release_runtime_service import (
-    project_active_operational_learning_release,
+    _apply_and_readback_release_activation,
 )
 from src.backend.services.operational_certification_cohort_aggregate_service import (
     OperationalCertificationCohortAggregateError,
@@ -623,45 +618,30 @@ def test_learning_release_optimistic_conflict_preserves_inspect_and_retry_paths(
     }
 
 
-def test_absent_active_release_preserves_inspection_and_candidate_opportunities() -> (
+def test_missing_release_activation_adapter_retains_active_release_opportunity() -> (
     None
 ):
-    namespace = "#V#synthetic_user@synthetic_org"
-    user_id = "#V#synthetic_user"
-    org_id = "#V#synthetic_org"
-    state = build_empty_operational_learning_release_state()
-    record = {
-        "schema_version": OPERATIONAL_LEARNING_RELEASE_STATE_RECORD_SCHEMA_VERSION,
-        "state_concept_id": operational_learning_release_state_concept_id(
-            namespace=namespace,
-            user_id=user_id,
-            org_id=org_id,
-        ),
-        "namespace": namespace,
-        "user_id": user_id,
-        "org_id": org_id,
-        "version": 1,
-        "state_sha256": operational_learning_release_digest(state),
-        "previous_state_sha256": None,
-        "previous_record_sha256": None,
-        "state": state,
-        "authenticated_approval_records": {},
-        "candidate_evaluation_records": {},
-        "last_mutation": {"operation": "synthetic_projection"},
-        "updated_at": "2026-07-14T10:00:00+00:00",
-    }
-    record["record_sha256"] = operational_learning_release_digest(record)
+    try:
+        _apply_and_readback_release_activation(
+            {
+                "candidate_id": "candidate-synthetic",
+                "affected_artifact": "#V#synthetic_artifact",
+                "release_sha256": "a" * 64,
+            }
+        )
+    except LearningReleasePersistenceError as exc:
+        projection = exc.to_dict()
+    else:  # pragma: no cover - the default adapter must fail closed
+        raise AssertionError("missing activation adapter unexpectedly succeeded")
 
-    projection = project_active_operational_learning_release(
-        record,
-        affected_artifact="#V#synthetic_artifact",
+    assert projection["details"]["decision_state"] == (
+        "promotion_approved_not_activated"
     )
-
-    assert projection["status"] == "no_active_release"
-    assert projection["release_payload"] is None
-    assert {item["action_type"] for item in projection["recovery_affordances"]} == {
-        "inspect_learning_release_state",
-        "inspect_release_candidates",
+    assert {
+        item["action_type"] for item in projection["recovery_affordances"]
+    } == {
+        "register_canonical_release_activation_adapter",
+        "retain_active_release",
     }
 
 
