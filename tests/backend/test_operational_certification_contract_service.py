@@ -1046,7 +1046,10 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
 
     contract = parse_operational_certification_contract(seed)
 
-    assert seed["seed_version"] == 6
+    assert seed["seed_version"] == 7
+    assert seed["known_legacy_authority_payload_sha256_by_seed_version"]["6"] == [
+        "4f39d85811751e3b98d6c0624fd06cbffa55e44bd8eedffc9e559b12029525dc"
+    ]
     assert seed["known_legacy_authority_payload_sha256_by_seed_version"]["5"] == [
         "0b2c86e5664bda819ea747a6b44c7cac5f2b14d45c719256ce691dff021f95a1"
     ]
@@ -1145,9 +1148,22 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
             budget["measurement_path"] for budget in scenario.budgets
         }
         assert "/operational_metrics/duration_ms" in measurement_paths
-        assert "/operational_metrics/follow_up_request_count" in measurement_paths
+        burden_evidence = scenario.metadata["interaction_burden_evidence"]
+        if burden_evidence.get("follow_up_request_applicable") is False:
+            assert (
+                "/operational_metrics/follow_up_request_count"
+                not in measurement_paths
+            )
+            assert burden_evidence["follow_up_request_measurement"] == (
+                "not_applicable"
+            )
+        else:
+            assert (
+                "/operational_metrics/follow_up_request_count"
+                in measurement_paths
+            )
         assert "/operational_metrics/correction_count" not in measurement_paths
-        assert scenario.metadata["interaction_burden_evidence"][
+        assert burden_evidence[
             "correction_measurement_status"
         ] == "pending_represented_correction_event_telemetry"
 
@@ -1405,5 +1421,5 @@ def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> Non
 
     assert definition_contract.contract_sha256 == selected_contract.contract_sha256
     assert selected_contract.source == "seed_bundle_import_fixture"
-    assert definition["seed_version"] == 6
-    assert selected_case_set["seed_version"] == 6
+    assert definition["seed_version"] == 7
+    assert selected_case_set["seed_version"] == 7

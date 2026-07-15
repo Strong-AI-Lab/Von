@@ -70,7 +70,7 @@ def test_operational_absence_probe_seed_is_read_only_and_deterministic() -> None
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert bundle["seed_version"] == "11"
+    assert bundle["seed_version"] == "13"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
     ] == {
@@ -128,11 +128,22 @@ def test_operational_marker_readback_probe_is_read_only_and_deterministic() -> N
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
     probe = workflows[service.OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID]
 
+    assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
+        service.OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID
+    ] == {
+        "11": [
+            "b30c35701de5dd89c8c6f5c10bbcc0c682e192a1836162d1a5c328f93219640e"
+        ],
+        "12": [
+            "db21bc845e72457d10ae62c2781b7ae3b2de89e27f97055add6ffadd0609e629"
+        ],
+    }
     assert probe["launch_input_contract"]["required_inputs"] == ["isolation_id"]
     steps = probe["publication_spec"]["steps"]
     action_ids = [step.get("action_id") for step in steps if step.get("action_id")]
     assert action_ids == [
         "workflow_control.context_template",
+        "workflow_mcp.invoke_tool",
         "workflow_mcp.invoke_tool",
         "workflow_mcp.invoke_tool",
         "workflow_mcp.invoke_tool",
@@ -147,7 +158,8 @@ def test_operational_marker_readback_probe_is_read_only_and_deterministic() -> N
     ] == [
         "resolve_concept_by_name",
         "fetch_concept",
-        "get_text_relations_summary",
+        "get_text_relations",
+        "get_text_relations",
     ]
 
 
@@ -166,7 +178,7 @@ def test_operational_marker_readback_probe_projects_exact_canonical_evidence() -
             outputs = {
                 "status": "resolved",
                 "resolved_concept_id": "#V#marker_isolation_456",
-                "candidates": ["#V#marker_isolation_456"],
+                "candidates": [],
             }
         elif tool_name == "fetch_concept":
             assert request.inputs["concept_id"] == "#V#marker_isolation_456"
@@ -181,23 +193,35 @@ def test_operational_marker_readback_probe_projects_exact_canonical_evidence() -
                 "content": "Trusted SAIL pilot certification marker isolation-456",
                 "relationships": {"is_an_instance_of": ["#V#workflow_marker"]},
             }
-        elif tool_name == "get_text_relations_summary":
+        elif tool_name == "get_text_relations":
             assert request.inputs["concept_id"] == "#V#marker_isolation_456"
-            outputs = {
-                "groups_found": 2,
-                "groups": [
-                    {
-                        "predicate": "hasName",
-                        "texts": ["Operational certification isolation-456"],
-                    },
-                    {
-                        "predicate": "hasDescription",
-                        "texts": [
-                            "Trusted SAIL pilot certification marker isolation-456"
-                        ],
-                    },
-                ],
-            }
+            if request.inputs["predicate"] == "hasName":
+                outputs = {
+                    "relations_found": 1,
+                    "relations": [
+                        {
+                            "predicate": "hasName",
+                            "lang": "en-NZ",
+                            "text": "Operational certification isolation-456",
+                        }
+                    ],
+                }
+            elif request.inputs["predicate"] == "hasDescription":
+                outputs = {
+                    "relations_found": 1,
+                    "relations": [
+                        {
+                            "predicate": "hasDescription",
+                            "lang": "en-NZ",
+                            "text": (
+                                "Trusted SAIL pilot certification marker "
+                                "isolation-456"
+                            ),
+                        }
+                    ],
+                }
+            else:  # pragma: no cover - regression guard
+                raise AssertionError(request.inputs["predicate"])
         else:  # pragma: no cover - regression guard
             raise AssertionError(tool_name)
         return WorkflowActionResult(
@@ -233,11 +257,19 @@ def test_operational_marker_readback_probe_projects_exact_canonical_evidence() -
     assert probe_result["target_absent"] is False
     assert probe_result["resolution_status"] == "resolved"
     assert probe_result["resolved_concept_id"] == "#V#marker_isolation_456"
+    assert probe_result["resolution_candidates"] == ["#V#marker_isolation_456"]
+    assert probe_result["raw_resolution_candidates"] == []
     assert probe_result["readback_concept_id"] == "#V#marker_isolation_456"
     assert probe_result["expected_name"] == (
         "Operational certification isolation-456"
     )
     assert probe_result["expected_description"] == (
+        "Trusted SAIL pilot certification marker isolation-456"
+    )
+    assert probe_result["names"][0]["text"] == (
+        "Operational certification isolation-456"
+    )
+    assert probe_result["content"][0]["text"] == (
         "Trusted SAIL pilot certification marker isolation-456"
     )
     assert probe_result["text_relation_group_count"] == 2
@@ -311,7 +343,13 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
     ] == {
         "10": [
             "7bc47787f354aa67f657ca120658d78b1e976d997134a934661309743563fdde"
-        ]
+        ],
+        "11": [
+            "2dea2962c177ec7fd6335db0a9e6c04269a458210b21a76d07fe099539c10817"
+        ],
+        "12": [
+            "025db88fab5588d064e86f382f8f2c313ab72a2d4369d8674ed69e1e318c54e5"
+        ],
     }
     definition = build_repo_seed_workflow_definitions(
         bundle_paths=[service._WORKFLOW_BUNDLE_PATH],
@@ -419,6 +457,12 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
     ]
     assert projected["outcome"] == "partial_success_with_committed_effect"
     assert projected["committed_effect_count"] == 1
+    assert projected["committed_effects"] == [
+        {
+            "effect_type": "create_namespaced_vontology_marker",
+            "concept_id": "#V#marker_isolation_matrix",
+        }
+    ]
     assert projected["committed_marker_concept_id"] == (
         "#V#marker_isolation_matrix"
     )
@@ -456,7 +500,7 @@ def test_operational_checkpoint_interruption_seed_authors_pause_before_resume() 
     probe = workflows[service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID]
     steps = probe["publication_spec"]["steps"]
 
-    assert bundle["seed_version"] == "11"
+    assert bundle["seed_version"] == "13"
     assert "workflow_control.pause_at_checkpoint" in bundle["supported_action_ids"]
     assert steps[0]["state_id"] == "request_checkpoint_pause"
     assert steps[0]["action_id"] == "workflow_control.pause_at_checkpoint"

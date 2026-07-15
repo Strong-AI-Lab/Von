@@ -2,7 +2,7 @@
   "family_id": "operational_certification_evaluator_workflow_seed_bundle",
   "managed_by": "operational_certification_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "11",
+  "seed_version": "13",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#operational_state_evidence_evaluator": {
       "1": [
@@ -23,9 +23,23 @@
         "e53bf609a1c28f392a9d9137f660ce8d6a169bf6d4f1f10acd01a2c236ba5fa6"
       ]
     },
+    "#V#operational_marker_readback_probe_workflow": {
+      "11": [
+        "b30c35701de5dd89c8c6f5c10bbcc0c682e192a1836162d1a5c328f93219640e"
+      ],
+      "12": [
+        "db21bc845e72457d10ae62c2781b7ae3b2de89e27f97055add6ffadd0609e629"
+      ]
+    },
     "#V#operational_degraded_fault_matrix_probe_workflow": {
       "10": [
         "7bc47787f354aa67f657ca120658d78b1e976d997134a934661309743563fdde"
+      ],
+      "11": [
+        "2dea2962c177ec7fd6335db0a9e6c04269a458210b21a76d07fe099539c10817"
+      ],
+      "12": [
+        "025db88fab5588d064e86f382f8f2c313ab72a2d4369d8674ed69e1e318c54e5"
       ]
     }
   },
@@ -585,6 +599,10 @@
                 ]
               ],
               [
+                "include_empty_fields",
+                true
+              ],
+              [
                 "field_sources",
                 {
                   "schema_version": "represented_operational_state_probe_result.v1",
@@ -736,16 +754,16 @@
                 "tool_output_field": "resolved_concept_id",
                 "context_key": "resolved_concept_id"
               },
-              {
-                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_candidates_to_resolution_candidates",
-                "tool_output_field": "candidates",
-                "context_key": "resolution_candidates"
-              }
+          {
+            "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_candidates_to_resolution_candidates",
+            "tool_output_field": "candidates",
+            "context_key": "raw_resolution_candidates"
+          }
             ],
             "writes_context_keys": [
-              "resolution_status",
-              "resolved_concept_id",
-              "resolution_candidates"
+          "resolution_status",
+          "resolved_concept_id",
+          "raw_resolution_candidates"
             ],
             "conditional_transitions": [
               {
@@ -807,48 +825,40 @@
                 "tool_output_field": "concept_id",
                 "context_key": "readback_concept_id"
               },
-              {
-                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_fetch_names_to_readback_names",
-                "tool_output_field": "names",
-                "context_key": "readback_names"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_fetch_content_to_readback_content",
-                "tool_output_field": "content",
-                "context_key": "readback_content"
-              },
-              {
+          {
                 "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_fetch_relationships_to_readback_relationships",
                 "tool_output_field": "relationships",
                 "context_key": "readback_relationships"
               }
             ],
-            "writes_context_keys": [
-              "readback_concept_id",
-              "readback_names",
-              "readback_content",
-              "readback_relationships"
-            ],
-            "next_state": "read_text_relations",
+        "writes_context_keys": [
+          "readback_concept_id",
+          "readback_relationships"
+        ],
+        "next_state": "read_name_text_relations",
             "on_failure_state": "failed"
           },
           {
-            "state_id": "read_text_relations",
+            "state_id": "read_name_text_relations",
             "action_id": "workflow_mcp.invoke_tool",
             "execution_mode": "deterministic",
             "static_input_bindings": [
               [
                 "tool_name",
-                "get_text_relations_summary"
+                "get_text_relations"
               ],
               [
-                "include_relations",
-                true
+                "predicate",
+                "hasName"
+              ],
+              [
+                "limit",
+                20
               ]
             ],
             "context_input_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_resolved_concept_id_to_text_summary_concept_id",
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_resolved_concept_id_to_name_text_concept_id",
                 "context_key": "resolved_concept_id",
                 "tool_param": "concept_id",
                 "required": true
@@ -856,19 +866,64 @@
             ],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_text_groups_to_text_relation_groups",
-                "tool_output_field": "groups",
-                "context_key": "text_relation_groups"
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_name_relations_to_readback_names",
+                "tool_output_field": "relations",
+                "context_key": "readback_names"
               },
               {
-                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_text_groups_found_to_text_relation_group_count",
-                "tool_output_field": "groups_found",
-                "context_key": "text_relation_group_count"
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_name_relations_found_to_name_count",
+                "tool_output_field": "relations_found",
+                "context_key": "name_relation_count"
               }
             ],
             "writes_context_keys": [
-              "text_relation_groups",
-              "text_relation_group_count"
+              "readback_names",
+              "name_relation_count"
+            ],
+            "next_state": "read_description_text_relations",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_description_text_relations",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "get_text_relations"
+              ],
+              [
+                "predicate",
+                "hasDescription"
+              ],
+              [
+                "limit",
+                20
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_resolved_concept_id_to_description_text_concept_id",
+                "context_key": "resolved_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_description_relations_to_readback_content",
+                "tool_output_field": "relations",
+                "context_key": "readback_content"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_description_relations_found_to_description_count",
+                "tool_output_field": "relations_found",
+                "context_key": "description_relation_count"
+              }
+            ],
+            "writes_context_keys": [
+              "readback_content",
+              "description_relation_count"
             ],
             "next_state": "project_probe_result",
             "on_failure_state": "failed"
@@ -893,6 +948,7 @@
                   "resolution_status",
                   "resolved_concept_id",
                   "resolution_candidates",
+                  "raw_resolution_candidates",
                   "expected_name",
                   "expected_description",
                   "readback_concept_id",
@@ -922,8 +978,13 @@
                   "resolved_concept_id": {
                     "$context_key": "resolved_concept_id"
                   },
-                  "resolution_candidates": {
-                    "$context_key": "resolution_candidates"
+                  "resolution_candidates": [
+                    {
+                      "$context_key": "resolved_concept_id"
+                    }
+                  ],
+                  "raw_resolution_candidates": {
+                    "$context_key": "raw_resolution_candidates"
                   },
                   "expected_name": {
                     "$context_key": "target_name"
@@ -943,12 +1004,27 @@
                   "relationships": {
                     "$context_key": "readback_relationships"
                   },
-                  "text_relation_groups": {
-                    "$context_key": "text_relation_groups"
-                  },
-                  "text_relation_group_count": {
-                    "$context_key": "text_relation_group_count"
-                  },
+                  "text_relation_groups": [
+                    {
+                      "predicate": "hasName",
+                      "relations_found": {
+                        "$context_key": "name_relation_count"
+                      },
+                      "relations": {
+                        "$context_key": "readback_names"
+                      }
+                    },
+                    {
+                      "predicate": "hasDescription",
+                      "relations_found": {
+                        "$context_key": "description_relation_count"
+                      },
+                      "relations": {
+                        "$context_key": "readback_content"
+                      }
+                    }
+                  ],
+                  "text_relation_group_count": 2,
                   "evidence": [
                     {
                       "kind": "canonical_exact_name_resolution",
@@ -964,7 +1040,7 @@
                       "kind": "canonical_concept_and_text_relation_readback",
                       "tools": [
                         "fetch_concept",
-                        "get_text_relations_summary"
+                        "get_text_relations"
                       ],
                       "resolved_concept_id": {
                         "$context_key": "resolved_concept_id"
@@ -2001,6 +2077,7 @@
                   "namespace",
                   "outcome",
                   "committed_effect_count",
+                  "committed_effects",
                   "committed_marker_concept_id",
                   "authoritative_empty_status",
                   "invalid_argument_evidence",
@@ -2027,6 +2104,14 @@
                   },
                   "outcome": "partial_success_with_committed_effect",
                   "committed_effect_count": 1,
+                  "committed_effects": [
+                    {
+                      "effect_type": "create_namespaced_vontology_marker",
+                      "concept_id": {
+                        "$context_key": "committed_marker_concept_id"
+                      }
+                    }
+                  ],
                   "committed_marker_concept_id": {
                     "$context_key": "committed_marker_concept_id"
                   },

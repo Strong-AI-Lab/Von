@@ -1114,6 +1114,12 @@ def _handle_context_project(request: WorkflowActionRequest) -> WorkflowActionRes
             requirement_map.get("include_null_fields"),
         )
     )
+    include_empty_fields = _coerce_bool(
+        inputs.get(
+            "include_empty_fields",
+            requirement_map.get("include_empty_fields"),
+        )
+    )
 
     try:
         max_chars_per_field = int(
@@ -1151,6 +1157,14 @@ def _handle_context_project(request: WorkflowActionRequest) -> WorkflowActionRes
             projected[output_field] = None
             selected_output_fields.append(output_field)
             continue
+        if (
+            include_empty_fields
+            and isinstance(value, (list, tuple, set, frozenset, dict))
+            and not value
+        ):
+            projected[output_field] = value
+            selected_output_fields.append(output_field)
+            continue
         if not _context_value_present(value):
             missing_fields.append(requested_field)
             continue
@@ -1175,6 +1189,7 @@ def _handle_context_project(request: WorkflowActionRequest) -> WorkflowActionRes
         "omitted_fields": omitted_fields,
         "truncated_fields": truncated_fields,
         "include_null_fields": include_null_fields,
+        "include_empty_fields": include_empty_fields,
         "requirement_schema_version": _normalise_text(
             requirement_map.get("schema_version")
         )
