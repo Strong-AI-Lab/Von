@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -185,9 +186,13 @@ def _observation(
                 "trial_index": trial_index,
                 "verdict": verdict,
                 "terminal_state": "verified",
-                "evidence": evidence
-                if evidence is not None
-                else [{"kind": "state_readback", "sha256": f"evidence-{trial_index}"}],
+                "evidence": (
+                    evidence
+                    if evidence is not None
+                    else [
+                        {"kind": "state_readback", "sha256": f"evidence-{trial_index}"}
+                    ]
+                ),
             }
         },
     }
@@ -861,6 +866,28 @@ def test_json_projection_rejects_opaque_and_non_finite_evidence() -> None:
         json_serialisable_projection({"opaque": object()})
     with pytest.raises(TypeError, match="non-finite"):
         json_serialisable_projection({"value": float("nan")})
+
+
+def test_json_projection_canonicalises_native_datetime_evidence() -> None:
+    aware = datetime(
+        2026,
+        7,
+        15,
+        1,
+        2,
+        3,
+        456789,
+        tzinfo=timezone(timedelta(hours=12)),
+    )
+    naive = datetime(2026, 7, 15, 1, 2, 3, 456789)
+
+    assert json_serialisable_projection({"aware": aware, "naive": naive}) == {
+        "aware": "2026-07-15T01:02:03.456789+12:00",
+        "naive": "2026-07-15T01:02:03.456789",
+    }
+    assert stable_payload_digest({"when": aware}) == stable_payload_digest(
+        {"when": "2026-07-15T01:02:03.456789+12:00"}
+    )
 
 
 def test_stable_digest_is_independent_of_mapping_key_order() -> None:

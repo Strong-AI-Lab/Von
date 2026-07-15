@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -95,6 +96,11 @@ def json_serialisable_projection(value: Any) -> Any:
         if not math.isfinite(value):
             raise TypeError("certification evidence contains a non-finite number")
         return value
+    if isinstance(value, datetime):
+        # PyMongo returns BSON datetimes as native ``datetime`` values. Preserve
+        # their exact timezone-bearing or naive representation in a canonical,
+        # JSON-compatible form instead of relying on incidental ``str`` output.
+        return value.isoformat(timespec="microseconds")
     if isinstance(value, Mapping):
         output: dict[str, Any] = {}
         for key, item in value.items():
@@ -149,7 +155,9 @@ def validate_operational_certification_campaign_result_integrity(
     contract_sha256 = _safe_text(report.get("contract_sha256"))
     if not (
         len(contract_sha256) == 64
-        and all(character in "0123456789abcdef" for character in contract_sha256.lower())
+        and all(
+            character in "0123456789abcdef" for character in contract_sha256.lower()
+        )
     ):
         errors.append({"code": "campaign_contract_digest_invalid"})
     certified = report.get("certified")
@@ -165,19 +173,13 @@ def validate_operational_certification_campaign_result_integrity(
     for index, gate in enumerate(gates):
         gate_id = _safe_text(gate.get("gate_id"))
         if not gate_id:
-            errors.append(
-                {"code": "campaign_gate_id_missing", "gate_index": index}
-            )
+            errors.append({"code": "campaign_gate_id_missing", "gate_index": index})
             continue
         if gate_id in gate_ids:
-            errors.append(
-                {"code": "campaign_gate_id_duplicate", "gate_id": gate_id}
-            )
+            errors.append({"code": "campaign_gate_id_duplicate", "gate_id": gate_id})
         gate_ids.append(gate_id)
         if not isinstance(gate.get("passed"), bool):
-            errors.append(
-                {"code": "campaign_gate_passed_invalid", "gate_id": gate_id}
-            )
+            errors.append({"code": "campaign_gate_passed_invalid", "gate_id": gate_id})
         elif gate.get("passed") is not True:
             failed_gate_ids.append(gate_id)
         observed_gate_digest = _safe_text(gate.get("result_sha256"))
@@ -1924,8 +1926,9 @@ def evaluate_scenario_trial(
 
 
 def _normalise_trial_results_by_scenario(
-    trial_results: Mapping[str, Sequence[Mapping[str, Any]]]
-    | Sequence[Mapping[str, Any]],
+    trial_results: (
+        Mapping[str, Sequence[Mapping[str, Any]]] | Sequence[Mapping[str, Any]]
+    ),
 ) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     if isinstance(trial_results, Mapping):
@@ -2057,8 +2060,9 @@ def _validate_trial_result_integrity(
 
 def aggregate_five_trial_campaign(
     contract: OperationalCertificationContract,
-    trial_results: Mapping[str, Sequence[Mapping[str, Any]]]
-    | Sequence[Mapping[str, Any]],
+    trial_results: (
+        Mapping[str, Sequence[Mapping[str, Any]]] | Sequence[Mapping[str, Any]]
+    ),
     *,
     represented_campaign_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
