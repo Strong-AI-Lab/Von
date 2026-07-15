@@ -131,9 +131,7 @@ class OperationalCertificationCohortAggregateError(ValueError):
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": (
-                "operational_certification_cohort_aggregate_error.v1"
-            ),
+            "schema_version": ("operational_certification_cohort_aggregate_error.v1"),
             "error_code": self.code,
             "details": copy.deepcopy(self.details),
             "recovery_affordances": copy.deepcopy(self.recovery_affordances),
@@ -216,9 +214,7 @@ def _contract_projection(
         "case_set": projection.get("case_set"),
         "policy": projection.get("policy"),
         "scenario_contract_sha256s": scenario_hashes,
-        "topological_scenario_ids": projection.get(
-            "topological_scenario_ids"
-        ),
+        "topological_scenario_ids": projection.get("topological_scenario_ids"),
     }
     expected_contract_sha256 = stable_payload_digest(contract_basis)
     if projection.get("contract_sha256") != expected_contract_sha256:
@@ -503,10 +499,8 @@ def _validate_canonical_experiment_run(
     expected_observation_count = len(contract_projection.get("scenarios") or []) * 5 + 1
     if (
         len(observations) != expected_observation_count
-        or finalisation.get("expected_observation_count")
-        != expected_observation_count
-        or finalisation.get("observed_observation_count")
-        != expected_observation_count
+        or finalisation.get("expected_observation_count") != expected_observation_count
+        or finalisation.get("observed_observation_count") != expected_observation_count
     ):
         raise OperationalCertificationCohortAggregateError(
             "cohort_actor_experiment_observation_count_mismatch"
@@ -755,9 +749,7 @@ def build_operational_certification_actor_campaign_dossier(
         "suite_concept_id": contract_projection.get("suite_concept_id"),
         "case_set": contract_projection.get("case_set"),
         "suite_source": contract_projection.get("source"),
-        "source_definition_sha256": contract_projection.get(
-            "source_definition_sha256"
-        ),
+        "source_definition_sha256": contract_projection.get("source_definition_sha256"),
         "contract_sha256": contract_projection.get("contract_sha256"),
         "policy_sha256": stable_payload_digest(contract_projection["policy"]),
         "cohort_policy_sha256": cohort["cohort_policy_sha256"],
@@ -766,9 +758,7 @@ def build_operational_certification_actor_campaign_dossier(
         "experiment_spec_id": canonical_run["experiment_spec_id"],
         "campaign_report_sha256": campaign.get("report_sha256"),
         "execution_sha256": observed_execution_sha256,
-        "canonical_experiment_run_sha256": canonical_run[
-            "canonical_run_state_sha256"
-        ],
+        "canonical_experiment_run_sha256": canonical_run["canonical_run_state_sha256"],
         "experiment_observation_count": canonical_run["observation_count"],
         "trusted_runner_attestation": attestation,
         "trusted_runner_attestation_sha256": stable_payload_digest(attestation),
@@ -808,9 +798,10 @@ def _validate_actor_dossier(
         )
     actor_id = _clean(projection.get("actor_concept_id"))
     org_id = _clean(projection.get("organisation_concept_id"))
-    if actor_id not in cohort["actor_concept_ids"] or org_id != cohort[
-        "organisation_concept_id"
-    ]:
+    if (
+        actor_id not in cohort["actor_concept_ids"]
+        or org_id != cohort["organisation_concept_id"]
+    ):
         raise OperationalCertificationCohortAggregateError(
             "cohort_actor_dossier_scope_mismatch"
         )
@@ -963,7 +954,9 @@ def build_operational_certification_cohort_aggregate(
         "experiment_spec_id",
     ):
         values = [str(dossier.get(field_name) or "") for dossier in dossiers]
-        reused = sorted({value for value in values if value and values.count(value) > 1})
+        reused = sorted(
+            {value for value in values if value and values.count(value) > 1}
+        )
         if reused:
             reused_execution_id_fields[field_name] = reused
     if reused_execution_id_fields:
@@ -971,9 +964,7 @@ def build_operational_certification_cohort_aggregate(
             "cohort_actor_campaign_execution_identity_reused",
             details={"reused_identity_values": reused_execution_id_fields},
             recovery_affordances=(
-                {
-                    "action_type": "rerun_actor_campaigns_with_distinct_experiments"
-                },
+                {"action_type": "rerun_actor_campaigns_with_distinct_experiments"},
             ),
         )
     dossiers.sort(key=lambda item: item["actor_concept_id"])
@@ -982,17 +973,14 @@ def build_operational_certification_cohort_aggregate(
         for dossier in dossiers
     }
     dossier_digests = {
-        dossier["actor_concept_id"]: dossier["dossier_sha256"]
-        for dossier in dossiers
+        dossier["actor_concept_id"]: dossier["dossier_sha256"] for dossier in dossiers
     }
     authority = {
         "suite_id": contract_projection.get("suite_id"),
         "suite_concept_id": contract_projection.get("suite_concept_id"),
         "case_set": contract_projection.get("case_set"),
         "suite_source": contract_projection.get("source"),
-        "source_definition_sha256": contract_projection.get(
-            "source_definition_sha256"
-        ),
+        "source_definition_sha256": contract_projection.get("source_definition_sha256"),
         "contract_sha256": contract_projection.get("contract_sha256"),
         "policy_sha256": stable_payload_digest(contract_projection["policy"]),
     }
@@ -1091,9 +1079,7 @@ def validate_operational_certification_cohort_aggregate(
         "suite_concept_id": contract_projection.get("suite_concept_id"),
         "case_set": contract_projection.get("case_set"),
         "suite_source": contract_projection.get("source"),
-        "source_definition_sha256": contract_projection.get(
-            "source_definition_sha256"
-        ),
+        "source_definition_sha256": contract_projection.get("source_definition_sha256"),
         "contract_sha256": contract_projection.get("contract_sha256"),
         "policy_sha256": stable_payload_digest(contract_projection["policy"]),
     }

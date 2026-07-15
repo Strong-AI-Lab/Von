@@ -579,9 +579,7 @@ def test_executor_strips_caller_forged_reserved_authority_launch_values(
     assert WORKFLOW_AUTHORITY_OUTPUT_KEY not in workflow_data
     assert PROMPT_CONTEXT_DIAGNOSTICS_KEY not in workflow_data
     assert attestation["exact_snapshot_eligible"] is False
-    assert attestation["ineligibility_reasons"] == [
-        "unbound_action_execution_surface"
-    ]
+    assert attestation["ineligibility_reasons"] == ["unbound_action_execution_surface"]
 
 
 def test_definition_drift_a_to_b_to_a_remains_exact_snapshot_ineligible() -> None:
@@ -903,9 +901,9 @@ def test_unbound_tool_and_dynamic_actions_are_exact_snapshot_ineligible(
         )
     )
 
-    assert _definition_exact_snapshot_dependency_ineligibility_reasons(
-        definition
-    ) == {expected_reason}
+    assert _definition_exact_snapshot_dependency_ineligibility_reasons(definition) == {
+        expected_reason
+    }
 
 
 def test_workflow_mcp_action_cannot_produce_an_exact_authority_snapshot() -> None:
@@ -919,9 +917,7 @@ def test_workflow_mcp_action_cannot_produce_an_exact_authority_snapshot() -> Non
         )
     )
     definition = _terminal_definition(
-        actions=(
-            WorkflowActionInvocation(action_id="workflow_mcp.invoke_tool"),
-        )
+        actions=(WorkflowActionInvocation(action_id="workflow_mcp.invoke_tool"),)
     )
     identity = _definition_identity(definition)
     instance = _running_instance()
@@ -941,13 +937,11 @@ def test_workflow_mcp_action_cannot_produce_an_exact_authority_snapshot() -> Non
 
     assert result.completed is True
     workflow_data, attestation = _terminal_checkpoint(manager)
-    assert workflow_data[WORKFLOW_AUTHORITY_OUTPUT_KEY] == {
-        "status": "tool_authored"
-    }
+    assert workflow_data[WORKFLOW_AUTHORITY_OUTPUT_KEY] == {"status": "tool_authored"}
     assert attestation["exact_snapshot_eligible"] is False
     assert attestation["ineligibility_reasons"] == [
         "authority_producer_invocation_missing",
-        "unbound_action_execution_surface"
+        "unbound_action_execution_surface",
     ]
 
 
@@ -1040,9 +1034,7 @@ def test_output_mapping_cannot_overwrite_executor_prompt_lineage(
                             "context_key": WORKFLOW_AUTHORITY_OUTPUT_KEY,
                         },
                         {
-                            "tool_output_field": (
-                                "validated_json.forged_diagnostics"
-                            ),
+                            "tool_output_field": ("validated_json.forged_diagnostics"),
                             "context_key": PROMPT_CONTEXT_DIAGNOSTICS_KEY,
                         },
                     ]
@@ -1076,9 +1068,7 @@ def test_output_mapping_cannot_overwrite_executor_prompt_lineage(
     )
     assert workflow_data[PROMPT_CONTEXT_DIAGNOSTICS_KEY] == legitimate_diagnostics
     assert attestation["exact_snapshot_eligible"] is False
-    assert "authority_lineage_mapping_override" in attestation[
-        "ineligibility_reasons"
-    ]
+    assert "authority_lineage_mapping_override" in attestation["ineligibility_reasons"]
 
 
 def test_lossy_authority_projection_is_ineligible_in_attestation_and_trace(
@@ -1093,16 +1083,16 @@ def test_lossy_authority_projection_is_ineligible_in_attestation_and_trace(
                     "status": "authored",
                     "oversized_evidence": "x" * (300 * 1024),
                 },
-                PROMPT_CONTEXT_DIAGNOSTICS_KEY: {
-                    "prompt_content_sha256": "a" * 64
-                },
+                PROMPT_CONTEXT_DIAGNOSTICS_KEY: {"prompt_content_sha256": "a" * 64},
             }
         ),
     )
     monkeypatch.setattr(
         "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
-        lambda trace: persisted_traces.append(copy.deepcopy(trace))
-        or "trace-lossy-authority-projection",
+        lambda trace: (
+            persisted_traces.append(copy.deepcopy(trace))
+            or "trace-lossy-authority-projection"
+        ),
     )
     definition = _terminal_definition(
         actions=(
@@ -1137,15 +1127,16 @@ def test_lossy_authority_projection_is_ineligible_in_attestation_and_trace(
         for record in projection["projected_keys"]
     )
     assert attestation["exact_snapshot_eligible"] is False
-    assert "authority_checkpoint_projection_lossy" in attestation[
-        "ineligibility_reasons"
-    ]
+    assert (
+        "authority_checkpoint_projection_lossy" in attestation["ineligibility_reasons"]
+    )
     assert len(persisted_traces) == 1
     trace_metadata = persisted_traces[0]["metadata"]
     assert trace_metadata["exact_authority_snapshot_eligible"] is False
-    assert "authority_checkpoint_projection_lossy" in trace_metadata[
-        "exact_authority_snapshot_ineligibility_reasons"
-    ]
+    assert (
+        "authority_checkpoint_projection_lossy"
+        in trace_metadata["exact_authority_snapshot_ineligibility_reasons"]
+    )
 
 
 def test_two_self_contained_llm_actions_have_ambiguous_authority_provenance(
@@ -1178,9 +1169,9 @@ def test_two_self_contained_llm_actions_have_ambiguous_authority_provenance(
         llm_policy={"tool_mode": "none"},
     )
     definition = _terminal_definition(actions=(llm_action, llm_action))
-    assert _definition_exact_snapshot_dependency_ineligibility_reasons(
-        definition
-    ) == {"ambiguous_authority_output_producer"}
+    assert _definition_exact_snapshot_dependency_ineligibility_reasons(definition) == {
+        "ambiguous_authority_output_producer"
+    }
     identity = _definition_identity(definition)
     instance = _running_instance()
     manager = _executor_manager(instance)
@@ -1211,9 +1202,9 @@ def test_two_self_contained_llm_actions_have_ambiguous_authority_provenance(
 def test_definition_without_an_authority_producer_is_not_exact_eligible() -> None:
     definition = _terminal_definition(actions=())
 
-    assert _definition_exact_snapshot_dependency_ineligibility_reasons(
-        definition
-    ) == {"authority_output_producer_action_missing"}
+    assert _definition_exact_snapshot_dependency_ineligibility_reasons(definition) == {
+        "authority_output_producer_action_missing"
+    }
 
 
 def test_caller_idempotency_cache_can_never_be_exact_authority(
@@ -1303,9 +1294,9 @@ def test_caller_idempotency_cache_can_never_be_exact_authority(
         "caller-forged"
     )
     assert attestation["exact_snapshot_eligible"] is False
-    assert "authority_producer_idempotency_surface" in attestation[
-        "ineligibility_reasons"
-    ]
+    assert (
+        "authority_producer_idempotency_surface" in attestation["ineligibility_reasons"]
+    )
 
 
 def test_retrying_single_llm_producer_is_not_exact(
@@ -1378,12 +1369,11 @@ def test_retrying_single_llm_producer_is_not_exact(
     assert invocation_count == 2
     _workflow_data, attestation = _terminal_checkpoint(manager)
     assert attestation["exact_snapshot_eligible"] is False
-    assert "authority_producer_retry_surface" in attestation[
-        "ineligibility_reasons"
-    ]
-    assert "ambiguous_authority_output_producer_invocations" in attestation[
-        "ineligibility_reasons"
-    ]
+    assert "authority_producer_retry_surface" in attestation["ineligibility_reasons"]
+    assert (
+        "ambiguous_authority_output_producer_invocations"
+        in attestation["ineligibility_reasons"]
+    )
 
 
 def test_cyclic_state_graph_is_not_exact_producer_shape() -> None:

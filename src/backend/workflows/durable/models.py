@@ -310,9 +310,7 @@ class WorkflowInstance:
             "claimed_at": self.claimed_at,
             "claimed_by_build": self.claimed_by_build,
             "claim_token": self.claim_token,
-            "authority_checkpoint_attestation": (
-                self.authority_checkpoint_attestation
-            ),
+            "authority_checkpoint_attestation": (self.authority_checkpoint_attestation),
             "min_worker_build": self.min_worker_build,
             "claim_ineligible_reason": self.claim_ineligible_reason,
             "claim_ineligible_detected_at": self.claim_ineligible_detected_at,
@@ -450,9 +448,7 @@ class WorkflowInstance:
             "claim_ineligible_detected_at": cls._status_datetime_to_iso(
                 doc.get("claim_ineligible_detected_at")
             ),
-            "manual_resume_required": bool(
-                doc.get("manual_resume_required", False)
-            ),
+            "manual_resume_required": bool(doc.get("manual_resume_required", False)),
             "checkpoint_pause_receipt": (
                 doc.get("checkpoint_pause_receipt")
                 if isinstance(doc.get("checkpoint_pause_receipt"), dict)
@@ -463,9 +459,7 @@ class WorkflowInstance:
                 if isinstance(doc.get("checkpoint_resume_receipt"), dict)
                 else None
             ),
-            "checkpoint_resume_count": int(
-                doc.get("checkpoint_resume_count", 0) or 0
-            ),
+            "checkpoint_resume_count": int(doc.get("checkpoint_resume_count", 0) or 0),
             "progress": {
                 "current": doc.get("progress_current"),
                 "total": doc.get("progress_total"),

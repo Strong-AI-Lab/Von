@@ -340,6 +340,12 @@ def test_explicit_workflow_target_scopes_support_concepts_transitively() -> None
             "relationships": {"#V#usesSupport": ["#V#transitive_support"]},
         },
         {"concept_id": "#V#transitive_support"},
+        {
+            "concept_id": "#V#targeted_bootstrap_support",
+            "materialise_for_targeted_workflow_bootstrap": True,
+            "relationships": {"#V#usesSupport": ["#V#global_dependency"]},
+        },
+        {"concept_id": "#V#global_dependency"},
         {"concept_id": "#V#unrelated_support"},
     ]
 
@@ -360,6 +366,8 @@ def test_explicit_workflow_target_scopes_support_concepts_transitively() -> None
     assert [spec["concept_id"] for spec in scoped] == [
         "#V#target_support",
         "#V#transitive_support",
+        "#V#targeted_bootstrap_support",
+        "#V#global_dependency",
     ]
 
 

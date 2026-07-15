@@ -129,30 +129,33 @@ def test_context_field_lineage_is_sensitive_to_value_order_and_label() -> None:
     assert digest is not None
     assert diagnostics["llm_context_fields_sha256"] == digest
     assert diagnostics["llm_context_fields_rendered_count"] == 2
-    assert len(
-        {
-            digest,
-            compute_llm_context_fields_sha256(
-                llm_policy=policy,
-                context={**context, "second": "changed"},
-            ),
-            compute_llm_context_fields_sha256(
-                llm_policy={
-                    "context_fields": list(reversed(policy["context_fields"]))
-                },
-                context=context,
-            ),
-            compute_llm_context_fields_sha256(
-                llm_policy={
-                    "context_fields": [
-                        {"context_key": "first", "label": "Renamed evidence"},
-                        policy["context_fields"][1],
-                    ]
-                },
-                context=context,
-            ),
-        }
-    ) == 4
+    assert (
+        len(
+            {
+                digest,
+                compute_llm_context_fields_sha256(
+                    llm_policy=policy,
+                    context={**context, "second": "changed"},
+                ),
+                compute_llm_context_fields_sha256(
+                    llm_policy={
+                        "context_fields": list(reversed(policy["context_fields"]))
+                    },
+                    context=context,
+                ),
+                compute_llm_context_fields_sha256(
+                    llm_policy={
+                        "context_fields": [
+                            {"context_key": "first", "label": "Renamed evidence"},
+                            policy["context_fields"][1],
+                        ]
+                    },
+                    context=context,
+                ),
+            }
+        )
+        == 4
+    )
 
 
 def test_context_field_lineage_distinguishes_authored_empty_from_missing() -> None:
@@ -341,9 +344,7 @@ def test_context_field_lineage_includes_model_visible_recovery_marker(
         ]
         + [{"context_key": "last", "label": "Final evidence " * 100}]
     }
-    context = {
-        f"field_{index}": "bulk evidence " * 2_000 for index in range(31)
-    }
+    context = {f"field_{index}": "bulk evidence " * 2_000 for index in range(31)}
     context["last"] = "omitted"
 
     monkeypatch.setattr(lse, "TOTAL_TRUNCATION_MARKER", "[marker one]")

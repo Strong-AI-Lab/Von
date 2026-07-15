@@ -97,9 +97,7 @@ def _contract() -> OperationalCertificationContract:
         "suite_concept_id": "#V#represented_pilot_suite",
         "case_set": "represented_pilot_case_set",
         "policy": policy,
-        "scenario_contract_sha256s": {
-            scenario.scenario_id: scenario.contract_sha256
-        },
+        "scenario_contract_sha256s": {scenario.scenario_id: scenario.contract_sha256},
         "topological_scenario_ids": [scenario.scenario_id],
     }
     return OperationalCertificationContract(
@@ -265,9 +263,7 @@ def _execution(
         "campaign_execution_id": campaign_execution_id,
         "experiment_run_id": experiment_run_id,
         "experiment_finalisation": {
-            "schema_version": (
-                "operational_certification_experiment_finalisation.v1"
-            ),
+            "schema_version": ("operational_certification_experiment_finalisation.v1"),
             "success": True,
             "checks": finalisation_checks,
             "expected_observation_count": 6,
@@ -307,10 +303,15 @@ def _fixture_campaigns() -> tuple[
     contract = _contract()
     alpha, alpha_run = _execution(contract, ACTOR_ALPHA)
     beta, beta_run = _execution(contract, ACTOR_BETA)
-    return contract, alpha, beta, {
-        alpha_run["run_id"]: alpha_run,
-        beta_run["run_id"]: beta_run,
-    }
+    return (
+        contract,
+        alpha,
+        beta,
+        {
+            alpha_run["run_id"]: alpha_run,
+            beta_run["run_id"]: beta_run,
+        },
+    )
 
 
 def test_cohort_aggregate_is_policy_driven_complete_and_order_independent() -> None:
@@ -435,9 +436,7 @@ def test_actor_dossier_rejects_execution_digest_tampering() -> None:
 
 def test_actor_dossier_rejects_forged_runner_attestation() -> None:
     contract, alpha, _beta, runs = _fixture_campaigns()
-    alpha["execution_provenance"]["trusted_runner_attestation"]["signature"] = (
-        "0" * 64
-    )
+    alpha["execution_provenance"]["trusted_runner_attestation"]["signature"] = "0" * 64
     canonical = runs[alpha["experiment_run_id"]]
     campaign_observation = canonical["observations"][-1]
     campaign_observation["execution_provenance"] = copy.deepcopy(

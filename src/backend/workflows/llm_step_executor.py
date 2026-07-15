@@ -1299,9 +1299,7 @@ def _render_llm_context_field_sections(
                 field_diagnostics["skipped_empty"] = True
                 recovery_diagnostics["skipped_empty_context_field_count"] = (
                     int(
-                        recovery_diagnostics.get(
-                            "skipped_empty_context_field_count"
-                        )
+                        recovery_diagnostics.get("skipped_empty_context_field_count")
                         or 0
                     )
                     + 1
@@ -1340,8 +1338,7 @@ def _render_llm_context_field_sections(
             )
             recovery_diagnostics["fields"].append(field_diagnostics)
             recovery_diagnostics["rendered_context_field_count"] = (
-                int(recovery_diagnostics.get("rendered_context_field_count") or 0)
-                + 1
+                int(recovery_diagnostics.get("rendered_context_field_count") or 0) + 1
             )
             recovery_diagnostics["rendered_context_chars"] = int(
                 recovery_diagnostics.get("rendered_context_chars") or 0

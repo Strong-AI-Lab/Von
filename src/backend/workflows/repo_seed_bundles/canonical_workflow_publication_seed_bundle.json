@@ -27,6 +27,7 @@
         "workflow-model-policy",
         "workflow-support"
       ],
+      "materialise_for_targeted_workflow_bootstrap": true,
       "relationships": {
         "#V#has_stage_configuration": [
           "#V#default_mail_review_response_rendering_config",

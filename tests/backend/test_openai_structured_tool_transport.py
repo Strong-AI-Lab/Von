@@ -857,9 +857,9 @@ def test_fresh_chat_request_projects_prior_tool_result_as_context_evidence(
         "tool_name": "lookup",
         "call_id": "call_prior",
     }
-    assert result.transport_metadata[
-        "fresh_tool_context_evidence_projection_count"
-    ] == 1
+    assert (
+        result.transport_metadata["fresh_tool_context_evidence_projection_count"] == 1
+    )
 
 
 def test_provider_tool_call_lineage_rejection_is_typed_and_never_surface_falls_back(

@@ -128,7 +128,12 @@ def _scope_support_concepts_to_authority_payloads(
             )
         }
 
-    selected_ids = _referenced_support_ids(authority_payloads)
+    selected_ids = {
+        concept_id
+        for concept_id, spec in by_id.items()
+        if spec.get("materialise_for_targeted_workflow_bootstrap") is True
+    }
+    selected_ids.update(_referenced_support_ids(authority_payloads))
     pending = list(selected_ids)
     while pending:
         concept_id = pending.pop()

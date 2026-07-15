@@ -140,9 +140,7 @@ def _ensure_aggregate_concept(
             )
         except Exception:
             if (
-                _safe_get_concept(
-                    OPERATIONAL_CERTIFICATION_COHORT_AGGREGATE_TYPE_ID
-                )
+                _safe_get_concept(OPERATIONAL_CERTIFICATION_COHORT_AGGREGATE_TYPE_ID)
                 is None
             ):
                 raise
@@ -170,9 +168,7 @@ def _ensure_aggregate_concept(
                         _aggregate_identity_attributes(aggregate)
                     ),
                 },
-                parent_concept_ids=[
-                    OPERATIONAL_CERTIFICATION_COHORT_AGGREGATE_TYPE_ID
-                ],
+                parent_concept_ids=[OPERATIONAL_CERTIFICATION_COHORT_AGGREGATE_TYPE_ID],
                 create_as_instance=True,
                 organisation_concept_id=org_id,
                 visibility_scope_mode="organisation_general",
@@ -342,9 +338,7 @@ def persist_operational_certification_cohort_aggregate(
                 },
                 context={
                     "operation": "persist_immutable_cohort_aggregate",
-                    "aggregate_identity_sha256": aggregate[
-                        "aggregate_identity_sha256"
-                    ],
+                    "aggregate_identity_sha256": aggregate["aggregate_identity_sha256"],
                 },
                 garbage_collect=True,
             )

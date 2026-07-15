@@ -1544,9 +1544,7 @@ def test_tool_execution_bridges_awaited_workflow_execute_authority_output_into_a
                     "verification": {
                         "preflight_passed": True,
                         "postflight_passed": True,
-                        "preflight": {
-                            "definition_identity": dict(definition_identity)
-                        },
+                        "preflight": {"definition_identity": dict(definition_identity)},
                         "postflight": {
                             "definition_identity": dict(definition_identity)
                         },
@@ -1569,9 +1567,7 @@ def test_tool_execution_bridges_awaited_workflow_execute_authority_output_into_a
         "candidate_id": "candidate-bridge-1",
     }
     workflow_data = {
-        "durable_executed_workflow_definition_identity": dict(
-            definition_identity
-        ),
+        "durable_executed_workflow_definition_identity": dict(definition_identity),
         "workflow_checkpoint_context_projection": {
             "schema_version": "workflow_checkpoint_context_projection.v1",
             "projected_key_count": 0,
@@ -1689,9 +1685,7 @@ def test_tool_execution_bridges_awaited_workflow_execute_authority_output_into_a
     assert execution_identity["execution_request_id"] == "request-bridge-1"
     assert execution_identity["conversation_session_id"] == "session-bridge-1"
     assert execution_identity["workflow_instance_id"] == instance_id
-    assert execution_identity["workflow_definition_identity"] == (
-        definition_identity
-    )
+    assert execution_identity["workflow_definition_identity"] == (definition_identity)
     claim_provenance = execution_identity["durable_claim_provenance"]
     assert claim_provenance["worker_id"] == "worker-bridge-1"
     assert claim_provenance["exact_snapshot_eligible"] is True

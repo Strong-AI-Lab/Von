@@ -1259,9 +1259,10 @@ class TestWorkflowInstanceManager:
         assert receipt is not None
         assert receipt["checkpoint_state"] == "after_pause"
         assert receipt["checkpoint_step_index"] == 1
-        assert receipt["claim_token_sha256"] == hashlib.sha256(
-            claimed.claim_token.encode("utf-8")
-        ).hexdigest()
+        assert (
+            receipt["claim_token_sha256"]
+            == hashlib.sha256(claimed.claim_token.encode("utf-8")).hexdigest()
+        )
         assert claimed.claim_token not in json.dumps(receipt, sort_keys=True)
         paused = manager.get_instance(instance_id)
         assert paused is not None
@@ -1278,14 +1279,17 @@ class TestWorkflowInstanceManager:
         assert resume_receipt["instance_id"] == instance_id
         assert resume_receipt["same_instance_resume"] is True
         assert resume_receipt["checkpoint_state"] == "after_pause"
-        assert resume_receipt["pause_receipt_sha256"] == hashlib.sha256(
-            json.dumps(
-                receipt,
-                ensure_ascii=True,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        assert (
+            resume_receipt["pause_receipt_sha256"]
+            == hashlib.sha256(
+                json.dumps(
+                    receipt,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
         queued = manager.get_instance(instance_id)
         assert queued is not None
         assert queued.status == WorkflowInstanceStatus.PENDING
@@ -1465,9 +1469,7 @@ class TestWorkflowInstanceManager:
                 "worker-capability-only",
                 worker_build_identity={
                     "git_commit": "123456789abc123456789abc123456789abc1234",
-                    "capabilities": [
-                        "durable_exact_workflow_authority_snapshot.v1"
-                    ],
+                    "capabilities": ["durable_exact_workflow_authority_snapshot.v1"],
                 },
             )
             is None
@@ -1476,9 +1478,7 @@ class TestWorkflowInstanceManager:
             "worker-exact-build",
             worker_build_identity={
                 "git_commit": exact_commit,
-                "capabilities": [
-                    "durable_exact_workflow_authority_snapshot.v1"
-                ],
+                "capabilities": ["durable_exact_workflow_authority_snapshot.v1"],
             },
         )
         assert claimed is not None
@@ -1673,8 +1673,7 @@ class TestWorkflowInstanceManager:
                 "$set": {
                     "status": WorkflowInstanceStatus.RUNNING.value,
                     "locked_by": "worker-reused",
-                    "lock_expires_at": datetime.now(timezone.utc)
-                    + timedelta(hours=1),
+                    "lock_expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
                     "claim_token": "claim-token-a",
                     "claimed_by_build": {
                         "schema_version": "durable_worker_claim_provenance.v1",
@@ -1924,8 +1923,7 @@ class TestWorkflowInstanceManager:
             {"instance_id": instance_id},
             {
                 "$set": {
-                    "lock_expires_at": datetime.now(timezone.utc)
-                    - timedelta(seconds=1)
+                    "lock_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)
                 }
             },
         )
@@ -1965,8 +1963,7 @@ class TestWorkflowInstanceManager:
             {"instance_id": instance_id},
             {
                 "$set": {
-                    "lock_expires_at": datetime.now(timezone.utc)
-                    - timedelta(seconds=1)
+                    "lock_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)
                 }
             },
         )
@@ -2036,8 +2033,7 @@ class TestWorkflowInstanceManager:
             {"instance_id": instance_id},
             {
                 "$set": {
-                    "lock_expires_at": datetime.now(timezone.utc)
-                    - timedelta(seconds=1)
+                    "lock_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)
                 }
             },
         )
@@ -2120,8 +2116,7 @@ class TestWorkflowInstanceManager:
             {"instance_id": instance_id},
             {
                 "$set": {
-                    "lock_expires_at": datetime.now(timezone.utc)
-                    - timedelta(seconds=1)
+                    "lock_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)
                 }
             },
         )
@@ -2292,8 +2287,7 @@ class TestWorkflowInstanceManager:
                 is False
             )
             assert (
-                manager.mark_completed(instance_id, outputs={"writer": "late"})
-                is False
+                manager.mark_completed(instance_id, outputs={"writer": "late"}) is False
             )
             assert manager.mark_failed(instance_id, error="late failure") is False
             instance = manager.get_instance(instance_id)

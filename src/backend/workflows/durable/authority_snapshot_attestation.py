@@ -16,18 +16,14 @@ from typing import Any
 EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY = (
     "durable_exact_workflow_authority_snapshot.v1"
 )
-DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION = (
-    "durable_worker_claim_provenance.v1"
-)
+DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION = "durable_worker_claim_provenance.v1"
 DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_SCHEMA_VERSION = (
     "durable_authority_checkpoint_attestation.v1"
 )
 DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY = (
     "durable_executed_workflow_definition_identity"
 )
-DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD = (
-    "authority_checkpoint_attestation"
-)
+DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD = "authority_checkpoint_attestation"
 
 WORKFLOW_AUTHORITY_OUTPUT_KEY = "workflow_authority_output"
 PROMPT_CONTEXT_DIAGNOSTICS_KEY = "prompt_context_diagnostics"
@@ -68,10 +64,7 @@ def _is_sha256(value: Any) -> bool:
 
 
 def _authority_payload(workflow_data: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        key: workflow_data.get(key)
-        for key in RESERVED_AUTHORITY_CONTEXT_KEYS
-    }
+    return {key: workflow_data.get(key) for key in RESERVED_AUTHORITY_CONTEXT_KEYS}
 
 
 def authority_payload_sha256(workflow_data: Mapping[str, Any]) -> str | None:
@@ -101,10 +94,7 @@ def worker_claim_supports_exact_authority_snapshot(
         claimed_by_build.get("schema_version")
         != DURABLE_WORKER_CLAIM_PROVENANCE_SCHEMA_VERSION
         or worker_id is None
-        or (
-            expected_worker_id is not None
-            and worker_id != expected_worker_id
-        )
+        or (expected_worker_id is not None and worker_id != expected_worker_id)
         or not any(
             _clean_text(claimed_by_build.get(field))
             for field in (
@@ -147,9 +137,7 @@ def build_authority_checkpoint_attestation(
     claim_token_clean = _clean_text(claim_token)
     worker_id_clean = _clean_text(worker_id)
     payload_digest = authority_payload_sha256(workflow_data)
-    identity = workflow_data.get(
-        DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY
-    )
+    identity = workflow_data.get(DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY)
     definition_hash = (
         _clean_text(identity.get("definition_hash"))
         if isinstance(identity, Mapping)
@@ -239,9 +227,7 @@ def validate_authority_checkpoint_attestation(
     ):
         return None, "authority_checkpoint_attestation_binding_mismatch"
     observed_digest = authority_payload_sha256(workflow_data)
-    identity = workflow_data.get(
-        DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY
-    )
+    identity = workflow_data.get(DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY)
     observed_definition_hash = (
         _clean_text(identity.get("definition_hash"))
         if isinstance(identity, Mapping)

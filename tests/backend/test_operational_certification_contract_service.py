@@ -1076,9 +1076,7 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
     assert cohort == {
         "status": "agreed",
         "profile": "trusted_sail",
-        "organisation_concept_id": (
-            "#V#university_of_auckland_strong_ai_lab"
-        ),
+        "organisation_concept_id": ("#V#university_of_auckland_strong_ai_lab"),
         "actor_concept_ids": [
             "#V#michael_witbrock",
             "#V#zhan_von_witbrock",
@@ -1130,8 +1128,7 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
     assert next(
         check
         for check in scenarios["pilot_typed_missing_entity_recovery"].checks
-        if check["matcher_id"]
-        == "at_least_one_tool_observed_for_semantic_evaluation"
+        if check["matcher_id"] == "at_least_one_tool_observed_for_semantic_evaluation"
     ) == {
         "matcher_id": "at_least_one_tool_observed_for_semantic_evaluation",
         "kind": "count",
@@ -1144,28 +1141,23 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
         input_text = json.dumps(scenario.execution.get("inputs") or {})
         assert "Michael" not in input_text
         assert "Zhan" not in input_text
-        measurement_paths = {
-            budget["measurement_path"] for budget in scenario.budgets
-        }
+        measurement_paths = {budget["measurement_path"] for budget in scenario.budgets}
         assert "/operational_metrics/duration_ms" in measurement_paths
         burden_evidence = scenario.metadata["interaction_burden_evidence"]
         if burden_evidence.get("follow_up_request_applicable") is False:
             assert (
-                "/operational_metrics/follow_up_request_count"
-                not in measurement_paths
+                "/operational_metrics/follow_up_request_count" not in measurement_paths
             )
             assert burden_evidence["follow_up_request_measurement"] == (
                 "not_applicable"
             )
         else:
-            assert (
-                "/operational_metrics/follow_up_request_count"
-                in measurement_paths
-            )
+            assert "/operational_metrics/follow_up_request_count" in measurement_paths
         assert "/operational_metrics/correction_count" not in measurement_paths
-        assert burden_evidence[
-            "correction_measurement_status"
-        ] == "pending_represented_correction_event_telemetry"
+        assert (
+            burden_evidence["correction_measurement_status"]
+            == "pending_represented_correction_event_telemetry"
+        )
 
     marker_probe = scenarios[
         "pilot_unique_state_marker_create_and_read_back"
@@ -1184,9 +1176,9 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
     ]
     assert degraded.permitted_effects[0]["cardinality"] == 1
     degraded_matchers = {check["matcher_id"]: check for check in degraded.checks}
-    assert degraded_matchers["authoritative_empty_has_zero_candidates"][
-        "expected"
-    ] == []
+    assert (
+        degraded_matchers["authoritative_empty_has_zero_candidates"]["expected"] == []
+    )
     assert degraded_matchers["invalid_argument_type_exact"]["expected"] == (
         "invalid_arguments"
     )
@@ -1197,15 +1189,19 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
     assert degraded_matchers["input_requirement_outcome_exact"]["expected"] == (
         "input_required"
     )
-    assert degraded_matchers["input_requirement_names_concept_id"][
-        "expected"
-    ] == ["concept_id"]
-    assert degraded_matchers[
-        "input_requirement_preserves_source_schema_failure"
-    ]["expected"] == "schema_validation_failed"
-    assert degraded_matchers["read_only_mutation_guard_reason_exact"][
-        "expected"
-    ] == "insufficient_mutation_authority"
+    assert degraded_matchers["input_requirement_names_concept_id"]["expected"] == [
+        "concept_id"
+    ]
+    assert (
+        degraded_matchers["input_requirement_preserves_source_schema_failure"][
+            "expected"
+        ]
+        == "schema_validation_failed"
+    )
+    assert (
+        degraded_matchers["read_only_mutation_guard_reason_exact"]["expected"]
+        == "insufficient_mutation_authority"
+    )
     assert degraded_matchers["wrong_target_contract_error_exact"]["expected"] == (
         "target_contract_symbolic_mismatch"
     )
@@ -1218,24 +1214,26 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
         step.get("operation", "execute")
         for step in interrupted.execution["inputs"]["submission_plan"]
     ] == ["execute", "await_status", "resume", "execute"]
-    interruption_matchers = {
-        check["matcher_id"]: check for check in interrupted.checks
-    }
+    interruption_matchers = {check["matcher_id"]: check for check in interrupted.checks}
     assert interruption_matchers["pause_claim_fence_digest_observed"]["path"] == (
         "/path_analysis/checkpoint_pause_receipts/0/claim_token_sha256"
     )
-    assert interruption_matchers[
-        "represented_checkpoint_resume_stage_reached"
-    ]["expected"] is True
-    assert interruption_matchers[
-        "represented_same_instance_resume_confirmed"
-    ]["expected"] is True
-    assert interruption_matchers[
-        "represented_pause_checkpoint_state_exact"
-    ]["expected"] == "mark_resumed"
-    assert interruption_matchers[
-        "represented_resume_checkpoint_state_exact"
-    ]["expected"] == "mark_resumed"
+    assert (
+        interruption_matchers["represented_checkpoint_resume_stage_reached"]["expected"]
+        is True
+    )
+    assert (
+        interruption_matchers["represented_same_instance_resume_confirmed"]["expected"]
+        is True
+    )
+    assert (
+        interruption_matchers["represented_pause_checkpoint_state_exact"]["expected"]
+        == "mark_resumed"
+    )
+    assert (
+        interruption_matchers["represented_resume_checkpoint_state_exact"]["expected"]
+        == "mark_resumed"
+    )
     assert interruption_matchers["represented_resume_count_exact"]["expected"] == 1
 
 
@@ -1265,9 +1263,7 @@ def test_repo_seed_declares_generic_transient_mcp_fault_recovery_case() -> None:
         "rate_limit",
         "temporary_unavailability",
     ]
-    assert {rule["tool_name"] for rule in plan["faults"]} == {
-        "resolve_concept_by_name"
-    }
+    assert {rule["tool_name"] for rule in plan["faults"]} == {"resolve_concept_by_name"}
     assert scenario.execution["inputs"]["timeout_seconds"] == 180.0
     assert "submission_plan" not in scenario.execution["inputs"]
     checks = {check["matcher_id"]: check for check in scenario.checks}

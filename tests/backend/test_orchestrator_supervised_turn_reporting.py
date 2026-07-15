@@ -3929,9 +3929,7 @@ def test_awaited_workflow_execute_snapshot_bridge_fails_closed_on_scope_or_autho
         },
     }
     if failure_case == "llm_context_fields_lineage_missing":
-        workflow_data["prompt_context_diagnostics"].pop(
-            "llm_context_fields_sha256"
-        )
+        workflow_data["prompt_context_diagnostics"].pop("llm_context_fields_sha256")
     elif failure_case == "llm_context_fields_lineage_ambiguous":
         workflow_data["prompt_context_diagnostics"]["nested_diagnostics"] = {
             "llm_context_fields_sha256": "e" * 64
