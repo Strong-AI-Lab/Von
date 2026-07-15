@@ -94,18 +94,6 @@ def vontology_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         lambda **_kwargs: None,
     )
 
-    def activate(candidate):
-        receipt = {
-            "activated": True,
-            "affected_artifact": candidate["affected_artifact"],
-            "candidate_release_sha256": candidate["release_sha256"],
-            "runtime_release_sha256": candidate["release_sha256"],
-        }
-        receipt["receipt_sha256"] = operational_learning_release_digest(receipt)
-        return receipt
-
-    monkeypatch.setattr(service, "_apply_and_readback_release_activation", activate)
-
     return {
         "concepts": concepts,
         "texts": texts,
@@ -462,6 +450,23 @@ def test_active_release_resolver_projects_exact_active_payload(
         },
         "previous": None,
     }
+    active_pointer = active_record["state"]["release_pointers"][ARTIFACT_ID][
+        "active"
+    ]
+    decision_receipt = {
+        "schema_version": OPERATIONAL_LEARNING_RELEASE_RECEIPT_SCHEMA_VERSION,
+        "receipt_id": "receipt-active-1",
+        "decision_id": "decision-active-1",
+        "action": "promote",
+        "affected_artifact": ARTIFACT_ID,
+        "candidate_id": "candidate-1",
+        "release_sha256": candidate["release_sha256"],
+        "resulting_active": copy.deepcopy(active_pointer),
+    }
+    decision_receipt["receipt_sha256"] = operational_learning_release_digest(
+        decision_receipt
+    )
+    active_record["state"]["decision_receipts"].append(decision_receipt)
     monkeypatch.setattr(
         service,
         "load_operational_learning_release_state",
@@ -481,6 +486,47 @@ def test_active_release_resolver_projects_exact_active_payload(
     assert active_release["candidate_id"] == "candidate-1"
     assert active_release["release_payload"] == candidate["release_payload"]
     assert active_release["candidate_lifecycle_state"] == "active"
+    assert active_release["activation_receipt"]["decision_receipt_id"] == (
+        "receipt-active-1"
+    )
+    assert active_release["activation_receipt"]["runtime_release_sha256"] == (
+        candidate["release_sha256"]
+    )
+
+
+def test_candidate_behaviour_evaluator_consumes_active_readback_projection() -> None:
+    bundle_path = (
+        Path(service.__file__).resolve().parents[1]
+        / "workflows"
+        / "repo_seed_bundles"
+        / "operational_learning_candidate_behaviour_workflow_seed_bundle.json"
+    )
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    workflow = bundle["workflows"][0]
+    steps = {
+        step["state_id"]: step
+        for step in workflow["publication_spec"]["steps"]
+    }
+
+    resolver = steps["resolve_active_baseline"]
+    assert ["tool_name", "operational_learning_release_resolve_active"] in resolver[
+        "static_input_bindings"
+    ]
+    assert {
+        "concept_id": (
+            "#V#workflow_mapping_operational_learning_candidate_behaviour_"
+            "active_baseline_to_represented_active_baseline_context"
+        ),
+        "context_key": "represented_active_baseline_context",
+        "tool_output_field": "result.active_release",
+    } in resolver["tool_output_mapping_specs"]
+    evaluator_context_keys = {
+        field["context_key"]
+        for field in steps["evaluate_candidate_behaviour"]["llm_policy"][
+            "context_fields"
+        ]
+    }
+    assert "represented_active_baseline_context" in evaluator_context_keys
 
 
 def test_scope_mismatch_fails_before_vontology_access(
@@ -809,6 +855,17 @@ def test_authenticated_approval_is_derived_persisted_and_required_for_live_path(
 
     assert promoted["success"] is True
     assert captured["human_approval"] == approval
+    activation_readback = promoted["runtime_activation_readback"]
+    assert activation_readback["status"] == "active_release_resolved"
+    assert activation_readback["release_sha256"] == (
+        registered["state"]["candidate_snapshots"]["candidate-1"]["release_sha256"]
+    )
+    assert activation_readback["activation_receipt"]["decision_receipt_id"] == (
+        "synthetic-support-test"
+    )
+    assert activation_readback["authority"]["record_sha256"] == promoted[
+        "state_record"
+    ]["record_sha256"]
 
 
 def test_live_promotion_requires_authoritative_approval_even_for_declared_low_risk(
@@ -841,22 +898,21 @@ def test_live_promotion_requires_authoritative_approval_even_for_declared_low_ri
         )
 
 
-def test_missing_runtime_activation_adapter_is_a_typed_non_promotion() -> None:
-    candidate = {
+def test_active_pointer_without_decision_receipt_fails_closed() -> None:
+    active_pointer = {
         "candidate_id": "candidate-1",
         "affected_artifact": ARTIFACT_ID,
         "release_sha256": "a" * 64,
     }
-
     with pytest.raises(
         service.LearningReleasePersistenceError,
-        match="canonical_learning_release_activation_adapter_unavailable",
-    ) as exc_info:
-        service._apply_and_readback_release_activation(candidate)
-
-    assert exc_info.value.details["decision_state"] == (
-        "promotion_approved_not_activated"
-    )
+        match="operational_learning_release_activation_receipt_missing",
+    ):
+        service._matching_active_pointer_decision_receipt(
+            {"decision_receipts": []},
+            affected_artifact=ARTIFACT_ID,
+            active_pointer=active_pointer,
+        )
 
 
 def test_candidate_evaluation_binding_precedes_decision_and_feeds_campaign(

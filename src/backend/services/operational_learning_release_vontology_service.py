@@ -72,6 +72,9 @@ REPRESENTED_FAILURE_EVIDENCE_MATERIAL_AVAILABILITY_SCHEMA_VERSION = (
 REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION = (
     "represented_active_learning_release_context.v1"
 )
+OPERATIONAL_LEARNING_RUNTIME_ACTIVATION_RECEIPT_SCHEMA_VERSION = (
+    "operational_learning_runtime_activation_receipt.v1"
+)
 REPRESENTED_LEARNING_RELEASE_BINDING_SCHEMA_VERSION = (
     "represented_learning_release_binding.v1"
 )
@@ -1084,6 +1087,105 @@ def resolve_operational_learning_release_candidate_in_vontology(
     return {"success": True, "result": {"candidate_context": candidate_context}}
 
 
+def _matching_active_pointer_decision_receipt(
+    state: Mapping[str, Any],
+    *,
+    affected_artifact: str,
+    active_pointer: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve the persisted decision receipt that produced an exact pointer."""
+
+    active_release_sha256 = active_pointer.get("release_sha256")
+    for raw_receipt in reversed(list(state.get("decision_receipts") or [])):
+        if not isinstance(raw_receipt, Mapping):
+            continue
+        if raw_receipt.get("action") not in {"promote", "rollback"}:
+            continue
+        if raw_receipt.get("affected_artifact") != affected_artifact:
+            continue
+        resulting_active = raw_receipt.get("resulting_active")
+        if not isinstance(resulting_active, Mapping):
+            continue
+        if resulting_active.get("release_sha256") != active_release_sha256:
+            continue
+        if dict(resulting_active) != dict(active_pointer):
+            raise LearningReleasePersistenceError(
+                "operational_learning_release_activation_receipt_pointer_mismatch",
+                details={
+                    "affected_artifact": affected_artifact,
+                    "active_release_sha256": active_release_sha256,
+                    "decision_receipt_id": raw_receipt.get("receipt_id"),
+                },
+                recovery_affordances=[
+                    {"action_type": "read_latest_state"},
+                    {"action_type": "inspect_release_decision_receipt"},
+                ],
+            )
+        return copy.deepcopy(dict(raw_receipt))
+    raise LearningReleasePersistenceError(
+        "operational_learning_release_activation_receipt_missing",
+        details={
+            "affected_artifact": affected_artifact,
+            "active_release_sha256": active_release_sha256,
+        },
+        recovery_affordances=[
+            {"action_type": "read_latest_state"},
+            {"action_type": "inspect_release_decision_receipts"},
+        ],
+    )
+
+
+def _activation_readback_receipt(
+    *,
+    record: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    active_pointer: Mapping[str, Any],
+    decision_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind runtime consumption to canonical pointer and decision read-back."""
+
+    candidate_release_sha256 = _require_sha256(
+        candidate.get("release_sha256"),
+        code="operational_learning_release_candidate_hash_missing",
+    )
+    decision_receipt_sha256 = _require_sha256(
+        decision_receipt.get("receipt_sha256"),
+        code="operational_learning_release_activation_receipt_hash_missing",
+    )
+    receipt: dict[str, Any] = {
+        "schema_version": (
+            OPERATIONAL_LEARNING_RUNTIME_ACTIVATION_RECEIPT_SCHEMA_VERSION
+        ),
+        "status": "pointer_verified",
+        "receipt_kind": "active_pointer_readback",
+        "affected_artifact": candidate.get("affected_artifact"),
+        "namespace": record.get("namespace"),
+        "user_id": record.get("user_id"),
+        "org_id": record.get("org_id"),
+        "state_concept_id": record.get("state_concept_id"),
+        "state_version": record.get("version"),
+        "state_sha256": record.get("state_sha256"),
+        "state_record_sha256": record.get("record_sha256"),
+        "active_pointer_sha256": operational_learning_release_digest(
+            active_pointer
+        ),
+        "candidate_id": candidate.get("candidate_id"),
+        "candidate_sha256": candidate.get("candidate_sha256"),
+        "release_id": candidate.get("release_id"),
+        "candidate_release_sha256": candidate_release_sha256,
+        "runtime_release_sha256": active_pointer.get("release_sha256"),
+        "release_payload_sha256": operational_learning_release_digest(
+            candidate.get("release_payload")
+        ),
+        "decision_action": decision_receipt.get("action"),
+        "decision_id": decision_receipt.get("decision_id"),
+        "decision_receipt_id": decision_receipt.get("receipt_id"),
+        "decision_receipt_sha256": decision_receipt_sha256,
+    }
+    receipt["receipt_sha256"] = operational_learning_release_digest(receipt)
+    return receipt
+
+
 def resolve_operational_learning_active_release_in_vontology(
     *,
     namespace: str,
@@ -1109,7 +1211,11 @@ def resolve_operational_learning_active_release_in_vontology(
     )
     record = load_operational_learning_release_state(**scope)
     state = record.get("state")
-    pointers = state.get("release_pointers") if isinstance(state, Mapping) else None
+    if not isinstance(state, Mapping):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_state_record_invalid"
+        )
+    pointers = state.get("release_pointers")
     pointer_state = (
         pointers.get(resolved_artifact) if isinstance(pointers, Mapping) else None
     )
@@ -1135,6 +1241,10 @@ def resolve_operational_learning_active_release_in_vontology(
             "affected_artifact": resolved_artifact,
             **scope,
             "authority": authority,
+            "active_release": None,
+            "release_payload": None,
+            "release_payload_sha256": None,
+            "activation_receipt": None,
         }
         active_release["context_sha256"] = operational_learning_release_digest(
             active_release
@@ -1179,6 +1289,17 @@ def resolve_operational_learning_active_release_in_vontology(
     )
     release_payload = copy.deepcopy(candidate.get("release_payload"))
     release_payload_sha256 = operational_learning_release_digest(release_payload)
+    decision_receipt = _matching_active_pointer_decision_receipt(
+        state,
+        affected_artifact=resolved_artifact,
+        active_pointer=active_pointer,
+    )
+    activation_receipt = _activation_readback_receipt(
+        record=record,
+        candidate=candidate,
+        active_pointer=active_pointer,
+        decision_receipt=decision_receipt,
+    )
     active_release = {
         "schema_version": REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION,
         "status": "active_release_resolved",
@@ -1190,8 +1311,10 @@ def resolve_operational_learning_active_release_in_vontology(
         "candidate_lifecycle_state": lifecycle_state,
         "candidate_snapshot": candidate,
         "candidate_snapshot_sha256": candidate_snapshot_sha256,
+        "active_release": copy.deepcopy(dict(active_pointer)),
         "release_payload": release_payload,
         "release_payload_sha256": release_payload_sha256,
+        "activation_receipt": activation_receipt,
         "authority": authority,
         "binding": _release_context_binding(
             candidate=candidate,
@@ -2488,81 +2611,58 @@ def _verify_live_transition_evidence(
     )
 
 
-def _apply_and_readback_release_activation(
-    candidate: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    """Fail closed until an affected-artefact activation adapter is registered."""
-
-    raise LearningReleasePersistenceError(
-        "canonical_learning_release_activation_adapter_unavailable",
-        details={
-            "candidate_id": candidate.get("candidate_id"),
-            "affected_artifact": candidate.get("affected_artifact"),
-            "candidate_release_sha256": candidate.get("release_sha256"),
-            "decision_state": "promotion_approved_not_activated",
-        },
-        recovery_affordances=[
-            {
-                "action_type": "register_canonical_release_activation_adapter",
-                "affected_artifact": candidate.get("affected_artifact"),
-            },
-            {"action_type": "retain_active_release"},
-        ],
-    )
-
-
-def _validate_activation_readback(
-    value: Any,
-    *,
-    candidate: Mapping[str, Any],
+def _attach_runtime_activation_readback(
+    mutation_result: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
+    """Read back the exact persisted active pointer for represented consumers."""
+
+    result = mutation_result.get("result")
+    state_record = mutation_result.get("state_record")
+    if not isinstance(result, Mapping) or not isinstance(state_record, Mapping):
         raise LearningReleasePersistenceError(
-            "canonical_learning_release_activation_readback_invalid"
+            "operational_learning_release_runtime_readback_input_invalid"
         )
-    receipt = copy.deepcopy(dict(value))
-    if (
-        receipt.get("activated") is not True
-        or receipt.get("affected_artifact") != candidate.get("affected_artifact")
-        or receipt.get("candidate_release_sha256") != candidate.get("release_sha256")
-        or receipt.get("runtime_release_sha256") != candidate.get("release_sha256")
+    resulting_active = result.get("resulting_active")
+    affected_artifact = result.get("affected_artifact")
+    expected_release_sha256 = (
+        resulting_active.get("release_sha256")
+        if isinstance(resulting_active, Mapping)
+        else None
+    )
+    if not isinstance(affected_artifact, str) or not _is_sha256(
+        expected_release_sha256
     ):
         raise LearningReleasePersistenceError(
-            "canonical_learning_release_activation_readback_mismatch"
+            "operational_learning_release_runtime_readback_input_invalid"
         )
-    digest_basis = dict(receipt)
-    observed_digest = digest_basis.pop("receipt_sha256", None)
-    if observed_digest != operational_learning_release_digest(digest_basis):
-        raise LearningReleasePersistenceError(
-            "canonical_learning_release_activation_receipt_hash_mismatch"
-        )
-    return receipt
-
-
-def _apply_and_readback_release_rollback_activation(
-    *,
-    active_candidate: Mapping[str, Any],
-    previous_candidate: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    """Fail closed until runtime can restore/read back the previous release."""
-
-    raise LearningReleasePersistenceError(
-        "canonical_learning_release_rollback_adapter_unavailable",
-        details={
-            "active_candidate_id": active_candidate.get("candidate_id"),
-            "previous_candidate_id": previous_candidate.get("candidate_id"),
-            "affected_artifact": active_candidate.get("affected_artifact"),
-            "previous_release_sha256": previous_candidate.get("release_sha256"),
-            "decision_state": "rollback_approved_not_activated",
-        },
-        recovery_affordances=[
-            {
-                "action_type": "register_canonical_release_rollback_adapter",
-                "affected_artifact": active_candidate.get("affected_artifact"),
-            },
-            {"action_type": "retain_active_release"},
-        ],
+    resolved = resolve_operational_learning_active_release_in_vontology(
+        namespace=str(state_record.get("namespace") or ""),
+        user_id=str(state_record.get("user_id") or ""),
+        org_id=str(state_record.get("org_id") or ""),
+        affected_artifact=affected_artifact,
+        expected_release_sha256=str(expected_release_sha256),
     )
+    projection = (resolved.get("result") or {}).get("active_release")
+    if not isinstance(projection, Mapping):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_runtime_readback_invalid"
+        )
+    authority = projection.get("authority")
+    if not isinstance(authority, Mapping) or any(
+        authority.get(field_name) != state_record.get(record_field_name)
+        for field_name, record_field_name in (
+            ("state_concept_id", "state_concept_id"),
+            ("version", "version"),
+            ("state_sha256", "state_sha256"),
+            ("record_sha256", "record_sha256"),
+        )
+    ):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_runtime_readback_authority_mismatch"
+        )
+    output = copy.deepcopy(dict(mutation_result))
+    output["runtime_activation_readback"] = copy.deepcopy(dict(projection))
+    return output
 
 
 Mutation = Callable[
@@ -3036,10 +3136,6 @@ def promote_operational_learning_release_candidate_in_vontology(
             human_approval,
             required=True,
         )
-        _validate_activation_readback(
-            _apply_and_readback_release_activation(candidate),
-            candidate=candidate,
-        )
         return promote_operational_learning_release_candidate(
             state,
             candidate_id=candidate_id,
@@ -3050,7 +3146,7 @@ def promote_operational_learning_release_candidate_in_vontology(
             recorded_at=recorded_at,
         )
 
-    return _mutate(
+    mutation_result = _mutate(
         namespace=namespace,
         user_id=user_id,
         org_id=org_id,
@@ -3061,6 +3157,7 @@ def promote_operational_learning_release_candidate_in_vontology(
         recorded_at=recorded_at,
         mutation=_promote,
     )
+    return _attach_runtime_activation_readback(mutation_result)
 
 
 def reject_operational_learning_release_candidate_in_vontology(
@@ -3166,30 +3263,6 @@ def rollback_operational_learning_release_in_vontology(
             human_approval,
             required=True,
         )
-        previous_pointer = (
-            pointer_state.get("previous")
-            if isinstance(pointer_state, Mapping)
-            else None
-        )
-        previous_candidate_id = (
-            previous_pointer.get("candidate_id")
-            if isinstance(previous_pointer, Mapping)
-            else None
-        )
-        previous_candidate = (state.get("candidate_snapshots") or {}).get(
-            previous_candidate_id
-        )
-        if not isinstance(previous_candidate, Mapping):
-            raise LearningReleasePersistenceError(
-                "operational_learning_release_previous_candidate_not_found"
-            )
-        _validate_activation_readback(
-            _apply_and_readback_release_rollback_activation(
-                active_candidate=candidate,
-                previous_candidate=previous_candidate,
-            ),
-            candidate=previous_candidate,
-        )
         return rollback_operational_learning_release(
             state,
             affected_artifact=affected_artifact,
@@ -3200,7 +3273,7 @@ def rollback_operational_learning_release_in_vontology(
             recorded_at=recorded_at,
         )
 
-    return _mutate(
+    mutation_result = _mutate(
         namespace=namespace,
         user_id=user_id,
         org_id=org_id,
@@ -3211,6 +3284,7 @@ def rollback_operational_learning_release_in_vontology(
         recorded_at=recorded_at,
         mutation=_rollback,
     )
+    return _attach_runtime_activation_readback(mutation_result)
 
 
 __all__ = [
@@ -3220,6 +3294,7 @@ __all__ = [
     "OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID",
     "OPERATIONAL_LEARNING_RELEASE_CAMPAIGN_EVIDENCE_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_CANDIDATE_EVALUATION_SCHEMA_VERSION",
+    "OPERATIONAL_LEARNING_RUNTIME_ACTIVATION_RECEIPT_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_STATE_PREDICATE",
     "OPERATIONAL_LEARNING_RELEASE_STATE_RECORD_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_STATE_TYPE_ID",
