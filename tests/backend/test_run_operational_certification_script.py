@@ -159,6 +159,29 @@ def test_generic_runtime_bindings_reject_reserved_or_duplicate_keys() -> None:
         )
 
 
+def test_cli_parser_accepts_one_repeatable_runtime_binding_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        certification_script.sys,
+        "argv",
+        [
+            "run_operational_certification.py",
+            "--runtime-binding",
+            "candidate_id=candidate-1",
+            "--runtime-binding",
+            "release_sha256=abc123",
+        ],
+    )
+
+    args = certification_script._parse_args()
+
+    assert args.runtime_binding == [
+        "candidate_id=candidate-1",
+        "release_sha256=abc123",
+    ]
+
+
 def test_candidate_safety_suite_declares_all_exact_runtime_bindings() -> None:
     contract = parse_operational_certification_contract(
         json.loads(_CANDIDATE_SAFETY_SEED_PATH.read_text(encoding="utf-8"))

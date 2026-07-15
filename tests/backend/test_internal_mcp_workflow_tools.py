@@ -242,6 +242,7 @@ class _StubWorkflowManager:
         inputs: dict[str, object] | None = None,
         schedule_id: str | None = None,
         max_retries: int = 3,
+        required_worker_build: str | None = None,
     ) -> tuple[str, bool]:
         existing_instance_id = self._event_index.get(event_idempotency_key)
         if isinstance(existing_instance_id, str):
@@ -258,6 +259,7 @@ class _StubWorkflowManager:
             source_event_type=source_event_type,
             source_event_id=source_event_id,
             event_idempotency_key=event_idempotency_key,
+            required_worker_build=required_worker_build,
         )
         self._event_index[event_idempotency_key] = instance_id
         return instance_id, True
@@ -2435,6 +2437,10 @@ def test_context_bundle_build_benchmark_invokes_service(monkeypatch):
 
 def test_workflow_list_execution_traces_returns_bounded_summaries(monkeypatch):
     gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
     monkeypatch.setattr(
         "src.backend.workflows.list_recent_workflow_execution_traces",
         lambda **kwargs: [

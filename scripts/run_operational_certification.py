@@ -4983,17 +4983,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-non-agent-test-server", action="store_true")
     parser.add_argument("--experiment-run-id", default="")
     parser.add_argument(
-        "--runtime-binding",
-        action="append",
-        default=[],
-        metavar="NAME=VALUE",
-        help=(
-            "Supply one exact value declared by the represented suite's runtime "
-            "binding contract. Repeat for multiple values; authenticated actor "
-            "scope bindings are verified against the live session."
-        ),
-    )
-    parser.add_argument(
         "--campaign-evidence-concept-id",
         default=OPERATIONAL_CERTIFICATION_CAMPAIGN_EVIDENCE_CONCEPT_ID,
         help=(
