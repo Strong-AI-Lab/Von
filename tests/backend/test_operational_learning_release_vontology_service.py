@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +26,8 @@ NAMESPACE = "#V#user@org"
 USER_ID = "#V#user"
 ORG_ID = "#V#org"
 ARTIFACT_ID = "#V#generic_policy_artifact"
+
+_REAL_VERIFY_LIVE_TRANSITION_EVIDENCE = service._verify_live_transition_evidence
 
 
 @pytest.fixture
@@ -81,6 +85,11 @@ def vontology_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     )
     monkeypatch.setattr(
         service,
+        "_verify_persisted_represented_candidate_proposal_trace",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
         "_verify_live_transition_evidence",
         lambda **_kwargs: None,
     )
@@ -96,6 +105,7 @@ def vontology_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return receipt
 
     monkeypatch.setattr(service, "_apply_and_readback_release_activation", activate)
+
     return {
         "concepts": concepts,
         "texts": texts,
@@ -111,6 +121,75 @@ def _authority() -> dict[str, Any]:
         "authority_revision_sha256": operational_learning_release_digest(
             {"authority": "#V#represented_learning_workflow", "revision": 1}
         ),
+    }
+
+
+def _workflow_authority_result_snapshot(
+    output: dict[str, Any],
+    *,
+    workflow_id: str | None = None,
+    definition_sha256: str | None = None,
+    prompt_sha256: str | None = None,
+    llm_context_fields_sha256: str | None = None,
+    execution_request_id: str | None = None,
+) -> dict[str, Any]:
+    authority = output.get("proposal_authority") or output.get("authority") or {}
+    resolved_workflow_id = workflow_id or authority.get("authority_concept_id")
+    resolved_definition_sha256 = definition_sha256 or authority.get(
+        "authority_revision_sha256"
+    )
+    resolved_prompt_sha256 = prompt_sha256 or authority.get(
+        "authority_prompt_revision_sha256"
+    )
+    resolved_execution_request_id = execution_request_id or authority.get(
+        "authority_execution_request_id"
+    )
+    resolved_llm_context_fields_sha256 = (
+        llm_context_fields_sha256
+        or operational_learning_release_digest(
+            {
+                "output_sha256": operational_learning_release_digest(output),
+                "lineage": "test-fixture",
+            }
+        )
+    )
+    return {
+        "workflow_authority_output": copy.deepcopy(output),
+        "workflow_authority_output_snapshot": {
+            "schema_version": "workflow_authority_output_snapshot.v1",
+            "exact": True,
+            "output_sha256": operational_learning_release_digest(output),
+            "redacted_count": 0,
+            "redacted_paths": [],
+            "truncated_count": 0,
+            "truncated_paths": [],
+            "prompt_lineage_observed": True,
+            "prompt_lineage_ambiguous": False,
+            "prompt_content_sha256": resolved_prompt_sha256,
+            "llm_context_fields_lineage_observed": True,
+            "llm_context_fields_lineage_ambiguous": False,
+            "llm_context_fields_sha256": resolved_llm_context_fields_sha256,
+            "workflow_execution_identity": {
+                "schema_version": "workflow_execution_identity.v1",
+                "workflow_id": resolved_workflow_id,
+                "execution_request_id": resolved_execution_request_id,
+                "conversation_session_id": "session-1",
+                "workflow_instance_id": None,
+                "episode_source": "conversation_turn_selected_workflow",
+                "workflow_definition_identity": {
+                    "schema_version": "workflow_definition_identity.v1",
+                    "version": 1,
+                    "workflow_id": resolved_workflow_id,
+                    "source": "vontology",
+                    "definition_hash": resolved_definition_sha256,
+                    "runtime_definition_hash": resolved_definition_sha256,
+                    "authoritative_definition_hash": resolved_definition_sha256,
+                    "hash_mismatch": False,
+                    "state_count": 1,
+                    "action_count": 1,
+                },
+            },
+        },
     }
 
 
@@ -363,9 +442,9 @@ def test_active_release_resolver_projects_exact_active_payload(
     candidate = registered["state"]["candidate_snapshots"]["candidate-1"]
     active_record = copy.deepcopy(registered)
     active_record["state"]["candidate_states"]["candidate-1"]["state"] = "active"
-    active_record["state"]["release_states"][candidate["release_sha256"]][
-        "state"
-    ] = "active"
+    active_record["state"]["release_states"][candidate["release_sha256"]]["state"] = (
+        "active"
+    )
     active_record["state"]["release_pointers"][ARTIFACT_ID] = {
         "active": {
             "schema_version": "operational_learning_release_pointer.v1",
@@ -525,9 +604,9 @@ def test_tampered_state_or_record_digest_fails_closed(
     )["state_record"]
     concept_id = record["state_concept_id"]
     stored = json.loads(vontology_store["texts"][concept_id])
-    stored["state"]["candidate_states"]["candidate-1"][
-        "updated_at"
-    ] = "2026-07-12T13:00:00+00:00"
+    stored["state"]["candidate_states"]["candidate-1"]["updated_at"] = (
+        "2026-07-12T13:00:00+00:00"
+    )
     vontology_store["texts"][concept_id] = json.dumps(stored)
 
     with pytest.raises(
@@ -666,7 +745,48 @@ def test_authenticated_approval_is_derived_persisted_and_required_for_live_path(
 
     def fake_promote(state, **kwargs):
         captured.update(kwargs)
-        return {"receipt_id": "synthetic-support-test"}
+        candidate = state["candidate_snapshots"][kwargs["candidate_id"]]
+        active_pointer = {
+            "schema_version": "operational_learning_release_pointer.v1",
+            "affected_artifact": candidate["affected_artifact"],
+            "namespace": candidate["namespace"],
+            "user_id": candidate["user_id"],
+            "org_id": candidate["org_id"],
+            "candidate_id": candidate["candidate_id"],
+            "release_id": candidate["release_id"],
+            "release_sha256": candidate["release_sha256"],
+            "risk_classes": copy.deepcopy(candidate["risk_classes"]),
+            "expires_at": candidate["expires_at"],
+            "retest_after": candidate["retest_after"],
+            "retest_requirements": copy.deepcopy(candidate["retest_requirements"]),
+        }
+        state["release_pointers"][candidate["affected_artifact"]] = {
+            "active": active_pointer,
+            "previous": None,
+        }
+        state["candidate_states"][candidate["candidate_id"]] = {
+            "state": "active",
+            "release_sha256": candidate["release_sha256"],
+            "updated_at": NOW.isoformat(),
+        }
+        state["release_states"][candidate["release_sha256"]] = {
+            "state": "active",
+            "candidate_id": candidate["candidate_id"],
+            "updated_at": NOW.isoformat(),
+        }
+        receipt = {
+            "schema_version": OPERATIONAL_LEARNING_RELEASE_RECEIPT_SCHEMA_VERSION,
+            "receipt_id": "synthetic-support-test",
+            "decision_id": "synthetic-decision",
+            "action": "promote",
+            "affected_artifact": candidate["affected_artifact"],
+            "candidate_id": candidate["candidate_id"],
+            "release_sha256": candidate["release_sha256"],
+            "resulting_active": active_pointer,
+        }
+        receipt["receipt_sha256"] = operational_learning_release_digest(receipt)
+        state["decision_receipts"].append(receipt)
+        return receipt
 
     monkeypatch.setattr(
         service,
@@ -914,6 +1034,345 @@ def test_self_consistent_inline_experiment_cannot_replace_canonical_run(
         )
 
 
+def _candidate_proposal_trace_fixture() -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any]
+]:
+    packets = _packets()
+    authority = {
+        "schema_version": REPRESENTED_AUTHORITY_REFERENCE_SCHEMA_VERSION,
+        "authority_concept_id": (
+            service.OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID
+        ),
+        "authority_revision_sha256": "a" * 64,
+        "authority_prompt_revision_sha256": "b" * 64,
+        "authority_execution_request_id": "request-proposal-1",
+    }
+    release_payload = {
+        "schema_version": "operational_learning_release_payload.v1",
+        "target_layer": "prompt",
+        "affected_artifact": ARTIFACT_ID,
+        "represented_change": {"prompt_guidance": "Preserve evidence lineage."},
+        "behavioural_test_vectors": {
+            "original_failure": {
+                "source_request_id": "request-1",
+                "stimulus": "Replay the bounded verification failure.",
+            },
+            "nearby_cases": [{"stimulus": "Verify a nearby bounded evidence case."}],
+        },
+    }
+    expires_at = "2027-01-01T00:00:00+00:00"
+    retest_after = "2026-12-01T00:00:00+00:00"
+    retest_requirements = {"suite_id": "#V#generic_regression_suite"}
+    proposal = {
+        "schema_version": (
+            service.REPRESENTED_OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_SCHEMA_VERSION
+        ),
+        "candidate_id": "candidate-1",
+        "release_id": "release-1",
+        "affected_artifact": ARTIFACT_ID,
+        "namespace": NAMESPACE,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "target_layer": "prompt",
+        "release_payload": release_payload,
+        "failure_evidence_packets": packets,
+        "risk_classes": ["quality"],
+        "expires_at": expires_at,
+        "retest_after": retest_after,
+        "retest_requirements": retest_requirements,
+        "proposal_authority": authority,
+        "binding": {
+            "candidate_id": "candidate-1",
+            "release_id": "release-1",
+            "affected_artifact": ARTIFACT_ID,
+            "namespace": NAMESPACE,
+            "user_id": USER_ID,
+            "org_id": ORG_ID,
+            "expires_at": expires_at,
+            "retest_after": retest_after,
+            "failure_packet_sha256s": [packet["packet_sha256"] for packet in packets],
+        },
+        "rationale": "The represented prompt remains semantic authority.",
+    }
+    verification_kwargs = {
+        "namespace": NAMESPACE,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "candidate_id": "candidate-1",
+        "release_id": "release-1",
+        "affected_artifact": ARTIFACT_ID,
+        "release_payload": release_payload,
+        "failure_evidence_packets": packets,
+        "proposal_authority": authority,
+        "risk_classes": ["quality"],
+        "expires_at": expires_at,
+        "retest_after": retest_after,
+        "retest_requirements": retest_requirements,
+    }
+    trace = {
+        "request_id": "request-proposal-1",
+        "namespace": NAMESPACE,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "execution": {
+            "selected_workflow_trace": {
+                "workflow_id": (
+                    service.OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID
+                ),
+                "workflow_definition_identity": {
+                    "authoritative_definition_hash": "a" * 64,
+                },
+                "child_result_snapshot": _workflow_authority_result_snapshot(proposal),
+            }
+        },
+    }
+    return proposal, verification_kwargs, trace
+
+
+def test_candidate_registration_requires_exact_represented_proposal_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _proposal, verification_kwargs, trace = _candidate_proposal_trace_fixture()
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(trace),
+    )
+
+    service._verify_persisted_represented_candidate_proposal_trace(
+        **verification_kwargs
+    )
+
+    tampered_values = {
+        "affected_artifact": "#V#other_artifact",
+        "release_payload": {
+            **verification_kwargs["release_payload"],
+            "represented_change": {"prompt_guidance": "Silently changed."},
+        },
+        "failure_evidence_packets": [
+            {
+                **verification_kwargs["failure_evidence_packets"][0],
+                "outcome": "forged_success",
+            }
+        ],
+        "risk_classes": ["safety"],
+        "expires_at": "2028-01-01T00:00:00+00:00",
+        "retest_after": "2026-12-02T00:00:00+00:00",
+        "retest_requirements": {"suite_id": "#V#weaker_suite"},
+    }
+    for field_name, tampered_value in tampered_values.items():
+        tampered_kwargs = copy.deepcopy(verification_kwargs)
+        tampered_kwargs[field_name] = tampered_value
+        with pytest.raises(
+            service.LearningReleasePersistenceError,
+            match="represented_candidate_proposal_binding_mismatch",
+        ) as exc_info:
+            service._verify_persisted_represented_candidate_proposal_trace(
+                **tampered_kwargs
+            )
+        assert exc_info.value.details["field"] == field_name
+
+
+def test_candidate_proposal_trace_rejects_input_only_truncated_and_stale_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal, verification_kwargs, trace = _candidate_proposal_trace_fixture()
+
+    wrong_actor_kwargs = copy.deepcopy(verification_kwargs)
+    wrong_actor_kwargs["user_id"] = "#V#other_user"
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(trace),
+    )
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_candidate_proposal_execution_trace_scope_mismatch",
+    ):
+        service._verify_persisted_represented_candidate_proposal_trace(
+            **wrong_actor_kwargs
+        )
+
+    input_only_trace = copy.deepcopy(trace)
+    selected_trace = input_only_trace["execution"]["selected_workflow_trace"]
+    selected_trace.pop("child_result_snapshot")
+    selected_trace["workflow_inputs"] = {"forged_proposal": proposal}
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(input_only_trace),
+    )
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_candidate_proposal_execution_output_required",
+    ):
+        service._verify_persisted_represented_candidate_proposal_trace(
+            **verification_kwargs
+        )
+
+    non_exact_trace = copy.deepcopy(trace)
+    snapshot = non_exact_trace["execution"]["selected_workflow_trace"][
+        "child_result_snapshot"
+    ]
+    snapshot["workflow_authority_output_snapshot"]["exact"] = False
+    snapshot["workflow_authority_output_snapshot"]["truncated_count"] = 1
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(non_exact_trace),
+    )
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_candidate_proposal_execution_output_required",
+    ) as exc_info:
+        service._verify_persisted_represented_candidate_proposal_trace(
+            **verification_kwargs
+        )
+    assert exc_info.value.details["unusable_authority_output_snapshot_count"] == 1
+
+    legacy_unbound_trace = copy.deepcopy(trace)
+    legacy_unbound_trace["execution"]["selected_workflow_trace"][
+        "child_result_snapshot"
+    ]["workflow_authority_output_snapshot"].pop("workflow_execution_identity")
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(legacy_unbound_trace),
+    )
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_candidate_proposal_execution_output_required",
+    ) as exc_info:
+        service._verify_persisted_represented_candidate_proposal_trace(
+            **verification_kwargs
+        )
+    assert exc_info.value.details["unusable_authority_output_snapshot_count"] == 1
+
+    stale_prompt_trace = copy.deepcopy(trace)
+    stale_prompt_trace["execution"]["selected_workflow_trace"]["child_result_snapshot"][
+        "workflow_authority_output_snapshot"
+    ]["prompt_content_sha256"] = "c" * 64
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(stale_prompt_trace),
+    )
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_candidate_proposal_execution_authority_mismatch",
+    ):
+        service._verify_persisted_represented_candidate_proposal_trace(
+            **verification_kwargs
+        )
+
+
+def test_exact_authority_output_requires_and_preserves_context_lineage() -> None:
+    proposal, _verification_kwargs, trace = _candidate_proposal_trace_fixture()
+    snapshot = trace["execution"]["selected_workflow_trace"]["child_result_snapshot"]
+    expected_sha256 = snapshot["workflow_authority_output_snapshot"][
+        "llm_context_fields_sha256"
+    ]
+
+    exact_outputs, unusable = service._exact_persisted_workflow_authority_outputs(trace)
+
+    assert unusable == []
+    assert exact_outputs == [
+        {
+            "output": proposal,
+            "output_sha256": operational_learning_release_digest(proposal),
+            "prompt_content_sha256": "b" * 64,
+            "llm_context_fields_sha256": expected_sha256,
+            "workflow_execution_identity": snapshot[
+                "workflow_authority_output_snapshot"
+            ]["workflow_execution_identity"],
+        }
+    ]
+
+    for field_name, replacement in (
+        ("llm_context_fields_lineage_observed", None),
+        ("llm_context_fields_lineage_ambiguous", True),
+        ("llm_context_fields_sha256", None),
+    ):
+        unusable_trace = copy.deepcopy(trace)
+        metadata = unusable_trace["execution"]["selected_workflow_trace"][
+            "child_result_snapshot"
+        ]["workflow_authority_output_snapshot"]
+        if replacement is None:
+            metadata.pop(field_name)
+        else:
+            metadata[field_name] = replacement
+        exact_outputs, unusable = service._exact_persisted_workflow_authority_outputs(
+            unusable_trace
+        )
+        assert exact_outputs == []
+        assert len(unusable) == 1
+
+    for count_field, paths_field in (
+        ("redacted_count", "redacted_paths"),
+        ("truncated_count", "truncated_paths"),
+    ):
+        contradictory_trace = copy.deepcopy(trace)
+        metadata = contradictory_trace["execution"]["selected_workflow_trace"][
+            "child_result_snapshot"
+        ]["workflow_authority_output_snapshot"]
+        metadata[count_field] = 1
+        metadata[paths_field] = ["$.secret"]
+
+        exact_outputs, unusable = service._exact_persisted_workflow_authority_outputs(
+            contradictory_trace
+        )
+
+        assert exact_outputs == []
+        assert len(unusable) == 1
+
+
+def test_candidate_proposal_rejects_lineage_spliced_across_workflow_executions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal, verification_kwargs, trace = _candidate_proposal_trace_fixture()
+    selected_trace = trace["execution"]["selected_workflow_trace"]
+    selected_trace["workflow_id"] = "#V#unrelated_workflow"
+    selected_trace["workflow_definition_identity"] = {
+        "authoritative_definition_hash": "c" * 64,
+    }
+    selected_trace["child_result_snapshot"] = _workflow_authority_result_snapshot(
+        proposal,
+        workflow_id="#V#unrelated_workflow",
+        definition_sha256="c" * 64,
+        prompt_sha256="d" * 64,
+    )
+    trace["execution"]["aux_llm_calls"] = [
+        {
+            "type": "workflow_execution",
+            "workflow_id": (
+                service.OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID
+            ),
+            "result_snapshot": _workflow_authority_result_snapshot(
+                {"schema_version": "unrelated_authority_output.v1"},
+                workflow_id=(
+                    service.OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID
+                ),
+                definition_sha256="a" * 64,
+                prompt_sha256="b" * 64,
+                execution_request_id="request-proposal-1",
+            ),
+        }
+    ]
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(trace),
+    )
+
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_candidate_proposal_execution_authority_mismatch",
+    ):
+        service._verify_persisted_represented_candidate_proposal_trace(
+            **verification_kwargs
+        )
+
+
 def test_represented_decision_must_be_exact_terminal_trace_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -938,13 +1397,14 @@ def test_represented_decision_must_be_exact_terminal_trace_output(
         "namespace": NAMESPACE,
         "user_id": USER_ID,
         "org_id": ORG_ID,
-        "workflow_execution": {
-            "workflow_id": "#V#represented_promotion_workflow",
-            "workflow_definition_identity": {
-                "authoritative_definition_hash": "a" * 64,
+        "execution": {
+            "selected_workflow_trace": {
+                "workflow_id": "#V#represented_promotion_workflow",
+                "workflow_definition_identity": {
+                    "authoritative_definition_hash": "a" * 64,
+                },
+                "child_result_snapshot": _workflow_authority_result_snapshot(decision),
             },
-            "prompt_context": {"prompt_revision_sha256": "b" * 64},
-            "outputs": {"represented_decision": decision},
         },
     }
     monkeypatch.setattr(
@@ -969,12 +1429,372 @@ def test_represented_decision_must_be_exact_terminal_trace_output(
         )
 
     wrong_authority_trace = copy.deepcopy(trace)
-    wrong_authority_trace["workflow_execution"]["workflow_id"] = "#V#unrelated_workflow"
+    wrong_snapshot_metadata = wrong_authority_trace["execution"][
+        "selected_workflow_trace"
+    ]["child_result_snapshot"]["workflow_authority_output_snapshot"]
+    wrong_snapshot_metadata["workflow_execution_identity"]["workflow_id"] = (
+        "#V#unrelated_workflow"
+    )
+    wrong_snapshot_metadata["workflow_execution_identity"][
+        "workflow_definition_identity"
+    ]["workflow_id"] = "#V#unrelated_workflow"
     monkeypatch.setattr(
         service,
         "_load_canonical_decision_trace",
         lambda _request_id, _namespace: copy.deepcopy(wrong_authority_trace),
     )
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_decision_execution_authority_mismatch",
+    ):
+        service._verify_persisted_represented_decision_trace(
+            candidate=candidate,
+            decision=decision,
+        )
+
+
+@pytest.mark.parametrize(
+    ("prompt_rows", "error_code"),
+    [
+        ([], "live_represented_evaluator_prompt_content_missing"),
+        (
+            [
+                {"predicate": "hasContent", "text": "first"},
+                {"predicate": "#V#hasContent", "text": "second"},
+            ],
+            "live_represented_evaluator_prompt_content_ambiguous",
+        ),
+    ],
+)
+def test_live_evaluator_prompt_content_fails_closed_on_missing_or_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_rows: list[dict[str, str]],
+    error_code: str,
+) -> None:
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concept",
+        lambda _prompt_id: copy.deepcopy(prompt_rows),
+    )
+
+    with pytest.raises(service.LearningReleasePersistenceError, match=error_code):
+        service._load_exact_live_prompt_content("#V#prompt_evaluator")
+
+
+def test_live_transition_binds_exact_context_and_rejects_definition_prompt_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    vontology_store: dict[str, Any],
+) -> None:
+    current = _register(
+        service.load_operational_learning_release_state(
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+        )
+    )["state_record"]
+    candidate = current["state"]["candidate_snapshots"]["candidate-1"]
+    from src.backend.workflows.llm_step_executor import (
+        compute_llm_context_fields_sha256,
+    )
+
+    resolved = service.resolve_operational_learning_release_candidate_in_vontology(
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        org_id=ORG_ID,
+        candidate_id=candidate["candidate_id"],
+        release_sha256=candidate["release_sha256"],
+        affected_artifact=candidate["affected_artifact"],
+    )
+    candidate_context = resolved["result"]["candidate_context"]
+    experiment_evidence = {
+        "schema_version": "learning_release_experiment_evidence.v1",
+        "evidence_sha256": "1" * 64,
+    }
+    certification_evidence = {
+        "schema_version": "learning_release_certification_evidence.v1",
+        "evidence_sha256": "2" * 64,
+    }
+    live_prompt = {"content": "Live represented evaluator prompt content."}
+    authority = {
+        "schema_version": "represented_authority_reference.v1",
+        "authority_concept_id": "#V#represented_learning_release_evaluator",
+        "authority_revision_sha256": "3" * 64,
+        "authority_prompt_revision_sha256": hashlib.sha256(
+            live_prompt["content"].encode("utf-8")
+        ).hexdigest(),
+        "authority_execution_request_id": "request-decision-1",
+    }
+    decision = {
+        "schema_version": "represented_learning_release_decision.v1",
+        "decision_id": "decision-1",
+        "candidate_context_sha256": candidate_context["context_sha256"],
+        "authority": authority,
+        "decided_at": NOW.isoformat(),
+    }
+    labels = [
+        ("represented_learning_candidate_context", "Exact candidate context"),
+        ("experiment_evidence", "Canonical experiment evidence"),
+        ("certification_evidence", "Canonical certification evidence"),
+        ("decision_id", "Decision identifier"),
+        ("decided_at", "Decision timestamp"),
+        ("authority_revision_sha256", "Workflow revision"),
+        ("authority_prompt_revision_sha256", "Prompt revision"),
+        ("authority_execution_request_id", "Execution request"),
+    ]
+    llm_policy = {
+        "context_fields": [
+            {"context_key": context_key, "label": label}
+            for context_key, label in labels
+        ]
+    }
+    reconstructed_context = {
+        "represented_learning_candidate_context": candidate_context,
+        "experiment_evidence": experiment_evidence,
+        "certification_evidence": certification_evidence,
+        "decision_id": decision["decision_id"],
+        "decided_at": decision["decided_at"],
+        "authority_revision_sha256": authority["authority_revision_sha256"],
+        "authority_prompt_revision_sha256": authority[
+            "authority_prompt_revision_sha256"
+        ],
+        "authority_execution_request_id": authority["authority_execution_request_id"],
+    }
+    definition = SimpleNamespace(
+        workflow_id=authority["authority_concept_id"],
+        initial_state="evaluate_release",
+        states={
+            "evaluate_release": SimpleNamespace(
+                actions=(
+                    SimpleNamespace(
+                        execution_mode="llm",
+                        prompt_contract={
+                            "requested_prompt_concept_ids": [
+                                "#V#prompt_represented_learning_release_evaluator"
+                            ],
+                            "resolved_prompt_concept_id": (
+                                "#V#prompt_represented_learning_release_evaluator"
+                            ),
+                        },
+                        llm_policy=llm_policy,
+                    ),
+                )
+            )
+        },
+    )
+    from src.backend.workflows.workflow_definition_identity_service import (
+        build_workflow_definition_identity,
+    )
+
+    definition_identity = build_workflow_definition_identity(
+        workflow_id=authority["authority_concept_id"],
+        source="vontology",
+        definition=definition,
+        authoritative_definition=definition,
+    )
+    authority["authority_revision_sha256"] = definition_identity["definition_hash"]
+    reconstructed_context["authority_revision_sha256"] = authority[
+        "authority_revision_sha256"
+    ]
+    expected_context_sha256 = compute_llm_context_fields_sha256(
+        llm_policy=llm_policy,
+        context=reconstructed_context,
+        workflow_state_id="evaluate_release",
+    )
+    observed_actor_scope: dict[str, str | None] = {}
+
+    def load_definition(_workflow_id: str) -> Any:
+        from src.backend.security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
+
+        observed_actor_scope["user_id"] = get_effective_user_concept_id()
+        observed_actor_scope["org_id"] = get_effective_organisation_concept_id()
+        return definition
+
+    monkeypatch.setattr(
+        service,
+        "_load_authoritative_workflow_definition",
+        load_definition,
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_exact_live_prompt_content",
+        lambda _prompt_id: live_prompt["content"],
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_canonical_experiment_evidence",
+        lambda **_kwargs: {"canonical_experiment_run": True},
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_canonical_certification_evidence",
+        lambda **_kwargs: {
+            "campaign_result": {"canonical_campaign": True},
+            "execution_provenance": {"canonical_provenance": True},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "build_learning_release_experiment_evidence",
+        lambda **_kwargs: copy.deepcopy(experiment_evidence),
+    )
+    monkeypatch.setattr(
+        service,
+        "build_learning_release_certification_evidence",
+        lambda **_kwargs: copy.deepcopy(certification_evidence),
+    )
+    observed_trace_lineage = {"value": expected_context_sha256}
+    monkeypatch.setattr(
+        service,
+        "_verify_persisted_represented_decision_trace",
+        lambda **_kwargs: {
+            "llm_context_fields_sha256": observed_trace_lineage["value"]
+        },
+    )
+
+    _REAL_VERIFY_LIVE_TRANSITION_EVIDENCE(
+        candidate=candidate,
+        represented_evaluator_decision=decision,
+        experiment_evidence=experiment_evidence,
+        certification_evidence=certification_evidence,
+        expected_version=current["version"],
+        expected_state_sha256=current["state_sha256"],
+    )
+    assert observed_actor_scope == {"user_id": USER_ID, "org_id": ORG_ID}
+
+    tampered_decision = copy.deepcopy(decision)
+    tampered_decision["candidate_context_sha256"] = "5" * 64
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_decision_candidate_context_mismatch",
+    ):
+        _REAL_VERIFY_LIVE_TRANSITION_EVIDENCE(
+            candidate=candidate,
+            represented_evaluator_decision=tampered_decision,
+            experiment_evidence=experiment_evidence,
+            certification_evidence=certification_evidence,
+            expected_version=current["version"],
+            expected_state_sha256=current["state_sha256"],
+        )
+
+    stale_definition_decision = copy.deepcopy(decision)
+    stale_definition_decision["authority"]["authority_revision_sha256"] = "7" * 64
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="live_represented_evaluator_definition_revision_mismatch",
+    ):
+        _REAL_VERIFY_LIVE_TRANSITION_EVIDENCE(
+            candidate=candidate,
+            represented_evaluator_decision=stale_definition_decision,
+            experiment_evidence=experiment_evidence,
+            certification_evidence=certification_evidence,
+            expected_version=current["version"],
+            expected_state_sha256=current["state_sha256"],
+        )
+
+    live_prompt["content"] = "Drifted represented evaluator prompt content."
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="live_represented_evaluator_prompt_revision_mismatch",
+    ):
+        _REAL_VERIFY_LIVE_TRANSITION_EVIDENCE(
+            candidate=candidate,
+            represented_evaluator_decision=decision,
+            experiment_evidence=experiment_evidence,
+            certification_evidence=certification_evidence,
+            expected_version=current["version"],
+            expected_state_sha256=current["state_sha256"],
+        )
+    live_prompt["content"] = "Live represented evaluator prompt content."
+
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_decision_candidate_context_state_stale",
+    ):
+        _REAL_VERIFY_LIVE_TRANSITION_EVIDENCE(
+            candidate=candidate,
+            represented_evaluator_decision=decision,
+            experiment_evidence=experiment_evidence,
+            certification_evidence=certification_evidence,
+            expected_version=current["version"] + 1,
+            expected_state_sha256=current["state_sha256"],
+        )
+
+    observed_trace_lineage["value"] = "6" * 64
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="represented_decision_llm_context_fields_mismatch",
+    ):
+        _REAL_VERIFY_LIVE_TRANSITION_EVIDENCE(
+            candidate=candidate,
+            represented_evaluator_decision=decision,
+            experiment_evidence=experiment_evidence,
+            certification_evidence=certification_evidence,
+            expected_version=current["version"],
+            expected_state_sha256=current["state_sha256"],
+        )
+
+
+def test_represented_decision_rejects_lineage_spliced_across_workflow_executions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = {
+        "namespace": NAMESPACE,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+    }
+    decision = {
+        "schema_version": "represented_learning_release_decision.v1",
+        "decision_id": "decision-1",
+        "decision": "promote",
+        "authority": {
+            "authority_concept_id": "#V#represented_promotion_workflow",
+            "authority_revision_sha256": "a" * 64,
+            "authority_prompt_revision_sha256": "b" * 64,
+            "authority_execution_request_id": "request-decision-1",
+        },
+    }
+    trace = {
+        "request_id": "request-decision-1",
+        "namespace": NAMESPACE,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "execution": {
+            "selected_workflow_trace": {
+                "workflow_id": "#V#unrelated_workflow",
+                "workflow_definition_identity": {
+                    "authoritative_definition_hash": "c" * 64,
+                },
+                "child_result_snapshot": _workflow_authority_result_snapshot(
+                    decision,
+                    workflow_id="#V#unrelated_workflow",
+                    definition_sha256="c" * 64,
+                    prompt_sha256="d" * 64,
+                ),
+            },
+            "aux_llm_calls": [
+                {
+                    "type": "workflow_execution",
+                    "workflow_id": "#V#represented_promotion_workflow",
+                    "result_snapshot": _workflow_authority_result_snapshot(
+                        {"schema_version": "unrelated_authority_output.v1"},
+                        workflow_id="#V#represented_promotion_workflow",
+                        definition_sha256="a" * 64,
+                        prompt_sha256="b" * 64,
+                        execution_request_id="request-decision-1",
+                    ),
+                }
+            ],
+        },
+    }
+    monkeypatch.setattr(
+        service,
+        "_load_canonical_decision_trace",
+        lambda _request_id, _namespace: copy.deepcopy(trace),
+    )
+
     with pytest.raises(
         service.LearningReleasePersistenceError,
         match="represented_decision_execution_authority_mismatch",

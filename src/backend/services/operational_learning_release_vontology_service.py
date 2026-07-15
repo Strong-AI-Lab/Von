@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import copy
 from datetime import datetime, timezone
+import hashlib
 import json
 import threading
 from typing import Any
@@ -35,6 +36,8 @@ from .operational_learning_release_service import (
     HUMAN_LEARNING_RELEASE_APPROVAL_SCHEMA_VERSION,
     LearningReleaseValidationError,
     build_empty_operational_learning_release_state,
+    build_learning_release_certification_evidence,
+    build_learning_release_experiment_evidence,
     operational_learning_release_digest,
     promote_operational_learning_release_candidate,
     register_operational_learning_release_candidate,
@@ -74,6 +77,17 @@ REPRESENTED_LEARNING_RELEASE_BINDING_SCHEMA_VERSION = (
 )
 OPERATIONAL_LEARNING_RELEASE_STATE_TYPE_ID = "#V#operational_learning_release_state"
 OPERATIONAL_LEARNING_RELEASE_STATE_PREDICATE = "hasContent"
+OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID = (
+    "#V#operational_learning_candidate_proposal_workflow"
+)
+REPRESENTED_OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_SCHEMA_VERSION = (
+    "represented_operational_learning_candidate_proposal.v1"
+)
+WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_SCHEMA_VERSION = (
+    "workflow_authority_output_snapshot.v1"
+)
+WORKFLOW_EXECUTION_IDENTITY_SCHEMA_VERSION = "workflow_execution_identity.v1"
+WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION = "workflow_definition_identity.v1"
 
 _MANAGED_BY = "operational_learning_release_vontology_service"
 _SOURCE_TAG = "JVNAUTOSCI-2575"
@@ -726,6 +740,81 @@ def project_operational_learning_release_campaign_evidence(
     return projection
 
 
+def validate_operational_learning_release_state_record(
+    raw_record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Strictly validate a storage or public exact-scope state record.
+
+    This is a pure validation surface for runtime consumers.  The two optional
+    public fields are derived by :func:`load_operational_learning_release_state`
+    and, when present, must agree exactly with the protected storage envelope.
+    No Vontology read or write occurs here.
+    """
+
+    if not isinstance(raw_record, Mapping):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_state_record_invalid"
+        )
+    allowed_fields = set(_RECORD_FIELDS) | {
+        "persisted",
+        "campaign_evidence_projection",
+    }
+    if set(raw_record) - allowed_fields:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_state_record_invalid"
+        )
+    storage_record = {
+        field_name: copy.deepcopy(raw_record.get(field_name))
+        for field_name in _RECORD_FIELDS
+    }
+    scope = _scope(
+        namespace=storage_record.get("namespace"),
+        user_id=storage_record.get("user_id"),
+        org_id=storage_record.get("org_id"),
+    )
+    state_concept_id = operational_learning_release_state_concept_id(**scope)
+    if storage_record.get("state_concept_id") != state_concept_id:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_state_concept_mismatch"
+        )
+    version = storage_record.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_state_version_invalid"
+        )
+    persisted_supplied = "persisted" in raw_record
+    persisted = raw_record.get("persisted")
+    if persisted_supplied and not isinstance(persisted, bool):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_state_persistence_marker_invalid"
+        )
+    if version == 0:
+        validated = _empty_record(scope, state_concept_id)
+        if storage_record != validated or persisted is True:
+            raise LearningReleasePersistenceError(
+                "operational_learning_release_virtual_state_invalid"
+            )
+    else:
+        validated = _validate_record(
+            storage_record,
+            scope=scope,
+            state_concept_id=state_concept_id,
+        )
+        if persisted is False:
+            raise LearningReleasePersistenceError(
+                "operational_learning_release_state_persistence_marker_invalid"
+            )
+    campaign_projection_supplied = "campaign_evidence_projection" in raw_record
+    supplied_campaign_projection = raw_record.get("campaign_evidence_projection")
+    if campaign_projection_supplied and supplied_campaign_projection != (
+        project_operational_learning_release_campaign_evidence(validated)
+    ):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_campaign_projection_mismatch"
+        )
+    return validated
+
+
 def _public_record(record: Mapping[str, Any], *, persisted: bool) -> dict[str, Any]:
     projection = copy.deepcopy(dict(record))
     projection["persisted"] = persisted
@@ -1269,62 +1358,161 @@ def _load_canonical_decision_trace(
     return record if isinstance(record, Mapping) else None
 
 
-def _mapping_occurs_in_projection(
-    projection: Any,
-    expected: Mapping[str, Any],
-) -> bool:
-    expected_digest = operational_learning_release_digest(expected)
-    pending = [projection]
-    visited: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if isinstance(current, Mapping):
-            identity = id(current)
-            if identity in visited:
-                continue
-            visited.add(identity)
-            try:
-                if operational_learning_release_digest(current) == expected_digest:
-                    return True
-            except LearningReleaseValidationError:
-                pass
-            pending.extend(current.values())
-        elif isinstance(current, list):
-            pending.extend(current)
-    return False
+def _persisted_workflow_authority_result_snapshots(
+    trace: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    """Return only canonical workflow-result snapshot surfaces from a TER."""
+
+    snapshots: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+
+    def _append(value: Any) -> None:
+        if not isinstance(value, Mapping) or id(value) in seen:
+            return
+        seen.add(id(value))
+        snapshots.append(value)
+
+    completion_report = trace.get("completion_report")
+    if isinstance(completion_report, Mapping):
+        _append(completion_report.get("result_snapshot"))
+
+    def _append_selected(surface: Any) -> None:
+        if not isinstance(surface, Mapping):
+            return
+        selected = surface.get("selected_workflow_trace")
+        if isinstance(selected, Mapping):
+            _append(selected.get("child_result_snapshot"))
+
+    _append_selected(trace)
+    execution = trace.get("execution")
+    _append_selected(execution)
+
+    def _append_aux(surface: Any) -> None:
+        if not isinstance(surface, Mapping):
+            return
+        entries = surface.get("aux_llm_calls")
+        if not isinstance(entries, list):
+            return
+        for entry in entries:
+            if isinstance(entry, Mapping) and entry.get("type") == "workflow_execution":
+                _append(entry.get("result_snapshot"))
+
+    _append_aux(trace)
+    _append_aux(execution)
+    return snapshots
 
 
-def _trace_values_for_keys(
-    projection: Any,
-    keys: set[str],
+def _exact_persisted_workflow_authority_outputs(
+    trace: Mapping[str, Any],
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """Return exact outputs bound to their producing workflow snapshots.
+
+    Prompt, workflow, and definition lineage must come from the same bounded
+    result snapshot as the output.  A TER can contain multiple workflow
+    executions, so whole-record lineage scans are not an authority boundary.
+    """
+
+    exact_by_digest: dict[str, Mapping[str, Any]] = {}
+    unusable_metadata: list[Mapping[str, Any]] = []
+    for snapshot in _persisted_workflow_authority_result_snapshots(trace):
+        output = snapshot.get("workflow_authority_output")
+        metadata = snapshot.get("workflow_authority_output_snapshot")
+        if not isinstance(output, Mapping) or not isinstance(metadata, Mapping):
+            continue
+        try:
+            output_sha256 = operational_learning_release_digest(output)
+        except LearningReleaseValidationError:
+            unusable_metadata.append(copy.deepcopy(dict(metadata)))
+            continue
+        workflow_execution_identity = metadata.get("workflow_execution_identity")
+        workflow_definition_identity = (
+            workflow_execution_identity.get("workflow_definition_identity")
+            if isinstance(workflow_execution_identity, Mapping)
+            else None
+        )
+        if (
+            metadata.get("schema_version")
+            != WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_SCHEMA_VERSION
+            or metadata.get("exact") is not True
+            or metadata.get("output_sha256") != output_sha256
+            or metadata.get("redacted_count") != 0
+            or metadata.get("redacted_paths") != []
+            or metadata.get("truncated_count") != 0
+            or metadata.get("truncated_paths") != []
+            or metadata.get("prompt_lineage_observed") is not True
+            or metadata.get("prompt_lineage_ambiguous") is not False
+            or not _is_sha256(metadata.get("prompt_content_sha256"))
+            or metadata.get("llm_context_fields_lineage_observed") is not True
+            or metadata.get("llm_context_fields_lineage_ambiguous") is not False
+            or not _is_sha256(metadata.get("llm_context_fields_sha256"))
+            or not isinstance(workflow_execution_identity, Mapping)
+            or workflow_execution_identity.get("schema_version")
+            != WORKFLOW_EXECUTION_IDENTITY_SCHEMA_VERSION
+            or not str(workflow_execution_identity.get("workflow_id") or "").strip()
+            or not str(
+                workflow_execution_identity.get("execution_request_id") or ""
+            ).strip()
+            or not isinstance(workflow_definition_identity, Mapping)
+            or workflow_definition_identity.get("schema_version")
+            != WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION
+            or workflow_definition_identity.get("workflow_id")
+            != workflow_execution_identity.get("workflow_id")
+            or not _is_sha256(workflow_definition_identity.get("definition_hash"))
+            or not _is_sha256(
+                workflow_definition_identity.get("authoritative_definition_hash")
+            )
+            or workflow_definition_identity.get("hash_mismatch") is not False
+        ):
+            unusable_metadata.append(copy.deepcopy(dict(metadata)))
+            continue
+        bound_output = {
+            "output": output,
+            "output_sha256": output_sha256,
+            "prompt_content_sha256": metadata["prompt_content_sha256"],
+            "llm_context_fields_sha256": metadata["llm_context_fields_sha256"],
+            "workflow_execution_identity": workflow_execution_identity,
+        }
+        bound_digest = operational_learning_release_digest(bound_output)
+        exact_by_digest.setdefault(bound_digest, bound_output)
+    return list(exact_by_digest.values()), unusable_metadata
+
+
+def _workflow_authority_output_matches_execution(
+    bound_output: Mapping[str, Any],
     *,
-    skip_mapping: Mapping[str, Any],
-) -> set[str]:
-    skipped_digest = operational_learning_release_digest(skip_mapping)
-    values: set[str] = set()
-    pending = [projection]
-    while pending:
-        current = pending.pop()
-        if isinstance(current, Mapping):
-            try:
-                if operational_learning_release_digest(current) == skipped_digest:
-                    continue
-            except LearningReleaseValidationError:
-                pass
-            for key, value in current.items():
-                if key in keys and isinstance(value, str) and value.strip():
-                    values.add(value.strip())
-                pending.append(value)
-        elif isinstance(current, list):
-            pending.extend(current)
-    return values
+    workflow_id: str,
+    authority_revision: str,
+    prompt_revision: str,
+    request_id: str,
+) -> bool:
+    """Match authority only within one persisted workflow-result snapshot."""
+
+    execution_identity = bound_output.get("workflow_execution_identity")
+    definition_identity = (
+        execution_identity.get("workflow_definition_identity")
+        if isinstance(execution_identity, Mapping)
+        else None
+    )
+    if not isinstance(execution_identity, Mapping) or not isinstance(
+        definition_identity, Mapping
+    ):
+        return False
+    return bool(
+        execution_identity.get("workflow_id") == workflow_id
+        and execution_identity.get("execution_request_id") == request_id
+        and definition_identity.get("workflow_id") == workflow_id
+        and definition_identity.get("definition_hash") == authority_revision
+        and definition_identity.get("authoritative_definition_hash")
+        == authority_revision
+        and bound_output.get("prompt_content_sha256") == prompt_revision
+    )
 
 
 def _verify_persisted_represented_decision_trace(
     *,
     candidate: Mapping[str, Any],
     decision: Mapping[str, Any],
-) -> None:
+) -> Mapping[str, Any]:
     authority = decision.get("authority")
     request_id = (
         str(authority.get("authority_execution_request_id") or "").strip()
@@ -1351,12 +1539,24 @@ def _verify_persisted_represented_decision_trace(
                 "represented_decision_execution_trace_scope_mismatch",
                 details={"field": field_name},
             )
-    if not _mapping_occurs_in_projection(trace, decision):
+    exact_outputs, unusable_output_metadata = (
+        _exact_persisted_workflow_authority_outputs(trace)
+    )
+    decision_sha256 = operational_learning_release_digest(decision)
+    matching_outputs = [
+        bound_output
+        for bound_output in exact_outputs
+        if bound_output.get("output_sha256") == decision_sha256
+    ]
+    if not matching_outputs:
         raise LearningReleasePersistenceError(
             "represented_decision_not_found_in_execution_trace",
             details={
                 "authority_execution_request_id": request_id,
                 "decision_id": decision.get("decision_id"),
+                "unusable_authority_output_snapshot_count": len(
+                    unusable_output_metadata
+                ),
             },
             recovery_affordances=[
                 {"action_type": "rerun_represented_evaluator"},
@@ -1377,37 +1577,22 @@ def _verify_persisted_represented_decision_trace(
         if isinstance(authority, Mapping)
         else ""
     ).strip()
-    observed_workflow_ids = _trace_values_for_keys(
-        trace,
-        {
-            "workflow_id",
-            "selected_workflow_id",
-            "dispatch_workflow_id",
-            "represented_workflow_id",
-        },
-        skip_mapping=decision,
-    )
-    observed_definition_revisions = _trace_values_for_keys(
-        trace,
-        {
-            "authoritative_definition_hash",
-            "workflow_definition_sha256",
-            "definition_hash",
-        },
-        skip_mapping=decision,
-    )
-    observed_prompt_revisions = _trace_values_for_keys(
-        trace,
-        {"prompt_revision_sha256", "prompt_content_sha256", "prompt_sha256"},
-        skip_mapping=decision,
-    )
+    authority_matching_outputs = [
+        bound_output
+        for bound_output in matching_outputs
+        if _workflow_authority_output_matches_execution(
+            bound_output,
+            workflow_id=workflow_id,
+            authority_revision=authority_revision,
+            prompt_revision=prompt_revision,
+            request_id=request_id,
+        )
+    ]
     if (
         not workflow_id
-        or workflow_id not in observed_workflow_ids
         or not authority_revision
-        or authority_revision not in observed_definition_revisions
         or not _is_sha256(prompt_revision)
-        or prompt_revision not in observed_prompt_revisions
+        or not authority_matching_outputs
     ):
         raise LearningReleasePersistenceError(
             "represented_decision_execution_authority_mismatch",
@@ -1421,6 +1606,233 @@ def _verify_persisted_represented_decision_trace(
                 {"action_type": "rerun_represented_evaluator_with_trace_lineage"}
             ],
         )
+    context_lineage_sha256s = {
+        str(bound_output.get("llm_context_fields_sha256") or "")
+        for bound_output in authority_matching_outputs
+    }
+    if len(context_lineage_sha256s) != 1 or not all(
+        _is_sha256(value) for value in context_lineage_sha256s
+    ):
+        raise LearningReleasePersistenceError(
+            "represented_decision_context_lineage_ambiguous",
+            details={
+                "authority_execution_request_id": request_id,
+                "distinct_llm_context_fields_sha256_count": len(
+                    context_lineage_sha256s
+                ),
+            },
+            recovery_affordances=[
+                {"action_type": "rerun_represented_evaluator"},
+                {"action_type": "inspect_represented_decision_execution_trace"},
+            ],
+        )
+    return copy.deepcopy(dict(authority_matching_outputs[0]))
+
+
+def _verify_persisted_represented_candidate_proposal_trace(
+    *,
+    namespace: str,
+    user_id: str,
+    org_id: str,
+    candidate_id: str,
+    release_id: str,
+    affected_artifact: str,
+    release_payload: Mapping[str, Any],
+    failure_evidence_packets: Sequence[Mapping[str, Any]],
+    proposal_authority: Mapping[str, Any],
+    risk_classes: Sequence[str],
+    expires_at: str,
+    retest_after: str,
+    retest_requirements: Mapping[str, Any],
+) -> None:
+    """Require registration arguments to equal one exact represented proposal TER."""
+
+    workflow_id = str(proposal_authority.get("authority_concept_id") or "").strip()
+    authority_revision = str(
+        proposal_authority.get("authority_revision_sha256") or ""
+    ).strip()
+    prompt_revision = str(
+        proposal_authority.get("authority_prompt_revision_sha256") or ""
+    ).strip()
+    request_id = str(
+        proposal_authority.get("authority_execution_request_id") or ""
+    ).strip()
+    if (
+        workflow_id != OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID
+        or not _is_sha256(authority_revision)
+        or not _is_sha256(prompt_revision)
+        or not request_id
+    ):
+        raise LearningReleasePersistenceError(
+            "represented_candidate_proposal_execution_authority_mismatch",
+            details={
+                "authority_concept_id": workflow_id or None,
+                "authority_revision_sha256": authority_revision or None,
+                "authority_prompt_revision_sha256": prompt_revision or None,
+                "authority_execution_request_id": request_id or None,
+            },
+            recovery_affordances=[
+                {"action_type": "rerun_represented_candidate_proposal_workflow"}
+            ],
+        )
+
+    trace = _load_canonical_decision_trace(request_id, namespace)
+    if not isinstance(trace, Mapping):
+        raise LearningReleasePersistenceError(
+            "represented_candidate_proposal_execution_trace_required",
+            details={"authority_execution_request_id": request_id},
+            recovery_affordances=[
+                {"action_type": "persist_represented_candidate_proposal_trace"},
+                {"action_type": "rerun_represented_candidate_proposal_workflow"},
+            ],
+        )
+    if trace.get("request_id") != request_id or trace.get("namespace") != namespace:
+        raise LearningReleasePersistenceError(
+            "represented_candidate_proposal_execution_trace_scope_mismatch"
+        )
+    for field_name, expected in (("user_id", user_id), ("org_id", org_id)):
+        observed = trace.get(field_name)
+        if observed is not None and observed != expected:
+            raise LearningReleasePersistenceError(
+                "represented_candidate_proposal_execution_trace_scope_mismatch",
+                details={"field": field_name},
+            )
+
+    exact_outputs, unusable_output_metadata = (
+        _exact_persisted_workflow_authority_outputs(trace)
+    )
+    proposal_outputs = [
+        bound_output
+        for bound_output in exact_outputs
+        if isinstance(bound_output.get("output"), Mapping)
+        and bound_output["output"].get("schema_version")
+        == REPRESENTED_OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_SCHEMA_VERSION
+    ]
+    if not proposal_outputs:
+        raise LearningReleasePersistenceError(
+            "represented_candidate_proposal_execution_output_required",
+            details={
+                "authority_execution_request_id": request_id,
+                "unusable_authority_output_snapshot_count": len(
+                    unusable_output_metadata
+                ),
+            },
+            recovery_affordances=[
+                {"action_type": "rerun_represented_candidate_proposal_workflow"},
+                {"action_type": "read_represented_candidate_proposal_trace"},
+            ],
+        )
+    authority_proposal_outputs = [
+        bound_output
+        for bound_output in proposal_outputs
+        if _workflow_authority_output_matches_execution(
+            bound_output,
+            workflow_id=workflow_id,
+            authority_revision=authority_revision,
+            prompt_revision=prompt_revision,
+            request_id=request_id,
+        )
+    ]
+    if not authority_proposal_outputs:
+        raise LearningReleasePersistenceError(
+            "represented_candidate_proposal_execution_authority_mismatch",
+            details={
+                "authority_execution_request_id": request_id,
+                "authority_concept_id": workflow_id,
+                "authority_revision_sha256": authority_revision,
+                "authority_prompt_revision_sha256": prompt_revision,
+            },
+            recovery_affordances=[
+                {
+                    "action_type": (
+                        "rerun_represented_candidate_proposal_with_trace_lineage"
+                    )
+                }
+            ],
+        )
+    proposals = [bound_output["output"] for bound_output in authority_proposal_outputs]
+    proposal_digests = {
+        operational_learning_release_digest(proposal) for proposal in proposals
+    }
+    if len(proposal_digests) != 1:
+        raise LearningReleasePersistenceError(
+            "represented_candidate_proposal_execution_output_ambiguous",
+            details={
+                "authority_execution_request_id": request_id,
+                "distinct_proposal_output_count": len(proposal_digests),
+            },
+            recovery_affordances=[
+                {"action_type": "rerun_represented_candidate_proposal_workflow"}
+            ],
+        )
+    proposal = proposals[0]
+
+    packet_sha256s: list[str] = []
+    for index, packet in enumerate(failure_evidence_packets):
+        packet_sha256 = (
+            str(packet.get("packet_sha256") or "").strip().lower()
+            if isinstance(packet, Mapping)
+            else ""
+        )
+        if not _is_sha256(packet_sha256):
+            raise LearningReleasePersistenceError(
+                "represented_candidate_proposal_binding_mismatch",
+                details={
+                    "field": "failure_evidence_packets.packet_sha256",
+                    "packet_index": index,
+                },
+            )
+        packet_sha256s.append(packet_sha256)
+    expected_binding = {
+        "candidate_id": candidate_id,
+        "release_id": release_id,
+        "affected_artifact": affected_artifact,
+        "namespace": namespace,
+        "user_id": user_id,
+        "org_id": org_id,
+        "expires_at": expires_at,
+        "retest_after": retest_after,
+        "failure_packet_sha256s": packet_sha256s,
+    }
+    expected_values: tuple[tuple[str, Any], ...] = (
+        ("candidate_id", candidate_id),
+        ("release_id", release_id),
+        ("affected_artifact", affected_artifact),
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+        ("release_payload", release_payload),
+        ("failure_evidence_packets", failure_evidence_packets),
+        ("risk_classes", list(risk_classes)),
+        ("expires_at", expires_at),
+        ("retest_after", retest_after),
+        ("retest_requirements", retest_requirements),
+        ("proposal_authority", proposal_authority),
+        ("binding", expected_binding),
+    )
+    for field_name, expected in expected_values:
+        try:
+            matches = operational_learning_release_digest(
+                proposal.get(field_name)
+            ) == operational_learning_release_digest(expected)
+        except LearningReleaseValidationError:
+            matches = False
+        if not matches:
+            raise LearningReleasePersistenceError(
+                "represented_candidate_proposal_binding_mismatch",
+                details={
+                    "field": field_name,
+                    "authority_execution_request_id": request_id,
+                },
+                recovery_affordances=[
+                    {
+                        "action_type": (
+                            "register_exact_represented_candidate_proposal_output"
+                        )
+                    },
+                    {"action_type": "rerun_represented_candidate_proposal_workflow"},
+                ],
+            )
 
 
 def _verify_live_authority_reference(
@@ -1480,7 +1892,7 @@ def _verify_canonical_experiment_evidence(
     *,
     candidate: Mapping[str, Any],
     experiment_evidence: Mapping[str, Any],
-) -> None:
+) -> dict[str, Any]:
     embedded_run = experiment_evidence.get("experiment_run")
     if not isinstance(embedded_run, Mapping):
         raise LearningReleasePersistenceError(
@@ -1517,13 +1929,14 @@ def _verify_canonical_experiment_evidence(
                 {"action_type": "read_canonical_experiment_run", "run_id": run_id}
             ],
         )
+    return copy.deepcopy(dict(canonical_run))
 
 
 def _verify_canonical_certification_evidence(
     *,
     candidate: Mapping[str, Any],
     certification_evidence: Mapping[str, Any],
-) -> None:
+) -> dict[str, Any]:
     campaign_result = certification_evidence.get("campaign_result")
     provenance = certification_evidence.get("execution_provenance")
     if not isinstance(campaign_result, Mapping) or not isinstance(provenance, Mapping):
@@ -1577,7 +1990,8 @@ def _verify_canonical_certification_evidence(
         validate_campaign_experiment_observation,
     )
 
-    matching_observation_found = False
+    canonical_campaign: Mapping[str, Any] | None = None
+    canonical_provenance: Mapping[str, Any] | None = None
     for raw_observation in canonical_run.get("observations") or []:
         if not isinstance(raw_observation, Mapping):
             continue
@@ -1614,9 +2028,10 @@ def _verify_canonical_certification_evidence(
                 "canonical_operational_certification_provenance_mismatch",
                 details={"experiment_run_id": experiment_run_id},
             )
-        matching_observation_found = True
+        canonical_campaign = persisted_campaign
+        canonical_provenance = persisted_provenance
         break
-    if not matching_observation_found:
+    if canonical_campaign is None or canonical_provenance is None:
         raise LearningReleasePersistenceError(
             "canonical_operational_certification_campaign_not_found",
             details={
@@ -1630,6 +2045,401 @@ def _verify_canonical_certification_evidence(
                 }
             ],
         )
+    return {
+        "campaign_result": copy.deepcopy(dict(canonical_campaign)),
+        "execution_provenance": copy.deepcopy(dict(canonical_provenance)),
+    }
+
+
+def _load_authoritative_workflow_definition(workflow_id: str) -> Any:
+    from ..workflows.vontology_loader import load_workflow_definition_from_vontology
+
+    return load_workflow_definition_from_vontology(workflow_id)
+
+
+def _load_exact_live_prompt_content(prompt_id: str) -> str:
+    """Read one unambiguous live prompt content relation exactly once."""
+
+    from .prompt_template_service import _PREFERRED_PREDICATE_ALIASES
+
+    try:
+        raw_texts = get_texts_for_concept(prompt_id)
+    except Exception as exc:
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_prompt_content_missing",
+            details={"prompt_concept_id": prompt_id},
+            recovery_affordances=[
+                {"action_type": "inspect_represented_prompt"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        ) from exc
+    texts = raw_texts if isinstance(raw_texts, Sequence) else ()
+    for aliases in _PREFERRED_PREDICATE_ALIASES:
+        candidates = [
+            str(item.get("text") or "").strip()
+            for item in texts
+            if isinstance(item, Mapping)
+            and item.get("predicate") in aliases
+            and str(item.get("text") or "").strip()
+        ]
+        if not candidates:
+            continue
+        if len(candidates) != 1:
+            raise LearningReleasePersistenceError(
+                "live_represented_evaluator_prompt_content_ambiguous",
+                details={
+                    "prompt_concept_id": prompt_id,
+                    "preferred_content_count": len(candidates),
+                },
+                recovery_affordances=[
+                    {"action_type": "inspect_represented_prompt"},
+                    {"action_type": "repair_prompt_singleton_content"},
+                    {"action_type": "rerun_represented_evaluator"},
+                ],
+            )
+        return candidates[0]
+    raise LearningReleasePersistenceError(
+        "live_represented_evaluator_prompt_content_missing",
+        details={"prompt_concept_id": prompt_id},
+        recovery_affordances=[
+            {"action_type": "inspect_represented_prompt"},
+            {"action_type": "rerun_represented_evaluator"},
+        ],
+    )
+
+
+def _project_exact_expected_candidate_context(
+    *,
+    candidate: Mapping[str, Any],
+    expected_version: int,
+    expected_state_sha256: str,
+) -> dict[str, Any]:
+    """Reproject candidate context from the exact state being transitioned."""
+
+    resolved_expected_version = _expected_version(expected_version)
+    resolved_expected_state_sha256 = _require_sha256(
+        expected_state_sha256,
+        code="operational_learning_release_expected_state_digest_invalid",
+    )
+    resolved = resolve_operational_learning_release_candidate_in_vontology(
+        namespace=str(candidate.get("namespace") or ""),
+        user_id=str(candidate.get("user_id") or ""),
+        org_id=str(candidate.get("org_id") or ""),
+        candidate_id=str(candidate.get("candidate_id") or ""),
+        release_sha256=str(candidate.get("release_sha256") or ""),
+        affected_artifact=str(candidate.get("affected_artifact") or ""),
+    )
+    result = resolved.get("result") if isinstance(resolved, Mapping) else None
+    context = result.get("candidate_context") if isinstance(result, Mapping) else None
+    authority = context.get("authority") if isinstance(context, Mapping) else None
+    if (
+        not isinstance(context, Mapping)
+        or not isinstance(authority, Mapping)
+        or authority.get("version") != resolved_expected_version
+        or authority.get("state_sha256") != resolved_expected_state_sha256
+    ):
+        raise LearningReleasePersistenceError(
+            "represented_decision_candidate_context_state_stale",
+            details={
+                "expected_version": resolved_expected_version,
+                "expected_state_sha256": resolved_expected_state_sha256,
+                "current_version": (
+                    authority.get("version") if isinstance(authority, Mapping) else None
+                ),
+                "current_state_sha256": (
+                    authority.get("state_sha256")
+                    if isinstance(authority, Mapping)
+                    else None
+                ),
+            },
+            recovery_affordances=[
+                {"action_type": "read_latest_state"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        )
+    if not _is_sha256(context.get("context_sha256")):
+        raise LearningReleasePersistenceError(
+            "canonical_learning_release_candidate_context_invalid"
+        )
+    return copy.deepcopy(dict(context))
+
+
+def _live_evaluator_llm_policy(
+    *,
+    workflow_id: str,
+    authority_revision_sha256: str,
+    authority_prompt_revision_sha256: str,
+    reconstructed_context: Mapping[str, Any],
+) -> tuple[str, Mapping[str, Any]]:
+    """Return the sole live evaluator LLM policy for exact reconstruction."""
+
+    definition = _load_authoritative_workflow_definition(workflow_id)
+    definition_workflow_id = str(getattr(definition, "workflow_id", "") or "").strip()
+    state_id = str(getattr(definition, "initial_state", "") or "").strip()
+    states = getattr(definition, "states", None)
+    state = states.get(state_id) if isinstance(states, Mapping) else None
+    actions = list(getattr(state, "actions", ()) or ()) if state is not None else []
+    if definition_workflow_id != workflow_id or not state_id or len(actions) != 1:
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_context_contract_unavailable",
+            details={
+                "authority_concept_id": workflow_id,
+                "definition_workflow_id": definition_workflow_id or None,
+                "initial_state": state_id or None,
+                "initial_state_action_count": len(actions),
+            },
+            recovery_affordances=[
+                {"action_type": "inspect_represented_authority"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        )
+    from ..workflows.workflow_definition_identity_service import (
+        build_workflow_definition_identity,
+    )
+
+    try:
+        identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source="vontology",
+            definition=definition,
+            authoritative_definition=definition,
+        )
+    except Exception as exc:
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_definition_identity_unavailable",
+            details={"authority_concept_id": workflow_id},
+            recovery_affordances=[
+                {"action_type": "inspect_represented_authority"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        ) from exc
+    if (
+        identity.get("definition_hash") != authority_revision_sha256
+        or identity.get("authoritative_definition_hash") != authority_revision_sha256
+        or identity.get("hash_mismatch") is not False
+    ):
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_definition_revision_mismatch",
+            details={
+                "authority_concept_id": workflow_id,
+                "expected_revision_sha256": authority_revision_sha256,
+                "loaded_definition_sha256": identity.get("definition_hash"),
+                "loaded_authoritative_definition_sha256": identity.get(
+                    "authoritative_definition_hash"
+                ),
+            },
+            recovery_affordances=[
+                {"action_type": "read_current_authority_revision"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        )
+    action = actions[0]
+    if str(getattr(action, "execution_mode", "") or "").strip() != "llm":
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_context_contract_unavailable"
+        )
+    prompt_contract = getattr(action, "prompt_contract", None)
+    if not isinstance(prompt_contract, Mapping):
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_prompt_contract_unavailable"
+        )
+    requested_prompt_ids_raw = prompt_contract.get("requested_prompt_concept_ids")
+    requested_prompt_ids = (
+        [
+            str(item or "").strip()
+            for item in requested_prompt_ids_raw
+            if str(item or "").strip()
+        ]
+        if isinstance(requested_prompt_ids_raw, Sequence)
+        and not isinstance(requested_prompt_ids_raw, (str, bytes, bytearray))
+        else []
+    )
+    resolved_prompt_id = str(
+        prompt_contract.get("resolved_prompt_concept_id") or ""
+    ).strip()
+    if (
+        len(requested_prompt_ids) != 1
+        or not resolved_prompt_id
+        or requested_prompt_ids[0] != resolved_prompt_id
+    ):
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_prompt_contract_ambiguous",
+            details={
+                "authority_concept_id": workflow_id,
+                "requested_prompt_concept_ids": requested_prompt_ids,
+                "resolved_prompt_concept_id": resolved_prompt_id or None,
+            },
+            recovery_affordances=[
+                {"action_type": "inspect_represented_authority"},
+                {"action_type": "repair_evaluator_prompt_link"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        )
+    live_prompt_content = _load_exact_live_prompt_content(resolved_prompt_id)
+    live_prompt_sha256 = hashlib.sha256(live_prompt_content.encode("utf-8")).hexdigest()
+    if live_prompt_sha256 != authority_prompt_revision_sha256:
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_prompt_revision_mismatch",
+            details={
+                "authority_concept_id": workflow_id,
+                "prompt_concept_id": resolved_prompt_id,
+                "expected_prompt_revision_sha256": (authority_prompt_revision_sha256),
+                "live_prompt_revision_sha256": live_prompt_sha256,
+            },
+            recovery_affordances=[
+                {"action_type": "read_current_prompt_revision"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        )
+    llm_policy = getattr(action, "llm_policy", None)
+    if not isinstance(llm_policy, Mapping):
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_context_contract_unavailable"
+        )
+    resolved_llm_policy: dict[str, Any] = {
+        str(key): value for key, value in llm_policy.items()
+    }
+    context_fields = resolved_llm_policy.get("context_fields")
+    if not isinstance(context_fields, Sequence) or isinstance(
+        context_fields,
+        (str, bytes, bytearray),
+    ):
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_context_contract_unavailable"
+        )
+    context_keys = [
+        str(item.get("context_key") or "").strip()
+        for item in context_fields
+        if isinstance(item, Mapping)
+    ]
+    expected_keys = set(reconstructed_context)
+    if (
+        len(context_fields) != len(reconstructed_context)
+        or len(context_keys) != len(reconstructed_context)
+        or len(set(context_keys)) != len(reconstructed_context)
+        or set(context_keys) != expected_keys
+    ):
+        raise LearningReleasePersistenceError(
+            "live_represented_evaluator_context_contract_mismatch",
+            details={
+                "authority_concept_id": workflow_id,
+                "context_field_count": len(context_fields),
+                "context_keys": context_keys,
+                "expected_context_keys": sorted(expected_keys),
+            },
+            recovery_affordances=[
+                {"action_type": "inspect_represented_authority"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        )
+    return state_id, resolved_llm_policy
+
+
+def _verify_exact_evaluator_context_lineage(
+    *,
+    decision: Mapping[str, Any],
+    candidate_context: Mapping[str, Any],
+    experiment_evidence: Mapping[str, Any],
+    certification_evidence: Mapping[str, Any],
+    bound_output: Mapping[str, Any],
+) -> None:
+    decision_context_sha256 = _require_sha256(
+        decision.get("candidate_context_sha256"),
+        code="represented_decision_candidate_context_sha256_invalid",
+    )
+    canonical_context_sha256 = _require_sha256(
+        candidate_context.get("context_sha256"),
+        code="canonical_learning_release_candidate_context_invalid",
+    )
+    if decision_context_sha256 != canonical_context_sha256:
+        raise LearningReleasePersistenceError(
+            "represented_decision_candidate_context_mismatch",
+            details={
+                "decision_candidate_context_sha256": decision_context_sha256,
+                "canonical_candidate_context_sha256": canonical_context_sha256,
+            },
+            recovery_affordances=[
+                {"action_type": "read_latest_state"},
+                {"action_type": "rerun_represented_evaluator"},
+            ],
+        )
+    authority = decision.get("authority")
+    if not isinstance(authority, Mapping):
+        raise LearningReleasePersistenceError(
+            "live_represented_authority_reference_required"
+        )
+    workflow_id = _clean(
+        authority.get("authority_concept_id"),
+        code="live_represented_authority_reference_required",
+    )
+    reconstructed_context: dict[str, Any] = {
+        "represented_learning_candidate_context": copy.deepcopy(
+            dict(candidate_context)
+        ),
+        "experiment_evidence": copy.deepcopy(dict(experiment_evidence)),
+        "certification_evidence": copy.deepcopy(dict(certification_evidence)),
+        "decision_id": _clean(
+            decision.get("decision_id"),
+            code="represented_decision_id_required",
+        ),
+        "decided_at": _clean(
+            decision.get("decided_at"),
+            code="represented_decision_timestamp_invalid",
+        ),
+        "authority_revision_sha256": _require_sha256(
+            authority.get("authority_revision_sha256"),
+            code="live_represented_authority_reference_required",
+        ),
+        "authority_prompt_revision_sha256": _require_sha256(
+            authority.get("authority_prompt_revision_sha256"),
+            code="represented_decision_prompt_revision_invalid",
+        ),
+        "authority_execution_request_id": _clean(
+            authority.get("authority_execution_request_id"),
+            code="represented_decision_execution_request_id_required",
+        ),
+    }
+    with override_current_actor(
+        str(candidate_context.get("user_id") or ""),
+        str(candidate_context.get("org_id") or ""),
+    ):
+        state_id, llm_policy = _live_evaluator_llm_policy(
+            workflow_id=workflow_id,
+            authority_revision_sha256=str(
+                reconstructed_context["authority_revision_sha256"]
+            ),
+            authority_prompt_revision_sha256=str(
+                reconstructed_context["authority_prompt_revision_sha256"]
+            ),
+            reconstructed_context=reconstructed_context,
+        )
+    from ..workflows.llm_step_executor import compute_llm_context_fields_sha256
+
+    reconstructed_sha256 = compute_llm_context_fields_sha256(
+        llm_policy=llm_policy,
+        context=reconstructed_context,
+        workflow_state_id=state_id,
+    )
+    observed_sha256 = bound_output.get("llm_context_fields_sha256")
+    if (
+        not _is_sha256(reconstructed_sha256)
+        or not _is_sha256(observed_sha256)
+        or reconstructed_sha256 != observed_sha256
+    ):
+        raise LearningReleasePersistenceError(
+            "represented_decision_llm_context_fields_mismatch",
+            details={
+                "authority_execution_request_id": authority.get(
+                    "authority_execution_request_id"
+                ),
+                "reconstructed_llm_context_fields_sha256": reconstructed_sha256,
+                "observed_llm_context_fields_sha256": observed_sha256,
+            },
+            recovery_affordances=[
+                {"action_type": "rerun_represented_evaluator"},
+                {"action_type": "inspect_represented_decision_execution_trace"},
+            ],
+        )
 
 
 def _verify_live_transition_evidence(
@@ -1638,21 +2448,43 @@ def _verify_live_transition_evidence(
     represented_evaluator_decision: Mapping[str, Any],
     experiment_evidence: Mapping[str, Any],
     certification_evidence: Mapping[str, Any],
+    expected_version: int,
+    expected_state_sha256: str,
 ) -> None:
-    """Require canonical authority and persisted experiment/campaign readback."""
+    """Require canonical evidence and exact evaluator context lineage."""
 
-    _verify_live_authority_reference(represented_evaluator_decision.get("authority"))
-    _verify_persisted_represented_decision_trace(
+    candidate_context = _project_exact_expected_candidate_context(
         candidate=candidate,
-        decision=represented_evaluator_decision,
+        expected_version=expected_version,
+        expected_state_sha256=expected_state_sha256,
     )
-    _verify_canonical_experiment_evidence(
+    canonical_experiment_run = _verify_canonical_experiment_evidence(
         candidate=candidate,
         experiment_evidence=experiment_evidence,
     )
-    _verify_canonical_certification_evidence(
+    canonical_certification_sources = _verify_canonical_certification_evidence(
         candidate=candidate,
         certification_evidence=certification_evidence,
+    )
+    canonical_experiment = build_learning_release_experiment_evidence(
+        candidate=candidate,
+        experiment_run=canonical_experiment_run,
+    )
+    canonical_certification = build_learning_release_certification_evidence(
+        candidate=candidate,
+        campaign_result=canonical_certification_sources["campaign_result"],
+        execution_provenance=canonical_certification_sources["execution_provenance"],
+    )
+    bound_output = _verify_persisted_represented_decision_trace(
+        candidate=candidate,
+        decision=represented_evaluator_decision,
+    )
+    _verify_exact_evaluator_context_lineage(
+        decision=represented_evaluator_decision,
+        candidate_context=candidate_context,
+        experiment_evidence=canonical_experiment,
+        certification_evidence=canonical_certification,
+        bound_output=bound_output,
     )
 
 
@@ -2193,6 +3025,8 @@ def promote_operational_learning_release_candidate_in_vontology(
             represented_evaluator_decision=represented_evaluator_decision,
             experiment_evidence=experiment_evidence,
             certification_evidence=certification_evidence,
+            expected_version=expected_version,
+            expected_state_sha256=expected_state_sha256,
         )
         current_record = {
             "authenticated_approval_records": _approvals,
@@ -2259,6 +3093,8 @@ def reject_operational_learning_release_candidate_in_vontology(
             represented_evaluator_decision=represented_evaluator_decision,
             experiment_evidence=experiment_evidence,
             certification_evidence=certification_evidence,
+            expected_version=expected_version,
+            expected_state_sha256=expected_state_sha256,
         )
         return reject_operational_learning_release_candidate(
             state,
@@ -2322,6 +3158,8 @@ def rollback_operational_learning_release_in_vontology(
             represented_evaluator_decision=represented_evaluator_decision,
             experiment_evidence=experiment_evidence,
             certification_evidence=certification_evidence,
+            expected_version=expected_version,
+            expected_state_sha256=expected_state_sha256,
         )
         approval = _authoritative_approval(
             {"authenticated_approval_records": approvals},
@@ -2379,6 +3217,7 @@ __all__ = [
     "AUTHENTICATED_HUMAN_APPROVAL_RECORD_SCHEMA_VERSION",
     "LearningReleasePersistenceError",
     "LearningReleaseStateConflictError",
+    "OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_WORKFLOW_ID",
     "OPERATIONAL_LEARNING_RELEASE_CAMPAIGN_EVIDENCE_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_CANDIDATE_EVALUATION_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_STATE_PREDICATE",
@@ -2387,6 +3226,8 @@ __all__ = [
     "REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION",
     "REPRESENTED_LEARNING_CANDIDATE_CONTEXT_SCHEMA_VERSION",
     "REPRESENTED_LEARNING_RELEASE_BINDING_SCHEMA_VERSION",
+    "REPRESENTED_OPERATIONAL_LEARNING_CANDIDATE_PROPOSAL_SCHEMA_VERSION",
+    "WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_SCHEMA_VERSION",
     "load_operational_learning_release_state",
     "operational_learning_release_state_concept_id",
     "project_operational_learning_release_campaign_evidence",
@@ -2398,4 +3239,5 @@ __all__ = [
     "resolve_operational_learning_active_release_in_vontology",
     "resolve_operational_learning_release_candidate_in_vontology",
     "rollback_operational_learning_release_in_vontology",
+    "validate_operational_learning_release_state_record",
 ]
