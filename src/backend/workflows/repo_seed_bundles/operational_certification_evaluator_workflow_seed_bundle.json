@@ -2,7 +2,7 @@
   "family_id": "operational_certification_evaluator_workflow_seed_bundle",
   "managed_by": "operational_certification_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "13",
+  "seed_version": "14",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#operational_state_evidence_evaluator": {
       "1": [
@@ -40,6 +40,9 @@
       ],
       "12": [
         "025db88fab5588d064e86f382f8f2c313ab72a2d4369d8674ed69e1e318c54e5"
+      ],
+      "13": [
+        "2c0fe62e42632a975780cf6366ea5ce49d1eb657902738320afd0c3f8f6e22e8"
       ]
     }
   },
@@ -2040,22 +2043,100 @@
                 "concept_id": "#V#workflow_mapping_operational_degraded_matrix_readback_id",
                 "tool_output_field": "concept_id",
                 "context_key": "readback_concept_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_readback_names",
-                "tool_output_field": "names",
-                "context_key": "readback_names"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_readback_content",
-                "tool_output_field": "content",
-                "context_key": "readback_content"
               }
             ],
             "writes_context_keys": [
-              "readback_concept_id",
+              "readback_concept_id"
+            ],
+            "next_state": "read_exact_name_text_relations",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_exact_name_text_relations",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "get_text_relations"
+              ],
+              [
+                "predicate",
+                "hasName"
+              ],
+              [
+                "limit",
+                20
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_committed_id_to_name_text_concept_id",
+                "context_key": "committed_marker_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_readback_names",
+                "tool_output_field": "relations",
+                "context_key": "readback_names"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_readback_name_count",
+                "tool_output_field": "relations_found",
+                "context_key": "readback_name_count"
+              }
+            ],
+            "writes_context_keys": [
               "readback_names",
-              "readback_content"
+              "readback_name_count"
+            ],
+            "next_state": "read_exact_description_text_relations",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_exact_description_text_relations",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "get_text_relations"
+              ],
+              [
+                "predicate",
+                "hasDescription"
+              ],
+              [
+                "limit",
+                20
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_committed_id_to_description_text_concept_id",
+                "context_key": "committed_marker_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_readback_content",
+                "tool_output_field": "relations",
+                "context_key": "readback_content"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_degraded_matrix_readback_description_count",
+                "tool_output_field": "relations_found",
+                "context_key": "readback_description_count"
+              }
+            ],
+            "writes_context_keys": [
+              "readback_content",
+              "readback_description_count"
             ],
             "next_state": "project_degraded_result",
             "on_failure_state": "failed"
@@ -2085,7 +2166,8 @@
                   "mutation_guard_evidence",
                   "wrong_target_evidence",
                   "readback_concept_id",
-                  "readback_names"
+                  "readback_names",
+                  "readback_content"
                 ]
               ],
               [

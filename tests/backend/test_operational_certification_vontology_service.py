@@ -70,7 +70,7 @@ def test_operational_absence_probe_seed_is_read_only_and_deterministic() -> None
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert bundle["seed_version"] == "13"
+    assert bundle["seed_version"] == "14"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
     ] == {
@@ -350,6 +350,9 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
         "12": [
             "025db88fab5588d064e86f382f8f2c313ab72a2d4369d8674ed69e1e318c54e5"
         ],
+        "13": [
+            "2c0fe62e42632a975780cf6366ea5ce49d1eb657902738320afd0c3f8f6e22e8"
+        ],
     }
     definition = build_repo_seed_workflow_definitions(
         bundle_paths=[service._WORKFLOW_BUNDLE_PATH],
@@ -424,12 +427,43 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
             assert request.inputs["concept_id"] == "#V#marker_isolation_matrix"
             return WorkflowActionResult(
                 status="success",
+                outputs={"concept_id": "#V#marker_isolation_matrix"},
+            )
+        if state_id == "read_exact_name_text_relations":
+            assert request.inputs == {
+                "tool_name": "get_text_relations",
+                "predicate": "hasName",
+                "limit": 20,
+                "concept_id": "#V#marker_isolation_matrix",
+            }
+            return WorkflowActionResult(
+                status="success",
                 outputs={
-                    "concept_id": "#V#marker_isolation_matrix",
-                    "names": ["Operational certification isolation-matrix"],
-                    "content": (
-                        "Trusted SAIL pilot certification marker isolation-matrix"
-                    ),
+                    "relations": [
+                        {"text": "Operational certification isolation-matrix"}
+                    ],
+                    "relations_found": 1,
+                },
+            )
+        if state_id == "read_exact_description_text_relations":
+            assert request.inputs == {
+                "tool_name": "get_text_relations",
+                "predicate": "hasDescription",
+                "limit": 20,
+                "concept_id": "#V#marker_isolation_matrix",
+            }
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "relations": [
+                        {
+                            "text": (
+                                "Trusted SAIL pilot certification marker "
+                                "isolation-matrix"
+                            )
+                        }
+                    ],
+                    "relations_found": 1,
                 },
             )
         raise AssertionError(state_id)
@@ -481,6 +515,12 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
         "target_contract_validation_failed"
     ] is True
     assert projected["readback_concept_id"] == "#V#marker_isolation_matrix"
+    assert projected["readback_names"] == [
+        {"text": "Operational certification isolation-matrix"}
+    ]
+    assert projected["readback_content"] == [
+        {"text": "Trusted SAIL pilot certification marker isolation-matrix"}
+    ]
     assert observed_states == [
         "create_committed_marker",
         "resolve_committed_marker",
@@ -489,6 +529,8 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
         "attempt_read_only_guarded_write",
         "attempt_wrong_target_read",
         "read_exact_committed_target",
+        "read_exact_name_text_relations",
+        "read_exact_description_text_relations",
     ]
 
 
@@ -500,7 +542,7 @@ def test_operational_checkpoint_interruption_seed_authors_pause_before_resume() 
     probe = workflows[service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID]
     steps = probe["publication_spec"]["steps"]
 
-    assert bundle["seed_version"] == "13"
+    assert bundle["seed_version"] == "14"
     assert "workflow_control.pause_at_checkpoint" in bundle["supported_action_ids"]
     assert steps[0]["state_id"] == "request_checkpoint_pause"
     assert steps[0]["action_id"] == "workflow_control.pause_at_checkpoint"
