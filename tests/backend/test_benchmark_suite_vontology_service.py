@@ -21,6 +21,42 @@ def _operational_certification_fixture_path() -> Path:
     return _SEED_DIR / "operational_certification_benchmark_seed_bundle.json"
 
 
+def _seed_v7_operational_definition() -> dict[str, Any]:
+    """Reconstruct the exact reviewed seed-v7 authority from the current fixture."""
+
+    definition = service.load_benchmark_suite_definition_from_seed_fixture(
+        _operational_certification_fixture_path(),
+        suite_concept_id=service.OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID,
+    )
+    definition["seed_version"] = 7
+    durable_budget_ids = {
+        "pilot_durable_checkpoint_interruption_and_resume": (
+            "pilot_durable_checkpoint_interruption_follow_up_request_count"
+        ),
+        "pilot_durable_workflow_resume_and_idempotence": (
+            "pilot_durable_workflow_resume_and_idempotence_follow_up_request_count"
+        ),
+    }
+    for scenario in definition["case_sets"]["trusted_sail_pilot_v1"]:
+        budget_id = durable_budget_ids.get(scenario["scenario_id"])
+        if budget_id is None:
+            continue
+        scenario["budgets"].append(
+            {
+                "budget_id": budget_id,
+                "measurement_path": "/operational_metrics/follow_up_request_count",
+                "operator": "lte",
+                "limit": 1,
+                "blocking": True,
+            }
+        )
+        burden_evidence = scenario["metadata"]["interaction_burden_evidence"]
+        burden_evidence.pop("follow_up_request_applicable")
+        burden_evidence["follow_up_request_measurement"] = "completion_gate_proxy"
+        burden_evidence["follow_up_request_max_per_trial"] = 1
+    return definition
+
+
 def _seed_v3_operational_definition() -> dict[str, Any]:
     """Reconstruct the exact reviewed seed-v3 authority from the current fixture."""
 
@@ -358,7 +394,7 @@ def test_operational_suite_preserves_unregistered_numeric_older_authority(
         _operational_certification_fixture_path(),
         suite_concept_id=(service.OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID),
     )
-    assert fixture_definition["seed_version"] == 7
+    assert fixture_definition["seed_version"] == 8
     legacy_definition = dict(fixture_definition)
     legacy_definition["seed_version"] = legacy_seed_version
     legacy_scenario_ids = {
@@ -399,17 +435,26 @@ def test_operational_suite_preserves_unregistered_numeric_older_authority(
     assert persisted == []
 
 
+@pytest.mark.parametrize(
+    ("legacy_definition_factory", "legacy_seed_version"),
+    [
+        pytest.param(_seed_v3_operational_definition, "3", id="seed-v3"),
+        pytest.param(_seed_v7_operational_definition, "7", id="seed-v7"),
+    ],
+)
 def test_operational_suite_migrates_an_exact_registered_numeric_legacy_payload(
     monkeypatch: pytest.MonkeyPatch,
+    legacy_definition_factory: Any,
+    legacy_seed_version: str,
 ) -> None:
-    legacy_definition = _seed_v3_operational_definition()
+    legacy_definition = legacy_definition_factory()
     legacy_sha256 = service._hash_payload(
         service._definition_authority_payload(legacy_definition)
     )
     assert legacy_sha256 in (
         service._known_legacy_authority_payload_digests_by_seed_version(
             _operational_certification_fixture_path()
-        )["3"]
+        )[legacy_seed_version]
     )
     state, upserts = _install_operational_definition_store(
         monkeypatch,
@@ -425,7 +470,7 @@ def test_operational_suite_migrates_an_exact_registered_numeric_legacy_payload(
     assert report["migrated_older_suite_concept_ids"] == [concept_id]
     assert report["migrated_known_legacy_suite_concept_ids"] == [concept_id]
     assert report["migration_readback_by_concept_id"][concept_id]["verified"] is True
-    assert json.loads(str(state["text"]))["seed_version"] == 7
+    assert json.loads(str(state["text"]))["seed_version"] == 8
     assert len(upserts) == 3
     assert state["context"][service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY][
         "status"
@@ -458,7 +503,7 @@ def test_operational_suite_migrates_exact_origin_main_unversioned_authority(
     assert report["migrated_older_suite_concept_ids"] == [concept_id]
     assert report["migrated_known_legacy_suite_concept_ids"] == [concept_id]
     assert report["migration_readback_by_concept_id"][concept_id]["verified"] is True
-    assert json.loads(str(state["text"]))["seed_version"] == 7
+    assert json.loads(str(state["text"]))["seed_version"] == 8
     assert len(upserts) == 3
     assert upserts[0]["context"][service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY][
         "status"
@@ -557,7 +602,7 @@ def test_interrupted_operational_suite_migration_self_heals_from_pending_receipt
     assert "simulated_receipt_verification_interruption" in first_report[
         "errors_by_concept_id"
     ][concept_id]
-    assert json.loads(str(state["text"]))["seed_version"] == 7
+    assert json.loads(str(state["text"]))["seed_version"] == 8
     assert state["context"][service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY][
         "status"
     ] == "pending"
@@ -625,7 +670,7 @@ def test_pending_operational_suite_receipt_cannot_authorise_a_human_edit(
     assert len(upserts) == writes_before_retry
 
 
-@pytest.mark.parametrize("live_seed_version", [7, 8])
+@pytest.mark.parametrize("live_seed_version", [8, 9])
 def test_operational_suite_preserves_equal_or_newer_live_authority(
     monkeypatch: pytest.MonkeyPatch,
     live_seed_version: int,

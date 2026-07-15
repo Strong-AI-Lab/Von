@@ -1046,7 +1046,10 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
 
     contract = parse_operational_certification_contract(seed)
 
-    assert seed["seed_version"] == 7
+    assert seed["seed_version"] == 8
+    assert seed["known_legacy_authority_payload_sha256_by_seed_version"]["7"] == [
+        "ce5be29c9d595892ee39965a012f9b69fd2e821ef54d93d7266a56d67bbad7b9"
+    ]
     assert seed["known_legacy_authority_payload_sha256_by_seed_version"]["6"] == [
         "4f39d85811751e3b98d6c0624fd06cbffa55e44bd8eedffc9e559b12029525dc"
     ]
@@ -1158,6 +1161,19 @@ def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> N
             burden_evidence["correction_measurement_status"]
             == "pending_represented_correction_event_telemetry"
         )
+
+    for scenario_id in {
+        "pilot_durable_checkpoint_interruption_and_resume",
+        "pilot_durable_workflow_resume_and_idempotence",
+    }:
+        durable = scenarios[scenario_id]
+        assert [budget["measurement_path"] for budget in durable.budgets] == [
+            "/operational_metrics/duration_ms"
+        ]
+        burden_evidence = durable.metadata["interaction_burden_evidence"]
+        assert burden_evidence["follow_up_request_measurement"] == "not_applicable"
+        assert burden_evidence["follow_up_request_applicable"] is False
+        assert "follow_up_request_max_per_trial" not in burden_evidence
 
     marker_probe = scenarios[
         "pilot_unique_state_marker_create_and_read_back"
@@ -1434,5 +1450,5 @@ def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> Non
 
     assert definition_contract.contract_sha256 == selected_contract.contract_sha256
     assert selected_contract.source == "seed_bundle_import_fixture"
-    assert definition["seed_version"] == 7
-    assert selected_case_set["seed_version"] == 7
+    assert definition["seed_version"] == 8
+    assert selected_case_set["seed_version"] == 8
