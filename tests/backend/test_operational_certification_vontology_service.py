@@ -70,7 +70,7 @@ def test_operational_absence_probe_seed_is_read_only_and_deterministic() -> None
     bundle = json.loads(service._WORKFLOW_BUNDLE_PATH.read_text(encoding="utf-8"))
     workflows = {workflow["workflow_id"]: workflow for workflow in bundle["workflows"]}
 
-    assert bundle["seed_version"] == "15"
+    assert bundle["seed_version"] == "16"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"][
         service.OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
     ] == {
@@ -353,6 +353,9 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
         "13": [
             "2c0fe62e42632a975780cf6366ea5ce49d1eb657902738320afd0c3f8f6e22e8"
         ],
+        "15": [
+            "b882b6801af4159c0c5a8f74cbadf32fd00a18d6cf1a17452b913e8ebabf05ba"
+        ],
     }
     definition = build_repo_seed_workflow_definitions(
         bundle_paths=[service._WORKFLOW_BUNDLE_PATH],
@@ -387,6 +390,10 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
                 outputs={
                     "mcp_result": {
                         "success": False,
+                        "prompt": "secret prompt content",
+                        "body": "private body content",
+                        "rationale": "private evaluator rationale",
+                        "token": "secret-token-value",
                         "error_code": "schema_validation_failed",
                         "error_type": "invalid_arguments",
                         "retryable": False,
@@ -406,6 +413,10 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
                 outputs={
                     "mutation_guardrail_blocked": True,
                     "write_policy_reason": "insufficient_mutation_authority",
+                    "prompt": "secret mutation prompt",
+                    "body": "private mutation body",
+                    "rationale": "private mutation rationale",
+                    "token": "secret-mutation-token",
                 },
             )
         if state_id == "attempt_wrong_target_read":
@@ -421,6 +432,10 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
                     "target_contract_validation_error_code": (
                         "target_contract_symbolic_mismatch"
                     ),
+                    "prompt": "secret target prompt",
+                    "body": "private target body",
+                    "rationale": "private target rationale",
+                    "token": "secret-target-token",
                 },
             )
         if state_id == "read_exact_committed_target":
@@ -501,19 +516,44 @@ def test_operational_degraded_fault_matrix_preserves_committed_effect_evidence()
         "#V#marker_isolation_matrix"
     )
     assert projected["authoritative_empty_status"] == "not_found"
-    assert projected["invalid_argument_evidence"]["mcp_result"][
-        "error_code"
-    ] == "schema_validation_failed"
+    assert projected["authoritative_empty_candidates"] == []
+    assert projected["invalid_argument_evidence"] == {
+        "mcp_result": {
+            "error_code": "schema_validation_failed",
+            "error_type": "invalid_arguments",
+            "retryable": False,
+            "validation_stage": "input_schema",
+        }
+    }
     assert projected["input_requirement_evidence"] == {
         "schema_version": "represented_input_requirement_evidence.v1",
         "outcome": "input_required",
         "required_inputs": ["concept_id"],
         "source_error": projected["invalid_argument_evidence"],
     }
-    assert projected["mutation_guard_evidence"]["mutation_guardrail_blocked"] is True
-    assert projected["wrong_target_evidence"][
-        "target_contract_validation_failed"
-    ] is True
+    assert projected["mutation_guard_evidence"] == {
+        "mutation_guardrail_blocked": True,
+        "write_policy_reason": "insufficient_mutation_authority",
+    }
+    assert projected["wrong_target_evidence"] == {
+        "target_contract_validation_error_code": (
+            "target_contract_symbolic_mismatch"
+        ),
+        "target_contract_validation_failed": True,
+    }
+    projected_text = json.dumps(projected, sort_keys=True)
+    assert "secret prompt content" not in projected_text
+    assert "private body content" not in projected_text
+    assert "private evaluator rationale" not in projected_text
+    assert "secret-token-value" not in projected_text
+    assert "secret mutation prompt" not in projected_text
+    assert "private mutation body" not in projected_text
+    assert "private mutation rationale" not in projected_text
+    assert "secret-mutation-token" not in projected_text
+    assert "secret target prompt" not in projected_text
+    assert "private target body" not in projected_text
+    assert "private target rationale" not in projected_text
+    assert "secret-target-token" not in projected_text
     assert projected["readback_concept_id"] == "#V#marker_isolation_matrix"
     assert projected["readback_names"] == [
         {"text": "Operational certification isolation-matrix"}
@@ -542,7 +582,7 @@ def test_operational_checkpoint_interruption_seed_authors_pause_before_resume() 
     probe = workflows[service.OPERATIONAL_CHECKPOINT_INTERRUPTION_PROBE_WORKFLOW_ID]
     steps = probe["publication_spec"]["steps"]
 
-    assert bundle["seed_version"] == "15"
+    assert bundle["seed_version"] == "16"
     assert "workflow_control.pause_at_checkpoint" in bundle["supported_action_ids"]
     assert steps[0]["state_id"] == "request_checkpoint_pause"
     assert steps[0]["action_id"] == "workflow_control.pause_at_checkpoint"

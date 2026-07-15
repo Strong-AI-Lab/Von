@@ -2,7 +2,7 @@
   "family_id": "operational_certification_evaluator_workflow_seed_bundle",
   "managed_by": "operational_certification_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "15",
+  "seed_version": "16",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#operational_state_evidence_evaluator": {
       "1": [
@@ -46,6 +46,9 @@
       ],
       "13": [
         "2c0fe62e42632a975780cf6366ea5ce49d1eb657902738320afd0c3f8f6e22e8"
+      ],
+      "15": [
+        "b882b6801af4159c0c5a8f74cbadf32fd00a18d6cf1a17452b913e8ebabf05ba"
       ]
     }
   },
@@ -1936,7 +1939,22 @@
                 [
                   {
                     "key": "invalid_argument_evidence",
-                    "value_from_context": "last_failed_action_outputs"
+                    "value": {
+                      "mcp_result": {
+                        "error_code": {
+                          "$context_key": "last_failed_action_outputs.mcp_result.error_code"
+                        },
+                        "error_type": {
+                          "$context_key": "last_failed_action_outputs.mcp_result.error_type"
+                        },
+                        "retryable": {
+                          "$context_key": "last_failed_action_outputs.mcp_result.retryable"
+                        },
+                        "validation_stage": {
+                          "$context_key": "last_failed_action_outputs.mcp_result.validation_stage"
+                        }
+                      }
+                    }
                   }
                 ]
               ]
@@ -2036,7 +2054,14 @@
                 [
                   {
                     "key": "mutation_guard_evidence",
-                    "value_from_context": "last_failed_action_outputs"
+                    "value": {
+                      "mutation_guardrail_blocked": {
+                        "$context_key": "last_failed_action_outputs.mutation_guardrail_blocked"
+                      },
+                      "write_policy_reason": {
+                        "$context_key": "last_failed_action_outputs.write_policy_reason"
+                      }
+                    }
                   }
                 ]
               ]
@@ -2110,7 +2135,14 @@
                 [
                   {
                     "key": "wrong_target_evidence",
-                    "value_from_context": "last_failed_action_outputs"
+                    "value": {
+                      "target_contract_validation_error_code": {
+                        "$context_key": "last_failed_action_outputs.target_contract_validation_error_code"
+                      },
+                      "target_contract_validation_failed": {
+                        "$context_key": "last_failed_action_outputs.target_contract_validation_failed"
+                      }
+                    }
                   }
                 ]
               ]
@@ -2270,6 +2302,7 @@
                   "committed_effects",
                   "committed_marker_concept_id",
                   "authoritative_empty_status",
+                  "authoritative_empty_candidates",
                   "invalid_argument_evidence",
                   "input_requirement_evidence",
                   "mutation_guard_evidence",
@@ -2281,6 +2314,10 @@
               ],
               [
                 "include_missing_fields",
+                true
+              ],
+              [
+                "include_empty_fields",
                 true
               ],
               [
