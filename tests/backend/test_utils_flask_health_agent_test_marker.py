@@ -44,9 +44,31 @@ def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None
 
     assert payload["agent_test_instance"] is True
     assert payload["agent_test_environment_marker"] == "VON_AGENT_TEST_INSTANCE"
+    assert payload["represented_postcondition_critic_enabled"] is False
     assert payload["local_ip"] == "127.0.0.1"
     assert payload["public_ip"] is None
     assert network_calls == {"socket": 0, "urlopen": 0}
+
+
+def test_health_response_reports_represented_agent_test_critic(monkeypatch) -> None:
+    import src.backend.server.utils_flask as utils_flask
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    monkeypatch.setenv("VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC", "1")
+    monkeypatch.setattr(
+        utils_flask,
+        "get_runtime_code_version_info",
+        lambda: {"version": "test", "git_branch": "main"},
+    )
+
+    app = Flask(__name__)
+    app.config["SERVER_START_TIME"] = "test-start"
+
+    with app.app_context():
+        payload = utils_flask._build_health_check_response(app).get_json()
+
+    assert payload["agent_test_instance"] is True
+    assert payload["represented_postcondition_critic_enabled"] is True
 
 
 def test_agent_test_instance_skips_durable_workflow_startup(monkeypatch) -> None:
@@ -89,6 +111,8 @@ def test_agent_test_diagnostics_reuse_skipped_durable_startup_status(
 
     assert payload["available"] is False
     assert payload["state"] == "skipped_agent_test"
+    assert payload["worker_running"] is False
+    assert payload["scheduler_running"] is False
     assert payload["source"] == "agent_test_startup_status"
     assert payload["startup_status"] == {
         "state": "skipped_agent_test",

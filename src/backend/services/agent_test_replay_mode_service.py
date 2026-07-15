@@ -2,18 +2,52 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping
 
 
 AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY = "agent_test_selector_replay_mode"
 AGENT_TEST_SELECTOR_REPLAY_MODE_FAST_PATH = "fast_path"
 AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM = "represented_selector_llm"
+AGENT_TEST_REAL_POSTCONDITION_CRITIC_ENV = "VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC"
 
 
 def _clean_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value or "").strip()
+
+
+def agent_test_real_postcondition_critic_enabled(
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether AgentTest must run the represented critic workflow."""
+
+    env = environ if environ is not None else os.environ
+    return _clean_text(env.get(AGENT_TEST_REAL_POSTCONDITION_CRITIC_ENV)).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def represented_postcondition_critic_enabled_for_runtime(
+    *,
+    agent_test_instance: bool,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Project whether this runtime uses the represented critic path.
+
+    Normal runtimes always use the represented subworkflow. AgentTest uses its
+    deterministic acceleration unless the explicit acceptance-mode override is
+    enabled.
+    """
+
+    return bool(
+        not agent_test_instance
+        or agent_test_real_postcondition_critic_enabled(environ=environ)
+    )
 
 
 def use_represented_selector_llm_for_agent_test_replay(

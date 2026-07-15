@@ -2187,6 +2187,18 @@ def _collect_runtime_authority_alignment(
             get_configured_database_name().encode("utf-8")
         ).hexdigest()
         version_details = _mapping(payload.get("version_details"))
+        durable_workflows = _mapping(payload.get("durable_workflows"))
+        server_durable_workflow_status = {
+            key: durable_workflows.get(key)
+            for key in (
+                "available",
+                "state",
+                "worker_running",
+                "scheduler_running",
+                "source",
+            )
+            if key in durable_workflows
+        }
         server_git_commit = _text(
             version_details.get("git_commit") or environment.get("server_git_commit")
         )
@@ -2228,6 +2240,9 @@ def _collect_runtime_authority_alignment(
                 "local_mongo_location_sha256": local_location_sha256,
                 "server_database_name_sha256": (server_database_name_sha256 or None),
                 "local_database_name_sha256": local_database_name_sha256,
+                "server_durable_workflow_status": (
+                    server_durable_workflow_status or None
+                ),
             }
         )
     except Exception as exc:
@@ -2766,6 +2781,99 @@ def _aggregate_authenticated_multi_turn_results(
     }
 
 
+def _selected_contract_adapter_ids(contract: Any) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                adapter_id
+                for scenario in getattr(contract, "scenarios", ())
+                if (
+                    adapter_id := _text(
+                        _mapping(getattr(scenario, "execution", {})).get("adapter_id")
+                    )
+                )
+            }
+        )
+    )
+
+
+def _agent_test_critic_preflight_blocker(
+    environment: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if environment.get("server_agent_test_instance") is not True:
+        return None
+    marker = environment.get("server_represented_postcondition_critic_enabled")
+    if marker is True:
+        return None
+    return {
+        "code": "certification_agent_test_deterministic_critic_active",
+        "message": (
+            "Operational certification requires the represented postcondition "
+            "critic, but this AgentTest server is using its deterministic "
+            "critic acceleration. Restart AgentTest with "
+            "VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC=1."
+        ),
+        "details": {
+            "server_agent_test_instance": True,
+            "server_represented_postcondition_critic_enabled": marker,
+            "health_marker_present": (
+                "server_represented_postcondition_critic_enabled" in environment
+            ),
+        },
+    }
+
+
+def _durable_worker_preflight_blocker(
+    *,
+    contract: Any,
+    runtime_alignment: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    selected_adapter_ids = _selected_contract_adapter_ids(contract)
+    if DURABLE_WORKFLOW_ADAPTER_ID not in selected_adapter_ids:
+        return None
+    durable_status = _mapping(runtime_alignment.get("server_durable_workflow_status"))
+    if durable_status.get("worker_running") is True:
+        return None
+    return {
+        "code": "certification_durable_workflow_worker_not_running",
+        "message": (
+            "The selected certification contract includes the durable workflow "
+            "adapter, but the trial server does not report a running durable "
+            "worker in /diag."
+        ),
+        "details": {
+            "selected_adapter_ids": list(selected_adapter_ids),
+            "required_adapter_id": DURABLE_WORKFLOW_ADAPTER_ID,
+            "server_durable_workflow_status": durable_status,
+        },
+    }
+
+
+def _live_preflight_failure_execution(
+    *,
+    blocker: Mapping[str, Any],
+    contract: Any,
+    campaign_execution_id: str,
+    environment: Mapping[str, Any],
+    runtime_alignment: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    execution = _typed_failure_execution(
+        code=_text(blocker.get("code")) or "certification_preflight_failed",
+        message=_text(blocker.get("message"))
+        or "Operational certification preflight failed.",
+        details=_mapping(blocker.get("details")),
+        contract=contract,
+    )
+    execution["campaign_execution_id"] = campaign_execution_id
+    execution["environment"] = dict(environment)
+    if runtime_alignment is not None:
+        execution["runtime_authority_alignment"] = dict(runtime_alignment)
+    execution["execution_sha256"] = stable_payload_digest(
+        {key: value for key, value in execution.items() if key != "execution_sha256"}
+    )
+    return execution
+
+
 def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
     campaign_execution_id = f"operational-certification-{uuid.uuid4()}"
     requested_runtime_bindings = _parse_runtime_binding_items(
@@ -2778,6 +2886,14 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         base_url=args.base_url,
         allow_non_agent_test_server=args.allow_non_agent_test_server,
     )
+    critic_blocker = _agent_test_critic_preflight_blocker(environment)
+    if critic_blocker:
+        return _live_preflight_failure_execution(
+            blocker=critic_blocker,
+            contract=contract,
+            campaign_execution_id=campaign_execution_id,
+            environment=environment,
+        )
     runtime_alignment = _collect_runtime_authority_alignment(
         session=session,
         base_url=args.base_url,
@@ -2806,6 +2922,30 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             }
         )
         return execution
+    durable_status = _mapping(runtime_alignment.get("server_durable_workflow_status"))
+    environment.update(
+        {
+            "server_durable_workflow_worker_running": durable_status.get(
+                "worker_running"
+            ),
+            "server_durable_workflow_scheduler_running": durable_status.get(
+                "scheduler_running"
+            ),
+            "server_durable_workflow_state": durable_status.get("state"),
+        }
+    )
+    durable_worker_blocker = _durable_worker_preflight_blocker(
+        contract=contract,
+        runtime_alignment=runtime_alignment,
+    )
+    if durable_worker_blocker:
+        return _live_preflight_failure_execution(
+            blocker=durable_worker_blocker,
+            contract=contract,
+            campaign_execution_id=campaign_execution_id,
+            environment=environment,
+            runtime_alignment=runtime_alignment,
+        )
     auth_status_before = get_auth_status(session=session, base_url=args.base_url)
     auth_login: dict[str, Any] = {}
     if auth_status_before.get("authenticated") is not True:

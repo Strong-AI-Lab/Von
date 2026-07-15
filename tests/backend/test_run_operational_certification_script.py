@@ -921,7 +921,10 @@ def _patch_live_preflight(
     monkeypatch.setattr(
         certification_script,
         "collect_run_environment",
-        lambda **_kwargs: {"server_agent_test_instance": True},
+        lambda **_kwargs: {
+            "server_agent_test_instance": True,
+            "server_represented_postcondition_critic_enabled": True,
+        },
     )
     monkeypatch.setattr(
         certification_script,
@@ -937,6 +940,11 @@ def _patch_live_preflight(
             "alignment_sha256": "runtime-alignment-digest",
             "server_git_commit": "a" * 40,
             "local_git_commit": "a" * 40,
+            "server_durable_workflow_status": {
+                "available": True,
+                "worker_running": True,
+                "scheduler_running": True,
+            },
         },
     )
     monkeypatch.setattr(
@@ -2897,6 +2905,11 @@ def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(
                         certification_script.hashlib.sha256(b"von").hexdigest()
                     ),
                 },
+                "durable_workflows": {
+                    "available": True,
+                    "worker_running": True,
+                    "scheduler_running": True,
+                },
             }
 
     class Session:
@@ -2935,6 +2948,11 @@ def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(
 
     assert aligned["verified"] is True
     assert all(aligned["checks"].values())
+    assert aligned["server_durable_workflow_status"] == {
+        "available": True,
+        "worker_running": True,
+        "scheduler_running": True,
+    }
 
     dirty_response = Response()
     dirty_response.json = lambda: {
@@ -3057,6 +3075,115 @@ def test_live_execution_fails_before_auth_when_runtime_alignment_is_unverified(
         "certification_runtime_authority_alignment_unverified"
     )
     assert execution["trial_results"] == []
+
+
+def test_agent_test_deterministic_critic_fails_before_runtime_alignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_preflight(monkeypatch)
+    monkeypatch.setattr(
+        certification_script,
+        "collect_run_environment",
+        lambda **_kwargs: {
+            "server_agent_test_instance": True,
+            "server_represented_postcondition_critic_enabled": False,
+        },
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "_collect_runtime_authority_alignment",
+        lambda **_kwargs: pytest.fail(
+            "runtime alignment must not run with the deterministic critic"
+        ),
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "get_auth_status",
+        lambda **_kwargs: pytest.fail("auth must not run before critic preflight"),
+    )
+
+    execution = certification_script._live_execution(_args(), _contract())
+
+    assert execution["release_eligibility"]["reason_code"] == (
+        "certification_agent_test_deterministic_critic_active"
+    )
+    assert execution["trial_results"] == []
+    blocker = execution["campaign_result"]["blockers"][0]
+    assert (
+        blocker["details"]["server_represented_postcondition_critic_enabled"] is False
+    )
+
+
+def test_critic_preflight_preserves_normal_server_path() -> None:
+    assert (
+        certification_script._agent_test_critic_preflight_blocker(
+            {
+                "server_agent_test_instance": False,
+                "server_represented_postcondition_critic_enabled": None,
+            }
+        )
+        is None
+    )
+
+
+def test_durable_contract_fails_before_auth_when_worker_is_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_contract = _contract()
+    scenario = replace(
+        base_contract.scenarios[0],
+        execution={
+            **base_contract.scenarios[0].execution,
+            "adapter_id": certification_script.DURABLE_WORKFLOW_ADAPTER_ID,
+        },
+    )
+    durable_contract = replace(base_contract, scenarios=(scenario,))
+    _patch_live_preflight(monkeypatch, actor_contract=durable_contract)
+    monkeypatch.setattr(
+        certification_script,
+        "_collect_runtime_authority_alignment",
+        lambda **_kwargs: {
+            "schema_version": "operational_certification_runtime_alignment.v1",
+            "verified": True,
+            "alignment_sha256": "runtime-alignment-digest",
+            "server_durable_workflow_status": {
+                "available": True,
+                "worker_running": False,
+                "scheduler_running": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "get_auth_status",
+        lambda **_kwargs: pytest.fail(
+            "auth must not run without the required durable worker"
+        ),
+    )
+
+    execution = certification_script._live_execution(_args(), durable_contract)
+
+    assert execution["release_eligibility"]["reason_code"] == (
+        "certification_durable_workflow_worker_not_running"
+    )
+    assert execution["trial_results"] == []
+    blocker = execution["campaign_result"]["blockers"][0]
+    assert (
+        blocker["details"]["server_durable_workflow_status"]["worker_running"] is False
+    )
+    assert execution["environment"]["server_durable_workflow_worker_running"] is False
+
+
+def test_durable_worker_preflight_ignores_non_durable_contract() -> None:
+    assert (
+        certification_script._durable_worker_preflight_blocker(
+            contract=_contract(),
+            runtime_alignment={
+                "server_durable_workflow_status": {"worker_running": False}
+            },
+        )
+        is None
+    )
 
 
 def test_reused_experiment_run_is_rejected_until_atomic_claim_is_available(

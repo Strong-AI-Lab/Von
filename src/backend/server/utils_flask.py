@@ -2737,7 +2737,16 @@ def _build_health_check_response(app: Flask):
     import socket
     import urllib.request
 
+    from ..services.agent_test_replay_mode_service import (
+        represented_postcondition_critic_enabled_for_runtime,
+    )
+
     agent_test_instance = _is_agent_test_instance()
+    represented_postcondition_critic_enabled = (
+        represented_postcondition_critic_enabled_for_runtime(
+            agent_test_instance=agent_test_instance
+        )
+    )
     if agent_test_instance:
         local_ip = "127.0.0.1"
     else:
@@ -2778,6 +2787,9 @@ def _build_health_check_response(app: Flask):
         version_details=version_info,
         agent_test_instance=agent_test_instance,
         agent_test_environment_marker="VON_AGENT_TEST_INSTANCE",
+        represented_postcondition_critic_enabled=(
+            represented_postcondition_critic_enabled
+        ),
         pid=os.getpid(),
         start_time=app.config["SERVER_START_TIME"],
         local_ip=local_ip,
@@ -2794,6 +2806,8 @@ def _build_diagnostics_durable_workflow_status(app: Flask) -> dict[str, object]:
         return {
             "available": False,
             "state": "skipped_agent_test",
+            "worker_running": False,
+            "scheduler_running": False,
             "source": "agent_test_startup_status",
             "startup_status": (
                 startup_status if isinstance(startup_status, dict) else None

@@ -12,6 +12,9 @@ import logging
 import os
 from typing import Any, Callable, Dict, Mapping, Sequence
 
+from ...services.agent_test_replay_mode_service import (
+    agent_test_real_postcondition_critic_enabled,
+)
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -109,7 +112,6 @@ _INVOCATION_LEDGER_KEY = "__workflow_subworkflow_invocation_ledger"
 _MAX_SUBWORKFLOW_DEPTH_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_DEPTH"
 _DEFAULT_SUBWORKFLOW_DEPTH_LIMIT = 8
 _MAX_SUBWORKFLOW_INVOCATIONS_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS"
-_AGENT_TEST_REAL_POSTCONDITION_CRITIC_ENV = "VON_AGENT_TEST_REAL_POSTCONDITION_CRITIC"
 _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT = 64
 _DEFAULT_MAX_TRANSITIONS = 40
 _MAX_TRANSITIONS_LIMIT = 300
@@ -202,7 +204,7 @@ def _is_agent_test_instance() -> bool:
 def _agent_test_real_postcondition_critic_enabled() -> bool:
     """Allow acceptance replays to exercise the represented critic workflow."""
 
-    return _truthy_env_value(os.getenv(_AGENT_TEST_REAL_POSTCONDITION_CRITIC_ENV))
+    return agent_test_real_postcondition_critic_enabled()
 
 
 def _agent_test_workflow_experience_profile_concept_id(

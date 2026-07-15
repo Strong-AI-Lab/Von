@@ -267,6 +267,9 @@ def _summarise_server_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "git_commit": _safe_text(version_details.get("git_commit")) or None,
         "git_dirty": version_details.get("git_dirty"),
         "agent_test_instance": payload.get("agent_test_instance"),
+        "represented_postcondition_critic_enabled": payload.get(
+            "represented_postcondition_critic_enabled"
+        ),
         "effective_user_concept_id": (
             _safe_text(payload.get("effective_user_concept_id")) or None
         ),

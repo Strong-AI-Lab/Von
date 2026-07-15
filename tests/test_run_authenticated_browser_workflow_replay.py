@@ -5,6 +5,36 @@ from typing import Any
 import scripts.run_authenticated_browser_workflow_replay as replay
 
 
+def test_collect_run_environment_records_represented_critic_marker(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        replay,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "version": "test",
+            "version_details": {
+                "git_branch": "main",
+                "git_commit": "a" * 40,
+                "git_dirty": False,
+            },
+            "agent_test_instance": True,
+            "represented_postcondition_critic_enabled": True,
+        },
+    )
+    monkeypatch.setattr(replay, "_git_capture", lambda *_args: "local-git-value")
+    monkeypatch.setattr(replay, "_git_status_dirty", lambda: False)
+
+    environment = replay.collect_run_environment(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5010",
+    )
+
+    assert environment["server_agent_test_instance"] is True
+    assert environment["server_represented_postcondition_critic_enabled"] is True
+    assert environment["server_metadata_source"] == "health"
+
+
 def test_establish_browser_test_session_skips_fixture_refresh(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
