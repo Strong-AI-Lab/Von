@@ -62,6 +62,9 @@ OPERATIONAL_LEARNING_RELEASE_CANDIDATE_EVALUATION_SCHEMA_VERSION = (
 REPRESENTED_LEARNING_CANDIDATE_CONTEXT_SCHEMA_VERSION = (
     "represented_learning_candidate_context.v1"
 )
+REPRESENTED_FAILURE_EVIDENCE_MATERIAL_AVAILABILITY_SCHEMA_VERSION = (
+    "represented_failure_evidence_material_availability.v1"
+)
 REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION = (
     "represented_active_learning_release_context.v1"
 )
@@ -830,6 +833,88 @@ def _resolved_candidate_from_record(
     return candidate_snapshot, lifecycle_state
 
 
+def _project_failure_evidence_material_availability(
+    candidate_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose neutral structural facts about candidate failure evidence.
+
+    The represented evaluator decides whether the available material is enough
+    for a particular behavioural case.  This support projection only
+    distinguishes digest locators from inline source material or a represented
+    source-material reference; it does not decide an evaluation verdict.
+    """
+
+    raw_packets = candidate_snapshot.get("failure_evidence_packets")
+    packets = (
+        [item for item in raw_packets if isinstance(item, Mapping)]
+        if isinstance(raw_packets, Sequence)
+        and not isinstance(raw_packets, (str, bytes, bytearray))
+        else []
+    )
+    member_count = 0
+    member_digest_locator_count = 0
+    member_inline_source_material_count = 0
+    member_source_material_reference_count = 0
+    member_source_material_count = 0
+    for packet in packets:
+        raw_members = packet.get("members")
+        members = (
+            [item for item in raw_members if isinstance(item, Mapping)]
+            if isinstance(raw_members, Sequence)
+            and not isinstance(raw_members, (str, bytes, bytearray))
+            else []
+        )
+        for member in members:
+            member_count += 1
+            if (
+                isinstance(member.get("source_evidence_sha256"), str)
+                and str(member.get("source_evidence_sha256")).strip()
+            ):
+                member_digest_locator_count += 1
+            inline_material = isinstance(
+                member.get("source_evidence"), Mapping
+            ) and bool(member.get("source_evidence"))
+            material_reference = any(
+                isinstance(member.get(key), Mapping) and bool(member.get(key))
+                for key in ("source_evidence_ref", "source_evidence_blob_ref")
+            )
+            if inline_material:
+                member_inline_source_material_count += 1
+            if material_reference:
+                member_source_material_reference_count += 1
+            if inline_material or material_reference:
+                member_source_material_count += 1
+
+    if member_count == 0:
+        coverage = "none"
+    elif member_source_material_count == member_count:
+        coverage = "source_material_present_for_all_members"
+    elif member_source_material_count > 0:
+        coverage = "partial_source_material"
+    elif member_digest_locator_count == member_count:
+        coverage = "digest_locators_only"
+    else:
+        coverage = "source_material_absent"
+
+    return {
+        "schema_version": (
+            REPRESENTED_FAILURE_EVIDENCE_MATERIAL_AVAILABILITY_SCHEMA_VERSION
+        ),
+        "packet_count": len(packets),
+        "member_count": member_count,
+        "member_digest_locator_count": member_digest_locator_count,
+        "member_inline_source_material_count": (member_inline_source_material_count),
+        "member_source_material_reference_count": (
+            member_source_material_reference_count
+        ),
+        "member_source_material_count": member_source_material_count,
+        "all_members_have_source_material": bool(
+            member_count > 0 and member_source_material_count == member_count
+        ),
+        "coverage": coverage,
+    }
+
+
 def resolve_operational_learning_release_candidate_in_vontology(
     *,
     namespace: str,
@@ -894,6 +979,9 @@ def resolve_operational_learning_release_candidate_in_vontology(
         "candidate_lifecycle_state": lifecycle_state,
         "candidate_snapshot": candidate,
         "candidate_snapshot_sha256": candidate_snapshot_sha256,
+        "failure_evidence_material_availability": (
+            _project_failure_evidence_material_availability(candidate)
+        ),
         "release_payload": release_payload,
         "release_payload_sha256": release_payload_sha256,
         "parent_release_sha256": parent_release_sha256,

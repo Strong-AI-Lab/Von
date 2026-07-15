@@ -201,6 +201,17 @@ def test_candidate_resolver_projects_exact_immutable_context_without_writing(
     assert context["status"] == "resolved"
     assert context["candidate_snapshot"] == candidate
     assert context["candidate_snapshot_sha256"] == candidate["candidate_sha256"]
+    assert context["failure_evidence_material_availability"] == {
+        "schema_version": ("represented_failure_evidence_material_availability.v1"),
+        "packet_count": 1,
+        "member_count": 1,
+        "member_digest_locator_count": 1,
+        "member_inline_source_material_count": 0,
+        "member_source_material_reference_count": 0,
+        "member_source_material_count": 0,
+        "all_members_have_source_material": False,
+        "coverage": "digest_locators_only",
+    }
     assert context["release_payload"] == candidate["release_payload"]
     assert context["release_payload_sha256"] == operational_learning_release_digest(
         candidate["release_payload"]
@@ -213,6 +224,33 @@ def test_candidate_resolver_projects_exact_immutable_context_without_writing(
     observed_digest = digest_basis.pop("context_sha256")
     assert observed_digest == operational_learning_release_digest(digest_basis)
     assert len(vontology_store["writes"]) == write_count
+
+
+def test_failure_evidence_material_projection_reports_partial_source_material() -> None:
+    projection = service._project_failure_evidence_material_availability(
+        {
+            "failure_evidence_packets": [
+                {
+                    "members": [
+                        {
+                            "source_evidence_sha256": "a" * 64,
+                            "source_evidence": {"causal_stage": "verification"},
+                        },
+                        {
+                            "source_evidence_sha256": "b" * 64,
+                        },
+                    ]
+                }
+            ]
+        }
+    )
+
+    assert projection["coverage"] == "partial_source_material"
+    assert projection["member_count"] == 2
+    assert projection["member_digest_locator_count"] == 2
+    assert projection["member_inline_source_material_count"] == 1
+    assert projection["member_source_material_count"] == 1
+    assert projection["all_members_have_source_material"] is False
 
 
 def test_candidate_context_workflow_projects_nullable_parent_release_fact() -> None:
@@ -229,9 +267,7 @@ def test_candidate_context_workflow_projects_nullable_parent_release_fact() -> N
         if item["workflow_id"]
         == "#V#operational_learning_candidate_context_resolution_workflow"
     )
-    steps = {
-        item["state_id"]: item for item in workflow["publication_spec"]["steps"]
-    }
+    steps = {item["state_id"]: item for item in workflow["publication_spec"]["steps"]}
     resolve_step = steps["resolve_candidate"]
     parent_mapping = next(
         item
