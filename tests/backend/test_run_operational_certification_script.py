@@ -1709,7 +1709,7 @@ def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(
 
     class Session:
         def get(self, _url: str, *, timeout: float) -> Response:
-            assert timeout == 12.0
+            assert timeout == 45.0
             return Response()
 
     from src.backend.db import mongo_client, mongo_uri_redaction
@@ -1762,6 +1762,59 @@ def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(
     )
     assert misaligned["verified"] is False
     assert misaligned["checks"]["clean_server_build"] is False
+
+
+def test_runtime_alignment_honours_explicit_non_agent_test_server_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "version_details": {"git_commit": "a" * 40, "git_dirty": False},
+                "mongo": {
+                    "effective_mongo_location": {"classification": "local"},
+                    "effective_database_name_sha256": (
+                        certification_script.hashlib.sha256(b"von").hexdigest()
+                    ),
+                },
+            }
+
+    class Session:
+        def get(self, _url: str, *, timeout: float) -> Response:
+            assert timeout == 45.0
+            return Response()
+
+    from src.backend.db import mongo_client, mongo_uri_redaction
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_effective_mongo_uri",
+        lambda: "mongodb://127.0.0.1:27017/von",
+    )
+    monkeypatch.setattr(mongo_client, "is_using_fallback_uri", lambda: False)
+    monkeypatch.setattr(mongo_client, "get_configured_database_name", lambda: "von")
+    monkeypatch.setattr(
+        mongo_uri_redaction,
+        "build_safe_mongo_connection_location",
+        lambda *_args, **_kwargs: {"classification": "local"},
+    )
+
+    aligned = certification_script._collect_runtime_authority_alignment(
+        session=Session(),
+        base_url="http://127.0.0.1:5000",
+        environment={
+            "server_agent_test_instance": False,
+            "local_repo_git_head": "a" * 40,
+            "local_repo_git_dirty": False,
+        },
+        allow_non_agent_test_server=True,
+    )
+
+    assert aligned["verified"] is True
+    assert aligned["checks"]["approved_server_mode"] is True
 
 
 @pytest.mark.parametrize(("stdout", "expected"), [("", False), ("?? x.py\n", True)])

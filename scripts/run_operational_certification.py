@@ -1369,6 +1369,8 @@ def _collect_runtime_authority_alignment(
     session: requests.Session,
     base_url: str,
     environment: Mapping[str, Any],
+    allow_non_agent_test_server: bool = False,
+    diagnostics_timeout_seconds: float = 45.0,
 ) -> dict[str, Any]:
     """Prove that HTTP trials and local authority writes share one runtime.
 
@@ -1388,7 +1390,7 @@ def _collect_runtime_authority_alignment(
         loopback_target = hostname in {"127.0.0.1", "localhost", "::1"}
         response = session.get(
             f"{_text(base_url).rstrip('/')}/diag",
-            timeout=12.0,
+            timeout=diagnostics_timeout_seconds,
         )
         response.raise_for_status()
         payload = response.json()
@@ -1430,8 +1432,9 @@ def _collect_runtime_authority_alignment(
         server_git_dirty = version_details.get("git_dirty")
         checks = {
             "loopback_http_target": loopback_target,
-            "agent_test_instance": (
+            "approved_server_mode": (
                 environment.get("server_agent_test_instance") is True
+                or allow_non_agent_test_server
             ),
             "exact_git_commit": bool(
                 server_git_commit
@@ -1977,6 +1980,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         session=session,
         base_url=args.base_url,
         environment=environment,
+        allow_non_agent_test_server=args.allow_non_agent_test_server,
     )
     if runtime_alignment.get("verified") is not True:
         execution = _typed_failure_execution(
