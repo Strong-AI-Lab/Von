@@ -1222,6 +1222,195 @@ def _append_recovery_total_truncation_marker(
     return remaining_budget - len(marker)
 
 
+def _render_llm_context_field_sections(
+    *,
+    llm_policy: Mapping[str, Any],
+    context: Mapping[str, Any],
+    workflow_state_id: str | None = None,
+) -> tuple[bool, list[str], list[str], dict[str, Any] | None]:
+    """Render the authored context-field sections used by an LLM prompt.
+
+    The first section list contains everything appended to the prompt for the
+    context-field block, including a recovery total-truncation marker when one
+    is required.  The second contains only the exact ordered labelled field
+    sections and is therefore the stable lineage surface hashed below.
+    """
+
+    raw_context_fields = llm_policy.get("context_fields")
+    if not isinstance(raw_context_fields, Sequence) or isinstance(
+        raw_context_fields,
+        (str, bytes, bytearray),
+    ):
+        return False, [], [], None
+
+    context_field_items = list(raw_context_fields)
+    prompt_sections: list[str] = []
+    rendered_field_sections: list[str] = []
+    # JVNAUTOSCI-2514: the recovery-decision step inlines the full turn
+    # state; project each field to bounded runtime evidence and cap the
+    # total so the prompt cannot balloon to tens of thousands of tokens.
+    is_recovery = is_recovery_decision_state(workflow_state_id)
+    remaining_recovery_budget = RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET
+    recovery_diagnostics: dict[str, Any] | None = None
+    if is_recovery:
+        recovery_diagnostics = {
+            "schema_version": "recovery_context_compaction.v1",
+            "enabled": True,
+            "workflow_state_id": _context_string(workflow_state_id),
+            "field_char_budget": RECOVERY_CONTEXT_FIELD_CHAR_BUDGET,
+            "total_context_char_budget": RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET,
+            "candidate_context_field_count": len(context_field_items),
+            "rendered_context_field_count": 0,
+            "skipped_empty_context_field_count": 0,
+            "omitted_context_field_count": 0,
+            "rendered_context_chars": 0,
+            "total_context_budget_exhausted": False,
+            "total_truncation_marker_rendered": False,
+            "fields": [],
+        }
+
+    for index, item in enumerate(context_field_items):
+        if not isinstance(item, Mapping):
+            continue
+        context_key = _context_string(item.get("context_key"))
+        if not context_key:
+            continue
+        value = context.get(context_key)
+        label = _context_string(item.get("label")) or context_key.replace("_", " ")
+        if is_recovery:
+            assert recovery_diagnostics is not None
+            if remaining_recovery_budget <= 0:
+                recovery_diagnostics["total_context_budget_exhausted"] = True
+                recovery_diagnostics["omitted_context_field_count"] = (
+                    len(context_field_items) - index
+                )
+                break
+            projection = compact_recovery_context_field(value)
+            value_text = _serialise_prompt_context_value(projection.value)
+            field_diagnostics = dict(projection.diagnostics)
+            field_diagnostics.update(
+                {
+                    "context_key": context_key,
+                    "label": label,
+                    "input_value_kind": type(value).__name__,
+                }
+            )
+            if not value_text:
+                field_diagnostics["skipped_empty"] = True
+                recovery_diagnostics["skipped_empty_context_field_count"] = (
+                    int(
+                        recovery_diagnostics.get(
+                            "skipped_empty_context_field_count"
+                        )
+                        or 0
+                    )
+                    + 1
+                )
+                recovery_diagnostics["fields"].append(field_diagnostics)
+                continue
+            header = f"{label}:\n"
+            body_budget = min(
+                RECOVERY_CONTEXT_FIELD_CHAR_BUDGET,
+                max(0, remaining_recovery_budget - len(header)),
+            )
+            if body_budget <= 0:
+                recovery_diagnostics["total_context_budget_exhausted"] = True
+                recovery_diagnostics["omitted_context_field_count"] = (
+                    len(context_field_items) - index
+                )
+                break
+            serialised_compacted_chars = len(value_text)
+            value_text = render_compacted_recovery_field_text(
+                value_text,
+                char_budget=body_budget,
+            )
+            section = f"{header}{value_text}"
+            remaining_recovery_budget -= len(section)
+            field_diagnostics.update(
+                {
+                    "skipped_empty": False,
+                    "serialised_compacted_chars": serialised_compacted_chars,
+                    "rendered_body_chars": len(value_text),
+                    "rendered_section_chars": len(section),
+                    "field_char_budget_used": body_budget,
+                    "body_truncated_by_char_budget": (
+                        serialised_compacted_chars > body_budget
+                    ),
+                }
+            )
+            recovery_diagnostics["fields"].append(field_diagnostics)
+            recovery_diagnostics["rendered_context_field_count"] = (
+                int(recovery_diagnostics.get("rendered_context_field_count") or 0)
+                + 1
+            )
+            recovery_diagnostics["rendered_context_chars"] = int(
+                recovery_diagnostics.get("rendered_context_chars") or 0
+            ) + len(section)
+            prompt_sections.append(section)
+            rendered_field_sections.append(section)
+            continue
+        value_text = _serialise_prompt_context_value(value)
+        if not value_text:
+            continue
+        section = f"{label}:\n{value_text}"
+        prompt_sections.append(section)
+        rendered_field_sections.append(section)
+
+    if recovery_diagnostics is not None:
+        if recovery_diagnostics["omitted_context_field_count"]:
+            remaining_recovery_budget = _append_recovery_total_truncation_marker(
+                sections=prompt_sections,
+                remaining_budget=remaining_recovery_budget,
+                diagnostics=recovery_diagnostics,
+            )
+        recovery_diagnostics["context_char_budget_remaining"] = max(
+            0,
+            remaining_recovery_budget,
+        )
+    return (
+        True,
+        prompt_sections,
+        rendered_field_sections,
+        recovery_diagnostics,
+    )
+
+
+def _rendered_llm_context_fields_sha256(sections: Sequence[str]) -> str:
+    encoded = json.dumps(
+        list(sections),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def compute_llm_context_fields_sha256(
+    *,
+    llm_policy: Mapping[str, Any],
+    context: Mapping[str, Any],
+    workflow_state_id: str | None = None,
+) -> str | None:
+    """Recompute exact rendered context-field lineage without an LLM call.
+
+    ``None`` means the policy does not author a ``context_fields`` sequence.
+    An authored sequence that renders no fields deliberately hashes the empty
+    ordered list so consumers can distinguish it from missing lineage. Recovery
+    truncation markers are part of this digest because they are appended to the
+    model-visible context-field block.
+    """
+
+    authored, prompt_sections, _rendered_field_sections, _diagnostics = (
+        _render_llm_context_field_sections(
+            llm_policy=llm_policy,
+            context=context,
+            workflow_state_id=workflow_state_id,
+        )
+    )
+    if not authored:
+        return None
+    return _rendered_llm_context_fields_sha256(prompt_sections)
+
+
 def _compose_llm_prompt_with_diagnostics(
     *,
     base_prompt: str,
@@ -1246,132 +1435,30 @@ def _compose_llm_prompt_with_diagnostics(
     if response_contract_text:
         sections.append(response_contract_text)
 
-    raw_context_fields = llm_policy.get("context_fields")
-    if isinstance(raw_context_fields, Sequence) and not isinstance(
-        raw_context_fields, (str, bytes, bytearray)
-    ):
-        context_field_items = list(raw_context_fields)
-        # JVNAUTOSCI-2514: the recovery-decision step inlines the full turn
-        # state; project each field to bounded runtime evidence and cap the
-        # total so the prompt cannot balloon to tens of thousands of tokens.
-        is_recovery = is_recovery_decision_state(workflow_state_id)
-        remaining_recovery_budget = RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET
-        recovery_diagnostics: dict[str, Any] | None = None
-        if is_recovery:
-            recovery_diagnostics = {
-                "schema_version": "recovery_context_compaction.v1",
-                "enabled": True,
-                "workflow_state_id": _context_string(workflow_state_id),
-                "field_char_budget": RECOVERY_CONTEXT_FIELD_CHAR_BUDGET,
-                "total_context_char_budget": RECOVERY_CONTEXT_TOTAL_CHAR_BUDGET,
-                "candidate_context_field_count": len(context_field_items),
-                "rendered_context_field_count": 0,
-                "skipped_empty_context_field_count": 0,
-                "omitted_context_field_count": 0,
-                "rendered_context_chars": 0,
-                "total_context_budget_exhausted": False,
-                "total_truncation_marker_rendered": False,
-                "fields": [],
-            }
-
-        for index, item in enumerate(context_field_items):
-            if not isinstance(item, Mapping):
-                continue
-            context_key = _context_string(item.get("context_key"))
-            if not context_key:
-                continue
-            value = context.get(context_key)
-            label = _context_string(item.get("label")) or context_key.replace("_", " ")
-            if is_recovery:
-                assert recovery_diagnostics is not None
-                if remaining_recovery_budget <= 0:
-                    recovery_diagnostics["total_context_budget_exhausted"] = True
-                    recovery_diagnostics["omitted_context_field_count"] = (
-                        len(context_field_items) - index
-                    )
-                    break
-                projection = compact_recovery_context_field(value)
-                value_text = _serialise_prompt_context_value(projection.value)
-                field_diagnostics = dict(projection.diagnostics)
-                field_diagnostics.update(
-                    {
-                        "context_key": context_key,
-                        "label": label,
-                        "input_value_kind": type(value).__name__,
-                    }
-                )
-                if not value_text:
-                    field_diagnostics["skipped_empty"] = True
-                    recovery_diagnostics["skipped_empty_context_field_count"] = (
-                        int(
-                            recovery_diagnostics.get(
-                                "skipped_empty_context_field_count"
-                            )
-                            or 0
-                        )
-                        + 1
-                    )
-                    recovery_diagnostics["fields"].append(field_diagnostics)
-                    continue
-                header = f"{label}:\n"
-                body_budget = min(
-                    RECOVERY_CONTEXT_FIELD_CHAR_BUDGET,
-                    max(0, remaining_recovery_budget - len(header)),
-                )
-                if body_budget <= 0:
-                    recovery_diagnostics["total_context_budget_exhausted"] = True
-                    recovery_diagnostics["omitted_context_field_count"] = (
-                        len(context_field_items) - index
-                    )
-                    break
-                serialised_compacted_chars = len(value_text)
-                value_text = render_compacted_recovery_field_text(
-                    value_text,
-                    char_budget=body_budget,
-                )
-                section = f"{header}{value_text}"
-                remaining_recovery_budget -= len(section)
-                field_diagnostics.update(
-                    {
-                        "skipped_empty": False,
-                        "serialised_compacted_chars": serialised_compacted_chars,
-                        "rendered_body_chars": len(value_text),
-                        "rendered_section_chars": len(section),
-                        "field_char_budget_used": body_budget,
-                        "body_truncated_by_char_budget": (
-                            serialised_compacted_chars > body_budget
-                        ),
-                    }
-                )
-                recovery_diagnostics["fields"].append(field_diagnostics)
-                recovery_diagnostics["rendered_context_field_count"] = (
-                    int(recovery_diagnostics.get("rendered_context_field_count") or 0)
-                    + 1
-                )
-                recovery_diagnostics["rendered_context_chars"] = int(
-                    recovery_diagnostics.get("rendered_context_chars") or 0
-                ) + len(section)
-                sections.append(section)
-                continue
-            value_text = _serialise_prompt_context_value(value)
-            if not value_text:
-                continue
-            sections.append(f"{label}:\n{value_text}")
-
+    (
+        context_fields_authored,
+        context_prompt_sections,
+        rendered_context_field_sections,
+        recovery_diagnostics,
+    ) = _render_llm_context_field_sections(
+        llm_policy=llm_policy,
+        context=context,
+        workflow_state_id=workflow_state_id,
+    )
+    sections.extend(context_prompt_sections)
+    if context_fields_authored:
+        prompt_context_diagnostics["schema_version"] = (
+            "llm_prompt_context_diagnostics.v1"
+        )
+        prompt_context_diagnostics["llm_context_fields_sha256"] = (
+            _rendered_llm_context_fields_sha256(context_prompt_sections)
+        )
+        # Keep only a bounded scalar count in generic diagnostics; context-field
+        # labels and values remain represented prompt content, never telemetry.
+        prompt_context_diagnostics["llm_context_fields_rendered_count"] = len(
+            rendered_context_field_sections
+        )
         if recovery_diagnostics is not None:
-            if recovery_diagnostics["omitted_context_field_count"]:
-                remaining_recovery_budget = _append_recovery_total_truncation_marker(
-                    sections=sections,
-                    remaining_budget=remaining_recovery_budget,
-                    diagnostics=recovery_diagnostics,
-                )
-            recovery_diagnostics["context_char_budget_remaining"] = max(
-                0,
-                remaining_recovery_budget,
-            )
-            prompt_context_diagnostics["schema_version"] = (
-                "llm_prompt_context_diagnostics.v1"
-            )
             prompt_context_diagnostics["workflow_state_id"] = _context_string(
                 workflow_state_id
             )
@@ -4056,4 +4143,4 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
     )
 
 
-__all__ = ["execute_llm_step"]
+__all__ = ["compute_llm_context_fields_sha256", "execute_llm_step"]

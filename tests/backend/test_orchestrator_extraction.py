@@ -1582,6 +1582,7 @@ def test_tool_execution_bridges_awaited_workflow_execute_authority_output_into_a
         "prompt_context_diagnostics": {
             "resolved_prompt_concept_id": "#V#candidate_proposal_prompt",
             "prompt_content_sha256": prompt_hash,
+            "llm_context_fields_sha256": "d" * 64,
         },
     }
     claim_token = "claim-token-bridge-1"
@@ -1682,6 +1683,7 @@ def test_tool_execution_bridges_awaited_workflow_execute_authority_output_into_a
     metadata = snapshot["workflow_authority_output_snapshot"]
     assert metadata["exact"] is True
     assert metadata["prompt_content_sha256"] == prompt_hash
+    assert metadata["llm_context_fields_sha256"] == "d" * 64
     execution_identity = metadata["workflow_execution_identity"]
     assert execution_identity["workflow_id"] == workflow_id
     assert execution_identity["execution_request_id"] == "request-bridge-1"

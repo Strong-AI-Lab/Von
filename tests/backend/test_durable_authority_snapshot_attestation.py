@@ -290,6 +290,7 @@ def test_checkpoint_attestation_binds_payload_claim_token_worker_and_definition(
         },
         PROMPT_CONTEXT_DIAGNOSTICS_KEY: {
             "prompt_content_sha256": "b" * 64,
+            "llm_context_fields_sha256": "c" * 64,
         },
     }
     attestation = build_authority_checkpoint_attestation(
@@ -350,6 +351,21 @@ def test_checkpoint_attestation_binds_payload_claim_token_worker_and_definition(
         current_state="done",
         step_index=2,
         workflow_data=mutated_data,
+    )
+    assert rejected is None
+    assert rejection == "authority_checkpoint_attestation_payload_mismatch"
+
+    mutated_context_lineage = copy.deepcopy(workflow_data)
+    mutated_context_lineage[PROMPT_CONTEXT_DIAGNOSTICS_KEY][
+        "llm_context_fields_sha256"
+    ] = "d" * 64
+    rejected, rejection = validate_authority_checkpoint_attestation(
+        attestation,
+        instance_id="instance-1",
+        workflow_id=WORKFLOW_ID,
+        current_state="done",
+        step_index=2,
+        workflow_data=mutated_context_lineage,
     )
     assert rejected is None
     assert rejection == "authority_checkpoint_attestation_payload_mismatch"
@@ -944,7 +960,8 @@ def test_self_contained_llm_action_with_tool_mode_none_remains_exact_eligible(
             outputs={
                 WORKFLOW_AUTHORITY_OUTPUT_KEY: {"status": "authored"},
                 PROMPT_CONTEXT_DIAGNOSTICS_KEY: {
-                    "prompt_content_sha256": "a" * 64
+                    "prompt_content_sha256": "a" * 64,
+                    "llm_context_fields_sha256": "b" * 64,
                 },
             }
         ),
@@ -978,6 +995,9 @@ def test_self_contained_llm_action_with_tool_mode_none_remains_exact_eligible(
     assert result.completed is True
     workflow_data, attestation = _terminal_checkpoint(manager)
     assert workflow_data[WORKFLOW_AUTHORITY_OUTPUT_KEY] == {"status": "authored"}
+    assert workflow_data[PROMPT_CONTEXT_DIAGNOSTICS_KEY][
+        "llm_context_fields_sha256"
+    ] == ("b" * 64)
     assert attestation["exact_snapshot_eligible"] is True
     assert attestation["ineligibility_reasons"] == []
 

@@ -2658,9 +2658,10 @@ def _build_workflow_authority_output_snapshot(
 def _workflow_authority_prompt_lineage(
     result_data: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Project hash-only prompt lineage from bounded workflow-step surfaces."""
+    """Project hash-only prompt and rendered-context lineage from step surfaces."""
 
     prompt_hashes: list[str] = []
+    context_fields_hashes: list[str] = []
     prompt_ids: list[str] = []
     pending: list[tuple[Any, int]] = []
     for key in (
@@ -2684,6 +2685,17 @@ def _workflow_authority_prompt_lineage(
                 and prompt_hash not in prompt_hashes
             ):
                 prompt_hashes.append(prompt_hash)
+            context_fields_hash = current.get("llm_context_fields_sha256")
+            if (
+                isinstance(context_fields_hash, str)
+                and len(context_fields_hash) == 64
+                and all(
+                    character in "0123456789abcdef"
+                    for character in context_fields_hash
+                )
+                and context_fields_hash not in context_fields_hashes
+            ):
+                context_fields_hashes.append(context_fields_hash)
             prompt_id = current.get("resolved_prompt_concept_id")
             if (
                 isinstance(prompt_id, str)
@@ -2707,11 +2719,17 @@ def _workflow_authority_prompt_lineage(
     lineage: dict[str, Any] = {
         "prompt_lineage_observed": bool(prompt_hashes),
         "prompt_lineage_ambiguous": len(prompt_hashes) > 1,
+        "llm_context_fields_lineage_observed": bool(context_fields_hashes),
+        "llm_context_fields_lineage_ambiguous": len(context_fields_hashes) > 1,
     }
     if len(prompt_hashes) == 1:
         lineage["prompt_content_sha256"] = prompt_hashes[0]
     elif prompt_hashes:
         lineage["prompt_content_sha256s"] = prompt_hashes
+    if len(context_fields_hashes) == 1:
+        lineage["llm_context_fields_sha256"] = context_fields_hashes[0]
+    elif context_fields_hashes:
+        lineage["llm_context_fields_sha256s"] = context_fields_hashes
     if len(prompt_ids) == 1:
         lineage["resolved_prompt_concept_id"] = prompt_ids[0]
     elif prompt_ids:
@@ -3675,6 +3693,18 @@ def _build_awaited_workflow_execute_aux_entry(
         or metadata.get("prompt_lineage_ambiguous") is not False
     ):
         return _fail("workflow_execute_exact_authority_snapshot_unavailable")
+    context_fields_sha256 = metadata.get("llm_context_fields_sha256")
+    if (
+        metadata.get("llm_context_fields_lineage_observed") is not True
+        or metadata.get("llm_context_fields_lineage_ambiguous") is not False
+        or not isinstance(context_fields_sha256, str)
+        or len(context_fields_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in context_fields_sha256
+        )
+    ):
+        return _fail("workflow_execute_exact_llm_context_fields_lineage_unavailable")
     entry.update(
         {
             "source": "workflow_execute_tool",

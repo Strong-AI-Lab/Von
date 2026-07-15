@@ -28,6 +28,7 @@ from src.backend.workflows.conversation_turn_llm_timeout import (
 from src.backend.workflows.llm_step_executor import (
     _compose_llm_prompt,
     _compose_llm_prompt_with_diagnostics,
+    compute_llm_context_fields_sha256,
     execute_llm_step,
 )
 from src.backend.workflows.recovery_prompt_compaction import (
@@ -104,6 +105,76 @@ def test_compose_llm_prompt_includes_workflow_experience_guidance_labels() -> No
     assert "Reuse evidence." in prompt
     assert "Avoid guessing." in prompt
     assert "Inspect telemetry before asking the user." in prompt
+
+
+def test_context_field_lineage_is_sensitive_to_value_order_and_label() -> None:
+    policy = {
+        "context_fields": [
+            {"context_key": "first", "label": "First evidence"},
+            {"context_key": "second", "label": "Second evidence"},
+        ]
+    }
+    context = {"first": {"value": 1}, "second": "two"}
+
+    _prompt, diagnostics = _compose_llm_prompt_with_diagnostics(
+        base_prompt="Use the represented evidence.",
+        llm_policy=policy,
+        context=context,
+    )
+    digest = compute_llm_context_fields_sha256(
+        llm_policy=policy,
+        context=context,
+    )
+
+    assert digest is not None
+    assert diagnostics["llm_context_fields_sha256"] == digest
+    assert diagnostics["llm_context_fields_rendered_count"] == 2
+    assert len(
+        {
+            digest,
+            compute_llm_context_fields_sha256(
+                llm_policy=policy,
+                context={**context, "second": "changed"},
+            ),
+            compute_llm_context_fields_sha256(
+                llm_policy={
+                    "context_fields": list(reversed(policy["context_fields"]))
+                },
+                context=context,
+            ),
+            compute_llm_context_fields_sha256(
+                llm_policy={
+                    "context_fields": [
+                        {"context_key": "first", "label": "Renamed evidence"},
+                        policy["context_fields"][1],
+                    ]
+                },
+                context=context,
+            ),
+        }
+    ) == 4
+
+
+def test_context_field_lineage_distinguishes_authored_empty_from_missing() -> None:
+    policy = {
+        "context_fields": [
+            {"context_key": "missing_value", "label": "Missing evidence"}
+        ]
+    }
+
+    prompt, diagnostics = _compose_llm_prompt_with_diagnostics(
+        base_prompt="Use available evidence.",
+        llm_policy=policy,
+        context={},
+    )
+
+    assert prompt == "Use available evidence."
+    assert diagnostics["llm_context_fields_rendered_count"] == 0
+    assert diagnostics["llm_context_fields_sha256"] == (
+        compute_llm_context_fields_sha256(llm_policy=policy, context={})
+    )
+    assert len(diagnostics["llm_context_fields_sha256"]) == 64
+    assert compute_llm_context_fields_sha256(llm_policy={}, context={}) is None
 
 
 def test_compose_llm_prompt_compacts_recovery_context_with_diagnostics() -> None:
@@ -196,6 +267,8 @@ def test_compose_llm_prompt_compacts_recovery_context_with_diagnostics() -> None
         == 6
     )
     assert field_diagnostics["extra_payload"]["body_truncated_by_char_budget"] is True
+    assert len(diagnostics["llm_context_fields_sha256"]) == 64
+    assert diagnostics["llm_context_fields_rendered_count"] >= 4
 
 
 def test_compose_llm_prompt_leaves_non_recovery_context_uncompacted() -> None:
@@ -217,7 +290,78 @@ def test_compose_llm_prompt_leaves_non_recovery_context_uncompacted() -> None:
     )
 
     assert long_value in prompt
-    assert diagnostics == {}
+    assert diagnostics["llm_context_fields_rendered_count"] == 1
+    assert len(diagnostics["llm_context_fields_sha256"]) == 64
+
+
+def test_context_field_lineage_is_sensitive_to_recovery_compaction() -> None:
+    policy = {
+        "context_fields": [
+            {"context_key": "selected_workflow_trace", "label": "Trace evidence"}
+        ]
+    }
+    context = {
+        "selected_workflow_trace": {
+            "workflow_id": "#V#represented_workflow",
+            "failure_detail": "typed blocker",
+            "stage_timings": {"discarded_bulk": "x" * 10_000},
+        }
+    }
+
+    uncompacted = compute_llm_context_fields_sha256(
+        llm_policy=policy,
+        context=context,
+        workflow_state_id="selector_decision",
+    )
+    compacted = compute_llm_context_fields_sha256(
+        llm_policy=policy,
+        context=context,
+        workflow_state_id="recovery_decision",
+    )
+    _prompt, diagnostics = _compose_llm_prompt_with_diagnostics(
+        base_prompt="Use represented recovery evidence.",
+        llm_policy=policy,
+        context=context,
+        workflow_state_id="recovery_decision",
+    )
+
+    assert uncompacted is not None
+    assert compacted is not None
+    assert compacted != uncompacted
+    assert diagnostics["llm_context_fields_sha256"] == compacted
+
+
+def test_context_field_lineage_includes_model_visible_recovery_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = {
+        "context_fields": [
+            {"context_key": f"field_{index}", "label": "Evidence"}
+            for index in range(31)
+        ]
+        + [{"context_key": "last", "label": "Final evidence " * 100}]
+    }
+    context = {
+        f"field_{index}": "bulk evidence " * 2_000 for index in range(31)
+    }
+    context["last"] = "omitted"
+
+    monkeypatch.setattr(lse, "TOTAL_TRUNCATION_MARKER", "[marker one]")
+    first = compute_llm_context_fields_sha256(
+        llm_policy=policy,
+        context=context,
+        workflow_state_id="recovery_decision",
+    )
+    monkeypatch.setattr(lse, "TOTAL_TRUNCATION_MARKER", "[marker two]")
+    second = compute_llm_context_fields_sha256(
+        llm_policy=policy,
+        context=context,
+        workflow_state_id="recovery_decision",
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first != second
 
 
 def test_execute_llm_step_parses_json_value_output() -> None:

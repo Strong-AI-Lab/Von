@@ -711,6 +711,7 @@ def test_execute_workflow_binds_authority_output_to_runtime_execution_identity(
                                     "#V#represented_authority_prompt"
                                 ),
                                 "prompt_content_sha256": "b" * 64,
+                                "llm_context_fields_sha256": "d" * 64,
                             }
                         }
                     }
@@ -760,6 +761,7 @@ def test_execute_workflow_binds_authority_output_to_runtime_execution_identity(
     )
     assert definition_identity["hash_mismatch"] is False
     assert metadata["prompt_content_sha256"] == "b" * 64
+    assert metadata["llm_context_fields_sha256"] == "d" * 64
 
 
 def test_execute_workflow_rejects_claims_conflicting_with_parent_actor(
@@ -3661,6 +3663,7 @@ def test_workflow_authority_output_snapshot_preserves_exact_bounded_lineage() ->
                                     "#V#represented_authority_prompt"
                                 ),
                                 "prompt_content_sha256": "c" * 64,
+                                "llm_context_fields_sha256": "d" * 64,
                             }
                         }
                     }
@@ -3702,6 +3705,9 @@ def test_workflow_authority_output_snapshot_preserves_exact_bounded_lineage() ->
         assert metadata["prompt_lineage_observed"] is True
         assert metadata["prompt_lineage_ambiguous"] is False
         assert metadata["prompt_content_sha256"] == "c" * 64
+        assert metadata["llm_context_fields_lineage_observed"] is True
+        assert metadata["llm_context_fields_lineage_ambiguous"] is False
+        assert metadata["llm_context_fields_sha256"] == "d" * 64
         assert metadata["resolved_prompt_concept_id"] == (
             "#V#represented_authority_prompt"
         )
@@ -3776,6 +3782,14 @@ def test_workflow_authority_output_snapshot_redacts_and_bounds_untrusted_data() 
         (
             "authority_output_checkpoint_projected",
             "workflow_execute_authority_lineage_was_checkpoint_projected",
+        ),
+        (
+            "llm_context_fields_lineage_missing",
+            "workflow_execute_exact_llm_context_fields_lineage_unavailable",
+        ),
+        (
+            "llm_context_fields_lineage_ambiguous",
+            "workflow_execute_exact_llm_context_fields_lineage_unavailable",
         ),
         (
             "worker_capability_missing",
@@ -3911,8 +3925,17 @@ def test_awaited_workflow_execute_snapshot_bridge_fails_closed_on_scope_or_autho
         "prompt_context_diagnostics": {
             "resolved_prompt_concept_id": "#V#candidate_proposal_prompt",
             "prompt_content_sha256": "b" * 64,
+            "llm_context_fields_sha256": "d" * 64,
         },
     }
+    if failure_case == "llm_context_fields_lineage_missing":
+        workflow_data["prompt_context_diagnostics"].pop(
+            "llm_context_fields_sha256"
+        )
+    elif failure_case == "llm_context_fields_lineage_ambiguous":
+        workflow_data["prompt_context_diagnostics"]["nested_diagnostics"] = {
+            "llm_context_fields_sha256": "e" * 64
+        }
     claim_token = "claim-token-fail-closed-1"
     checkpoint_attestation = build_authority_checkpoint_attestation(
         instance_id=instance_id,
