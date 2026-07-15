@@ -30,6 +30,9 @@ CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID = (
 OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID = (
     "#V#operational_certification_benchmark_suite"
 )
+OPERATIONAL_LEARNING_CANDIDATE_SAFETY_BENCHMARK_SUITE_CONCEPT_ID = (
+    "#V#operational_learning_candidate_safety_benchmark_suite"
+)
 
 _KNOWN_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION_FIELD = (
     "known_legacy_authority_payload_sha256_by_seed_version"
@@ -69,6 +72,13 @@ _CANONICAL_SUITE_FIXTURES: tuple[dict[str, Any], ...] = (
         # allows a reviewed fixture revision to advance older materialisation
         # without making unconditional overwrite the default for other suites.
         "migrate_older_seed_versions": True,
+    },
+    {
+        "suite_concept_id": (
+            OPERATIONAL_LEARNING_CANDIDATE_SAFETY_BENCHMARK_SUITE_CONCEPT_ID
+        ),
+        "fixture_path": _REPO_SEED_BUNDLE_DIR
+        / "operational_learning_candidate_safety_benchmark_seed_bundle.json",
     },
 )
 
@@ -254,25 +264,23 @@ def _known_legacy_authority_payload_digests_by_seed_version(
     raw = json.loads(fixture_path.read_text(encoding="utf-8"))
     if not isinstance(raw, Mapping):
         raise ValueError("benchmark_suite_fixture_invalid")
-    configured = raw.get(
-        _KNOWN_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION_FIELD
-    )
+    configured = raw.get(_KNOWN_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION_FIELD)
     if configured is None:
         return {}
     if not isinstance(configured, Mapping):
-        raise ValueError(
-            "benchmark_suite_known_legacy_authority_digests_invalid"
-        )
+        raise ValueError("benchmark_suite_known_legacy_authority_digests_invalid")
     normalised: dict[str, frozenset[str]] = {}
     for raw_version, raw_digests in configured.items():
         version_key = _safe_str(raw_version).lower()
-        if not version_key or not isinstance(raw_digests, Sequence) or isinstance(
-            raw_digests,
-            (str, bytes, bytearray),
-        ):
-            raise ValueError(
-                "benchmark_suite_known_legacy_authority_digests_invalid"
+        if (
+            not version_key
+            or not isinstance(raw_digests, Sequence)
+            or isinstance(
+                raw_digests,
+                (str, bytes, bytearray),
             )
+        ):
+            raise ValueError("benchmark_suite_known_legacy_authority_digests_invalid")
         digests: set[str] = set()
         for raw_digest in raw_digests:
             digest = _safe_str(raw_digest).lower()
@@ -316,12 +324,8 @@ def _pending_seed_migration_receipt_is_valid(
     if not isinstance(value, Mapping):
         return False
     source_version_key = _safe_str(value.get("source_seed_version_key")).lower()
-    source_sha256 = _safe_str(
-        value.get("source_authority_payload_sha256")
-    ).lower()
-    target_sha256 = _safe_str(
-        value.get("target_authority_payload_sha256")
-    ).lower()
+    source_sha256 = _safe_str(value.get("source_authority_payload_sha256")).lower()
+    target_sha256 = _safe_str(value.get("target_authority_payload_sha256")).lower()
     return bool(
         value.get("schema_version") == _SEED_MIGRATION_RECEIPT_SCHEMA_VERSION
         and value.get("status") == "pending"
@@ -590,9 +594,7 @@ def ensure_canonical_benchmark_suites_from_seed_fixtures(
                 suite_concept_id=concept_id,
             )
             known_digests_by_version = (
-                _known_legacy_authority_payload_digests_by_seed_version(
-                    fixture_path
-                )
+                _known_legacy_authority_payload_digests_by_seed_version(fixture_path)
             )
         except Exception as exc:
             errors_by_concept_id[concept_id] = f"fixture_load_failed:{exc}"
@@ -676,9 +678,7 @@ def ensure_canonical_benchmark_suites_from_seed_fixtures(
                 and isinstance(existing_row.get("context"), Mapping)
                 else {}
             )
-            pending_receipt = existing_context.get(
-                _SEED_MIGRATION_RECEIPT_CONTEXT_KEY
-            )
+            pending_receipt = existing_context.get(_SEED_MIGRATION_RECEIPT_CONTEXT_KEY)
             pending_receipt_valid = _pending_seed_migration_receipt_is_valid(
                 pending_receipt,
                 current_authority_payload_sha256=existing_authority_sha256,
@@ -732,12 +732,8 @@ def ensure_canonical_benchmark_suites_from_seed_fixtures(
                 blocker = {
                     "error_code": error_code,
                     "observed_seed_version_key": existing_version_key,
-                    "observed_authority_payload_sha256": (
-                        existing_authority_sha256
-                    ),
-                    "known_legacy_authority_payload_sha256": sorted(
-                        known_digests
-                    ),
+                    "observed_authority_payload_sha256": (existing_authority_sha256),
+                    "known_legacy_authority_payload_sha256": sorted(known_digests),
                     "pending_migration_receipt_present": isinstance(
                         pending_receipt,
                         Mapping,
@@ -769,9 +765,7 @@ def ensure_canonical_benchmark_suites_from_seed_fixtures(
             pending_receipt = _seed_migration_receipt(
                 status="pending",
                 source_seed_version_key=migration_source_version_key,
-                source_authority_payload_sha256=(
-                    migration_source_authority_sha256
-                ),
+                source_authority_payload_sha256=(migration_source_authority_sha256),
                 target_seed_version=int(definition["seed_version"]),
                 target_authority_payload_sha256=target_authority_sha256,
             )
@@ -784,9 +778,11 @@ def ensure_canonical_benchmark_suites_from_seed_fixtures(
                     subject_concept_id=concept_id,
                     predicate=definition_predicate,
                     lang=language,
-                    text=_safe_str(existing_row.get("text"))
-                    if isinstance(existing_row, Mapping)
-                    else definition_json,
+                    text=(
+                        _safe_str(existing_row.get("text"))
+                        if isinstance(existing_row, Mapping)
+                        else definition_json
+                    ),
                     policy=policy,
                     provenance=provenance_payload,
                     context=migration_relation_context,
@@ -845,9 +841,7 @@ def ensure_canonical_benchmark_suites_from_seed_fixtures(
             verified_receipt = _seed_migration_receipt(
                 status="verified",
                 source_seed_version_key=migration_source_version_key,
-                source_authority_payload_sha256=(
-                    migration_source_authority_sha256
-                ),
+                source_authority_payload_sha256=(migration_source_authority_sha256),
                 target_seed_version=int(definition["seed_version"]),
                 target_authority_payload_sha256=target_authority_sha256,
             )
@@ -927,6 +921,7 @@ __all__ = [
     "CONTEXT_GROUNDED_ANSWERING_BENCHMARK_SUITE_CONCEPT_ID",
     "HAS_BENCHMARK_SUITE_DEFINITION_JSON",
     "OPERATIONAL_CERTIFICATION_BENCHMARK_SUITE_CONCEPT_ID",
+    "OPERATIONAL_LEARNING_CANDIDATE_SAFETY_BENCHMARK_SUITE_CONCEPT_ID",
     "SELECTOR_ROUTING_BENCHMARK_SUITE_CONCEPT_ID",
     "BenchmarkSuiteAuthorityMissingError",
     "canonical_benchmark_suite_concept_ids",

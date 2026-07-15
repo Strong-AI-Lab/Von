@@ -502,6 +502,7 @@ REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
         "src/backend/services/kr_materialisation_workflow_vontology_service.py",
         "src/backend/services/multilingual_concept_enrichment_vontology_service.py",
         "src/backend/services/operational_certification_vontology_service.py",
+        "src/backend/services/operational_learning_release_authority_vontology_service.py",
         "src/backend/services/paper_recommendation_workflow_vontology_service.py",
         "src/backend/services/paper_representation_workflow_vontology_service.py",
         "src/backend/services/representation_workflow_routing_coverage_audit_vontology_service.py",

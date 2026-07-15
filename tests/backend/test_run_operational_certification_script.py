@@ -24,6 +24,14 @@ _OPERATIONAL_SEED_PATH = (
     / "repo_seed_bundles"
     / "operational_certification_benchmark_seed_bundle.json"
 )
+_CANDIDATE_SAFETY_SEED_PATH = (
+    _REPO_ROOT
+    / "src"
+    / "backend"
+    / "workflows"
+    / "repo_seed_bundles"
+    / "operational_learning_candidate_safety_benchmark_seed_bundle.json"
+)
 
 
 def _contract():
@@ -111,6 +119,59 @@ def _repo_seed_contract():
     )
 
 
+def test_generic_runtime_bindings_preserve_exact_json_values_and_find_gaps() -> None:
+    bindings = certification_script._parse_runtime_binding_items(
+        [
+            "candidate_id=candidate-1",
+            'candidate_context={"release":"abc","safe":true}',
+            "attempt_limit=5",
+        ]
+    )
+
+    rendered = certification_script._substitute_trial_values(
+        {
+            "candidate_id": "{{candidate_id}}",
+            "candidate_context": "{{candidate_context}}",
+            "message": "trial {{trial_index}} for {{candidate_id}}",
+            "unresolved": "{{release_sha256}}",
+        },
+        trial_index=2,
+        isolation_id="isolation-2",
+        runtime_bindings=bindings,
+    )
+
+    assert rendered["candidate_id"] == "candidate-1"
+    assert rendered["candidate_context"] == {"release": "abc", "safe": True}
+    assert rendered["message"] == "trial 2 for candidate-1"
+    assert certification_script._unresolved_runtime_placeholders(rendered) == (
+        "release_sha256",
+    )
+
+
+def test_generic_runtime_bindings_reject_reserved_or_duplicate_keys() -> None:
+    with pytest.raises(ValueError, match="operational_runtime_binding_invalid"):
+        certification_script._parse_runtime_binding_items(["trial_index=7"])
+    with pytest.raises(ValueError, match="operational_runtime_binding_duplicate"):
+        certification_script._parse_runtime_binding_items(
+            ["candidate_id=one", "candidate_id=two"]
+        )
+
+
+def test_candidate_safety_suite_declares_all_exact_runtime_bindings() -> None:
+    contract = parse_operational_certification_contract(
+        json.loads(_CANDIDATE_SAFETY_SEED_PATH.read_text(encoding="utf-8"))
+    )
+
+    assert certification_script._runtime_binding_requirements(contract) == (
+        "candidate_id",
+        "release_sha256",
+        "affected_artifact",
+        "namespace",
+        "user_id",
+        "org_id",
+    )
+
+
 def test_every_repo_unique_state_scenario_declares_executable_absence_probe() -> None:
     contract = _repo_seed_contract()
 
@@ -186,7 +247,7 @@ def _represented_selector_diagnostics() -> dict[str, Any]:
                     "selector_response_entry_count": 1,
                     "missing_fields": [],
                 },
-            }
+            },
         },
         "decision_attribution": {
             "schema_version": "turn_decision_attribution.v1",
@@ -196,9 +257,7 @@ def _represented_selector_diagnostics() -> dict[str, Any]:
                     "authority": "represented",
                     "concept_ids": ["#V#entity_representation_workflow"],
                     "evidence": {
-                        "selected_workflow_id": (
-                            "#V#entity_representation_workflow"
-                        ),
+                        "selected_workflow_id": ("#V#entity_representation_workflow"),
                     },
                 }
             ],
@@ -220,9 +279,7 @@ def test_represented_selector_evidence_accepts_final_represented_selection() -> 
     assert evidence["selector_selected_workflow_id"] == (
         "#V#entity_representation_workflow"
     )
-    assert evidence["final_workflow_ids"] == [
-        "#V#entity_representation_workflow"
-    ]
+    assert evidence["final_workflow_ids"] == ["#V#entity_representation_workflow"]
     assert evidence["selection_attribution_workflow_ids"] == [
         "#V#entity_representation_workflow"
     ]
@@ -238,12 +295,10 @@ def test_represented_selector_evidence_rejects_complete_python_fallback() -> Non
     )
     routing = turn_record["workflow_routing_diagnostics"]
     routing["selector_source"] = "selector_override"
-    routing["selector"]["selection_resolution"] = (
-        "single_specialised_candidate_recovery_from_selector_fallback"
-    )
-    turn_record["decision_attribution"]["decisions"][0]["authority"] = (
-        "python_fallback"
-    )
+    routing["selector"][
+        "selection_resolution"
+    ] = "single_specialised_candidate_recovery_from_selector_fallback"
+    turn_record["decision_attribution"]["decisions"][0]["authority"] = "python_fallback"
 
     evidence = certification_script._represented_selector_evidence(turn_record)
 
@@ -306,9 +361,9 @@ def test_represented_selector_evidence_rejects_unbound_prompt_provenance() -> No
 def test_represented_selector_evidence_binds_selected_workflow_identity() -> None:
     turn_record = _represented_selector_diagnostics()
     turn_record["workflow_selection"]["selected_workflow_id"] = "#V#final_workflow"
-    turn_record["workflow_routing_diagnostics"]["selected_workflow_id"] = (
-        "#V#final_workflow"
-    )
+    turn_record["workflow_routing_diagnostics"][
+        "selected_workflow_id"
+    ] = "#V#final_workflow"
 
     evidence = certification_script._represented_selector_evidence(turn_record)
 
@@ -334,9 +389,7 @@ def test_represented_selector_evidence_binds_attribution_identity() -> None:
         "selection_attribution_concept_identity_bound",
         "selection_attribution_evidence_identity_bound",
     ]
-    assert evidence["selection_attribution_workflow_ids"] == [
-        "#V#different_workflow"
-    ]
+    assert evidence["selection_attribution_workflow_ids"] == ["#V#different_workflow"]
 
 
 def test_represented_selector_evidence_requires_model_selected_identity() -> None:
@@ -414,7 +467,10 @@ def test_represented_selector_evidence_requires_both_attribution_id_surfaces() -
             "selection_attribution_evidence_identity_bound",
         ],
     }
-    for removed_field, expected_missing_fields in missing_fields_by_removed_field.items():
+    for (
+        removed_field,
+        expected_missing_fields,
+    ) in missing_fields_by_removed_field.items():
         turn_record = _represented_selector_diagnostics()
         selection = turn_record["decision_attribution"]["decisions"][0]
         selection.pop(removed_field)
@@ -1001,23 +1057,23 @@ def test_unique_state_reset_requires_causal_authoritative_absence_readback(
             "execution_trace_id": "probe-trace",
             "workflow_definition_identity_sha256": "probe-definition-digest",
             "workflow_output_sha256": "probe-output-digest",
-                "workflow_action_evidence": [
-                    {
-                        "action_id": "workflow_mcp.invoke_tool",
-                        "status": "success",
-                        "resolution_lineage_sha256": (
-                            certification_script.stable_payload_digest(
-                                action_resolution_lineage
-                            )
-                        ),
-                    },
-                    {
-                        "action_id": "workflow_control.context_project",
-                        "status": "success",
-                        "state_probe_result_sha256": (
-                            certification_script.stable_payload_digest(probe_result)
-                        ),
-                }
+            "workflow_action_evidence": [
+                {
+                    "action_id": "workflow_mcp.invoke_tool",
+                    "status": "success",
+                    "resolution_lineage_sha256": (
+                        certification_script.stable_payload_digest(
+                            action_resolution_lineage
+                        )
+                    ),
+                },
+                {
+                    "action_id": "workflow_control.context_project",
+                    "status": "success",
+                    "state_probe_result_sha256": (
+                        certification_script.stable_payload_digest(probe_result)
+                    ),
+                },
             ],
             "workflow_output": {
                 "represented_operational_state_probe_result": probe_result
@@ -1446,7 +1502,8 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
     assert [call["await_terminal"] for call in workflow_calls] == [False, True]
     assert [call["timeout_seconds"] for call in workflow_calls] == [0.0, 5.0]
     assert all(
-        call["inputs"] == {
+        call["inputs"]
+        == {
             "target": "stable-read-only-target",
             "requested_model": "gpt-5.4-mini",
         }

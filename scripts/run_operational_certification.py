@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+import copy
 from dataclasses import replace
 from datetime import datetime
 import hashlib
@@ -30,7 +31,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.live_test_server_defaults import get_default_agent_test_base_url  # noqa: E402
+from scripts.live_test_server_defaults import (
+    get_default_agent_test_base_url,
+)  # noqa: E402
 from scripts.run_authenticated_browser_workflow_replay import (  # noqa: E402
     ReplayCase,
     apply_target_session_context,
@@ -121,6 +124,8 @@ def _canonical_selector_source(value: Any) -> str:
     if source in _REPRESENTED_SELECTOR_SOURCES:
         return "workflow_selector"
     return source
+
+
 MIGRATION_FIXTURE_PATH = (
     PROJECT_ROOT
     / "src"
@@ -191,7 +196,9 @@ def _represented_selector_evidence(
         selector_prompt_provenance.get("resolved_prompt_id")
     )
     selector_requested_prompt_ids = {
-        _text(item) for item in _sequence(selector.get("requested_prompt_ids")) if _text(item)
+        _text(item)
+        for item in _sequence(selector.get("requested_prompt_ids"))
+        if _text(item)
     }
     provenance_requested_prompt_ids = {
         _text(item)
@@ -200,9 +207,7 @@ def _represented_selector_evidence(
     }
     workflow_selection_id = _text(workflow_selection.get("selected_workflow_id"))
     routing_selection_id = _text(routing.get("selected_workflow_id"))
-    workflow_selection_source = _text(
-        workflow_selection.get("selector_source")
-    ).lower()
+    workflow_selection_source = _text(workflow_selection.get("selector_source")).lower()
     routing_selector_source = _text(routing.get("selector_source")).lower()
     selector_source = workflow_selection_source or routing_selector_source
     canonical_workflow_selection_source = _canonical_selector_source(
@@ -285,8 +290,7 @@ def _represented_selector_evidence(
         "model_name_present": bool(_text(selector.get("model_name"))),
         "selector_prompt_id_present": bool(selector_prompt_id),
         "selector_prompt_provenance_bound": bool(
-            selector_prompt_id
-            and resolved_selector_prompt_id == selector_prompt_id
+            selector_prompt_id and resolved_selector_prompt_id == selector_prompt_id
         ),
         "selector_prompt_requested_id_bound": bool(
             selector_prompt_id
@@ -301,9 +305,7 @@ def _represented_selector_evidence(
         "selector_verdict_surfaces_bound": selector_verdict_surfaces_bound,
         "selection_resolution_represented": selection_resolution_represented,
         "selection_attribution_represented": selection_authority == "represented",
-        "selector_selected_workflow_id_present": bool(
-            selector_selected_workflow_id
-        ),
+        "selector_selected_workflow_id_present": bool(selector_selected_workflow_id),
         "workflow_selection_id_present": bool(workflow_selection_id),
         "routing_selection_id_present": bool(routing_selection_id),
         "final_selection_identity_bound": bool(
@@ -322,8 +324,7 @@ def _represented_selector_evidence(
         ),
         "selection_attribution_evidence_identity_bound": bool(
             selector_selected_workflow_id
-            and attribution_evidence_workflow_id
-            == selector_selected_workflow_id
+            and attribution_evidence_workflow_id == selector_selected_workflow_id
         ),
     }
     missing_fields = [field for field, present in field_status.items() if not present]
@@ -410,8 +411,7 @@ def _canonical_absence_probe_resolution_lineage(
         "tool": tool,
         "target_name": target,
         "status": status,
-        "resolved_concept_id": _text(result_payload.get("resolved_concept_id"))
-        or None,
+        "resolved_concept_id": _text(result_payload.get("resolved_concept_id")) or None,
         "candidates": json_serialisable_projection(candidates),
     }
 
@@ -668,18 +668,101 @@ def _typed_failure_execution(
     return execution
 
 
-def _substitute_trial_values(value: Any, *, trial_index: int, isolation_id: str) -> Any:
-    if isinstance(value, str):
-        return value.replace("{{trial_index}}", str(trial_index)).replace(
-            "{{isolation_id}}",
-            isolation_id,
+def _parse_runtime_binding_items(items: Sequence[str] | None) -> dict[str, Any]:
+    bindings: dict[str, Any] = {}
+    for raw_item in items or ():
+        item = str(raw_item or "").strip()
+        key, separator, raw_value = item.partition("=")
+        key = key.strip()
+        if (
+            separator != "="
+            or not key
+            or key in {"trial_index", "isolation_id"}
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key)
+        ):
+            raise ValueError(f"operational_runtime_binding_invalid:{item}")
+        if key in bindings:
+            raise ValueError(f"operational_runtime_binding_duplicate:{key}")
+        raw_value = raw_value.strip()
+        if not raw_value:
+            raise ValueError(f"operational_runtime_binding_value_missing:{key}")
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            value = raw_value
+        bindings[key] = value
+    return bindings
+
+
+def _runtime_binding_requirements(contract: Any) -> tuple[str, ...]:
+    policy = _mapping(getattr(contract, "policy", {}))
+    binding_contract = _mapping(policy.get("runtime_binding_contract"))
+    return tuple(
+        dict.fromkeys(
+            _text(item)
+            for item in _sequence(binding_contract.get("required_bindings"))
+            if _text(item)
         )
+    )
+
+
+def _unresolved_runtime_placeholders(value: Any) -> tuple[str, ...]:
+    placeholders: set[str] = set()
+
+    def _visit(item: Any) -> None:
+        if isinstance(item, str):
+            placeholders.update(re.findall(r"\{\{([A-Za-z][A-Za-z0-9_]*)\}\}", item))
+            return
+        if isinstance(item, Mapping):
+            for nested in item.values():
+                _visit(nested)
+            return
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            for nested in item:
+                _visit(nested)
+
+    _visit(value)
+    return tuple(sorted(placeholders))
+
+
+def _substitute_trial_values(
+    value: Any,
+    *,
+    trial_index: int,
+    isolation_id: str,
+    runtime_bindings: Mapping[str, Any] | None = None,
+) -> Any:
+    bindings = {
+        "trial_index": trial_index,
+        "isolation_id": isolation_id,
+        **dict(runtime_bindings or {}),
+    }
+    if isinstance(value, str):
+        exact_match = re.fullmatch(r"\{\{([A-Za-z][A-Za-z0-9_]*)\}\}", value)
+        if exact_match and exact_match.group(1) in bindings:
+            return copy.deepcopy(bindings[exact_match.group(1)])
+
+        def _replace(match: re.Match[str]) -> str:
+            key = match.group(1)
+            if key not in bindings:
+                return match.group(0)
+            replacement = bindings[key]
+            if isinstance(replacement, str):
+                return replacement
+            if replacement is None or isinstance(replacement, (bool, int, float)):
+                return json.dumps(replacement, ensure_ascii=True)
+            raise ValueError(
+                f"operational_runtime_binding_embedded_value_invalid:{key}"
+            )
+
+        return re.sub(r"\{\{([A-Za-z][A-Za-z0-9_]*)\}\}", _replace, value)
     if isinstance(value, Mapping):
         return {
             str(key): _substitute_trial_values(
                 item,
                 trial_index=trial_index,
                 isolation_id=isolation_id,
+                runtime_bindings=runtime_bindings,
             )
             for key, item in value.items()
         }
@@ -689,6 +772,7 @@ def _substitute_trial_values(value: Any, *, trial_index: int, isolation_id: str)
                 item,
                 trial_index=trial_index,
                 isolation_id=isolation_id,
+                runtime_bindings=runtime_bindings,
             )
             for item in value
         ]
@@ -933,11 +1017,12 @@ def _execute_represented_workflow_synchronously(
                     )
 
                     with override_current_actor(user_id_text, org_id_text):
-                        resolved_prompt_id, prompt_text = (
-                            PromptTemplateService().resolve_prompt_text(
-                                [selected_prompt_id],
-                                max_chars=200_000,
-                            )
+                        (
+                            resolved_prompt_id,
+                            prompt_text,
+                        ) = PromptTemplateService().resolve_prompt_text(
+                            [selected_prompt_id],
+                            max_chars=200_000,
                         )
                     if resolved_prompt_id != selected_prompt_id or not prompt_text:
                         error_code = (
@@ -1432,9 +1517,11 @@ def _validate_canonical_certification_observations(
         trial_index = outcome.get("trial_index")
         key = (
             scenario_id,
-            trial_index
-            if isinstance(trial_index, int) and not isinstance(trial_index, bool)
-            else -1,
+            (
+                trial_index
+                if isinstance(trial_index, int) and not isinstance(trial_index, bool)
+                else -1
+            ),
         )
         if key in observed_trials:
             trial_binding_errors.append(
@@ -1876,6 +1963,9 @@ def _aggregate_authenticated_multi_turn_results(
 
 def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
     campaign_execution_id = f"operational-certification-{uuid.uuid4()}"
+    requested_runtime_bindings = _parse_runtime_binding_items(
+        getattr(args, "runtime_binding", None)
+    )
     session = requests.Session()
     environment = collect_run_environment(session=session, base_url=args.base_url)
     require_agent_test_server(
@@ -1981,6 +2071,52 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 "auth_status": auth_status,
                 "auth_login": auth_login,
                 "target_session_context": target_context,
+            }
+        )
+        execution["execution_sha256"] = stable_payload_digest(
+            {
+                key: value
+                for key, value in execution.items()
+                if key != "execution_sha256"
+            }
+        )
+        return execution
+
+    runtime_bindings = {
+        **requested_runtime_bindings,
+        "namespace": effective_namespace,
+        "user_id": effective_user_id,
+        "org_id": effective_org_id,
+    }
+    required_runtime_bindings = _runtime_binding_requirements(contract)
+    missing_runtime_bindings = [
+        key
+        for key in required_runtime_bindings
+        if key not in runtime_bindings or runtime_bindings[key] in (None, "")
+    ]
+    if missing_runtime_bindings:
+        execution = _typed_failure_execution(
+            code="operational_certification_runtime_bindings_missing",
+            message=(
+                "The represented suite requires explicit runtime bindings that "
+                "were not supplied."
+            ),
+            details={
+                "required_bindings": list(required_runtime_bindings),
+                "supplied_binding_keys": sorted(runtime_bindings),
+                "missing_bindings": missing_runtime_bindings,
+            },
+            contract=contract,
+        )
+        execution.update(
+            {
+                "campaign_execution_id": campaign_execution_id,
+                "environment": environment,
+                "auth_status_before": auth_status_before,
+                "auth_status": auth_status,
+                "auth_login": auth_login,
+                "target_session_context": target_context,
+                "runtime_authority_alignment": runtime_alignment,
             }
         )
         execution["execution_sha256"] = stable_payload_digest(
@@ -2229,6 +2365,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 raw_probe_inputs,
                 trial_index=trial_index,
                 isolation_id=isolation_id,
+                runtime_bindings=runtime_bindings,
             )
         )
         probe_inputs["isolation_id"] = isolation_id
@@ -2265,9 +2402,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         probe_result_sha256 = (
             stable_payload_digest(probe_result) if probe_result else None
         )
-        probe_resolution_lineage = _resolution_lineage_from_probe_result(
-            probe_result
-        )
+        probe_resolution_lineage = _resolution_lineage_from_probe_result(probe_result)
         probe_resolution_lineage_sha256 = (
             stable_payload_digest(probe_resolution_lineage)
             if probe_resolution_lineage
@@ -2297,8 +2432,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             if _text(item.get("action_id")) in required_action_ids
             and _text(item.get("status")).lower() == "success"
             and probe_resolution_lineage_sha256
-            and item.get("resolution_lineage_sha256")
-            == probe_resolution_lineage_sha256
+            and item.get("resolution_lineage_sha256") == probe_resolution_lineage_sha256
         ]
         checks = {
             "execution_succeeded": payload.get("success") is True,
@@ -2322,9 +2456,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             "evidence_present": bool(evidence),
             "resolver_result_lineage_present": bool(probe_resolution_lineage),
             "resolver_result_lineage_not_found": (
-                _text(
-                    _mapping(probe_resolution_lineage).get("status")
-                ).lower()
+                _text(_mapping(probe_resolution_lineage).get("status")).lower()
                 == "not_found"
             ),
             "resolver_target_binds_isolation": isolation_id
@@ -2333,9 +2465,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 action_id in successful_action_ids for action_id in required_action_ids
             ),
             "canonical_tool_output_exact": bool(matching_receipt_actions),
-            "resolver_output_causal_lineage_exact": bool(
-                matching_resolution_actions
-            ),
+            "resolver_output_causal_lineage_exact": bool(matching_resolution_actions),
         }
         return {
             "verified": all(checks.values()),
@@ -2496,9 +2626,11 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 "reason": (
                     None
                     if isolation_verified
-                    else absence_probe.get("reason")
-                    if supported
-                    else "durable_reset_requires_read_only_or_unique_state_template"
+                    else (
+                        absence_probe.get("reason")
+                        if supported
+                        else "durable_reset_requires_read_only_or_unique_state_template"
+                    )
                 ),
                 "authoritative_absence_probe": absence_probe,
                 "pre_state_snapshot": {
@@ -2532,8 +2664,15 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 scenario.execution.get("inputs") or {},
                 trial_index=trial_index,
                 isolation_id=isolation_id,
+                runtime_bindings=runtime_bindings,
             )
         )
+        unresolved_bindings = _unresolved_runtime_placeholders(inputs)
+        if unresolved_bindings:
+            raise ValueError(
+                "operational_certification_runtime_bindings_unresolved:"
+                + ",".join(unresolved_bindings)
+            )
         started = time.perf_counter()
         if adapter_id == AUTHENTICATED_MULTI_TURN_ADAPTER_ID:
             raw_turns = _sequence(inputs.get("turns"))
@@ -3185,6 +3324,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", default="")
     parser.add_argument("--user-concept-id", default="")
     parser.add_argument("--organisation-concept-id", default="")
+    parser.add_argument(
+        "--runtime-binding",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Bind a represented suite runtime placeholder. Repeat as needed; "
+            "VALUE is parsed as JSON when valid, otherwise as a string. Actor "
+            "scope bindings come from the verified authenticated session."
+        ),
+    )
     parser.add_argument("--model", default="")
     parser.add_argument("--timeout-seconds", type=float, default=600.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=0.75)

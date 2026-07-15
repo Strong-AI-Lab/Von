@@ -117,6 +117,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         multilingual_concept_enrichment_schedule_bootstrap_service as multilingual_schedule_bootstrap,
         multilingual_concept_enrichment_vontology_service as multilingual_workflow_bootstrap,
         operational_certification_vontology_service as operational_certification_bootstrap,
+        operational_learning_release_authority_vontology_service as operational_learning_release_bootstrap,
         paper_representation_workflow_vontology_service as paper_workflow_bootstrap,
         paper_recommendation_background_schedule_bootstrap_service as paper_recommendation_schedule_bootstrap,
         paper_recommendation_workflow_vontology_service as paper_recommendation_workflow_bootstrap,
@@ -282,6 +283,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
             "linked_workflow_ids": ["#V#workflow_authoring_workflow"],
         },
     )
+
     def _bootstrap_entity_workflows():
         startup_events.append("entity_bootstrap")
         return {
@@ -470,6 +472,14 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        operational_learning_release_bootstrap,
+        "bootstrap_operational_learning_release_authority",
+        lambda: {
+            "success": True,
+            "schema_version": "operational_learning_release_authority_bootstrap.v1",
+        },
+    )
+    monkeypatch.setattr(
         ai_chat_session_source_profile_bootstrap,
         "ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture",
         lambda: {"success": True, "profile_count": 1},
@@ -598,6 +608,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     testing_workflow_bootstrap_report = result.get("testing_workflow_bootstrap")
     assert isinstance(testing_workflow_bootstrap_report, dict)
     assert testing_workflow_bootstrap_report.get("success") is True
+    operational_learning_release_bootstrap_report = result.get(
+        "operational_learning_release_bootstrap"
+    )
+    assert isinstance(operational_learning_release_bootstrap_report, dict)
+    assert operational_learning_release_bootstrap_report.get("success") is True
     turn_pipeline_monitoring_workflow_bootstrap_report = result.get(
         "turn_pipeline_monitoring_workflow_bootstrap"
     )

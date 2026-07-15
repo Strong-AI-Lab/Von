@@ -174,6 +174,161 @@ def test_absent_state_projects_virtual_version_zero_without_writing(
     assert vontology_store["creates"] == []
 
 
+def test_candidate_resolver_projects_exact_immutable_context_without_writing(
+    vontology_store: dict[str, Any],
+) -> None:
+    registered = _register(
+        service.load_operational_learning_release_state(
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+        )
+    )["state_record"]
+    candidate = registered["state"]["candidate_snapshots"]["candidate-1"]
+    write_count = len(vontology_store["writes"])
+
+    result = service.resolve_operational_learning_release_candidate_in_vontology(
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        org_id=ORG_ID,
+        candidate_id="candidate-1",
+        release_sha256=candidate["release_sha256"],
+        affected_artifact=ARTIFACT_ID,
+    )
+
+    context = result["result"]["candidate_context"]
+    assert context["status"] == "resolved"
+    assert context["candidate_snapshot"] == candidate
+    assert context["candidate_snapshot_sha256"] == candidate["candidate_sha256"]
+    assert context["release_payload"] == candidate["release_payload"]
+    assert context["release_payload_sha256"] == operational_learning_release_digest(
+        candidate["release_payload"]
+    )
+    assert context["binding"]["candidate_id"] == "candidate-1"
+    assert context["authority"]["record_sha256"] == registered["record_sha256"]
+    digest_basis = copy.deepcopy(context)
+    observed_digest = digest_basis.pop("context_sha256")
+    assert observed_digest == operational_learning_release_digest(digest_basis)
+    assert len(vontology_store["writes"]) == write_count
+
+
+def test_candidate_resolver_fails_closed_on_release_binding_mismatch(
+    vontology_store: dict[str, Any],
+) -> None:
+    registered = _register(
+        service.load_operational_learning_release_state(
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+        )
+    )["state_record"]
+    candidate = registered["state"]["candidate_snapshots"]["candidate-1"]
+
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="operational_learning_release_candidate_binding_mismatch",
+    ):
+        service.resolve_operational_learning_release_candidate_in_vontology(
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+            candidate_id="candidate-1",
+            release_sha256="f" * 64,
+            affected_artifact=ARTIFACT_ID,
+        )
+
+    assert candidate["release_sha256"] != "f" * 64
+
+
+def test_active_release_resolver_returns_typed_absence_and_checks_expectation(
+    vontology_store: dict[str, Any],
+) -> None:
+    _register(
+        service.load_operational_learning_release_state(
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+        )
+    )
+
+    result = service.resolve_operational_learning_active_release_in_vontology(
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        org_id=ORG_ID,
+        affected_artifact=ARTIFACT_ID,
+    )
+
+    active_release = result["result"]["active_release"]
+    assert active_release["status"] == "no_active_release"
+    assert active_release["affected_artifact"] == ARTIFACT_ID
+    with pytest.raises(
+        service.LearningReleasePersistenceError,
+        match="operational_learning_release_expected_active_not_found",
+    ):
+        service.resolve_operational_learning_active_release_in_vontology(
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+            affected_artifact=ARTIFACT_ID,
+            expected_release_sha256="a" * 64,
+        )
+
+
+def test_active_release_resolver_projects_exact_active_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    vontology_store: dict[str, Any],
+) -> None:
+    registered = _register(
+        service.load_operational_learning_release_state(
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+        )
+    )["state_record"]
+    candidate = registered["state"]["candidate_snapshots"]["candidate-1"]
+    active_record = copy.deepcopy(registered)
+    active_record["state"]["candidate_states"]["candidate-1"]["state"] = "active"
+    active_record["state"]["release_states"][candidate["release_sha256"]][
+        "state"
+    ] = "active"
+    active_record["state"]["release_pointers"][ARTIFACT_ID] = {
+        "active": {
+            "schema_version": "operational_learning_release_pointer.v1",
+            "affected_artifact": ARTIFACT_ID,
+            "namespace": NAMESPACE,
+            "user_id": USER_ID,
+            "org_id": ORG_ID,
+            "candidate_id": "candidate-1",
+            "release_id": "release-1",
+            "release_sha256": candidate["release_sha256"],
+            "risk_classes": candidate["risk_classes"],
+            "expires_at": candidate["expires_at"],
+            "retest_after": candidate["retest_after"],
+            "retest_requirements": candidate["retest_requirements"],
+        },
+        "previous": None,
+    }
+    monkeypatch.setattr(
+        service,
+        "load_operational_learning_release_state",
+        lambda **_kwargs: copy.deepcopy(active_record),
+    )
+
+    result = service.resolve_operational_learning_active_release_in_vontology(
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        org_id=ORG_ID,
+        affected_artifact=ARTIFACT_ID,
+        expected_release_sha256=candidate["release_sha256"],
+    )
+
+    active_release = result["result"]["active_release"]
+    assert active_release["status"] == "active_release_resolved"
+    assert active_release["candidate_id"] == "candidate-1"
+    assert active_release["release_payload"] == candidate["release_payload"]
+    assert active_release["candidate_lifecycle_state"] == "active"
+
+
 def test_scope_mismatch_fails_before_vontology_access(
     vontology_store: dict[str, Any],
 ) -> None:
@@ -295,9 +450,9 @@ def test_tampered_state_or_record_digest_fails_closed(
     )["state_record"]
     concept_id = record["state_concept_id"]
     stored = json.loads(vontology_store["texts"][concept_id])
-    stored["state"]["candidate_states"]["candidate-1"]["updated_at"] = (
-        "2026-07-12T13:00:00+00:00"
-    )
+    stored["state"]["candidate_states"]["candidate-1"][
+        "updated_at"
+    ] = "2026-07-12T13:00:00+00:00"
     vontology_store["texts"][concept_id] = json.dumps(stored)
 
     with pytest.raises(

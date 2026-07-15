@@ -383,12 +383,8 @@ def _get_durable_definition_loader():
                 namespace_user_id, namespace_org_id = (
                     derive_actor_context_from_namespace(actor_namespace)
                 )
-                if (
-                    namespace_user_id != actor_user_id
-                    or (
-                        namespace_org_id is not None
-                        and namespace_org_id != actor_org_id
-                    )
+                if namespace_user_id != actor_user_id or (
+                    namespace_org_id is not None and namespace_org_id != actor_org_id
                 ):
                     logging.getLogger(__name__).warning(
                         "[durable_workflows] Refusing definition load with "
@@ -528,6 +524,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         )
         from ..services.operational_certification_vontology_service import (
             bootstrap_operational_certification_authority,
+        )
+        from ..services.operational_learning_release_authority_vontology_service import (
+            bootstrap_operational_learning_release_authority,
         )
         from ..services.ai_chat_session_source_profile_vontology_service import (
             ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture,
@@ -688,6 +687,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="operational certification authority",
             bootstrap_fn=bootstrap_operational_certification_authority,
         )
+        operational_learning_release_bootstrap_report = _run_workflow_family_bootstrap(
+            label="operational learning-release authority",
+            bootstrap_fn=bootstrap_operational_learning_release_authority,
+        )
         ai_chat_session_source_profile_bootstrap_report = _run_workflow_family_bootstrap(
             label="AI chat-session source profiles",
             bootstrap_fn=ensure_canonical_ai_chat_session_source_profiles_from_seed_fixture,
@@ -751,6 +754,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["benchmark_suite_bootstrap"] = benchmark_suite_bootstrap_report
         result["operational_certification_bootstrap"] = (
             operational_certification_bootstrap_report
+        )
+        result["operational_learning_release_bootstrap"] = (
+            operational_learning_release_bootstrap_report
         )
         result["ai_chat_session_source_profile_bootstrap"] = (
             ai_chat_session_source_profile_bootstrap_report
@@ -2554,9 +2560,7 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
             "state": (
                 "skipped_pytest"
                 if running_under_pytest
-                else "skipped_agent_test"
-                if agent_test_instance
-                else "pending"
+                else "skipped_agent_test" if agent_test_instance else "pending"
             ),
             "ready": False,
             "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),

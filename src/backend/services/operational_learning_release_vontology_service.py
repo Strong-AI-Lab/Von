@@ -59,6 +59,15 @@ OPERATIONAL_LEARNING_RELEASE_CAMPAIGN_EVIDENCE_SCHEMA_VERSION = (
 OPERATIONAL_LEARNING_RELEASE_CANDIDATE_EVALUATION_SCHEMA_VERSION = (
     "operational_learning_release_candidate_evaluation.v1"
 )
+REPRESENTED_LEARNING_CANDIDATE_CONTEXT_SCHEMA_VERSION = (
+    "represented_learning_candidate_context.v1"
+)
+REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION = (
+    "represented_active_learning_release_context.v1"
+)
+REPRESENTED_LEARNING_RELEASE_BINDING_SCHEMA_VERSION = (
+    "represented_learning_release_binding.v1"
+)
 OPERATIONAL_LEARNING_RELEASE_STATE_TYPE_ID = "#V#operational_learning_release_state"
 OPERATIONAL_LEARNING_RELEASE_STATE_PREDICATE = "hasContent"
 
@@ -733,6 +742,276 @@ def load_operational_learning_release_state(
     resolved_scope = _scope(namespace=namespace, user_id=user_id, org_id=org_id)
     record, persisted = _load_raw_record(resolved_scope)
     return _public_record(record, persisted=persisted)
+
+
+def _release_context_authority(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "represented_learning_release_state_authority.v1",
+        "state_concept_id": record.get("state_concept_id"),
+        "version": record.get("version"),
+        "state_sha256": record.get("state_sha256"),
+        "record_sha256": record.get("record_sha256"),
+    }
+
+
+def _release_context_binding(
+    *,
+    candidate: Mapping[str, Any],
+    candidate_snapshot_sha256: str,
+    release_payload_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": REPRESENTED_LEARNING_RELEASE_BINDING_SCHEMA_VERSION,
+        "candidate_id": candidate["candidate_id"],
+        "release_sha256": candidate["release_sha256"],
+        "affected_artifact": candidate["affected_artifact"],
+        "namespace": candidate["namespace"],
+        "user_id": candidate["user_id"],
+        "org_id": candidate["org_id"],
+        "candidate_snapshot_sha256": candidate_snapshot_sha256,
+        "release_payload_sha256": release_payload_sha256,
+    }
+
+
+def _resolved_candidate_from_record(
+    record: Mapping[str, Any],
+    *,
+    candidate_id: str,
+    release_sha256: str,
+    affected_artifact: str,
+) -> tuple[dict[str, Any], str]:
+    state = record.get("state")
+    if not isinstance(state, Mapping):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_state_record_invalid"
+        )
+    snapshots = state.get("candidate_snapshots")
+    candidate = snapshots.get(candidate_id) if isinstance(snapshots, Mapping) else None
+    if not isinstance(candidate, Mapping):
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_candidate_not_found",
+            details={"candidate_id": candidate_id},
+            recovery_affordances=[{"action_type": "read_latest_state"}],
+        )
+    candidate_snapshot = copy.deepcopy(dict(candidate))
+    mismatches = [
+        field_name
+        for field_name, expected in (
+            ("release_sha256", release_sha256),
+            ("affected_artifact", affected_artifact),
+            ("namespace", record.get("namespace")),
+            ("user_id", record.get("user_id")),
+            ("org_id", record.get("org_id")),
+        )
+        if candidate_snapshot.get(field_name) != expected
+    ]
+    if mismatches:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_candidate_binding_mismatch",
+            details={"candidate_id": candidate_id, "mismatches": mismatches},
+            recovery_affordances=[{"action_type": "read_latest_state"}],
+        )
+    candidate_states = state.get("candidate_states")
+    lifecycle = (
+        candidate_states.get(candidate_id)
+        if isinstance(candidate_states, Mapping)
+        else None
+    )
+    lifecycle_state = (
+        str(lifecycle.get("state") or "").strip()
+        if isinstance(lifecycle, Mapping)
+        else ""
+    )
+    if not lifecycle_state:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_candidate_lifecycle_missing",
+            details={"candidate_id": candidate_id},
+        )
+    return candidate_snapshot, lifecycle_state
+
+
+def resolve_operational_learning_release_candidate_in_vontology(
+    *,
+    namespace: str,
+    user_id: str,
+    org_id: str,
+    candidate_id: str,
+    release_sha256: str,
+    affected_artifact: str,
+) -> dict[str, Any]:
+    """Resolve one immutable candidate and its opaque payload without mutation."""
+
+    scope = _scope(namespace=namespace, user_id=user_id, org_id=org_id)
+    resolved_candidate_id = _clean(
+        candidate_id,
+        code="operational_learning_release_candidate_id_required",
+    )
+    resolved_release_sha256 = _require_sha256(
+        release_sha256,
+        code="operational_learning_release_candidate_hash_required",
+    )
+    resolved_artifact = _clean(
+        affected_artifact,
+        code="operational_learning_release_affected_artifact_required",
+    )
+    record = load_operational_learning_release_state(**scope)
+    candidate, lifecycle_state = _resolved_candidate_from_record(
+        record,
+        candidate_id=resolved_candidate_id,
+        release_sha256=resolved_release_sha256,
+        affected_artifact=resolved_artifact,
+    )
+    candidate_snapshot_sha256 = _require_sha256(
+        candidate.get("candidate_sha256"),
+        code="operational_learning_release_candidate_snapshot_hash_missing",
+    )
+    release_payload = copy.deepcopy(candidate.get("release_payload"))
+    release_payload_sha256 = operational_learning_release_digest(release_payload)
+    binding = _release_context_binding(
+        candidate=candidate,
+        candidate_snapshot_sha256=candidate_snapshot_sha256,
+        release_payload_sha256=release_payload_sha256,
+    )
+    candidate_context: dict[str, Any] = {
+        "schema_version": REPRESENTED_LEARNING_CANDIDATE_CONTEXT_SCHEMA_VERSION,
+        "status": "resolved",
+        "candidate_id": resolved_candidate_id,
+        "release_sha256": resolved_release_sha256,
+        "affected_artifact": resolved_artifact,
+        **scope,
+        "candidate_lifecycle_state": lifecycle_state,
+        "candidate_snapshot": candidate,
+        "candidate_snapshot_sha256": candidate_snapshot_sha256,
+        "release_payload": release_payload,
+        "release_payload_sha256": release_payload_sha256,
+        "authority": _release_context_authority(record),
+        "binding": binding,
+    }
+    candidate_context["context_sha256"] = operational_learning_release_digest(
+        candidate_context
+    )
+    return {"success": True, "result": {"candidate_context": candidate_context}}
+
+
+def resolve_operational_learning_active_release_in_vontology(
+    *,
+    namespace: str,
+    user_id: str,
+    org_id: str,
+    affected_artifact: str,
+    expected_release_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Resolve the exact actor-scoped active baseline without mutation."""
+
+    scope = _scope(namespace=namespace, user_id=user_id, org_id=org_id)
+    resolved_artifact = _clean(
+        affected_artifact,
+        code="operational_learning_release_affected_artifact_required",
+    )
+    expected_hash = (
+        _require_sha256(
+            expected_release_sha256,
+            code="operational_learning_release_expected_active_hash_invalid",
+        )
+        if expected_release_sha256 is not None and str(expected_release_sha256).strip()
+        else None
+    )
+    record = load_operational_learning_release_state(**scope)
+    state = record.get("state")
+    pointers = state.get("release_pointers") if isinstance(state, Mapping) else None
+    pointer_state = (
+        pointers.get(resolved_artifact) if isinstance(pointers, Mapping) else None
+    )
+    active_pointer = (
+        pointer_state.get("active") if isinstance(pointer_state, Mapping) else None
+    )
+    authority = _release_context_authority(record)
+    if not isinstance(active_pointer, Mapping):
+        if expected_hash is not None:
+            raise LearningReleasePersistenceError(
+                "operational_learning_release_expected_active_not_found",
+                details={
+                    "affected_artifact": resolved_artifact,
+                    "expected_release_sha256": expected_hash,
+                },
+                recovery_affordances=[{"action_type": "read_latest_state"}],
+            )
+        active_release: dict[str, Any] = {
+            "schema_version": (
+                REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION
+            ),
+            "status": "no_active_release",
+            "affected_artifact": resolved_artifact,
+            **scope,
+            "authority": authority,
+        }
+        active_release["context_sha256"] = operational_learning_release_digest(
+            active_release
+        )
+        return {"success": True, "result": {"active_release": active_release}}
+
+    pointer_candidate_id = _clean(
+        active_pointer.get("candidate_id"),
+        code="operational_learning_release_active_candidate_id_missing",
+    )
+    pointer_release_sha256 = _require_sha256(
+        active_pointer.get("release_sha256"),
+        code="operational_learning_release_active_hash_missing",
+    )
+    if expected_hash is not None and pointer_release_sha256 != expected_hash:
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_active_hash_mismatch",
+            details={
+                "affected_artifact": resolved_artifact,
+                "expected_release_sha256": expected_hash,
+                "observed_release_sha256": pointer_release_sha256,
+            },
+            recovery_affordances=[{"action_type": "read_latest_state"}],
+        )
+    candidate, lifecycle_state = _resolved_candidate_from_record(
+        record,
+        candidate_id=pointer_candidate_id,
+        release_sha256=pointer_release_sha256,
+        affected_artifact=resolved_artifact,
+    )
+    if lifecycle_state != "active":
+        raise LearningReleasePersistenceError(
+            "operational_learning_release_active_lifecycle_mismatch",
+            details={
+                "candidate_id": pointer_candidate_id,
+                "lifecycle_state": lifecycle_state,
+            },
+        )
+    candidate_snapshot_sha256 = _require_sha256(
+        candidate.get("candidate_sha256"),
+        code="operational_learning_release_candidate_snapshot_hash_missing",
+    )
+    release_payload = copy.deepcopy(candidate.get("release_payload"))
+    release_payload_sha256 = operational_learning_release_digest(release_payload)
+    active_release = {
+        "schema_version": REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION,
+        "status": "active_release_resolved",
+        "candidate_id": pointer_candidate_id,
+        "release_id": candidate.get("release_id"),
+        "release_sha256": pointer_release_sha256,
+        "affected_artifact": resolved_artifact,
+        **scope,
+        "candidate_lifecycle_state": lifecycle_state,
+        "candidate_snapshot": candidate,
+        "candidate_snapshot_sha256": candidate_snapshot_sha256,
+        "release_payload": release_payload,
+        "release_payload_sha256": release_payload_sha256,
+        "authority": authority,
+        "binding": _release_context_binding(
+            candidate=candidate,
+            candidate_snapshot_sha256=candidate_snapshot_sha256,
+            release_payload_sha256=release_payload_sha256,
+        ),
+    }
+    active_release["context_sha256"] = operational_learning_release_digest(
+        active_release
+    )
+    return {"success": True, "result": {"active_release": active_release}}
 
 
 def _ensure_state_concept(
@@ -1974,6 +2253,9 @@ __all__ = [
     "OPERATIONAL_LEARNING_RELEASE_STATE_PREDICATE",
     "OPERATIONAL_LEARNING_RELEASE_STATE_RECORD_SCHEMA_VERSION",
     "OPERATIONAL_LEARNING_RELEASE_STATE_TYPE_ID",
+    "REPRESENTED_ACTIVE_LEARNING_RELEASE_CONTEXT_SCHEMA_VERSION",
+    "REPRESENTED_LEARNING_CANDIDATE_CONTEXT_SCHEMA_VERSION",
+    "REPRESENTED_LEARNING_RELEASE_BINDING_SCHEMA_VERSION",
     "load_operational_learning_release_state",
     "operational_learning_release_state_concept_id",
     "project_operational_learning_release_campaign_evidence",
@@ -1982,5 +2264,7 @@ __all__ = [
     "register_operational_learning_release_candidate_evaluation_in_vontology",
     "register_operational_learning_release_candidate_in_vontology",
     "reject_operational_learning_release_candidate_in_vontology",
+    "resolve_operational_learning_active_release_in_vontology",
+    "resolve_operational_learning_release_candidate_in_vontology",
     "rollback_operational_learning_release_in_vontology",
 ]

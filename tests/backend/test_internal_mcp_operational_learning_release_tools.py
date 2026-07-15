@@ -38,6 +38,8 @@ def test_learning_release_catalogue_methods_are_strict_and_correctly_categorised
         "operational_learning_build_experiment_evidence": "read",
         "operational_learning_build_certification_evidence": "read",
         "operational_learning_release_get_state": "read",
+        "operational_learning_release_resolve_candidate": "read",
+        "operational_learning_release_resolve_active": "read",
         "operational_learning_release_register_candidate": "write",
         "operational_learning_release_register_candidate_evaluation": "write",
         "operational_learning_release_record_human_approval": "write",
@@ -102,6 +104,78 @@ def test_get_state_tool_forwards_exact_scope(
         "namespace": NAMESPACE,
         "user_id": USER_ID,
         "org_id": ORG_ID,
+    }
+
+
+def test_resolver_tools_forward_only_authenticated_exact_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, dict] = {}
+
+    def resolve_candidate(**kwargs):
+        captured["candidate"] = kwargs
+        return {"success": True, "result": {"candidate_context": {}}}
+
+    def resolve_active(**kwargs):
+        captured["active"] = kwargs
+        return {"success": True, "result": {"active_release": {}}}
+
+    monkeypatch.setattr(
+        service,
+        "resolve_operational_learning_release_candidate_in_vontology",
+        resolve_candidate,
+    )
+    monkeypatch.setattr(
+        service,
+        "resolve_operational_learning_active_release_in_vontology",
+        resolve_active,
+    )
+    monkeypatch.setattr(
+        catalogue_module,
+        "_operational_learning_authorised_scope",
+        lambda _kwargs: {
+            "namespace": NAMESPACE,
+            "user_id": USER_ID,
+            "org_id": ORG_ID,
+        },
+    )
+    catalogue = build_default_catalogue()
+    candidate_result = catalogue.get(
+        "operational_learning_release_resolve_candidate"
+    ).handler(
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        org_id=ORG_ID,
+        candidate_id="candidate-1",
+        release_sha256="a" * 64,
+        affected_artifact="#V#artifact",
+    )
+    active_result = catalogue.get(
+        "operational_learning_release_resolve_active"
+    ).handler(
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        org_id=ORG_ID,
+        affected_artifact="#V#artifact",
+        expected_release_sha256="a" * 64,
+    )
+
+    assert candidate_result["success"] is True
+    assert active_result["success"] is True
+    assert captured["candidate"] == {
+        "namespace": NAMESPACE,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "candidate_id": "candidate-1",
+        "release_sha256": "a" * 64,
+        "affected_artifact": "#V#artifact",
+    }
+    assert captured["active"] == {
+        "namespace": NAMESPACE,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "affected_artifact": "#V#artifact",
+        "expected_release_sha256": "a" * 64,
     }
 
 

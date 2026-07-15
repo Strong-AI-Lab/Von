@@ -10372,9 +10372,7 @@ def _build_turn_execution_replay_case(
                         item.get("terminal_outcome_receipt_projection"),
                     )
                 )
-                if isinstance(
-                    item.get("terminal_outcome_receipt_projection"), Mapping
-                )
+                if isinstance(item.get("terminal_outcome_receipt_projection"), Mapping)
                 else None
             ),
             "weak_follow_up_action": _has_turn_execution_weak_follow_up_action(item),
@@ -12866,9 +12864,7 @@ def _turn_execution_build_dashboard(**kwargs):
             )
         requested_namespace = _clean_optional_string(kwargs.get("namespace"))
         requested_user_id = _clean_optional_string(kwargs.get("user_concept_id"))
-        requested_org_id = _clean_optional_string(
-            kwargs.get("organisation_concept_id")
-        )
+        requested_org_id = _clean_optional_string(kwargs.get("organisation_concept_id"))
         if not requested_namespace or not requested_user_id or not requested_org_id:
             return make_error_response(
                 "operational_certification_scope_required",
@@ -13288,9 +13284,7 @@ def _turn_execution_build_dashboard(**kwargs):
                 {
                     "run_id": operational_run_id,
                     "report_sha256": operational_certification.get("report_sha256"),
-                    "contract_sha256": operational_certification.get(
-                        "contract_sha256"
-                    ),
+                    "contract_sha256": operational_certification.get("contract_sha256"),
                     "source": "experiment_run.operational_certification_campaign",
                 }
                 if operational_certification
@@ -13782,7 +13776,9 @@ def _turn_execution_get_critic_bundle(**kwargs):
 
 
 def _experiment_run_list(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "experiment_runs"
@@ -13790,7 +13786,9 @@ def _experiment_run_list(**kwargs):
 
 
 def _experiment_run_get(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     run_id = kwargs.get("run_id")
     session_id = kwargs.get("session_id")
@@ -14063,7 +14061,9 @@ def _testing_theory_gc_expired(**kwargs):
 
 
 def _experiment_create_spec(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import create_experiment_spec
 
@@ -14092,7 +14092,9 @@ def _experiment_create_spec(**kwargs):
 
 
 def _experiment_start_run(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import start_experiment_run
 
@@ -14114,7 +14116,9 @@ def _experiment_start_run(**kwargs):
 
 
 def _experiment_record_observation(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import record_experiment_observation
 
@@ -14129,7 +14133,9 @@ def _experiment_record_observation(**kwargs):
 
 
 def _experiment_compute_verdict(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import compute_experiment_verdict
 
@@ -14137,7 +14143,9 @@ def _experiment_compute_verdict(**kwargs):
 
 
 def _experiment_emit_learning_signal(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import emit_experiment_learning_signal
 
@@ -14151,7 +14159,9 @@ def _experiment_emit_learning_signal(**kwargs):
 
 
 def _experiment_execute_target_workflow(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.workflow_actor_scope_service import WorkflowActorScopeError
     from ...workflows.durable import WorkflowInstanceManager
@@ -14197,7 +14207,9 @@ def _experiment_execute_target_workflow(**kwargs):
 
 
 def _experiment_execute_regression_suite(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import execute_regression_suite
 
@@ -14212,7 +14224,9 @@ def _experiment_execute_regression_suite(**kwargs):
 
 
 def _testing_prepare_experiment_spec(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import prepare_experiment_spec_from_template
 
@@ -14240,7 +14254,9 @@ def _testing_prepare_experiment_spec(**kwargs):
 
 
 def _testing_prepare_meeting_invitation_spec(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.experiment_run_service import (
         prepare_meeting_invitation_experiment_spec,
@@ -14261,7 +14277,9 @@ def _testing_prepare_meeting_invitation_spec(**kwargs):
 
 
 def _testing_prepare_arxiv_paper_ingestion_fixture(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("experiment control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "experiment control plane"
+    ):
         return denial
     from ...services.arxiv_ingestion_testing_service import (
         prepare_arxiv_paper_ingestion_test_fixture,
@@ -14938,12 +14956,8 @@ def _search_knowledge_base(**kwargs):
             retrieval_state = build_rag_retrieval_state(
                 str(raw_retrieval_state.get("status") or "degraded"),
                 result_count=result_count,
-                cause=(
-                    str(raw_retrieval_state.get("cause") or "").strip() or None
-                ),
-                detail=(
-                    str(raw_retrieval_state.get("detail") or "").strip() or None
-                ),
+                cause=(str(raw_retrieval_state.get("cause") or "").strip() or None),
+                detail=(str(raw_retrieval_state.get("detail") or "").strip() or None),
                 candidate_count=raw_retrieval_state.get("candidate_count"),
                 filtered_candidate_count=raw_retrieval_state.get(
                     "filtered_candidate_count"
@@ -15602,9 +15616,7 @@ def _workflow_list_definitions_for_current_actor(**kwargs):
             "capability_matrix": capability_matrix,
         }
         if _internal_mcp_global_workflow_admin_authorised():
-            payload["baseline_telemetry"] = (
-                get_workflow_baseline_telemetry_snapshot()
-            )
+            payload["baseline_telemetry"] = get_workflow_baseline_telemetry_snapshot()
         else:
             # Baseline telemetry is process-global and its recent guardrail
             # events carry workflow/step/action IDs plus conversation and turn
@@ -15722,9 +15734,7 @@ def _workflow_list_use_episodes(**kwargs):
         )
 
     try:
-        registry = build_durable_workflow_registry_read_only(
-            defer_parity_work=True
-        )
+        registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
         visible_workflow_ids = filter_workflow_ids_for_current_actor(
             registry.all_workflow_ids()
         )
@@ -16141,9 +16151,7 @@ def _workflow_list_event_bindings(**kwargs):
         limit=limit,
     )
     binding_workflow_ids = [
-        item.get("workflow_id")
-        for item in bindings
-        if isinstance(item, Mapping)
+        item.get("workflow_id") for item in bindings if isinstance(item, Mapping)
     ]
     visible_workflow_ids = set(
         filter_workflow_ids_for_current_actor(binding_workflow_ids)
@@ -16151,8 +16159,7 @@ def _workflow_list_event_bindings(**kwargs):
     bindings = [
         item
         for item in bindings
-        if isinstance(item, Mapping)
-        and item.get("workflow_id") in visible_workflow_ids
+        if isinstance(item, Mapping) and item.get("workflow_id") in visible_workflow_ids
     ]
     diagnostics = build_event_workflow_binding_diagnostics(bindings)
     return {
@@ -16376,22 +16383,17 @@ def _resolve_internal_mcp_workflow_launch_actor_scope(
         trusted_unscoped = actor_source == "trusted_operator_payload_fallback"
     else:
         trusted_unscoped = not bool(
-            get_effective_user_concept_id()
-            or get_effective_organisation_concept_id()
+            get_effective_user_concept_id() or get_effective_organisation_concept_id()
         )
 
     claimed_namespace = (
-        namespace.strip()
-        if isinstance(namespace, str) and namespace.strip()
-        else None
+        namespace.strip() if isinstance(namespace, str) and namespace.strip() else None
     )
     claimed_user_id = user_id
     claimed_org_id = org_id
     if trusted_unscoped and claimed_namespace is None:
         claimed_user_id = (
-            user_id
-            if isinstance(user_id, str) and user_id.strip()
-            else "anonymous"
+            user_id if isinstance(user_id, str) and user_id.strip() else "anonymous"
         )
         claimed_org_id = (
             org_id if isinstance(org_id, str) and org_id.strip() else "default"
@@ -16432,8 +16434,7 @@ def _internal_mcp_global_workflow_admin_authorised() -> bool:
     # Preserve deliberately direct operator/startup calls, while refusing a
     # direct call made inside an authenticated user/workflow actor context.
     return not bool(
-        get_effective_user_concept_id()
-        or get_effective_organisation_concept_id()
+        get_effective_user_concept_id() or get_effective_organisation_concept_id()
     )
 
 
@@ -16958,11 +16959,7 @@ def _workflow_list_execution_traces(**kwargs):
 
     visible_workflow_ids = set(
         filter_workflow_ids_for_current_actor(
-            [
-                trace.get("workflow_id")
-                for trace in traces
-                if isinstance(trace, Mapping)
-            ]
+            [trace.get("workflow_id") for trace in traces if isinstance(trace, Mapping)]
         )
     )
     summaries = [
@@ -29244,7 +29241,9 @@ def _operational_learning_release_error_response(exc: Exception) -> dict[str, An
         LearningReleasePersistenceError,
     )
 
-    if isinstance(exc, (LearningReleaseValidationError, LearningReleasePersistenceError)):
+    if isinstance(
+        exc, (LearningReleaseValidationError, LearningReleasePersistenceError)
+    ):
         projection = exc.to_dict()
         recovery_affordances = projection.get("recovery_affordances") or []
         suggestions = [
@@ -29328,6 +29327,43 @@ def _operational_learning_release_get_state(**kwargs):
             org_id=authenticated_scope["org_id"],
         )
         return {"success": True, "state_record": record}
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_resolve_candidate(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        resolve_operational_learning_release_candidate_in_vontology,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        return resolve_operational_learning_release_candidate_in_vontology(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+            candidate_id=kwargs["candidate_id"],
+            release_sha256=kwargs["release_sha256"],
+            affected_artifact=kwargs["affected_artifact"],
+        )
+    except Exception as exc:
+        return _operational_learning_release_error_response(exc)
+
+
+def _operational_learning_release_resolve_active(**kwargs):
+    from ...services.operational_learning_release_vontology_service import (
+        resolve_operational_learning_active_release_in_vontology,
+    )
+
+    try:
+        authenticated_scope = _operational_learning_authorised_scope(kwargs)
+        return resolve_operational_learning_active_release_in_vontology(
+            namespace=authenticated_scope["namespace"],
+            user_id=authenticated_scope["user_id"],
+            org_id=authenticated_scope["org_id"],
+            affected_artifact=kwargs["affected_artifact"],
+            expected_release_sha256=kwargs.get("expected_release_sha256"),
+        )
     except Exception as exc:
         return _operational_learning_release_error_response(exc)
 
@@ -29438,8 +29474,7 @@ def _operational_learning_authorised_scope(
     mismatches = [
         field_name
         for field_name in ("namespace", "user_id", "org_id")
-        if str(supplied.get(field_name) or "").strip()
-        != authenticated[field_name]
+        if str(supplied.get(field_name) or "").strip() != authenticated[field_name]
     ]
     if mismatches:
         raise LearningReleasePersistenceError(
@@ -29484,9 +29519,7 @@ def _operational_learning_release_promote_candidate(**kwargs):
             expected_version=kwargs["expected_version"],
             expected_state_sha256=kwargs["expected_state_sha256"],
             candidate_id=kwargs["candidate_id"],
-            represented_evaluator_decision=kwargs[
-                "represented_evaluator_decision"
-            ],
+            represented_evaluator_decision=kwargs["represented_evaluator_decision"],
             experiment_evidence=kwargs["experiment_evidence"],
             certification_evidence=kwargs["certification_evidence"],
             human_approval=kwargs["human_approval"],
@@ -29509,9 +29542,7 @@ def _operational_learning_release_reject_candidate(**kwargs):
             expected_version=kwargs["expected_version"],
             expected_state_sha256=kwargs["expected_state_sha256"],
             candidate_id=kwargs["candidate_id"],
-            represented_evaluator_decision=kwargs[
-                "represented_evaluator_decision"
-            ],
+            represented_evaluator_decision=kwargs["represented_evaluator_decision"],
             experiment_evidence=kwargs["experiment_evidence"],
             certification_evidence=kwargs["certification_evidence"],
         )
@@ -29533,9 +29564,7 @@ def _operational_learning_release_rollback(**kwargs):
             expected_version=kwargs["expected_version"],
             expected_state_sha256=kwargs["expected_state_sha256"],
             affected_artifact=kwargs["affected_artifact"],
-            represented_evaluator_decision=kwargs[
-                "represented_evaluator_decision"
-            ],
+            represented_evaluator_decision=kwargs["represented_evaluator_decision"],
             experiment_evidence=kwargs["experiment_evidence"],
             certification_evidence=kwargs["certification_evidence"],
             human_approval=kwargs["human_approval"],
@@ -29605,6 +29634,57 @@ def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
             description=(
                 "Read the current version/digest, immutable release state, approval "
                 "registry, and receipt-derived campaign projection."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_release_resolve_candidate",
+            handler=_operational_learning_release_resolve_candidate,
+            input_schema=Schema(
+                required={
+                    **exact_scope,
+                    "candidate_id": str,
+                    "release_sha256": str,
+                    "affected_artifact": str,
+                },
+                optional={},
+                allow_unknown=False,
+                description=(
+                    "Resolve one exact immutable candidate snapshot and opaque "
+                    "payload under authenticated actor scope."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={"result": dict},
+                allow_unknown=True,
+            ),
+            category="read",
+            description=(
+                "Expose exact candidate, payload, lifecycle, binding and state "
+                "authority evidence for represented evaluators without mutation."
+            ),
+        ),
+        MethodDefinition(
+            name="operational_learning_release_resolve_active",
+            handler=_operational_learning_release_resolve_active,
+            input_schema=Schema(
+                required={**exact_scope, "affected_artifact": str},
+                optional={"expected_release_sha256": (str, type(None))},
+                allow_unknown=False,
+                description=(
+                    "Resolve the exact actor-scoped active release, optionally "
+                    "requiring one expected immutable release digest."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={"result": dict},
+                allow_unknown=True,
+            ),
+            category="read",
+            description=(
+                "Expose an exact active baseline or typed absence for represented "
+                "candidate comparison without mutation."
             ),
         ),
         MethodDefinition(
@@ -29752,11 +29832,7 @@ def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
                         **optimistic,
                         **represented_evidence,
                         "candidate_id": str,
-                        **(
-                            {"human_approval": dict}
-                            if action == "promote"
-                            else {}
-                        ),
+                        **({"human_approval": dict} if action == "promote" else {}),
                     },
                     optional={},
                     allow_unknown=False,
@@ -31184,9 +31260,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> List[
-    MethodDefinition
-]:
+def _build_default_catalogue_external_integration_definitions() -> (
+    List[MethodDefinition]
+):
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -31687,9 +31763,9 @@ def _build_default_catalogue_external_integration_definitions() -> List[
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
-    MethodDefinition
-]:
+def _build_default_catalogue_diagnostics_and_research_definitions() -> (
+    List[MethodDefinition]
+):
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",
