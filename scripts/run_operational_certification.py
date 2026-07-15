@@ -72,6 +72,7 @@ from src.backend.services.experiment_run_service import (  # noqa: E402
 from src.backend.services.operational_certification_contract_service import (  # noqa: E402
     CertificationContractValidationError,
     aggregate_five_trial_campaign,
+    aggregate_user_burden_metrics,
     evaluate_scenario_trial,
     json_serialisable_projection,
     project_represented_evaluator_observation,
@@ -96,6 +97,9 @@ AUTHENTICATED_MULTI_TURN_ADAPTER_ID = (
     "#V#authenticated_von_multi_turn_operational_adapter"
 )
 DURABLE_WORKFLOW_ADAPTER_ID = "#V#durable_workflow_execute_operational_adapter"
+SYNCHRONOUS_WORKFLOW_ADAPTER_ID = (
+    "#V#synchronous_represented_workflow_operational_adapter"
+)
 _REQUIRED_REPRESENTED_SELECTOR_TELEMETRY_FIELDS = (
     "prompt_present",
     "candidate_list_present",
@@ -169,6 +173,236 @@ def _walk_mappings(value: Any) -> list[Mapping[str, Any]]:
         ):
             stack.extend(current)
     return mappings
+
+
+def _explicit_actor_namespace_values(value: Any) -> set[str]:
+    """Return namespaces only from recognised actor-scope wiring surfaces.
+
+    Tool results and represented payloads may legitimately contain a field
+    named ``namespace`` with domain-specific meaning.  Treating every nested
+    occurrence as an access-scope claim creates false security alarms.  This
+    projection therefore inspects only the turn/workflow envelope, explicit
+    scope objects, and tool/workflow input payloads.
+    """
+
+    namespaces: set[str] = set()
+    root = _mapping(value)
+    if _text(root.get("namespace")):
+        namespaces.add(_text(root.get("namespace")))
+    for mapping in _walk_mappings(value):
+        if (
+            _text(mapping.get("namespace"))
+            and any(
+                _text(mapping.get(key))
+                for key in ("request_id", "session_id", "workflow_id", "instance_id")
+            )
+        ):
+            namespaces.add(_text(mapping.get("namespace")))
+        effective_namespace = _text(mapping.get("effective_namespace"))
+        if effective_namespace:
+            namespaces.add(effective_namespace)
+        for scope_key in (
+            "actor_scope",
+            "exact_scope",
+            "session_context",
+            "target_scope",
+        ):
+            scope = mapping.get(scope_key)
+            if isinstance(scope, Mapping) and _text(scope.get("namespace")):
+                namespaces.add(_text(scope.get("namespace")))
+        is_tool_call = bool(
+            _text(mapping.get("tool"))
+            or _text(mapping.get("tool_name"))
+            or _text(mapping.get("canonical_tool_name"))
+        )
+        if is_tool_call:
+            for payload_key in (
+                "payload",
+                "effective_payload",
+                "arguments",
+                "tool_args",
+            ):
+                payload = mapping.get(payload_key)
+                if isinstance(payload, Mapping) and _text(payload.get("namespace")):
+                    namespaces.add(_text(payload.get("namespace")))
+        if _text(mapping.get("workflow_id")):
+            workflow_inputs = mapping.get("inputs")
+            if (
+                isinstance(workflow_inputs, Mapping)
+                and _text(workflow_inputs.get("namespace"))
+            ):
+                namespaces.add(_text(workflow_inputs.get("namespace")))
+    return namespaces
+
+
+_RUNTIME_BINDING_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_ACTOR_RUNTIME_BINDING_KEYS = frozenset({"namespace", "user_id", "org_id"})
+
+
+def _parse_runtime_binding_arguments(values: Sequence[str]) -> dict[str, str]:
+    """Parse generic represented-suite runtime bindings from ``name=value``.
+
+    The runner owns only exact string plumbing.  Which bindings are required,
+    and what they mean, remains declared by the represented suite policy.
+    """
+
+    bindings: dict[str, str] = {}
+    for raw_value in values:
+        raw_text = _text(raw_value)
+        if "=" not in raw_text:
+            raise ValueError("runtime_binding_argument_invalid")
+        raw_name, raw_binding_value = raw_text.split("=", 1)
+        name = raw_name.strip()
+        binding_value = raw_binding_value.strip()
+        if not _RUNTIME_BINDING_NAME_PATTERN.fullmatch(name):
+            raise ValueError("runtime_binding_name_invalid")
+        if not binding_value or "{{" in binding_value or "}}" in binding_value:
+            raise ValueError(f"runtime_binding_value_invalid:{name}")
+        if name in bindings:
+            raise ValueError(f"runtime_binding_duplicate:{name}")
+        bindings[name] = binding_value
+    return bindings
+
+
+def _resolve_declared_runtime_bindings(
+    *,
+    policy: Mapping[str, Any],
+    supplied_arguments: Sequence[str],
+    namespace: str,
+    user_id: str,
+    org_id: str,
+) -> dict[str, str]:
+    """Bind a represented runtime contract to the authenticated actor exactly."""
+
+    supplied = _parse_runtime_binding_arguments(supplied_arguments)
+    raw_contract = policy.get("runtime_binding_contract")
+    if not isinstance(raw_contract, Mapping):
+        if supplied:
+            raise ValueError("runtime_binding_contract_not_declared")
+        return {}
+
+    required_bindings = [
+        _text(item) for item in _sequence(raw_contract.get("required_bindings"))
+    ]
+    if (
+        not required_bindings
+        or any(
+            not _RUNTIME_BINDING_NAME_PATTERN.fullmatch(name)
+            for name in required_bindings
+        )
+        or len(set(required_bindings)) != len(required_bindings)
+    ):
+        raise ValueError("runtime_binding_contract_required_bindings_invalid")
+    required_names = set(required_bindings)
+    unknown_names = sorted(set(supplied) - required_names)
+    if unknown_names:
+        raise ValueError(
+            "runtime_binding_not_declared:" + ",".join(unknown_names)
+        )
+
+    metadata_binding = raw_contract.get("candidate_metadata_binding")
+    if not isinstance(metadata_binding, Mapping) or set(metadata_binding) != (
+        required_names
+    ):
+        raise ValueError("runtime_binding_contract_metadata_binding_invalid")
+    for name in required_bindings:
+        if metadata_binding.get(name) != f"{{{{{name}}}}}":
+            raise ValueError(
+                f"runtime_binding_contract_template_invalid:{name}"
+            )
+
+    actor_bindings = {
+        "namespace": _text(namespace),
+        "user_id": _text(user_id),
+        "org_id": _text(org_id),
+    }
+    if raw_contract.get("exact_actor_scope_required") is True:
+        missing_actor_names = sorted(_ACTOR_RUNTIME_BINDING_KEYS - required_names)
+        if missing_actor_names or not all(actor_bindings.values()):
+            raise ValueError("runtime_binding_contract_actor_scope_invalid")
+    for name, actor_value in actor_bindings.items():
+        if name not in required_names:
+            continue
+        supplied_value = supplied.get(name)
+        if supplied_value is not None and supplied_value != actor_value:
+            raise ValueError(f"runtime_binding_actor_scope_mismatch:{name}")
+        supplied[name] = actor_value
+
+    missing_names = sorted(required_names - set(supplied))
+    if missing_names:
+        raise ValueError("runtime_binding_missing:" + ",".join(missing_names))
+    return {name: supplied[name] for name in required_bindings}
+
+
+def _operational_experiment_spec_id(
+    *,
+    campaign_execution_id: str,
+    contract_sha256: str,
+    namespace: str,
+    user_id: str,
+    org_id: str,
+    runtime_bindings: Mapping[str, str],
+) -> str:
+    """Return one campaign-, actor-, and candidate-bound immutable spec ID."""
+
+    identity_sha256 = stable_payload_digest(
+        {
+            "campaign_execution_id": campaign_execution_id,
+            "contract_sha256": contract_sha256,
+            "namespace": namespace,
+            "user_id": user_id,
+            "org_id": org_id,
+            "runtime_bindings_sha256": (
+                stable_payload_digest(runtime_bindings)
+                if runtime_bindings
+                else None
+            ),
+        }
+    )
+    return f"#V#operational_certification_experiment_spec_{identity_sha256[:32]}"
+
+
+def _resolve_pilot_cohort_membership(
+    *,
+    policy: Mapping[str, Any],
+    user_id: str,
+    org_id: str,
+) -> dict[str, Any]:
+    """Validate optional represented pilot-cohort membership for one actor run."""
+
+    raw_cohort = policy.get("pilot_cohort")
+    if not isinstance(raw_cohort, Mapping):
+        return {
+            "applicable": False,
+            "verified": True,
+            "aggregation_required": False,
+        }
+    actor_ids = [_text(item) for item in _sequence(raw_cohort.get("actor_concept_ids"))]
+    expected_org_id = _text(raw_cohort.get("organisation_concept_id"))
+    aggregation_policy = _text(raw_cohort.get("aggregation_policy"))
+    contract_valid = bool(
+        raw_cohort.get("status") == "agreed"
+        and expected_org_id
+        and actor_ids
+        and all(actor_ids)
+        and len(set(actor_ids)) == len(actor_ids)
+        and aggregation_policy
+        == "all_actors_must_independently_satisfy_all_certification_gates"
+    )
+    if not contract_valid:
+        raise ValueError("pilot_cohort_contract_invalid")
+    return {
+        "applicable": True,
+        "verified": user_id in actor_ids and org_id == expected_org_id,
+        "profile": _text(raw_cohort.get("profile")) or None,
+        "effective_user_id": user_id,
+        "effective_org_id": org_id,
+        "expected_organisation_concept_id": expected_org_id,
+        "actor_concept_ids": actor_ids,
+        "actor_count": len(actor_ids),
+        "aggregation_policy": aggregation_policy,
+        "aggregation_required": True,
+    }
 
 
 def _represented_selector_evidence(
@@ -360,6 +594,14 @@ def _find_schema_payload(value: Any, schema_version: str) -> dict[str, Any] | No
 _ABSENCE_PROBE_RESOLUTION_LINEAGE_SCHEMA_VERSION = (
     "operational_absence_probe_resolution_lineage.v1"
 )
+_AUTHORITATIVE_POSTCONDITION_PROBE_SCHEMA_VERSION = (
+    "operational_certification_authoritative_postcondition_probe.v1"
+)
+_AUTHORITATIVE_POSTCONDITION_PROBE_RESULT_SCHEMA_VERSION = (
+    "represented_operational_state_probe_result.v1"
+)
+_AUTHORITATIVE_POSTCONDITION_MAX_ACTION_EVIDENCE = 32
+_AUTHORITATIVE_POSTCONDITION_MAX_TEXT_VALUES = 64
 
 
 def _resolution_payload_from_action_outputs(
@@ -456,6 +698,344 @@ def _resolution_lineage_from_probe_result(
         if lineage is not None:
             return lineage
     return None
+
+
+def _bounded_exact_text_values(
+    value: Any,
+    *,
+    max_values: int = _AUTHORITATIVE_POSTCONDITION_MAX_TEXT_VALUES,
+    max_depth: int = 5,
+) -> list[str]:
+    """Collect bounded exact string leaves from represented read-back fields."""
+
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def _visit(current: Any, depth: int) -> None:
+        if len(values) >= max_values or depth > max_depth:
+            return
+        if isinstance(current, str):
+            text = current.strip()
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
+            return
+        if isinstance(current, Mapping):
+            for index, nested in enumerate(current.values()):
+                if index >= max_values or len(values) >= max_values:
+                    break
+                _visit(nested, depth + 1)
+            return
+        if isinstance(current, Sequence) and not isinstance(
+            current,
+            (str, bytes, bytearray),
+        ):
+            for index, nested in enumerate(current):
+                if index >= max_values or len(values) >= max_values:
+                    break
+                _visit(nested, depth + 1)
+
+    _visit(value, 0)
+    return values
+
+
+def _probe_candidate_concept_ids(value: Any) -> tuple[list[str], bool]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return [], False
+    concept_ids: list[str] = []
+    shape_valid = True
+    for raw in value[:_AUTHORITATIVE_POSTCONDITION_MAX_TEXT_VALUES]:
+        concept_id = ""
+        if isinstance(raw, str):
+            concept_id = _text(raw)
+        elif isinstance(raw, Mapping):
+            concept_id = _text(
+                raw.get("concept_id") or raw.get("resolved_concept_id") or raw.get("id")
+            )
+        if not concept_id:
+            shape_valid = False
+        concept_ids.append(concept_id)
+    if len(value) > _AUTHORITATIVE_POSTCONDITION_MAX_TEXT_VALUES:
+        shape_valid = False
+    return concept_ids, shape_valid
+
+
+def _probe_evidence_tool_names(value: Any) -> list[str]:
+    tool_names: list[str] = []
+    seen: set[str] = set()
+    for mapping in _walk_mappings(value):
+        for key in ("tool", "tool_name"):
+            tool_name = _text(mapping.get(key))
+            if tool_name and tool_name not in seen:
+                seen.add(tool_name)
+                tool_names.append(tool_name)
+        for raw_tool_name in _sequence(mapping.get("tools")):
+            tool_name = _text(raw_tool_name)
+            if tool_name and tool_name not in seen:
+                seen.add(tool_name)
+                tool_names.append(tool_name)
+        if len(tool_names) >= _AUTHORITATIVE_POSTCONDITION_MAX_TEXT_VALUES:
+            break
+    return tool_names[:_AUTHORITATIVE_POSTCONDITION_MAX_TEXT_VALUES]
+
+
+def _bounded_postcondition_action_evidence(value: Any) -> list[dict[str, Any]]:
+    allowed_keys = {
+        "action_id",
+        "status",
+        "call_id",
+        "requested_tool_name",
+        "resolved_tool_name",
+        "inputs_sha256",
+        "outputs_sha256",
+        "state_probe_result_sha256",
+        "resolution_lineage_sha256",
+    }
+    rows: list[dict[str, Any]] = []
+    for raw in _sequence(value)[:_AUTHORITATIVE_POSTCONDITION_MAX_ACTION_EVIDENCE]:
+        if not isinstance(raw, Mapping):
+            continue
+        row = {
+            key: raw.get(key)
+            for key in allowed_keys
+            if raw.get(key) not in (None, "", [], {})
+        }
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _evaluate_authoritative_postcondition_probe_execution(
+    *,
+    probe_spec: Mapping[str, Any],
+    probe_inputs: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    isolation_id: str,
+    namespace: str,
+    user_id: str,
+    org_id: str,
+    source_event_type: str,
+    source_event_id: str,
+    event_idempotency_key: str,
+) -> dict[str, Any]:
+    """Validate one represented postcondition probe without domain policy.
+
+    The represented probe owns acquisition and projection of post-state facts.
+    This support function validates the hard execution/evidence interface and
+    exact values declared by the scenario contract; it does not infer target
+    names, descriptions, tools, or success policy from a workflow/domain ID.
+    """
+
+    workflow_id = _text(probe_spec.get("workflow_id"))
+    required_action_ids = [
+        _text(item)
+        for item in _sequence(probe_spec.get("required_action_ids"))
+        if _text(item)
+    ]
+    required_tool_names = [
+        _text(item)
+        for item in _sequence(probe_spec.get("required_tool_names"))
+        if _text(item)
+    ]
+    expected_cardinality_raw = probe_spec.get("expected_cardinality")
+    expected_cardinality_valid = (
+        isinstance(expected_cardinality_raw, int)
+        and not isinstance(expected_cardinality_raw, bool)
+        and expected_cardinality_raw >= 0
+    )
+    expected_cardinality = (
+        expected_cardinality_raw if expected_cardinality_valid else None
+    )
+    expected_name = _text(probe_spec.get("expected_name"))
+    expected_description = _text(probe_spec.get("expected_description"))
+
+    workflow_output = _mapping(payload.get("workflow_output"))
+    probe_result = _mapping(
+        workflow_output.get("represented_operational_state_probe_result")
+    )
+    result_sha256 = stable_payload_digest(probe_result) if probe_result else None
+    resolution_candidates = probe_result.get("resolution_candidates")
+    candidate_concept_ids, candidate_shape_valid = _probe_candidate_concept_ids(
+        resolution_candidates
+    )
+    observed_cardinality = (
+        len(resolution_candidates)
+        if isinstance(resolution_candidates, Sequence)
+        and not isinstance(resolution_candidates, (str, bytes, bytearray))
+        else None
+    )
+    resolved_concept_id = _text(probe_result.get("resolved_concept_id"))
+    readback_concept_id = _text(probe_result.get("readback_concept_id"))
+    name_values = _bounded_exact_text_values(probe_result.get("names"))
+    description_values = _bounded_exact_text_values(
+        [
+            probe_result.get("content"),
+            probe_result.get("text_relation_groups"),
+        ]
+    )
+    represented_evidence = _sequence(probe_result.get("evidence"))
+    represented_tool_names = _probe_evidence_tool_names(represented_evidence)
+
+    action_evidence = _bounded_postcondition_action_evidence(
+        payload.get("workflow_action_evidence")
+    )
+    successful_actions = [
+        row for row in action_evidence if _text(row.get("status")).lower() == "success"
+    ]
+    successful_action_ids = {_text(row.get("action_id")) for row in successful_actions}
+    required_tool_action_evidence: dict[str, list[dict[str, Any]]] = {}
+    for tool_name in required_tool_names:
+        required_tool_action_evidence[tool_name] = [
+            row
+            for row in successful_actions
+            if _text(row.get("requested_tool_name")) == tool_name
+            and _text(row.get("resolved_tool_name")) == tool_name
+        ]
+    matching_result_actions = [
+        row
+        for row in successful_actions
+        if _text(row.get("action_id")) in required_action_ids
+        and result_sha256
+        and row.get("state_probe_result_sha256") == result_sha256
+    ]
+
+    expected_scope = {
+        "namespace": namespace,
+        "user_id": user_id,
+        "org_id": org_id,
+        "source_event_type": source_event_type,
+        "source_event_id": source_event_id,
+        "event_idempotency_key": event_idempotency_key,
+    }
+    exact_scope = _mapping(payload.get("exact_scope"))
+    checks = {
+        "declaration_workflow_id_present": bool(workflow_id),
+        "declaration_required_actions_present": bool(required_action_ids),
+        "declaration_required_tools_present": bool(required_tool_names),
+        "declaration_expected_cardinality_valid": expected_cardinality_valid,
+        "declaration_expected_name_present": bool(expected_name),
+        "declaration_expected_description_present": bool(expected_description),
+        "execution_succeeded": payload.get("success") is True,
+        "trace_persisted": payload.get("trace_persisted") is True,
+        "live_vontology_authority": (
+            _text(payload.get("workflow_authority_source")).lower() == "vontology"
+        ),
+        "workflow_identity_exact": _text(payload.get("workflow_id")) == workflow_id,
+        "workflow_definition_identity_present": bool(
+            _text(payload.get("workflow_definition_identity_sha256"))
+        ),
+        "workflow_output_identity_present": bool(
+            _text(payload.get("workflow_output_sha256"))
+        ),
+        "workflow_output_identity_exact": payload.get("workflow_output_sha256")
+        == stable_payload_digest(workflow_output),
+        "execution_trace_identity_present": bool(
+            _text(payload.get("execution_trace_id"))
+        ),
+        "workflow_inputs_exact": payload.get("workflow_inputs_sha256")
+        == stable_payload_digest(probe_inputs),
+        "exact_authenticated_scope": exact_scope == expected_scope,
+        "exact_scope_identity": payload.get("exact_scope_sha256")
+        == stable_payload_digest(expected_scope),
+        "result_schema_exact": probe_result.get("schema_version")
+        == _AUTHORITATIVE_POSTCONDITION_PROBE_RESULT_SCHEMA_VERSION,
+        "isolation_id_exact": _text(probe_result.get("isolation_id")) == isolation_id,
+        "namespace_exact": _text(probe_result.get("namespace")) == namespace,
+        "target_present": probe_result.get("target_present") is True,
+        "target_not_absent": probe_result.get("target_absent") is False,
+        "resolution_status_exact": (
+            _text(probe_result.get("resolution_status")).lower() == "resolved"
+        ),
+        "candidate_shape_valid": candidate_shape_valid,
+        "cardinality_exact": expected_cardinality is not None
+        and observed_cardinality == expected_cardinality,
+        "resolved_concept_present": bool(resolved_concept_id),
+        "resolved_candidate_exact": bool(resolved_concept_id)
+        and resolved_concept_id in candidate_concept_ids,
+        "readback_concept_exact": bool(resolved_concept_id)
+        and readback_concept_id == resolved_concept_id,
+        "expected_name_projection_exact": _text(probe_result.get("expected_name"))
+        == expected_name,
+        "name_readback_exact": bool(expected_name) and expected_name in name_values,
+        "expected_description_projection_exact": _text(
+            probe_result.get("expected_description")
+        )
+        == expected_description,
+        "description_readback_exact": bool(expected_description)
+        and expected_description in description_values,
+        "represented_evidence_present": bool(represented_evidence),
+        "represented_tool_evidence_complete": set(required_tool_names).issubset(
+            set(represented_tool_names)
+        ),
+        "required_actions_executed": set(required_action_ids).issubset(
+            successful_action_ids
+        ),
+        "required_tools_executed": all(
+            required_tool_action_evidence.get(tool_name)
+            for tool_name in required_tool_names
+        ),
+        "required_tool_output_evidence_present": all(
+            any(_text(row.get("outputs_sha256")) for row in rows)
+            for rows in required_tool_action_evidence.values()
+        ),
+        "projected_result_causal_action_evidence": bool(matching_result_actions),
+    }
+    verified = all(checks.values())
+    evidence_projection = {
+        "schema_version": _AUTHORITATIVE_POSTCONDITION_PROBE_SCHEMA_VERSION,
+        "verified": verified,
+        "reason": None if verified else "authoritative_postcondition_probe_unverified",
+        "workflow_id": workflow_id or None,
+        "required_action_ids": required_action_ids,
+        "required_tool_names": required_tool_names,
+        "checks": checks,
+        "expected_state": {
+            "cardinality": expected_cardinality,
+            "name_sha256": stable_payload_digest(expected_name)
+            if expected_name
+            else None,
+            "description_sha256": stable_payload_digest(expected_description)
+            if expected_description
+            else None,
+        },
+        "observed_state": {
+            "cardinality": observed_cardinality,
+            "resolved_concept_id": resolved_concept_id or None,
+            "readback_concept_id": readback_concept_id or None,
+            "candidate_concept_ids": candidate_concept_ids,
+            "name_value_count": len(name_values),
+            "name_values_sha256": stable_payload_digest(name_values),
+            "description_value_count": len(description_values),
+            "description_values_sha256": stable_payload_digest(description_values),
+        },
+        "scope_evidence": {
+            "namespace": namespace,
+            "isolation_id_sha256": stable_payload_digest(isolation_id),
+            "exact_scope_sha256": payload.get("exact_scope_sha256"),
+            "workflow_inputs_sha256": payload.get("workflow_inputs_sha256"),
+        },
+        "execution_evidence": {
+            "execution_trace_id": payload.get("execution_trace_id"),
+            "workflow_definition_identity_sha256": payload.get(
+                "workflow_definition_identity_sha256"
+            ),
+            "workflow_output_sha256": payload.get("workflow_output_sha256"),
+            "result_sha256": result_sha256,
+            "action_evidence_sha256": stable_payload_digest(action_evidence),
+            "action_evidence": action_evidence,
+            "matching_result_action_evidence": matching_result_actions,
+        },
+        "represented_evidence": {
+            "evidence_count": len(represented_evidence),
+            "evidence_sha256": stable_payload_digest(represented_evidence),
+            "tool_names": represented_tool_names,
+        },
+    }
+    evidence_projection["evidence_sha256"] = stable_payload_digest(evidence_projection)
+    return evidence_projection
 
 
 def _json_pointer_value(value: Any, pointer: Any) -> Any:
@@ -850,6 +1430,49 @@ def _substitute_trial_values(
     return value
 
 
+def _require_exact_agent_test_fault_consumption(
+    *,
+    fault_plan: Mapping[str, Any],
+    fault_events: Sequence[Mapping[str, Any]],
+) -> None:
+    """Require every represented fault activation once and in declared order."""
+
+    expected_sequence: list[str] = []
+    for raw_rule in _sequence(fault_plan.get("faults")):
+        if not isinstance(raw_rule, Mapping):
+            continue
+        fault_id = _text(raw_rule.get("fault_id"))
+        raw_activations = raw_rule.get("max_activations", 1)
+        if (
+            not fault_id
+            or isinstance(raw_activations, bool)
+            or not isinstance(raw_activations, int)
+            or raw_activations < 1
+        ):
+            raise RuntimeError("agent_test_mcp_fault_plan_consumption_contract_invalid")
+        expected_sequence.extend([fault_id] * raw_activations)
+
+    observed_sequence = [
+        _text(event.get("fault_id"))
+        for event in fault_events
+        if isinstance(event, Mapping)
+    ]
+    if not expected_sequence or observed_sequence != expected_sequence:
+        raise RuntimeError(
+            "agent_test_mcp_fault_plan_not_fully_consumed:"
+            f"expected={','.join(expected_sequence)};"
+            f"observed={','.join(observed_sequence)}"
+        )
+
+
+def _workflow_final_state_is_failure(value: Any) -> bool:
+    final_state = _text(value).lower()
+    return bool(
+        final_state in {"failed", "failure", "error", "cancelled"}
+        or final_state.endswith("_failed")
+    )
+
+
 def _canonical_tool_catalogue_digest() -> str:
     from src.backend.integrations.internal_mcp.tool_contract_registry import (
         get_canonical_tool_registry,
@@ -1157,6 +1780,9 @@ def _execute_represented_workflow_synchronously(
             response["workflow_completed"] = bool(result.completed)
             response["final_state"] = _text(result.final_state) or None
             response["workflow_error"] = _text(result.error) or None
+            response["workflow_terminal_failure"] = (
+                _workflow_final_state_is_failure(result.final_state)
+            )
             response["workflow_output"] = json_serialisable_projection(result.data)
             response["workflow_result_envelope"] = json_serialisable_projection(
                 result.result_envelope or {}
@@ -1182,6 +1808,15 @@ def _execute_represented_workflow_synchronously(
                     "action_id": _text(raw_action.get("action_id")) or None,
                     "status": _text(raw_action.get("status")) or None,
                     "call_id": _text(raw_action.get("call_id")) or None,
+                    "requested_tool_name": _text(
+                        action_inputs.get("tool_name") or action_inputs.get("tool")
+                    )
+                    or None,
+                    "resolved_tool_name": _text(
+                        action_outputs.get("mcp_resolved_tool")
+                        or action_outputs.get("mcp_tool")
+                    )
+                    or None,
                     "inputs_sha256": stable_payload_digest(action_inputs),
                     "outputs_sha256": stable_payload_digest(action_outputs),
                     "state_probe_result_sha256": (
@@ -1197,7 +1832,11 @@ def _execute_represented_workflow_synchronously(
                 }
                 workflow_action_evidence.append(evidence_row)
             response["workflow_action_evidence"] = workflow_action_evidence
-            if result.completed is not True or result.error:
+            if (
+                result.completed is not True
+                or result.error
+                or response["workflow_terminal_failure"] is True
+            ):
                 error_code = "represented_workflow_execution_failed"
                 error_detail = _text(result.error) or _text(result.final_state)
     except Exception as exc:
@@ -1288,6 +1927,7 @@ def _execute_represented_workflow_synchronously(
         and result is not None
         and result.completed is True
         and not result.error
+        and not _workflow_final_state_is_failure(result.final_state)
     )
     response["execution_sha256"] = stable_payload_digest(
         {key: value for key, value in response.items() if key != "execution_sha256"}
@@ -1763,9 +2403,16 @@ def _turn_record_evidence_projection(turn_record: Mapping[str, Any]) -> dict[str
         "execution_trace_id",
         "workflow_instance_ids",
     }
-    return _bounded_safe_evidence(
+    bounded_record = _bounded_safe_evidence(
         {key: value for key, value in turn_record.items() if key in allowed_keys}
     )
+    if not isinstance(bounded_record, Mapping):
+        raise TypeError("turn_record_evidence_projection_invalid")
+    projection = dict(bounded_record)
+    tool_evidence_projection = project_final_answer_tool_evidence(turn_record)
+    if tool_evidence_projection is not None:
+        projection["tool_evidence_projection"] = tool_evidence_projection
+    return projection
 
 
 def _task_evidence_projection(task_evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -1966,6 +2613,25 @@ def _aggregate_authenticated_multi_turn_results(
         complete = len(numeric) == len(results)
         return (sum(numeric) if complete else None), complete
 
+    def _aggregate_user_burden() -> dict[str, Any]:
+        aggregate = aggregate_user_burden_metrics(
+            [_mapping(result.get("operational_metrics")) for result in results]
+        )
+        flattened: dict[str, Any] = {}
+        measurements = _mapping(aggregate.get("measurements"))
+        for metric_key in (
+            "follow_up_request_count",
+            "clarification_count",
+            "correction_count",
+        ):
+            measurement = _mapping(measurements.get(metric_key))
+            flattened[metric_key] = aggregate.get(metric_key)
+            flattened[f"{metric_key}_applicable"] = measurement.get("applicable")
+            flattened[f"{metric_key}_complete"] = measurement.get("complete")
+            flattened[f"{metric_key}_evidence_kind"] = measurement.get("evidence_kind")
+        flattened["user_burden_measurement_provenance"] = measurements
+        return flattened
+
     last = results[-1]
     false_success_claims = [
         {**dict(item), "turn_index": turn_index}
@@ -1973,12 +2639,28 @@ def _aggregate_authenticated_multi_turn_results(
         for item in _sequence(result.get("false_success_claims"))
         if isinstance(item, Mapping)
     ]
+    tool_evidence_projections = [
+        {
+            "turn_index": turn_index,
+            "available": isinstance(result.get("tool_evidence_projection"), Mapping),
+            "tool_evidence_projection": (
+                dict(result["tool_evidence_projection"])
+                if isinstance(result.get("tool_evidence_projection"), Mapping)
+                else None
+            ),
+        }
+        for turn_index, result in enumerate(results, start=1)
+    ]
     path_turns = [
         {
             "turn_index": turn_index,
             "terminal_state": result.get("terminal_state"),
             "visible_answer": result.get("visible_answer"),
             "path_analysis": _mapping(result.get("path_analysis")),
+            "tool_evidence_projection_available": isinstance(
+                result.get("tool_evidence_projection"),
+                Mapping,
+            ),
             "turn_execution_request_ids": _sequence(
                 result.get("turn_execution_request_ids")
             ),
@@ -2003,15 +2685,16 @@ def _aggregate_authenticated_multi_turn_results(
     duration_ms, duration_complete = _sum_numeric_metric("duration_ms")
     model_cost_units, model_cost_complete = _sum_numeric_metric("model_cost_units")
     tool_cost_units, tool_cost_complete = _sum_numeric_metric("tool_cost_units")
-    clarification_count, clarification_complete = _sum_numeric_metric(
-        "clarification_count"
-    )
-    correction_count, correction_complete = _sum_numeric_metric("correction_count")
+    user_burden_metrics = _aggregate_user_burden()
     return {
         "terminal_state": last.get("terminal_state"),
         "visible_answer": last.get("visible_answer"),
         "visible_answers": [result.get("visible_answer") for result in results],
         "conversation_turn_count": len(results),
+        "tool_evidence_projections": tool_evidence_projections,
+        "tool_evidence_projection_count": sum(
+            int(item["available"]) for item in tool_evidence_projections
+        ),
         "path_analysis": {
             "turns": path_turns,
             "selected_workflow_ids": _ordered_path_strings("selected_workflow_ids"),
@@ -2046,10 +2729,7 @@ def _aggregate_authenticated_multi_turn_results(
             "model_cost_units_complete": model_cost_complete,
             "tool_cost_units": tool_cost_units,
             "tool_cost_units_complete": tool_cost_complete,
-            "clarification_count": clarification_count,
-            "clarification_count_complete": clarification_complete,
-            "correction_count": correction_count,
-            "correction_count_complete": correction_complete,
+            **user_burden_metrics,
             "false_success_count": len(false_success_claims),
             "namespace_violation_count": len(_ordered_strings("namespace_violations")),
         },
@@ -2290,6 +2970,78 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             )
         contract = actor_contract
 
+    try:
+        runtime_bindings = _resolve_declared_runtime_bindings(
+            policy=contract.policy,
+            supplied_arguments=_sequence(getattr(args, "runtime_binding", ())),
+            namespace=effective_namespace,
+            user_id=effective_user_id,
+            org_id=effective_org_id,
+        )
+        pilot_cohort_membership = _resolve_pilot_cohort_membership(
+            policy=contract.policy,
+            user_id=effective_user_id,
+            org_id=effective_org_id,
+        )
+    except ValueError as exc:
+        execution = _typed_failure_execution(
+            code="certification_runtime_binding_invalid",
+            message=(
+                "The supplied runtime values do not satisfy the represented "
+                "suite binding contract."
+            ),
+            details={"reason_code": str(exc)},
+            contract=contract,
+        )
+        execution.update(
+            {
+                "campaign_execution_id": campaign_execution_id,
+                "environment": environment,
+                "auth_status_before": auth_status_before,
+                "auth_status": auth_status,
+                "auth_login": auth_login,
+                "target_session_context": target_context,
+                "runtime_authority_alignment": runtime_alignment,
+            }
+        )
+        execution["execution_sha256"] = stable_payload_digest(
+            {
+                key: value
+                for key, value in execution.items()
+                if key != "execution_sha256"
+            }
+        )
+        return execution
+    if pilot_cohort_membership.get("verified") is not True:
+        execution = _typed_failure_execution(
+            code="certification_pilot_actor_not_in_represented_cohort",
+            message=(
+                "The authenticated actor is not a member of the represented "
+                "pilot cohort for this suite."
+            ),
+            details={"pilot_cohort_membership": pilot_cohort_membership},
+            contract=contract,
+        )
+        execution.update(
+            {
+                "campaign_execution_id": campaign_execution_id,
+                "environment": environment,
+                "auth_status_before": auth_status_before,
+                "auth_status": auth_status,
+                "auth_login": auth_login,
+                "target_session_context": target_context,
+                "runtime_authority_alignment": runtime_alignment,
+            }
+        )
+        execution["execution_sha256"] = stable_payload_digest(
+            {
+                key: value
+                for key, value in execution.items()
+                if key != "execution_sha256"
+            }
+        )
+        return execution
+
     declared_workflow_ids = sorted(
         {
             workflow_id
@@ -2313,7 +3065,9 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         "effective_namespace": effective_namespace,
         "authenticated": True,
         "requested_model": args.model or None,
+        "suite_id": contract.suite_id,
         "suite_concept_id": contract.suite_concept_id,
+        "case_set": contract.case_set,
         "suite_source": contract.source,
         "source_definition_sha256": contract.source_definition_sha256,
         "contract_sha256": contract.contract_sha256,
@@ -2324,10 +3078,20 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         "represented_evaluator_transport": "synchronous_workflow_executor",
         "represented_evaluator_authority_required": "vontology",
         "represented_evaluator_trace_persistence_required": True,
+        "pilot_cohort_membership": pilot_cohort_membership,
+        "runtime_binding_contract_sha256": (
+            stable_payload_digest(contract.policy["runtime_binding_contract"])
+            if isinstance(contract.policy.get("runtime_binding_contract"), Mapping)
+            else None
+        ),
+        "runtime_bindings_sha256": (
+            stable_payload_digest(runtime_bindings) if runtime_bindings else None
+        ),
         "supported_operational_adapter_ids": [
             AUTHENTICATED_GENERATE_ADAPTER_ID,
             AUTHENTICATED_MULTI_TURN_ADAPTER_ID,
             DURABLE_WORKFLOW_ADAPTER_ID,
+            SYNCHRONOUS_WORKFLOW_ADAPTER_ID,
         ],
     }
     from src.backend.security.access_control import override_current_actor
@@ -2355,8 +3119,13 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         )
     )
 
-    experiment_spec_id = (
-        f"#V#operational_certification_experiment_spec_{contract.contract_sha256[:20]}"
+    experiment_spec_id = _operational_experiment_spec_id(
+        campaign_execution_id=campaign_execution_id,
+        contract_sha256=contract.contract_sha256,
+        namespace=effective_namespace,
+        user_id=effective_user_id,
+        org_id=effective_org_id,
+        runtime_bindings=runtime_bindings,
     )
     experiment_run_id = _text(args.experiment_run_id)
     if experiment_run_id:
@@ -2607,6 +3376,154 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             "matching_resolution_action_evidence": matching_resolution_actions,
         }
 
+    def _run_authoritative_postcondition_probe(
+        *,
+        scenario: Any,
+        trial_index: int,
+        isolation_id: str,
+        reset_policy: Mapping[str, Any],
+        primary_execution: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        raw_probe_spec = _mapping(reset_policy.get("authoritative_postcondition_probe"))
+        substituted_spec = _mapping(
+            _substitute_trial_values(
+                raw_probe_spec,
+                trial_index=trial_index,
+                isolation_id=isolation_id,
+                runtime_bindings=runtime_bindings,
+            )
+        )
+        workflow_id = _text(substituted_spec.get("workflow_id"))
+        raw_probe_inputs = _mapping(raw_probe_spec.get("inputs"))
+        probe_inputs = _mapping(substituted_spec.get("inputs"))
+        required_action_ids = [
+            _text(item)
+            for item in _sequence(substituted_spec.get("required_action_ids"))
+            if _text(item)
+        ]
+        required_tool_names = [
+            _text(item)
+            for item in _sequence(substituted_spec.get("required_tool_names"))
+            if _text(item)
+        ]
+        expected_cardinality = substituted_spec.get("expected_cardinality")
+        probe_declares_isolation = "{{isolation_id}}" in json.dumps(
+            raw_probe_inputs,
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        substituted_payload_text = json.dumps(
+            substituted_spec,
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        declaration_checks = {
+            "unique_state_mode": _text(reset_policy.get("mode")) == "unique_state",
+            "workflow_id_present": bool(workflow_id),
+            "probe_declares_isolation": probe_declares_isolation,
+            "probe_input_isolation_exact": (
+                _text(probe_inputs.get("isolation_id")) == isolation_id
+            ),
+            "trial_templates_resolved": all(
+                marker not in substituted_payload_text
+                for marker in ("{{isolation_id}}", "{{trial_index}}")
+            ),
+            "required_action_ids_present": bool(required_action_ids),
+            "required_action_ids_deterministic": (
+                "llm.action" not in required_action_ids
+            ),
+            "required_tool_names_present": bool(required_tool_names),
+            "expected_cardinality_valid": (
+                isinstance(expected_cardinality, int)
+                and not isinstance(expected_cardinality, bool)
+                and expected_cardinality >= 0
+            ),
+            "expected_name_present": bool(_text(substituted_spec.get("expected_name"))),
+            "expected_description_present": bool(
+                _text(substituted_spec.get("expected_description"))
+            ),
+        }
+        if not all(declaration_checks.values()):
+            evidence = {
+                "schema_version": _AUTHORITATIVE_POSTCONDITION_PROBE_SCHEMA_VERSION,
+                "verified": False,
+                "reason": "authoritative_postcondition_probe_contract_invalid",
+                "workflow_id": workflow_id or None,
+                "checks": declaration_checks,
+                "required_action_ids": required_action_ids,
+                "required_tool_names": required_tool_names,
+                "scope_evidence": {
+                    "namespace": effective_namespace,
+                    "isolation_id_sha256": stable_payload_digest(isolation_id),
+                    "probe_inputs_sha256": stable_payload_digest(probe_inputs),
+                },
+            }
+            evidence["evidence_sha256"] = stable_payload_digest(evidence)
+            return evidence
+
+        source_event_type = "operational_certification_postcondition_probe"
+        source_event_id = (
+            f"{campaign_execution_id}:{scenario.scenario_id}:"
+            f"{trial_index}:postcondition"
+        )
+        primary_execution_sha256 = stable_payload_digest(primary_execution)
+        event_idempotency_key = (
+            "operational-certification-postcondition-probe:"
+            f"{stable_payload_digest({'workflow_id': workflow_id, 'inputs': probe_inputs, 'namespace': effective_namespace, 'primary_execution_sha256': primary_execution_sha256})}"
+        )
+        try:
+            payload = _execute_represented_workflow_synchronously(
+                workflow_id=workflow_id,
+                inputs=probe_inputs,
+                namespace=effective_namespace,
+                user_id=effective_user_id,
+                org_id=effective_org_id,
+                source_event_type=source_event_type,
+                source_event_id=source_event_id,
+                event_idempotency_key=event_idempotency_key,
+                execution_metadata={
+                    "campaign_execution_id": campaign_execution_id,
+                    "contract_sha256": contract.contract_sha256,
+                    "scenario_id": scenario.scenario_id,
+                    "trial_index": trial_index,
+                    "isolation_id_sha256": stable_payload_digest(isolation_id),
+                    "primary_execution_sha256": primary_execution_sha256,
+                },
+                timeout_seconds=args.timeout_seconds,
+                require_policy_identity=False,
+            )
+        except Exception as exc:
+            evidence = {
+                "schema_version": _AUTHORITATIVE_POSTCONDITION_PROBE_SCHEMA_VERSION,
+                "verified": False,
+                "reason": "authoritative_postcondition_probe_execution_exception",
+                "workflow_id": workflow_id,
+                "required_action_ids": required_action_ids,
+                "required_tool_names": required_tool_names,
+                "scope_evidence": {
+                    "namespace": effective_namespace,
+                    "isolation_id_sha256": stable_payload_digest(isolation_id),
+                    "probe_inputs_sha256": stable_payload_digest(probe_inputs),
+                    "primary_execution_sha256": primary_execution_sha256,
+                },
+                "execution_evidence": {"error_type": type(exc).__name__},
+            }
+            evidence["evidence_sha256"] = stable_payload_digest(evidence)
+            return evidence
+
+        return _evaluate_authoritative_postcondition_probe_execution(
+            probe_spec=substituted_spec,
+            probe_inputs=probe_inputs,
+            payload=payload,
+            isolation_id=isolation_id,
+            namespace=effective_namespace,
+            user_id=effective_user_id,
+            org_id=effective_org_id,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            event_idempotency_key=event_idempotency_key,
+        )
+
     def reset_scenario(scenario: Any, trial_index: int) -> Mapping[str, Any]:
         adapter_id = _text(scenario.execution.get("adapter_id"))
         inputs = _mapping(scenario.execution.get("inputs"))
@@ -2712,7 +3629,10 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     ),
                 },
             }
-        if adapter_id == DURABLE_WORKFLOW_ADAPTER_ID:
+        if adapter_id in {
+            DURABLE_WORKFLOW_ADAPTER_ID,
+            SYNCHRONOUS_WORKFLOW_ADAPTER_ID,
+        }:
             read_only_scenario = bool(
                 scenario.metadata.get("read_only") is True
                 or not scenario.permitted_effects
@@ -2771,7 +3691,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             "adapter_id": adapter_id or None,
         }
 
-    def execute_scenario(
+    def _execute_primary_scenario(
         scenario: Any,
         trial_index: int,
         reset_evidence: Mapping[str, Any],
@@ -2819,7 +3739,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     },
                 )
                 turn_results.append(
-                    execute_scenario(
+                    _execute_primary_scenario(
                         single_turn_scenario,
                         trial_index,
                         reset_evidence,
@@ -2945,6 +3865,13 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             visible_answer = record_visible_answer or extract_visible_answer(
                 task_result
             )
+            turn_record_projection = _turn_record_evidence_projection(turn_record)
+            tool_evidence_projection = turn_record_projection.get(
+                "tool_evidence_projection"
+            )
+            follow_up_request_count = int(
+                completion_gate.get("requires_follow_up") is True
+            )
             return {
                 "terminal_state": _text(
                     completion_gate.get("decision") or terminal_receipt.get("outcome")
@@ -2956,6 +3883,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     if record_visible_answer_source
                     else "background_task_result"
                 ),
+                "tool_evidence_projection": tool_evidence_projection,
                 "path_analysis": {
                     "selected_workflow_ids": extract_selected_workflow_ids(
                         *evidence_sources
@@ -2987,10 +3915,18 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "timeout": bool(task_evidence.get("timed_out")),
                     "model_cost_units": task_evidence.get("model_cost_units"),
                     "tool_cost_units": task_evidence.get("tool_cost_units"),
-                    "clarification_count": int(
-                        completion_gate.get("requires_follow_up") is True
-                    ),
-                    "correction_count": 0,
+                    "follow_up_request_count": follow_up_request_count,
+                    "follow_up_request_count_applicable": True,
+                    "follow_up_request_count_complete": True,
+                    "follow_up_request_count_evidence_kind": ("completion_gate_proxy"),
+                    "clarification_count": follow_up_request_count,
+                    "clarification_count_applicable": True,
+                    "clarification_count_complete": True,
+                    "clarification_count_evidence_kind": ("follow_up_request_proxy"),
+                    "correction_count": None,
+                    "correction_count_applicable": True,
+                    "correction_count_complete": False,
+                    "correction_count_evidence_kind": "missing",
                     "false_success_count": len(false_success_claims),
                     "namespace_violation_count": len(namespace_violations),
                 },
@@ -3006,7 +3942,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     }
                 ),
                 "task_evidence": _task_evidence_projection(task_evidence),
-                "turn_execution_record": _turn_record_evidence_projection(turn_record),
+                "turn_execution_record": turn_record_projection,
                 "final_state_snapshot": {
                     "schema_version": "operational_state_snapshot.v1",
                     "isolation_id": isolation_id,
@@ -3019,6 +3955,189 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                         "committed_effects",
                         [],
                     ),
+                },
+            }
+        if adapter_id == SYNCHRONOUS_WORKFLOW_ADAPTER_ID:
+            from src.backend.integrations.internal_mcp.agent_test_fault_plan import (
+                bind_agent_test_mcp_fault_plan,
+            )
+
+            workflow_id = _text(inputs.get("workflow_id"))
+            if not workflow_id:
+                raise ValueError("represented_scenario_workflow_id_missing")
+            correlation_id = _text(reset_evidence.get("correlation_id"))
+            workflow_inputs = _mapping(inputs.get("workflow_inputs"))
+            if _text(args.model):
+                workflow_inputs["requested_model"] = _text(args.model)
+            raw_timeout = inputs.get("timeout_seconds", args.timeout_seconds)
+            if isinstance(raw_timeout, bool) or not isinstance(
+                raw_timeout,
+                (int, float),
+            ):
+                raise ValueError("represented_synchronous_timeout_invalid")
+            raw_fault_plan = scenario.fault_injection.get(
+                "agent_test_mcp_fault_plan"
+            )
+            fault_plan = (
+                _mapping(
+                    _substitute_trial_values(
+                        raw_fault_plan,
+                        trial_index=trial_index,
+                        isolation_id=isolation_id,
+                        runtime_bindings=runtime_bindings,
+                    )
+                )
+                if isinstance(raw_fault_plan, Mapping)
+                else {}
+            )
+            fault_scope_context = (
+                bind_agent_test_mcp_fault_plan(fault_plan)
+                if fault_plan
+                else nullcontext(None)
+            )
+            fault_events: list[dict[str, Any]] = []
+            with fault_scope_context as fault_scope:
+                payload = _mapping(
+                    _execute_represented_workflow_synchronously(
+                        workflow_id=workflow_id,
+                        inputs=workflow_inputs,
+                        namespace=effective_namespace,
+                        user_id=effective_user_id,
+                        org_id=effective_org_id,
+                        source_event_type="operational_certification_trial",
+                        source_event_id=correlation_id,
+                        event_idempotency_key=correlation_id,
+                        execution_metadata={
+                            "campaign_execution_id": campaign_execution_id,
+                            "contract_sha256": contract.contract_sha256,
+                            "scenario_id": scenario.scenario_id,
+                            "trial_index": trial_index,
+                            "fault_plan_sha256": (
+                                stable_payload_digest(fault_plan)
+                                if fault_plan
+                                else None
+                            ),
+                        },
+                        timeout_seconds=float(raw_timeout),
+                        require_policy_identity=False,
+                    )
+                )
+                if fault_scope is not None:
+                    fault_events = [
+                        dict(event) for event in fault_scope.event_snapshot()
+                    ]
+            if fault_plan and scenario.fault_injection.get(
+                "require_all_fault_rules_consumed"
+            ) is True:
+                _require_exact_agent_test_fault_consumption(
+                    fault_plan=fault_plan,
+                    fault_events=fault_events,
+                )
+
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            action_evidence = [
+                _mapping(item)
+                for item in _sequence(payload.get("workflow_action_evidence"))
+                if isinstance(item, Mapping)
+            ]
+            observed_tools: list[str] = []
+            for item in action_evidence:
+                for key in ("resolved_tool_name", "requested_tool_name"):
+                    tool_name = _text(item.get(key))
+                    if tool_name and tool_name not in observed_tools:
+                        observed_tools.append(tool_name)
+            forbidden_names = {
+                _text(item).lower()
+                for item in _sequence(inputs.get("forbidden_tool_names"))
+                if _text(item)
+            }
+            exact_scope = _mapping(payload.get("exact_scope"))
+            namespace_violations = [
+                field_name
+                for field_name, expected, observed in (
+                    (
+                        "namespace",
+                        effective_namespace,
+                        _text(exact_scope.get("namespace")),
+                    ),
+                    (
+                        "user_id",
+                        effective_user_id,
+                        _text(exact_scope.get("user_id")),
+                    ),
+                    (
+                        "org_id",
+                        effective_org_id,
+                        _text(exact_scope.get("org_id")),
+                    ),
+                )
+                if observed != expected
+            ]
+            injected_fault_classes = [
+                _text(event.get("fault_class"))
+                for event in fault_events
+                if _text(event.get("fault_class"))
+            ]
+            terminal_state = (
+                "completed"
+                if payload.get("success") is True
+                else _text(payload.get("final_state") or payload.get("error_code"))
+                or "inconclusive"
+            )
+            return {
+                "terminal_state": terminal_state,
+                "path_analysis": {
+                    "workflow_id": workflow_id,
+                    "observed_tool_names": observed_tools,
+                    "execution": _bounded_safe_evidence(payload),
+                    "execution_transport": "synchronous_workflow_executor",
+                    "agent_test_fault_events": json_serialisable_projection(
+                        fault_events
+                    ),
+                },
+                "forbidden_mutations": [
+                    name for name in observed_tools if name.lower() in forbidden_names
+                ],
+                "namespace_violations": namespace_violations,
+                "false_success_claims": [],
+                "execution_budget_units": len(action_evidence),
+                "operational_metrics": {
+                    "duration_ms": elapsed_ms,
+                    "timeout": False,
+                    "injected_fault_count": len(fault_events),
+                    "injected_timeout_count": injected_fault_classes.count("timeout"),
+                    "injected_fault_classes": injected_fault_classes,
+                    "model_cost_units": None,
+                    "tool_cost_units": None,
+                    "follow_up_request_count": None,
+                    "follow_up_request_count_applicable": False,
+                    "follow_up_request_count_complete": True,
+                    "follow_up_request_count_evidence_kind": "not_applicable",
+                    "clarification_count": None,
+                    "clarification_count_applicable": False,
+                    "clarification_count_complete": True,
+                    "clarification_count_evidence_kind": "not_applicable",
+                    "correction_count": None,
+                    "correction_count_applicable": False,
+                    "correction_count_complete": True,
+                    "correction_count_evidence_kind": "not_applicable",
+                    "false_success_count": 0,
+                    "namespace_violation_count": len(namespace_violations),
+                },
+                "workflow_execution": _bounded_safe_evidence(payload),
+                "agent_test_fault_events": json_serialisable_projection(fault_events),
+                "final_state_snapshot": {
+                    "schema_version": "operational_state_snapshot.v1",
+                    "isolation_id": isolation_id,
+                    "workflow_id": workflow_id,
+                    "execution_trace_id": payload.get("execution_trace_id"),
+                    "workflow_output_sha256": payload.get("workflow_output_sha256"),
+                    "agent_test_fault_event_sha256": (
+                        stable_payload_digest(fault_events)
+                        if fault_events
+                        else None
+                    ),
+                    "terminal_payload_sha256": stable_payload_digest(payload),
                 },
             }
         if adapter_id == DURABLE_WORKFLOW_ADAPTER_ID:
@@ -3053,13 +4172,21 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                 # workflow runtime, rather than the runner, resolves provider
                 # details and records the override in execution telemetry.
                 workflow_inputs["requested_model"] = _text(args.model)
+            if isinstance(
+                scenario.fault_injection.get("agent_test_mcp_fault_plan"),
+                Mapping,
+            ):
+                raise ValueError(
+                    "agent_test_mcp_fault_plan_requires_synchronous_adapter"
+                )
             payloads: list[dict[str, Any]] = []
             for step_index, raw_step in enumerate(submission_plan, start=1):
                 step = dict(raw_step)
                 await_terminal = step.get("await_terminal", True)
                 if not isinstance(await_terminal, bool):
                     raise ValueError(
-                        f"represented_durable_await_terminal_invalid:{step_index}"
+                        "represented_durable_await_terminal_invalid:"
+                        f"{step_index}"
                     )
                 raw_timeout = step.get("timeout_seconds", args.timeout_seconds)
                 if isinstance(raw_timeout, bool) or not isinstance(
@@ -3089,6 +4216,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             payload = payloads[-1]
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             observed_tools = _observed_tool_names(payloads)
+            fault_events: list[dict[str, Any]] = []
             forbidden_names = {
                 _text(item).lower()
                 for item in _sequence(inputs.get("forbidden_tool_names"))
@@ -3138,6 +4266,8 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
             )
             timed_out = any(
                 mapping.get("timed_out") is True for mapping in _walk_mappings(payloads)
+            ) or any(
+                event.get("fault_class") == "timeout" for event in fault_events
             )
             workflow_execution = _mapping(payload.get("workflow_execution"))
             terminal_state = _text(
@@ -3161,6 +4291,9 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "idempotent_instance_reuse_observed": (
                         idempotent_instance_reuse_observed
                     ),
+                    "agent_test_fault_events": json_serialisable_projection(
+                        fault_events
+                    ),
                 },
                 "forbidden_mutations": [
                     name for name in observed_tools if name.lower() in forbidden_names
@@ -3174,23 +4307,70 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "timeout": timed_out,
                     "model_cost_units": None,
                     "tool_cost_units": None,
-                    "clarification_count": 0,
-                    "correction_count": 0,
+                    "follow_up_request_count": None,
+                    "follow_up_request_count_applicable": False,
+                    "follow_up_request_count_complete": True,
+                    "follow_up_request_count_evidence_kind": "not_applicable",
+                    "clarification_count": None,
+                    "clarification_count_applicable": False,
+                    "clarification_count_complete": True,
+                    "clarification_count_evidence_kind": "not_applicable",
+                    "correction_count": None,
+                    "correction_count_applicable": False,
+                    "correction_count_complete": True,
+                    "correction_count_evidence_kind": "not_applicable",
                     "false_success_count": 0,
                     "namespace_violation_count": len(namespace_violations),
                 },
                 "workflow_execution": _bounded_safe_evidence(payload),
                 "workflow_submissions": _bounded_safe_evidence(payloads),
+                "agent_test_fault_events": json_serialisable_projection(fault_events),
                 "final_state_snapshot": {
                     "schema_version": "operational_state_snapshot.v1",
                     "isolation_id": isolation_id,
                     "workflow_id": workflow_id,
                     "workflow_instance_ids": workflow_instance_ids,
                     "submission_count": len(payloads),
+                    "agent_test_fault_event_sha256": (
+                        stable_payload_digest(fault_events) if fault_events else None
+                    ),
                     "terminal_payload_sha256": stable_payload_digest(payload),
                 },
             }
         raise ValueError(f"unsupported_scenario_adapter:{adapter_id or 'missing'}")
+
+    def execute_scenario(
+        scenario: Any,
+        trial_index: int,
+        reset_evidence: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        primary_execution = dict(
+            _execute_primary_scenario(scenario, trial_index, reset_evidence)
+        )
+        reset_policy = _mapping(scenario.reset_policy)
+        if not isinstance(
+            reset_policy.get("authoritative_postcondition_probe"),
+            Mapping,
+        ):
+            return primary_execution
+
+        postcondition_probe = _run_authoritative_postcondition_probe(
+            scenario=scenario,
+            trial_index=trial_index,
+            isolation_id=_text(reset_evidence.get("isolation_id")),
+            reset_policy=reset_policy,
+            primary_execution=primary_execution,
+        )
+        primary_execution["authoritative_postcondition_probe"] = postcondition_probe
+        final_state_snapshot = _mapping(primary_execution.get("final_state_snapshot"))
+        final_state_snapshot["authoritative_postcondition_probe_verified"] = (
+            postcondition_probe.get("verified") is True
+        )
+        final_state_snapshot["authoritative_postcondition_probe_evidence_sha256"] = (
+            postcondition_probe.get("evidence_sha256")
+        )
+        primary_execution["final_state_snapshot"] = final_state_snapshot
+        return primary_execution
 
     def execute_evaluator(
         scenario: Any,
@@ -3223,7 +4403,16 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         payload = _execute_represented_workflow_synchronously(
             workflow_id=workflow_id,
             inputs={
-                "scenario_contract": scenario.to_projection(),
+                "scenario_contract": _substitute_trial_values(
+                    scenario.to_projection(),
+                    trial_index=trial_index,
+                    isolation_id=_text(
+                        _mapping(observation.get("reset_evidence")).get(
+                            "isolation_id"
+                        )
+                    ),
+                    runtime_bindings=runtime_bindings,
+                ),
                 "trial_index": trial_index,
                 "trial_observation": projected_observation,
             },
@@ -3298,6 +4487,16 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
                     "one clean runtime and Mongo authority location."
                 ),
                 "details": runtime_alignment,
+            },
+            {
+                "gate_id": "pilot_actor_cohort_membership_verified",
+                "passed": pilot_cohort_membership.get("verified") is True,
+                "blocker_code": "certification_pilot_actor_not_in_represented_cohort",
+                "message": (
+                    "Actor-level pilot evidence must be produced by an exact "
+                    "member of the represented cohort."
+                ),
+                "details": pilot_cohort_membership,
             },
         ),
         represented_campaign_evidence=represented_campaign_evidence,
@@ -3383,6 +4582,7 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
     execution["experiment_run_id"] = experiment_run_id
     execution["experiment_finalisation"] = experiment_finalisation
     execution["release_eligibility"] = {
+        "scope": "actor_campaign",
         "eligible": bool(
             live_authority
             and campaign.get("certified") is True
@@ -3396,6 +4596,17 @@ def _live_execution(args: argparse.Namespace, contract: Any) -> dict[str, Any]:
         "effective_user_id": effective_user_id,
         "effective_org_id": effective_org_id,
         "effective_namespace": effective_namespace,
+        "pilot_cohort_membership_verified": (
+            pilot_cohort_membership.get("verified") is True
+        ),
+        "cohort_aggregate_required_for_v1": (
+            pilot_cohort_membership.get("aggregation_required") is True
+        ),
+        "cohort_aggregate_verified": (
+            False
+            if pilot_cohort_membership.get("aggregation_required") is True
+            else None
+        ),
         "experiment_finalisation_success": experiment_finalisation.get("success")
         is True,
         "experiment_status": experiment_finalisation.get("status"),
@@ -3454,6 +4665,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval-seconds", type=float, default=0.75)
     parser.add_argument("--allow-non-agent-test-server", action="store_true")
     parser.add_argument("--experiment-run-id", default="")
+    parser.add_argument(
+        "--runtime-binding",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "Supply one exact value declared by the represented suite's runtime "
+            "binding contract. Repeat for multiple values; authenticated actor "
+            "scope bindings are verified against the live session."
+        ),
+    )
     parser.add_argument(
         "--campaign-evidence-concept-id",
         default=OPERATIONAL_CERTIFICATION_CAMPAIGN_EVIDENCE_CONCEPT_ID,

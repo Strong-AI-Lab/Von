@@ -991,7 +991,10 @@ def test_stable_digest_is_independent_of_mapping_key_order() -> None:
 def test_repo_seed_bundle_is_a_valid_generic_contract_fixture() -> None:
     seed = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
 
-    contract = parse_operational_certification_contract(seed)
+    contract = parse_operational_certification_contract(
+        seed,
+        case_set="executable_engineering_seed",
+    )
 
     assert contract.suite_concept_id == "#V#operational_certification_benchmark_suite"
     assert contract.topological_scenario_ids == (
@@ -1038,6 +1041,165 @@ def test_repo_seed_bundle_is_a_valid_generic_contract_fixture() -> None:
     }
 
 
+def test_repo_seed_bundle_declares_the_agreed_trusted_sail_pilot_contract() -> None:
+    seed = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
+
+    contract = parse_operational_certification_contract(seed)
+
+    assert seed["seed_version"] == 4
+    assert contract.case_set == "trusted_sail_pilot_v1"
+    assert {scenario.scenario_id for scenario in contract.scenarios} == {
+        "pilot_kb_relation_rag_read_only",
+        "pilot_arxiv_mcp_read_only",
+        "pilot_jira_mcp_read_only",
+        "pilot_multi_tool_research_briefing",
+        "pilot_same_session_referent_followup",
+        "pilot_durable_workflow_resume_and_idempotence",
+        "pilot_unique_state_marker_create_and_read_back",
+        "pilot_typed_missing_entity_recovery",
+    }
+    assert all(not scenario.depends_on for scenario in contract.scenarios)
+    assert all(
+        scenario.metadata["pilot_acceptance_eligible"] is True
+        for scenario in contract.scenarios
+    )
+
+    cohort = contract.policy["pilot_cohort"]
+    assert cohort == {
+        "status": "agreed",
+        "profile": "trusted_sail",
+        "organisation_concept_id": (
+            "#V#university_of_auckland_strong_ai_lab"
+        ),
+        "actor_concept_ids": [
+            "#V#michael_witbrock",
+            "#V#zhan_von_witbrock",
+        ],
+        "aggregation_policy": (
+            "all_actors_must_independently_satisfy_all_certification_gates"
+        ),
+    }
+    envelopes = contract.policy["pilot_envelopes"]
+    assert envelopes["status"] == "agreed_initial"
+    assert envelopes["latency"] == {
+        "single_turn_max_ms": 120000,
+        "durable_max_ms": 180000,
+        "multi_turn_max_ms": 360000,
+    }
+    assert envelopes["clarification"]["max_count_per_trial"] == 1
+    assert envelopes["correction"]["max_count_per_trial"] == 0
+    assert envelopes["revision_policy"] == {
+        "basis": "measured_campaign_evidence",
+        "requires_live_vontology_revision": True,
+        "no_silent_relaxation": True,
+    }
+
+    scenarios = {scenario.scenario_id: scenario for scenario in contract.scenarios}
+    expected_tools = {
+        "pilot_kb_relation_rag_read_only": ["search_knowledge_base"],
+        "pilot_arxiv_mcp_read_only": ["search_arxiv"],
+        "pilot_jira_mcp_read_only": ["jira_get_issue"],
+        "pilot_multi_tool_research_briefing": [
+            "search_knowledge_base",
+            "search_arxiv",
+            "jira_get_issue",
+        ],
+    }
+    for scenario_id, required_tools in expected_tools.items():
+        scenario = scenarios[scenario_id]
+        tool_check = next(
+            check
+            for check in scenario.checks
+            if check["matcher_id"] == "required_observed_tools_present"
+        )
+        assert tool_check == {
+            "matcher_id": "required_observed_tools_present",
+            "kind": "subset",
+            "path": "/path_analysis/observed_tool_names",
+            "expected": required_tools,
+        }
+
+    assert next(
+        check
+        for check in scenarios["pilot_typed_missing_entity_recovery"].checks
+        if check["matcher_id"]
+        == "at_least_one_tool_observed_for_semantic_evaluation"
+    ) == {
+        "matcher_id": "at_least_one_tool_observed_for_semantic_evaluation",
+        "kind": "count",
+        "path": "/path_analysis/observed_tool_names",
+        "operator": "gte",
+        "expected": 1,
+    }
+
+    for scenario in contract.scenarios:
+        input_text = json.dumps(scenario.execution.get("inputs") or {})
+        assert "Michael" not in input_text
+        assert "Zhan" not in input_text
+        measurement_paths = {
+            budget["measurement_path"] for budget in scenario.budgets
+        }
+        assert "/operational_metrics/duration_ms" in measurement_paths
+        assert "/operational_metrics/follow_up_request_count" in measurement_paths
+        assert "/operational_metrics/correction_count" not in measurement_paths
+        assert scenario.metadata["interaction_burden_evidence"][
+            "correction_measurement_status"
+        ] == "pending_represented_correction_event_telemetry"
+
+    marker_probe = scenarios[
+        "pilot_unique_state_marker_create_and_read_back"
+    ].reset_policy["authoritative_postcondition_probe"]
+    assert marker_probe["workflow_id"] == (
+        "#V#operational_marker_readback_probe_workflow"
+    )
+    assert marker_probe["expected_cardinality"] == 1
+
+
+def test_repo_seed_declares_generic_transient_mcp_fault_recovery_case() -> None:
+    seed = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
+    seed["default_case_set"] = "transient_mcp_fault_recovery_v1"
+    contract = parse_operational_certification_contract(seed)
+
+    assert len(contract.scenarios) == 1
+    scenario = contract.scenarios[0]
+    assert scenario.scenario_id == (
+        "transient_mcp_fault_chain_recovers_with_bounded_retries"
+    )
+    assert scenario.execution["adapter_id"] == (
+        "#V#synchronous_represented_workflow_operational_adapter"
+    )
+    assert scenario.execution["inputs"]["workflow_id"] == (
+        "#V#operational_mcp_fault_recovery_probe_workflow"
+    )
+    fault_contract = scenario.fault_injection
+    assert fault_contract["recoverable"] is True
+    assert fault_contract["bounded_recovery_budget"] == 3
+    assert fault_contract["require_all_fault_rules_consumed"] is True
+    plan = fault_contract["agent_test_mcp_fault_plan"]
+    assert [rule["fault_class"] for rule in plan["faults"]] == [
+        "timeout",
+        "rate_limit",
+        "temporary_unavailability",
+    ]
+    assert {rule["tool_name"] for rule in plan["faults"]} == {
+        "resolve_concept_by_name"
+    }
+    assert scenario.execution["inputs"]["timeout_seconds"] == 180.0
+    assert "submission_plan" not in scenario.execution["inputs"]
+    checks = {check["matcher_id"]: check for check in scenario.checks}
+    assert checks["timeout_fault_observed_first"]["expected"] == "timeout"
+    assert checks["rate_limit_fault_observed_second"]["expected"] == "rate_limit"
+    assert checks["temporary_unavailability_fault_observed_third"]["expected"] == (
+        "temporary_unavailability"
+    )
+    assert checks["represented_recovery_attempt_count_exact"]["expected"] == 3
+    assert checks["represented_recovery_final_read_completed"]["expected"] == (
+        "not_found"
+    )
+    assert scenario.permitted_effects == ()
+    assert scenario.metadata["pilot_acceptance_eligible"] is False
+
+
 def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> None:
     definition = load_benchmark_suite_definition_from_seed_fixture(_SEED_PATH)
     selected_case_set = load_benchmark_suite_case_set(
@@ -1050,5 +1212,5 @@ def test_repo_seed_bundle_round_trips_through_existing_benchmark_loader() -> Non
 
     assert definition_contract.contract_sha256 == selected_contract.contract_sha256
     assert selected_contract.source == "seed_bundle_import_fixture"
-    assert definition["seed_version"] == 3
-    assert selected_case_set["seed_version"] == 3
+    assert definition["seed_version"] == 4
+    assert selected_case_set["seed_version"] == 4

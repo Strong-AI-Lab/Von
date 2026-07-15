@@ -56,6 +56,14 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
                     "drift_detected": False,
                 },
             },
+            "operational_learning_release_authority_bootstrap": {
+                "success": True,
+                "workflow_publication": {
+                    "publication": {
+                        "materialisation_status": "current",
+                    }
+                },
+            },
         }
     )
 
@@ -93,6 +101,9 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
             "materialisation_status": "current",
             "drift_detected": False,
             "skip_reason": "existing_materialisation_valid",
+        },
+        "operational_learning_release_authority_bootstrap": {
+            "success": True,
         },
     }
 
@@ -621,6 +632,17 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     talk_workflow_bootstrap_report = result.get("talk_workflow_bootstrap")
     assert isinstance(talk_workflow_bootstrap_report, dict)
     assert talk_workflow_bootstrap_report.get("success") is True
+    operational_learning_release_authority_report = result.get(
+        "operational_learning_release_authority_bootstrap"
+    )
+    assert isinstance(operational_learning_release_authority_report, dict)
+    assert operational_learning_release_authority_report.get("success") is True
+    assert (
+        operational_learning_release_authority_report.get(
+            "candidate_behaviour_workflow_id"
+        )
+        == "#V#operational_learning_candidate_behaviour_evaluation_workflow"
+    )
     workflow_authority_bootstrap_report = result.get("workflow_authority_bootstrap")
     assert isinstance(workflow_authority_bootstrap_report, dict)
     assert workflow_authority_bootstrap_report.get("success") is True

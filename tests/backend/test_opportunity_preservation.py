@@ -21,6 +21,8 @@ Barrier classes (from JVNAUTOSCI-2553):
     terminal-success contracts (2557)
 """
 
+import json
+
 from src.backend.integrations.internal_mcp.catalogue import (
     _bool_input_normalisation_record,
     _coerce_bool_input,
@@ -43,17 +45,31 @@ from src.backend.services.rag_service import build_rag_retrieval_state
 from src.backend.services.required_tool_obligation_service import (
     build_required_tool_obligation_ledger,
 )
+from src.backend.services.turn_execution_record_service import (
+    project_final_answer_tool_evidence,
+)
+from src.backend.services import (
+    tool_evidence_projection_service as tool_evidence_projection,
+)
 from src.backend.services import tool_target_contract_validation as target_validation
 from src.backend.services.tool_metadata_service import (
     ToolRequiredObligationMetadata,
 )
 from src.backend.services.operational_learning_release_service import (
+    build_empty_operational_learning_release_state,
+    operational_learning_release_digest,
     project_learning_release_recovery_affordances,
 )
 from src.backend.services.operational_learning_release_vontology_service import (
     LearningReleaseStateConflictError,
-    LearningReleasePersistenceError,
-    _apply_and_readback_release_activation,
+    OPERATIONAL_LEARNING_RELEASE_STATE_RECORD_SCHEMA_VERSION,
+    operational_learning_release_state_concept_id,
+)
+from src.backend.services.operational_learning_release_runtime_service import (
+    project_active_operational_learning_release,
+)
+from src.backend.services.operational_certification_cohort_aggregate_service import (
+    OperationalCertificationCohortAggregateError,
 )
 from src.backend.workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
@@ -76,9 +92,85 @@ from src.backend.services.workflow_discovery_service import (
 from src.backend.languagemodels.structured_tool_calling import (
     transport as structured_tool_transport,
 )
+from src.backend.languagemodels.structured_tool_calling.providers import OpenAIClient
 
 
 # --- retrieval barriers remain inspectable and recoverable ------------------
+
+
+def test_final_answer_tool_evidence_remains_available_to_external_evaluation() -> None:
+    turn_record = {
+        "final_answer_synthesis": {
+            "request": {"prompt": "private synthesis prompt"},
+            "tool_evidence_projection": {
+                "schema_version": "tool_evidence_projection_reachability.v1",
+                "projection_count": 1,
+                "missing_required_field_concept_ids": ["#V#synthetic_unresolved_field"],
+                "entries": [
+                    {
+                        "tool": "synthetic_lookup",
+                        "missing_required_fields": [
+                            {
+                                "field_concept_id": "#V#synthetic_unresolved_field",
+                                "output_key": "unresolved_fact",
+                                "reason": "missing_from_payload",
+                            }
+                        ],
+                        "projected_payload": {
+                            "established_fact": "represented evidence",
+                            "access_token": "must-not-leak",
+                        },
+                    }
+                ],
+            },
+        }
+    }
+
+    projection = project_final_answer_tool_evidence(turn_record)
+
+    assert projection is not None
+    entry = projection["entries"][0]
+    assert entry["projected_payload"]["established_fact"] == ("represented evidence")
+    assert entry["projected_payload"]["access_token"] == "[redacted]"
+    assert projection["missing_required_field_concept_ids"] == [
+        "#V#synthetic_unresolved_field"
+    ]
+    assert entry["missing_required_fields"][0]["reason"] == ("missing_from_payload")
+    assert "request" not in projection
+
+
+def test_fresh_structured_request_preserves_prior_tool_evidence_without_orphan_output() -> (
+    None
+):
+    client = OpenAIClient.__new__(OpenAIClient)
+    items = client._build_responses_input(
+        prompt="Continue from the represented evidence.",
+        context=[
+            {
+                "role": "tool",
+                "name": "synthetic_lookup",
+                "tool_call_id": "call_synthetic_prior",
+                "content": '{"represented_fact":"available"}',
+            }
+        ],
+        continuation=None,
+        tool_results=[],
+    )
+
+    # A fresh request has no opaque provider continuation, so the prior result
+    # must remain available as lower-trust context rather than becoming an
+    # invalid provider-native function output with no matching function call.
+    assert not any(item.get("type") == "function_call_output" for item in items)
+    evidence = json.loads(items[0]["content"])
+    assert evidence == {
+        "schema_version": "structured_tool_context_evidence.v1",
+        "type": "prior_tool_result",
+        "trust_boundary": "untrusted_tool_output",
+        "output": '{"represented_fact":"available"}',
+        "tool_name": "synthetic_lookup",
+        "call_id": "call_synthetic_prior",
+    }
+    assert items[-1]["content"] == "Continue from the represented evidence."
 
 
 def test_recovery_schema_hygiene_preserves_valid_verification_read_opportunity() -> (
@@ -106,9 +198,7 @@ def test_recovery_schema_hygiene_preserves_valid_verification_read_opportunity()
         "query": "synthetic target",
         "namespace": "#V#tester@test_org",
     }
-    assert {
-        (entry.get("field"), entry.get("source")) for entry in bindings
-    } >= {
+    assert {(entry.get("field"), entry.get("source")) for entry in bindings} >= {
         ("namespace", "user_namespace"),
         ("contract_advisory", "removed_for_strict_tool_schema"),
     }
@@ -134,6 +224,75 @@ def test_retrieval_incompatibility_is_not_collapsed_into_authoritative_empty() -
     assert empty["usable"] is True
     assert empty["authoritative_empty"] is True
     assert empty["rebuild_required"] is False
+
+
+def test_represented_tool_evidence_keeps_typed_recovery_facts_visible(
+    monkeypatch,
+) -> None:
+    field_specs = (
+        ("#V#synthetic_expected_fact_field", "expected_fact", True),
+        ("#V#synthetic_success_field", "success", False),
+        ("#V#synthetic_error_code_field", "error_code", False),
+        ("#V#synthetic_error_details_field", "error_details", False),
+        ("#V#synthetic_suggestions_field", "suggestions", False),
+    )
+    fields = tuple(
+        tool_evidence_projection.ToolFieldContract(
+            concept_id=concept_id,
+            output_key=output_key,
+            wire_aliases=(output_key,),
+            payload_paths=(output_key,),
+            required=required,
+            included=True,
+            redacted=False,
+        )
+        for concept_id, output_key, required in field_specs
+    )
+    contract = tool_evidence_projection.ToolProjectionContract(
+        tool_concept_id="#V#synthetic_grounded_read_tool",
+        evidence_view_concept_ids=("#V#synthetic_final_answer_evidence_view",),
+        fields=fields,
+        output_field_ids=tuple(field.concept_id for field in fields),
+        collection_field_ids=(),
+    )
+    monkeypatch.setattr(
+        tool_evidence_projection,
+        "resolve_tool_projection_contract",
+        lambda _tool_name: contract,
+    )
+
+    projected = tool_evidence_projection.project_tool_payload_for_llm(
+        "synthetic_grounded_read",
+        {
+            "success": False,
+            "error_code": "represented_dependency_unavailable",
+            "error_details": {
+                "cause": "synthetic_unavailability",
+                "recovery_hint": "retry through the represented read surface",
+            },
+            "suggestions": ["inspect", "retry", "return a bounded answer"],
+            "private_backend_state": "must-not-leak",
+        },
+    )
+
+    assert projected is not None
+    assert projected["success"] is False
+    assert projected["error_code"] == "represented_dependency_unavailable"
+    assert projected["error_details"]["recovery_hint"] == (
+        "retry through the represented read surface"
+    )
+    assert projected["suggestions"] == [
+        "inspect",
+        "retry",
+        "return a bounded answer",
+    ]
+    assert "private_backend_state" not in projected
+    assert projected["_tool_evidence_projection"]["missing_required_fields"] == [
+        {
+            "field_concept_id": "#V#synthetic_expected_fact_field",
+            "output_key": "expected_fact",
+        }
+    ]
 
 
 def test_represented_tool_transport_preserves_compatible_surface_opportunity(
@@ -326,9 +485,7 @@ def test_stale_discovery_projection_keeps_currently_visible_recovery_candidate(
         }
     )
 
-    assert [item["concept_id"] for item in projected["matches"]] == [
-        accessible_id
-    ]
+    assert [item["concept_id"] for item in projected["matches"]] == [accessible_id]
     assert projected["candidate_count"] == 1
     assert projected["match_count"] == 1
     assert restricted_id not in repr(projected)
@@ -340,9 +497,7 @@ def test_stale_discovery_projection_keeps_currently_visible_recovery_candidate(
 # --- terminal receipts retain represented recovery opportunities ------------
 
 
-def test_equivalent_execution_surface_is_not_erased_by_gateway_name_mismatch() -> (
-    None
-):
+def test_equivalent_execution_surface_is_not_erased_by_gateway_name_mismatch() -> None:
     action_id = "synthetic_family.verify_effect"
     ledger = build_required_tool_obligation_ledger(
         required_tools=[action_id],
@@ -398,9 +553,7 @@ def test_grounded_read_evidence_preserves_target_inspection_opportunity(
                 "tool": "synthetic.resolve_target",
                 "status": "ok",
                 "effective_payload": {
-                    "result": {
-                        "resolved_concept_id": "#V#synthetic_grounded_target"
-                    }
+                    "result": {"resolved_concept_id": "#V#synthetic_grounded_target"}
                 },
             }
         ],
@@ -460,33 +613,52 @@ def test_learning_release_optimistic_conflict_preserves_inspect_and_retry_paths(
 
     assert conflict["details"]["current_version"] == 4
     assert conflict["details"]["current_state_sha256"] == "b" * 64
-    assert {
-        item["action_type"] for item in conflict["recovery_affordances"]
-    } == {"read_latest_state", "retry_with_latest_version"}
+    assert {item["action_type"] for item in conflict["recovery_affordances"]} == {
+        "read_latest_state",
+        "retry_with_latest_version",
+    }
 
 
-def test_missing_release_activation_adapter_retains_active_release_opportunity() -> (
+def test_absent_active_release_preserves_inspection_and_candidate_opportunities() -> (
     None
 ):
-    try:
-        _apply_and_readback_release_activation(
-            {
-                "candidate_id": "candidate-synthetic",
-                "affected_artifact": "#V#synthetic_artifact",
-                "release_sha256": "a" * 64,
-            }
-        )
-    except LearningReleasePersistenceError as exc:
-        projection = exc.to_dict()
-    else:  # pragma: no cover - the default adapter must fail closed
-        raise AssertionError("missing activation adapter unexpectedly succeeded")
+    namespace = "#V#synthetic_user@synthetic_org"
+    user_id = "#V#synthetic_user"
+    org_id = "#V#synthetic_org"
+    state = build_empty_operational_learning_release_state()
+    record = {
+        "schema_version": OPERATIONAL_LEARNING_RELEASE_STATE_RECORD_SCHEMA_VERSION,
+        "state_concept_id": operational_learning_release_state_concept_id(
+            namespace=namespace,
+            user_id=user_id,
+            org_id=org_id,
+        ),
+        "namespace": namespace,
+        "user_id": user_id,
+        "org_id": org_id,
+        "version": 1,
+        "state_sha256": operational_learning_release_digest(state),
+        "previous_state_sha256": None,
+        "previous_record_sha256": None,
+        "state": state,
+        "authenticated_approval_records": {},
+        "candidate_evaluation_records": {},
+        "last_mutation": {"operation": "synthetic_projection"},
+        "updated_at": "2026-07-14T10:00:00+00:00",
+    }
+    record["record_sha256"] = operational_learning_release_digest(record)
 
-    assert projection["details"]["decision_state"] == (
-        "promotion_approved_not_activated"
+    projection = project_active_operational_learning_release(
+        record,
+        affected_artifact="#V#synthetic_artifact",
     )
-    assert {
-        item["action_type"] for item in projection["recovery_affordances"]
-    } == {"register_canonical_release_activation_adapter", "retain_active_release"}
+
+    assert projection["status"] == "no_active_release"
+    assert projection["release_payload"] is None
+    assert {item["action_type"] for item in projection["recovery_affordances"]} == {
+        "inspect_learning_release_state",
+        "inspect_release_candidates",
+    }
 
 
 # --- terminal receipts retain represented recovery opportunities ------------
@@ -708,3 +880,28 @@ def test_verified_existing_entity_does_not_force_duplicate_creation() -> None:
     assert projection["conditional_satisfaction_reason"] == (
         "resolved_existing_entity_satisfies_create_if_absent_branch"
     )
+
+
+def test_cohort_evidence_failure_keeps_machine_recovery_visible() -> None:
+    error = OperationalCertificationCohortAggregateError(
+        "synthetic_cohort_campaign_set_mismatch",
+        details={"missing_actor_concept_ids": ["#V#synthetic_actor"]},
+        recovery_affordances=(
+            {
+                "action_type": "supply_exact_declared_actor_campaign_set",
+                "declared_actor_concept_ids": ["#V#synthetic_actor"],
+            },
+        ),
+    )
+
+    projection = error.to_dict()
+
+    assert projection["details"]["missing_actor_concept_ids"] == [
+        "#V#synthetic_actor"
+    ]
+    assert projection["recovery_affordances"] == [
+        {
+            "action_type": "supply_exact_declared_actor_campaign_set",
+            "declared_actor_concept_ids": ["#V#synthetic_actor"],
+        }
+    ]

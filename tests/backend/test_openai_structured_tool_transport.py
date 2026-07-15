@@ -67,6 +67,20 @@ class _RateLimitError(RuntimeError):
     status_code = 429
 
 
+class _ToolCallLineageError(RuntimeError):
+    status_code = 400
+    body = {
+        "error": {
+            "message": (
+                "No tool call found for function call output with call_id call_orphan."
+            ),
+            "type": "invalid_request_error",
+            "param": "input",
+            "code": None,
+        }
+    }
+
+
 def _tool(name: str = "lookup") -> ToolDefinition:
     return ToolDefinition(
         name=name,
@@ -737,6 +751,160 @@ def test_responses_parses_mixed_output_and_preserves_ordered_continuation(
         "completion_tokens": 8,
         "total_tokens": 18,
     }
+
+
+def test_fresh_responses_request_projects_prior_tool_result_as_context_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "deployment-fresh-tool-context"
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[_text_response(model=model, text="Evidence considered")],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Review the prior evidence.",
+            available_tools=[_tool("lookup")],
+            context=[
+                {"role": "system", "content": "Use grounded evidence."},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_prior",
+                    "name": "lookup",
+                    "content": '{"value":"grounded"}',
+                },
+            ],
+        )
+    )
+
+    request_input = captured["responses"][0]["input"]
+    assert not any(item.get("type") == "function_call_output" for item in request_input)
+    evidence_message = next(
+        item
+        for item in request_input
+        if item.get("role") == "user"
+        and "structured_tool_context_evidence.v1" in str(item.get("content"))
+    )
+    assert json.loads(evidence_message["content"]) == {
+        "schema_version": "structured_tool_context_evidence.v1",
+        "type": "prior_tool_result",
+        "trust_boundary": "untrusted_tool_output",
+        "output": '{"value":"grounded"}',
+        "tool_name": "lookup",
+        "call_id": "call_prior",
+    }
+    assert request_input[-1] == {
+        "role": "user",
+        "content": "Review the prior evidence.",
+    }
+    assert (
+        result.transport_metadata["fresh_tool_context_evidence_projection_count"] == 1
+    )
+    assert result.transport_metadata["fresh_tool_context_evidence_projection"] == (
+        "user_role_json_envelope"
+    )
+
+
+def test_fresh_chat_request_projects_prior_tool_result_as_context_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "chat-fresh-tool-context"
+    _install_profiles(monkeypatch, _registry_profiles(_chat_profile()))
+    captured = _install_fake_openai(monkeypatch)
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Review the prior evidence.",
+            available_tools=[_tool("lookup")],
+            context=[
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_prior",
+                    "name": "lookup",
+                    "content": "grounded",
+                }
+            ],
+        )
+    )
+
+    request_messages = captured["chat"][0]["messages"]
+    assert not any(message.get("role") == "tool" for message in request_messages)
+    evidence_message = request_messages[0]
+    assert evidence_message["role"] == "user"
+    assert json.loads(evidence_message["content"]) == {
+        "schema_version": "structured_tool_context_evidence.v1",
+        "type": "prior_tool_result",
+        "trust_boundary": "untrusted_tool_output",
+        "output": "grounded",
+        "tool_name": "lookup",
+        "call_id": "call_prior",
+    }
+    assert result.transport_metadata[
+        "fresh_tool_context_evidence_projection_count"
+    ] == 1
+
+
+def test_provider_tool_call_lineage_rejection_is_typed_and_never_surface_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "deployment-lineage-rejection"
+    _install_profiles(
+        monkeypatch,
+        _registry_profiles(
+            _responses_profile(),
+            _chat_profile(),
+        ),
+    )
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[
+            _ToolCallLineageError(
+                "No tool call found for function call output with call_id call_orphan."
+            )
+        ],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    with pytest.raises(StructuredToolProtocolError) as exc_info:
+        asyncio.run(
+            client.generate_with_tools(
+                prompt="Review evidence.",
+                available_tools=[_tool("lookup")],
+            )
+        )
+
+    assert len(captured["responses"]) == 1
+    assert captured["chat"] == []
+    assert exc_info.value.decision["failure_kind"] == (
+        "provider_tool_call_lineage_rejected"
+    )
+    assert exc_info.value.decision["provider_status_code"] == 400
+    assert exc_info.value.decision["provider_error_param"] == "input"
 
 
 def test_responses_continuation_emits_exact_call_outputs_and_reasoning_items(

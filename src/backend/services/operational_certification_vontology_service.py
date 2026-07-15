@@ -32,6 +32,12 @@ OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID = (
 OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID = (
     "#V#operational_marker_absence_probe_workflow"
 )
+OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID = (
+    "#V#operational_marker_readback_probe_workflow"
+)
+OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID = (
+    "#V#operational_mcp_fault_recovery_probe_workflow"
+)
 OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID = (
     "#V#prompt_operational_certification_state_evaluator"
 )
@@ -326,6 +332,8 @@ def bootstrap_operational_certification_authority(
         target_workflow_ids=(
             OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID,
             OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID,
+            OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID,
+            OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID,
         ),
     )
     suite_support = ensure_canonical_benchmark_suites_from_seed_fixtures(
@@ -358,6 +366,12 @@ def bootstrap_operational_certification_authority(
         "marker_absence_probe_workflow_id": (
             OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID
         ),
+        "marker_readback_probe_workflow_id": (
+            OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID
+        ),
+        "mcp_fault_recovery_probe_workflow_id": (
+            OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID
+        ),
         "evaluator_prompt_id": OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID,
         "prompt_support": prompt_support,
         "workflow_publication": workflow_publication,
@@ -371,6 +385,8 @@ __all__ = [
     "OPERATIONAL_CERTIFICATION_EVALUATOR_PROMPT_ID",
     "OPERATIONAL_CERTIFICATION_EVALUATOR_WORKFLOW_ID",
     "OPERATIONAL_MARKER_ABSENCE_PROBE_WORKFLOW_ID",
+    "OPERATIONAL_MARKER_READBACK_PROBE_WORKFLOW_ID",
+    "OPERATIONAL_MCP_FAULT_RECOVERY_PROBE_WORKFLOW_ID",
     "REPRESENTED_OPERATIONAL_CAMPAIGN_EVIDENCE_SCHEMA_VERSION",
     "bootstrap_operational_certification_authority",
     "load_represented_operational_campaign_evidence",

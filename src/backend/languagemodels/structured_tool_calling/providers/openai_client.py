@@ -165,6 +165,21 @@ class OpenAIClient(LLMClient):
         except Exception as exc:
             safe_error = self._sanitise_provider_error(exc)
             self.logger.error("OpenAI structured-tool API error: %s", safe_error)
+            if self._looks_like_tool_call_lineage_rejection(exc):
+                raise StructuredToolProtocolError(
+                    "OpenAI rejected a function-call output whose provider call "
+                    "lineage was unavailable; refusing an uncorrelated retry: "
+                    f"{safe_error}",
+                    decision={
+                        **decision.to_telemetry(),
+                        **self._provider_error_metadata(exc),
+                        **self._fresh_tool_context_projection_metadata(
+                            context=context,
+                            continuation=continuation,
+                        ),
+                        "failure_kind": "provider_tool_call_lineage_rejected",
+                    },
+                ) from exc
             if self._looks_like_capability_rejection(exc):
                 if continuation is not None:
                     # A provider continuation is surface-specific.  Switching
@@ -220,6 +235,29 @@ class OpenAIClient(LLMClient):
                         alternate_safe_error = self._sanitise_provider_error(
                             alternate_exc
                         )
+                        if self._looks_like_tool_call_lineage_rejection(alternate_exc):
+                            raise StructuredToolProtocolError(
+                                "OpenAI rejected a function-call output whose "
+                                "provider call lineage was unavailable on the "
+                                "advertised alternate surface; refusing an "
+                                "uncorrelated retry: "
+                                f"{alternate_safe_error}",
+                                decision={
+                                    **alternate_decision.to_telemetry(),
+                                    **self._provider_error_metadata(alternate_exc),
+                                    **self._fresh_tool_context_projection_metadata(
+                                        context=context,
+                                        continuation=continuation,
+                                    ),
+                                    "surface_fallback_used": True,
+                                    "initial_effective_api_surface": (
+                                        decision.effective_api_surface
+                                    ),
+                                    "failure_kind": (
+                                        "provider_tool_call_lineage_rejected"
+                                    ),
+                                },
+                            ) from alternate_exc
                         if self._looks_like_capability_rejection(alternate_exc):
                             rejection_telemetry = {
                                 **alternate_decision.to_telemetry(),
@@ -371,6 +409,12 @@ class OpenAIClient(LLMClient):
             decision=decision,
             input_items=messages,
         )
+        parsed.transport_metadata.update(
+            self._fresh_tool_context_projection_metadata(
+                context=context,
+                continuation=continuation,
+            )
+        )
         if continuation is not None:
             retained_count = (
                 len(continuation.input_items)
@@ -466,6 +510,12 @@ class OpenAIClient(LLMClient):
             available_tools,
             decision=decision,
             input_items=input_items,
+        )
+        parsed.transport_metadata.update(
+            self._fresh_tool_context_projection_metadata(
+                context=context,
+                continuation=continuation,
+            )
         )
         if continuation is not None:
             retained_count = (
@@ -587,15 +637,19 @@ class OpenAIClient(LLMClient):
         role = str(message.get("role") or "user")
         if role == "model":
             role = "assistant"
-        if role not in {"system", "developer", "user", "assistant", "tool"}:
+        if role == "tool":
+            # A fresh model request has no provider continuation containing the
+            # matching assistant function-call item.  Re-emitting accumulated
+            # tool evidence as a native tool message would create an orphan
+            # function output.  Preserve the evidence and its correlation as
+            # ordinary, untrusted context instead.
+            return OpenAIClient._fresh_tool_context_evidence_message(message)
+        if role not in {"system", "developer", "user", "assistant"}:
             role = "user"
-        projected: Dict[str, Any] = {
+        return {
             "role": role,
             "content": str(message.get("content") or ""),
         }
-        if role == "tool" and isinstance(message.get("tool_call_id"), str):
-            projected["tool_call_id"] = message["tool_call_id"]
-        return projected
 
     @staticmethod
     def _chat_tool_result_message(result: ToolResult) -> dict[str, Any]:
@@ -693,20 +747,76 @@ class OpenAIClient(LLMClient):
             role = str(msg.get("role") or "user")
             if role == "model":
                 role = "assistant"
-            if role == "tool" and isinstance(msg.get("tool_call_id"), str):
-                items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": msg["tool_call_id"],
-                        "output": str(msg.get("content") or ""),
-                    }
-                )
+            if role == "tool":
+                # `function_call_output` is valid only when the same request
+                # replays the matching provider function-call item, or carries
+                # its provider-managed response ID.  Fresh subworkflow and
+                # critic calls often retain prior tool evidence without that
+                # opaque provider state, so project it as ordinary context.
+                items.append(self._fresh_tool_context_evidence_message(msg))
                 continue
             if role not in {"system", "developer", "user", "assistant"}:
                 role = "user"
             items.append({"role": role, "content": str(msg.get("content") or "")})
         items.append({"role": "user", "content": prompt})
         return items
+
+    @staticmethod
+    def _fresh_tool_context_evidence_message(
+        message: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Project prior tool evidence without claiming provider continuation.
+
+        The user-role envelope deliberately keeps tool output below the system
+        and developer trust boundary.  It retains the original tool name and
+        call ID for diagnosis/correlation, but it is not a provider-native
+        function-call result and therefore cannot be mistaken for one on a
+        fresh structured-tool request.
+        """
+
+        evidence: dict[str, Any] = {
+            "schema_version": "structured_tool_context_evidence.v1",
+            "type": "prior_tool_result",
+            "trust_boundary": "untrusted_tool_output",
+            "output": str(message.get("content") or ""),
+        }
+        tool_name = message.get("name")
+        if isinstance(tool_name, str) and tool_name.strip():
+            evidence["tool_name"] = tool_name.strip()
+        call_id = message.get("tool_call_id")
+        if isinstance(call_id, str) and call_id.strip():
+            evidence["call_id"] = call_id.strip()
+        return {
+            "role": "user",
+            "content": json.dumps(
+                evidence,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        }
+
+    @staticmethod
+    def _fresh_tool_context_projection_metadata(
+        *,
+        context: Optional[Sequence[Dict[str, Any]]],
+        continuation: LLMContinuation | None,
+    ) -> dict[str, Any]:
+        if continuation is not None:
+            return {"fresh_tool_context_evidence_projection_count": 0}
+        count = sum(
+            1
+            for message in context or ()
+            if isinstance(message, Mapping)
+            and str(message.get("role") or "").strip().lower() == "tool"
+        )
+        return {
+            "fresh_tool_context_evidence_projection_count": count,
+            **(
+                {"fresh_tool_context_evidence_projection": ("user_role_json_envelope")}
+                if count
+                else {}
+            ),
+        }
 
     @staticmethod
     def _responses_context_message_item(
@@ -1452,6 +1562,24 @@ class OpenAIClient(LLMClient):
         response.transport_metadata["projected_model_parameter_paths"] = projected_paths
         response.transport_metadata["omitted_model_parameter_names"] = sorted(
             key for key in requested if key not in projected_paths
+        )
+
+    @staticmethod
+    def _looks_like_tool_call_lineage_rejection(exc: Exception) -> bool:
+        """Return whether OpenAI rejected an uncorrelated function output."""
+
+        status_code = getattr(exc, "status_code", None)
+        if status_code is not None:
+            try:
+                if int(status_code) not in {400, 409, 422}:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        text = str(exc).lower()
+        return "no tool call found for function call output" in text or (
+            "function_call_output" in text
+            and "call_id" in text
+            and any(marker in text for marker in ("not found", "missing", "unknown"))
         )
 
     @staticmethod

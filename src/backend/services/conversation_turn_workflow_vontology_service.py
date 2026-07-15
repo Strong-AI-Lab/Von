@@ -330,8 +330,8 @@ def _ensure_conversation_turn_prompt_support(
         provenance_source=_MANAGED_BY,
     )
 
-    # Jira-specific extraction and evidence expectations are represented in
-    # Vontology. Materialise that graph before publishing the conversation
+    # Tool-specific extraction and evidence expectations are represented in
+    # Vontology. Materialise those graphs before publishing the conversation
     # workflow so a clean environment cannot silently use an uncontracted
     # projection path.
     support_bootstraps: dict[str, Any] = {}
@@ -346,6 +346,19 @@ def _ensure_conversation_turn_prompt_support(
             )
         except Exception as exc:
             support_bootstraps["jira_tool_evidence_contract"] = {
+                "success": False,
+                "error": str(exc),
+            }
+        try:
+            from .grounded_read_tool_evidence_contract_vontology_service import (
+                bootstrap_grounded_read_tool_evidence_contract,
+            )
+
+            support_bootstraps["grounded_read_tool_evidence_contract"] = (
+                bootstrap_grounded_read_tool_evidence_contract()
+            )
+        except Exception as exc:
+            support_bootstraps["grounded_read_tool_evidence_contract"] = {
                 "success": False,
                 "error": str(exc),
             }

@@ -273,6 +273,31 @@ def _extract_possible_outputs(definition: Any) -> set[str]:
     return outputs
 
 
+def _child_output_mapping_is_declared(
+    *,
+    mapped_output: str,
+    possible_outputs: set[str],
+) -> bool:
+    """Return whether a child output mapping is rooted in a declared output.
+
+    Tool-output mappings support dotted traversal into mapping-valued action
+    outputs.  A child that declares ``candidate_context`` therefore also makes
+    ``candidate_context.binding.release_sha256`` a structurally valid mapping
+    path; the runtime remains responsible for reporting a missing field when
+    that nested value is absent from a particular execution.
+    """
+
+    mapped_output_text = str(mapped_output or "").strip()
+    if not mapped_output_text:
+        return False
+    return any(
+        mapped_output_text == possible_output
+        or mapped_output_text.startswith(f"{possible_output}.")
+        for possible_output in possible_outputs
+        if possible_output
+    )
+
+
 def _extract_action_input_text(action: Any, *keys: str) -> str:
     inputs = getattr(action, "inputs", {})
     if not isinstance(inputs, Mapping):
@@ -1399,7 +1424,10 @@ def validate_workflow_definition_contract(
                         unknown_output_fields = sorted(
                             item
                             for item in mapped_outputs
-                            if item not in child_possible_outputs
+                            if not _child_output_mapping_is_declared(
+                                mapped_output=item,
+                                possible_outputs=child_possible_outputs,
+                            )
                         )
                         if unknown_output_fields:
                             subworkflow_contract_issues.append(

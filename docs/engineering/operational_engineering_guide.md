@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Canonical operational companion selected by `AGENTS.md`
 - **Created:** 2026-04-04
-- **Last substantive content update before this metadata review:** 2026-07-11
+- **Last substantive content update:** 2026-07-15
 - **Freshness boundary:** Revalidate environment-, host-, and tool-specific facts
 
 ## 1. Purpose
@@ -454,6 +454,72 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\set
 
 Use `-ForceDependencyInstall` only when a run deliberately needs to refresh the
 checkout-local venv.
+
+### 5.3 Operational-certification signing-key durability
+
+Operational-certification campaign attestations are HMAC-signed. A campaign can
+certify, and a persisted cohort aggregate can later be read back as verified,
+only when the Von process has both of these values:
+
+- `VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY`: secret signing material of at
+  least 32 bytes;
+- `VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY_ID`: the non-secret identifier
+  embedded in each attestation.
+
+The signing material must survive a server restart. For the current local macOS
+SAIL certification lane, the operator convention is a generic-password item in
+the login Keychain with service
+`nz.ac.auckland.von.operational-certification` and account `$USER`. The current
+key identifier is `macos-keychain-von-operational-certification-v1`. This is a
+stronger host credential mechanism than repo-root `.env`; do not copy the key
+into `.env`, repository files, shell history, logs, Jira, or evidence artefacts.
+
+Check that the Keychain item exists without returning its secret:
+
+```zsh
+security find-generic-password \
+  -a "$USER" \
+  -s 'nz.ac.auckland.von.operational-certification' \
+  >/dev/null
+```
+
+Start or restart the isolated certification server in a subshell so the secret
+is passed to the child-process environment and is not retained in the caller's
+shell. Keep shell tracing disabled because `set -x` can expose expanded
+secret-bearing commands:
+
+```zsh
+(
+  set +x
+  signing_key="$(security find-generic-password \
+    -a "$USER" \
+    -s 'nz.ac.auckland.von.operational-certification' \
+    -w)"
+  [ "${#signing_key}" -ge 32 ]
+  env \
+    VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY="$signing_key" \
+    VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY_ID='macos-keychain-von-operational-certification-v1' \
+    ./run.sh restart -AgentTest -Port 5010 -NoBrowser -HealthTimeoutSec 180
+)
+```
+
+The launcher-spawned server inherits those values. This convention assumes the
+two names are absent from `.env`, because `run.sh` loads `.env` overrides after
+it inherits its caller's environment. Do not add the pilot key there. After a
+restart, verify durability by loading the persisted cohort aggregate through
+its canonical Vontology service path. That read-back rechecks each actor
+attestation cryptographically; a successful digest-only read is not equivalent
+evidence.
+
+The current verifier accepts one active key and requires an exact key-ID match.
+Do not replace or delete this Keychain item while its pilot evidence must remain
+verifiable. Same-host, same-account Keychain storage protects restart
+durability, but it is not a multi-host backup or a key-rotation scheme. Before
+routine rotation or multi-host deployment, add a secret-manager-backed key ring
+selected by attestation `key_id` and test old-key read-back during the cutover.
+If the key is lost or suspected compromised before that support exists, fail
+closed and run a new trusted certification campaign rather than treating the
+old aggregate as verified.
 
 ## 6. Preferred Tool and Access Pathways
 

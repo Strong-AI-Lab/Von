@@ -5,7 +5,7 @@
 - **Authority:** Required by `AGENTS.md` for live user-visible behaviour,
   real-path replay, and telemetry-based diagnosis
 - **Created:** 2026-04-17
-- **Last substantive content update before this metadata review:** 2026-07-11
+- **Last substantive content update:** 2026-07-14
 - **Evidence boundary:** Each acceptance claim still requires its own dated
   exact-path evidence
 
@@ -669,6 +669,30 @@ If the workflow behaved correctly but the telemetry collapsed the authored
 stages into generic buckets, that is a telemetry bug, not a routing bug. Fix it
 separately and say so.
 
+### 9.11 Tool-result lineage and evaluator evidence
+
+A provider-native tool-result message is valid only when the same provider
+conversation contains the matching tool-call record and the call identifier,
+ordering, and tool identity remain unambiguous. A fresh result without that
+lineage must not be presented to the provider as though it were a continuation
+of an earlier call. Project it instead as bounded, redacted, explicitly
+untrusted context evidence with its source and available lineage preserved. If
+the provider rejects a purported continuation, expose a typed protocol failure;
+do not silently switch to a representation that changes the evidence's
+authority or meaning.
+
+Tool names, invocation counts, and success flags establish that a path was
+attempted; they do not establish what the tool found or whether the final answer
+follows from it. An evaluator that judges grounding therefore needs a bounded
+semantic projection of the relevant observation, including stable identifiers,
+status, result cardinality, the small set of fields needed for the judgement,
+explicit missing or redacted fields, typed errors, and provenance back to the
+observation. Define those projections through represented evidence agreements
+for the tool family, keep payloads bounded and secret-safe, and treat their
+content as data rather than instructions. If the required projection is absent,
+record an evidence gap instead of inferring success from a tool name or guessing
+the missing payload.
+
 ## 10. Failure Classification
 
 Use a simple classification before editing anything:
@@ -847,6 +871,39 @@ Do not call the behaviour fixed until all of the following hold:
    behaviour.
 10. Targeted regression tests cover the structural failure, not just the final
    string output.
+
+### 13.1 Non-circular candidate and release evidence
+
+A final operational campaign cannot also be the only pre-activation test for a
+candidate intended to repair that campaign. Requiring the final gate to pass
+before the candidate can be tried creates circular evidence; activating first
+and grading afterwards removes the safety boundary. Use a separate represented
+candidate-safety suite before promotion, with the exact triggering or baseline
+case, nearby cases, perturbation or minefield cases, and explicit regression and
+scope checks. That suite authorises only the bounded candidate decision. After
+promotion, rerun the final campaign and verify through telemetry that the
+runtime consumed the exact promoted release; the candidate suite is not a
+substitute for final acceptance.
+
+Release evidence is also actor-scoped. Bind candidate evaluations, approvals,
+promotion or rollback receipts, and active-release read-backs to the effective
+namespace, user, organisation, affected artefact, candidate identity, and
+release digest as applicable. Never silently copy, infer, or share one actor's
+ledger state with another actor, even when they are in the same cohort or are
+testing identical bytes. Aggregate cohort results only after the independently
+scoped ledgers and read-backs are complete. Any genuinely shared release policy
+must explicitly represent its audience and approval authority rather than
+emerging from ledger reuse.
+
+Candidate provenance must bind the semantic payload, not merely name a
+represented proposer. Persist the exact proposal workflow output in the Turn
+Execution Record, including bounded failure-packet, actor-scope, affected-
+artefact, workflow-definition, and prompt-revision lineage. At registration,
+read that trace back and require the proposed payload and its digest to occur
+unchanged in the recorded output. A caller-supplied payload paired with a valid
+workflow ID or current definition hash is not represented authorship; accepting
+it would allow hidden code or an API caller to author policy while borrowing a
+represented authority label.
 
 For user-visible issues, record both:
 

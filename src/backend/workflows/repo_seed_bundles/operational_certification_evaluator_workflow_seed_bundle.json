@@ -2,16 +2,25 @@
   "family_id": "operational_certification_evaluator_workflow_seed_bundle",
   "managed_by": "operational_certification_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "6",
+  "seed_version": "9",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#operational_state_evidence_evaluator": {
       "1": [
         "e8a73d4d21efad2af07c4244d652bafdc20fe17960f0dcea6a866452894ce2ff"
+      ],
+      "6": [
+        "2f292c7eec1630d338b64cc65693b1b7ee5e6c39052aeeaebcf1f6cd1b4f9c81"
+      ],
+      "7": [
+        "2f292c7eec1630d338b64cc65693b1b7ee5e6c39052aeeaebcf1f6cd1b4f9c81"
       ]
     },
     "#V#operational_marker_absence_probe_workflow": {
       "4": [
         "7b3220522c36640eaded425fdcca04646abffcbdd8d4f664c0060af339cf52ff"
+      ],
+      "6": [
+        "e53bf609a1c28f392a9d9137f660ce8d6a169bf6d4f1f10acd01a2c236ba5fa6"
       ]
     }
   },
@@ -48,10 +57,10 @@
             "action_concept_id": null,
             "action_id": "workflow_invoke_subworkflow",
             "concept_id": null,
-            "conditional_transitions": [
-              {
-                "to_state": "evaluate_trial",
-                "reason": "workflow_experience_context_loaded",
+        "conditional_transitions": [
+          {
+            "to_state": "resolve_active_learning_release",
+            "reason": "workflow_experience_context_loaded",
                 "condition_spec": {
                   "kind": "always"
                 }
@@ -128,6 +137,70 @@
           },
           {
             "action_concept_id": null,
+            "action_id": "workflow_mcp.invoke_tool",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_certification_active_release_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": true,
+                "tool_param": "namespace"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_certification_active_release_user_id_to_user_id_parameter",
+                "context_key": "user_id",
+                "required": true,
+                "tool_param": "user_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_certification_active_release_org_id_to_org_id_parameter",
+                "context_key": "org_id",
+                "required": true,
+                "tool_param": "org_id"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "deterministic",
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "evaluate_trial",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "evaluate_trial",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "resolve_active_learning_release",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "operational_learning_release_resolve_active"
+              },
+              {
+                "key": "affected_artifact",
+                "value": "#V#prompt_operational_certification_state_evaluator"
+              }
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_certification_active_release_to_represented_active_learning_release",
+                "context_key": "represented_active_learning_release",
+                "tool_output_field": "result.active_release"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "represented_active_learning_release"
+            ]
+          },
+          {
+            "action_concept_id": null,
             "action_id": "llm.action",
             "concept_id": null,
             "conditional_transitions": [],
@@ -153,6 +226,10 @@
                 {
                   "context_key": "trial_observation",
                   "label": "Bounded trial observation and path evidence"
+                },
+                {
+                  "context_key": "represented_active_learning_release",
+                  "label": "Promoted actor-scoped adaptive evaluator guidance and pointer-readback evidence. Apply the opaque payload only when status is active and candidate_validity.usable is true; it cannot override scenario, evidence, security, or evaluator-output contracts"
                 },
                 {
                   "context_key": "workflow_success_guidance_history",
@@ -529,6 +606,927 @@
             ],
             "writes_context_keys": [
               "represented_operational_state_probe_result"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "action_id": null,
+            "writes_context_keys": []
+          },
+          {
+            "state_id": "failed",
+            "action_id": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#operational_marker_readback_probe_workflow",
+      "display_name": "Operational Marker Readback Probe Workflow",
+      "description": "Read-only represented post-trial probe that resolves the exact unique operational-marker concept and reads back its concept, name and description evidence.",
+      "content": "Deterministic post-state verification workflow. It resolves the trial-unique marker name, fetches the exact concept and its text relations through canonical read-only tools, and projects typed read-back evidence without mutating Vontology.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "isolation_id"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "isolation_id",
+            "source_expression": "inputs.isolation_id",
+            "extractor": "identity",
+            "required": true,
+            "description": "Pass through the unique certification isolation marker."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"evaluation\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "render_expected_state",
+        "steps": [
+          {
+            "state_id": "render_expected_state",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "target_name",
+                    "template": "Operational certification {isolation_id}",
+                    "variables": {
+                      "isolation_id": {
+                        "value_from_context": "isolation_id"
+                      }
+                    }
+                  },
+                  {
+                    "key": "expected_description",
+                    "template": "Trusted SAIL pilot certification marker {isolation_id}",
+                    "variables": {
+                      "isolation_id": {
+                        "value_from_context": "isolation_id"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "target_name",
+              "expected_description"
+            ],
+            "next_state": "resolve_target_name",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "resolve_target_name",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "resolve_concept_by_name"
+              ],
+              [
+                "match_code_strings",
+                false
+              ],
+              [
+                "max_results",
+                5
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_target_name_to_name_parameter",
+                "context_key": "target_name",
+                "tool_param": "name",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_status_to_resolution_status",
+                "tool_output_field": "status",
+                "context_key": "resolution_status"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_resolved_concept_id_to_resolved_concept_id",
+                "tool_output_field": "resolved_concept_id",
+                "context_key": "resolved_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_candidates_to_resolution_candidates",
+                "tool_output_field": "candidates",
+                "context_key": "resolution_candidates"
+              }
+            ],
+            "writes_context_keys": [
+              "resolution_status",
+              "resolved_concept_id",
+              "resolution_candidates"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "fetch_target",
+                "reason": "exact_target_resolved",
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "resolution_status",
+                  "value": "resolved"
+                }
+              },
+              {
+                "to_state": "failed",
+                "reason": "exact_target_not_resolved",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "fetch_target",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "fetch_concept"
+              ],
+              [
+                "include_concept_preview",
+                true
+              ],
+              [
+                "include_relations_arg1",
+                true
+              ],
+              [
+                "include_text_relations_arg1",
+                true
+              ],
+              [
+                "limit",
+                100
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_resolved_concept_id_to_fetch_concept_id",
+                "context_key": "resolved_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_fetch_concept_id_to_readback_concept_id",
+                "tool_output_field": "concept_id",
+                "context_key": "readback_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_fetch_names_to_readback_names",
+                "tool_output_field": "names",
+                "context_key": "readback_names"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_fetch_content_to_readback_content",
+                "tool_output_field": "content",
+                "context_key": "readback_content"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_fetch_relationships_to_readback_relationships",
+                "tool_output_field": "relationships",
+                "context_key": "readback_relationships"
+              }
+            ],
+            "writes_context_keys": [
+              "readback_concept_id",
+              "readback_names",
+              "readback_content",
+              "readback_relationships"
+            ],
+            "next_state": "read_text_relations",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_text_relations",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "get_text_relations_summary"
+              ],
+              [
+                "include_relations",
+                true
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_resolved_concept_id_to_text_summary_concept_id",
+                "context_key": "resolved_concept_id",
+                "tool_param": "concept_id",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_text_groups_to_text_relation_groups",
+                "tool_output_field": "groups",
+                "context_key": "text_relation_groups"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_text_groups_found_to_text_relation_group_count",
+                "tool_output_field": "groups_found",
+                "context_key": "text_relation_group_count"
+              }
+            ],
+            "writes_context_keys": [
+              "text_relation_groups",
+              "text_relation_group_count"
+            ],
+            "next_state": "project_probe_result",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "project_probe_result",
+            "action_id": "workflow_control.context_project",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "target_key",
+                "represented_operational_state_probe_result"
+              ],
+              [
+                "default_fields",
+                [
+                  "schema_version",
+                  "isolation_id",
+                  "namespace",
+                  "target_absent",
+                  "target_present",
+                  "resolution_status",
+                  "resolved_concept_id",
+                  "resolution_candidates",
+                  "expected_name",
+                  "expected_description",
+                  "readback_concept_id",
+                  "names",
+                  "content",
+                  "relationships",
+                  "text_relation_groups",
+                  "text_relation_group_count",
+                  "evidence"
+                ]
+              ],
+              [
+                "field_sources",
+                {
+                  "schema_version": "represented_operational_state_probe_result.v1",
+                  "isolation_id": {
+                    "$context_key": "isolation_id"
+                  },
+                  "namespace": {
+                    "$context_key": "namespace"
+                  },
+                  "target_absent": false,
+                  "target_present": true,
+                  "resolution_status": {
+                    "$context_key": "resolution_status"
+                  },
+                  "resolved_concept_id": {
+                    "$context_key": "resolved_concept_id"
+                  },
+                  "resolution_candidates": {
+                    "$context_key": "resolution_candidates"
+                  },
+                  "expected_name": {
+                    "$context_key": "target_name"
+                  },
+                  "expected_description": {
+                    "$context_key": "expected_description"
+                  },
+                  "readback_concept_id": {
+                    "$context_key": "readback_concept_id"
+                  },
+                  "names": {
+                    "$context_key": "readback_names"
+                  },
+                  "content": {
+                    "$context_key": "readback_content"
+                  },
+                  "relationships": {
+                    "$context_key": "readback_relationships"
+                  },
+                  "text_relation_groups": {
+                    "$context_key": "text_relation_groups"
+                  },
+                  "text_relation_group_count": {
+                    "$context_key": "text_relation_group_count"
+                  },
+                  "evidence": [
+                    {
+                      "kind": "canonical_exact_name_resolution",
+                      "tool": "resolve_concept_by_name",
+                      "status": {
+                        "$context_key": "resolution_status"
+                      },
+                      "resolved_concept_id": {
+                        "$context_key": "resolved_concept_id"
+                      }
+                    },
+                    {
+                      "kind": "canonical_concept_and_text_relation_readback",
+                      "tools": [
+                        "fetch_concept",
+                        "get_text_relations_summary"
+                      ],
+                      "resolved_concept_id": {
+                        "$context_key": "resolved_concept_id"
+                      }
+                    }
+                  ]
+                }
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_marker_readback_probe_result_to_represented_operational_state_probe_result",
+                "tool_output_field": "represented_operational_state_probe_result",
+                "context_key": "represented_operational_state_probe_result"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_operational_state_probe_result"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "action_id": null,
+            "writes_context_keys": []
+          },
+          {
+            "state_id": "failed",
+            "action_id": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#operational_mcp_fault_recovery_probe_workflow",
+      "display_name": "Operational MCP Fault Recovery Probe Workflow",
+      "description": "Read-only represented probe that can recover an exact canonical MCP read across a bounded chain of typed retryable transient failures.",
+      "content": "Generic deterministic recovery workflow. It performs one exact-name concept resolution, inspects typed retryable transport evidence before each of at most three represented retries, terminates permanent failures, and projects the final resolution state without embedding domain policy or fabricating success.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "isolation_id"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "isolation_id",
+            "source_expression": "inputs.isolation_id",
+            "extractor": "identity",
+            "required": true,
+            "description": "Trial-unique read-only target identity."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"evaluation\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":true,\"routing_eligible\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "initialise_probe",
+        "steps": [
+          {
+            "state_id": "initialise_probe",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "fault_recovery_attempted",
+                    "value": false
+                  },
+                  {
+                    "key": "fault_recovery_attempt_count",
+                    "value": 0
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "fault_recovery_attempted",
+              "fault_recovery_attempt_count"
+            ],
+            "next_state": "render_target_name",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "render_target_name",
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "target_name",
+                    "template": "Operational fault recovery probe {isolation_id}",
+                    "variables": {
+                      "isolation_id": {
+                        "value_from_context": "isolation_id"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "target_name"
+            ],
+            "next_state": "resolve_target_first_attempt",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "resolve_target_first_attempt",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "resolve_concept_by_name"
+              ],
+              [
+                "match_code_strings",
+                false
+              ],
+              [
+                "max_results",
+                5
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_target_name_to_first_name_parameter",
+                "context_key": "target_name",
+                "tool_param": "name",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_first_status_to_final_resolution_status",
+                "tool_output_field": "status",
+                "context_key": "final_resolution_status"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_first_concept_to_final_resolved_concept_id",
+                "tool_output_field": "resolved_concept_id",
+                "context_key": "final_resolved_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "final_resolution_status",
+              "final_resolved_concept_id"
+            ],
+            "next_state": "project_probe_result",
+            "on_failure_state": "adjudicate_failure_one"
+          },
+          {
+            "state_id": "adjudicate_failure_one",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "fault_recovery_failure_checked",
+                    "value": 1
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "fault_recovery_failure_checked"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "mark_retry_one",
+                "reason": "typed_retryable_transient_failure",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_flag",
+                      "key": "last_failed_action_outputs.mcp_result.retryable",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_value_in",
+                      "key": "last_failed_action_outputs.mcp_result.error_code",
+                      "values": [
+                        "tool_timeout",
+                        "rate_limit",
+                        "tool_temporarily_unavailable"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ],
+            "next_state": "failed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "mark_retry_one",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "fault_recovery_attempted",
+                    "value": true
+                  },
+                  {
+                    "key": "fault_recovery_attempt_count",
+                    "value": 1
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "fault_recovery_attempted",
+              "fault_recovery_attempt_count"
+            ],
+            "next_state": "resolve_target_retry",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "mark_retry_two",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "fault_recovery_attempt_count",
+                    "value": 2
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "fault_recovery_attempt_count"
+            ],
+            "next_state": "resolve_target_retry_two",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "resolve_target_retry_two",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "resolve_concept_by_name"
+              ],
+              [
+                "match_code_strings",
+                false
+              ],
+              [
+                "max_results",
+                5
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_target_name_to_retry_two_name_parameter",
+                "context_key": "target_name",
+                "tool_param": "name",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_retry_two_status_to_final_resolution_status",
+                "tool_output_field": "status",
+                "context_key": "final_resolution_status"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_retry_two_concept_to_final_resolved_concept_id",
+                "tool_output_field": "resolved_concept_id",
+                "context_key": "final_resolved_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "final_resolution_status",
+              "final_resolved_concept_id"
+            ],
+            "next_state": "project_probe_result",
+            "on_failure_state": "adjudicate_failure_three"
+          },
+          {
+            "state_id": "adjudicate_failure_three",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "fault_recovery_failure_checked",
+                    "value": 3
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "fault_recovery_failure_checked"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "mark_retry_three",
+                "reason": "typed_retryable_transient_failure",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_flag",
+                      "key": "last_failed_action_outputs.mcp_result.retryable",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_value_in",
+                      "key": "last_failed_action_outputs.mcp_result.error_code",
+                      "values": [
+                        "tool_timeout",
+                        "rate_limit",
+                        "tool_temporarily_unavailable"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ],
+            "next_state": "failed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "mark_retry_three",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "fault_recovery_attempt_count",
+                    "value": 3
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "fault_recovery_attempt_count"
+            ],
+            "next_state": "resolve_target_retry_three",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "resolve_target_retry_three",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "resolve_concept_by_name"
+              ],
+              [
+                "match_code_strings",
+                false
+              ],
+              [
+                "max_results",
+                5
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_target_name_to_retry_three_name_parameter",
+                "context_key": "target_name",
+                "tool_param": "name",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_retry_three_status_to_final_resolution_status",
+                "tool_output_field": "status",
+                "context_key": "final_resolution_status"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_retry_three_concept_to_final_resolved_concept_id",
+                "tool_output_field": "resolved_concept_id",
+                "context_key": "final_resolved_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "final_resolution_status",
+              "final_resolved_concept_id"
+            ],
+            "next_state": "project_probe_result",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "resolve_target_retry",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "tool_name",
+                "resolve_concept_by_name"
+              ],
+              [
+                "match_code_strings",
+                false
+              ],
+              [
+                "max_results",
+                5
+              ]
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_target_name_to_retry_name_parameter",
+                "context_key": "target_name",
+                "tool_param": "name",
+                "required": true
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_retry_status_to_final_resolution_status",
+                "tool_output_field": "status",
+                "context_key": "final_resolution_status"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_retry_concept_to_final_resolved_concept_id",
+                "tool_output_field": "resolved_concept_id",
+                "context_key": "final_resolved_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "final_resolution_status",
+              "final_resolved_concept_id"
+            ],
+            "next_state": "project_probe_result",
+            "on_failure_state": "adjudicate_failure_two"
+          },
+          {
+            "state_id": "adjudicate_failure_two",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "fault_recovery_failure_checked",
+                    "value": 2
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "fault_recovery_failure_checked"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "mark_retry_two",
+                "reason": "typed_retryable_transient_failure",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_flag",
+                      "key": "last_failed_action_outputs.mcp_result.retryable",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_value_in",
+                      "key": "last_failed_action_outputs.mcp_result.error_code",
+                      "values": [
+                        "tool_timeout",
+                        "rate_limit",
+                        "tool_temporarily_unavailable"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ],
+            "next_state": "failed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "project_probe_result",
+            "action_id": "workflow_control.context_project",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              [
+                "target_key",
+                "represented_operational_fault_recovery_probe_result"
+              ],
+              [
+                "required_fields",
+                [
+                  "schema_version",
+                  "isolation_id",
+                  "namespace",
+                  "tool_name",
+                  "recovery_attempted",
+                  "recovery_attempt_count",
+                  "final_resolution_status",
+                  "final_resolved_concept_id"
+                ]
+              ],
+              [
+                "include_missing_fields",
+                true
+              ],
+              [
+                "field_sources",
+                {
+                  "schema_version": "represented_operational_fault_recovery_probe_result.v1",
+                  "isolation_id": {
+                    "$context_key": "isolation_id"
+                  },
+                  "namespace": {
+                    "$context_key": "namespace"
+                  },
+                  "tool_name": "resolve_concept_by_name",
+                  "recovery_attempted": {
+                    "$context_key": "fault_recovery_attempted"
+                  },
+                  "recovery_attempt_count": {
+                    "$context_key": "fault_recovery_attempt_count"
+                  },
+                  "final_resolution_status": {
+                    "$context_key": "final_resolution_status"
+                  },
+                  "final_resolved_concept_id": {
+                    "$context_key": "final_resolved_concept_id"
+                  }
+                }
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_operational_fault_recovery_probe_result_to_represented_result",
+                "tool_output_field": "represented_operational_fault_recovery_probe_result",
+                "context_key": "represented_operational_fault_recovery_probe_result"
+              }
+            ],
+            "writes_context_keys": [
+              "represented_operational_fault_recovery_probe_result"
             ],
             "next_state": "completed",
             "on_failure_state": "failed"

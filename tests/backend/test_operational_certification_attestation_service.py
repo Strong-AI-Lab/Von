@@ -83,3 +83,38 @@ def test_runner_attestation_rejects_public_development_key(
             **EXPECTED,
             issued_at=datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc),
         )
+
+
+def test_runner_attestation_fails_closed_after_uncoordinated_key_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY",
+        "original-local-key-" + "s" * 64,
+    )
+    monkeypatch.setenv(
+        "VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY_ID",
+        "macos-keychain-von-operational-certification-v1",
+    )
+    attestation = build_operational_certification_runner_attestation(
+        **EXPECTED,
+        issued_at=datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc),
+    )
+
+    monkeypatch.setenv(
+        "VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY",
+        "rotated-local-key-" + "r" * 64,
+    )
+    monkeypatch.setenv(
+        "VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY_ID",
+        "macos-keychain-von-operational-certification-v2",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="operational_certification_runner_attestation_key_id_invalid",
+    ):
+        verify_operational_certification_runner_attestation(
+            attestation,
+            expected=EXPECTED,
+        )

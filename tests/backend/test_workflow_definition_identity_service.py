@@ -305,6 +305,30 @@ def test_validate_contract_accepts_compatible_subworkflow_contract() -> None:
     assert "workflow_subworkflow_unresolved" not in (validation.get("errors") or [])
 
 
+def test_validate_contract_accepts_nested_path_below_declared_subworkflow_output() -> None:
+    child = _child_workflow_definition(produced_outputs=("candidate_context",))
+    parent = _parent_with_subworkflow_contract(
+        output_mappings=[
+            {
+                "child_output_field": (
+                    "candidate_context.candidate_snapshot.parent_release.release_sha256"
+                ),
+                "parent_context_key": "expected_baseline_release_sha256",
+            }
+        ]
+    )
+
+    validation = validate_workflow_definition_contract(
+        definition=parent,
+        workflow_definition_loader=lambda workflow_id: (
+            child if workflow_id == child.workflow_id else None
+        ),
+    )
+
+    assert validation["valid"] is True
+    assert validation["subworkflow_contract_issues"] == []
+
+
 def test_validate_contract_accepts_dynamic_subworkflow_contract() -> None:
     dynamic_parent = WorkflowDefinition(
         workflow_id="#V#dynamic_parent_workflow",

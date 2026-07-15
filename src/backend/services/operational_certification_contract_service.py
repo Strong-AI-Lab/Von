@@ -46,6 +46,11 @@ _POLICY_KEYS = (
 _MATCHER_KINDS = frozenset({"exact", "subset", "exists", "count"})
 _COMPARISON_OPERATORS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte"})
 _MISSING = object()
+_USER_BURDEN_METRIC_KEYS = (
+    "follow_up_request_count",
+    "clarification_count",
+    "correction_count",
+)
 
 
 def _is_sequence(value: Any) -> bool:
@@ -83,6 +88,92 @@ def _percentile(values: Sequence[float], percentile: float) -> float | None:
         return ordered[lower]
     weight = position - lower
     return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def aggregate_user_burden_metrics(
+    metric_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate explicit user-burden measurements without inventing zeroes.
+
+    Counts are reportable only when every applicable observation explicitly
+    marks the metric complete and supplies a non-negative integer.  Rows marked
+    not applicable are excluded, while absent provenance remains an incomplete
+    measurement.  This keeps represented budgets free to fail closed on a
+    missing burden measurement instead of treating missing evidence as zero.
+    """
+
+    rows = [dict(row) for row in metric_rows if isinstance(row, Mapping)]
+    measurements: dict[str, Any] = {}
+    output: dict[str, Any] = {
+        "observation_count": len(rows),
+        "measurements": measurements,
+    }
+
+    for metric_key in _USER_BURDEN_METRIC_KEYS:
+        applicable_count = 0
+        complete_count = 0
+        invalid_value_count = 0
+        values: list[int] = []
+        evidence_kinds: list[str] = []
+        for row in rows:
+            evidence_kind = _safe_text(row.get(f"{metric_key}_evidence_kind"))
+            if evidence_kind and evidence_kind not in evidence_kinds:
+                evidence_kinds.append(evidence_kind)
+            if row.get(f"{metric_key}_applicable") is False:
+                continue
+            applicable_count += 1
+            value = row.get(metric_key)
+            valid_value = (
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            )
+            if (
+                row.get(f"{metric_key}_complete") is True
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            ):
+                complete_count += 1
+                values.append(value)
+            elif value is not None and not valid_value:
+                invalid_value_count += 1
+
+        if not rows:
+            status = "missing"
+        elif applicable_count == 0:
+            status = "not_applicable"
+        elif complete_count == applicable_count:
+            status = "complete"
+        else:
+            status = "incomplete"
+        aggregate_value = sum(values) if status == "complete" else None
+        evidence_kind = (
+            evidence_kinds[0]
+            if len(evidence_kinds) == 1
+            else "mixed"
+            if evidence_kinds
+            else "missing"
+        )
+        output[metric_key] = aggregate_value
+        measurement = {
+            "status": status,
+            "applicable": applicable_count > 0,
+            "complete": status in {"complete", "not_applicable"},
+            "evidence_kind": evidence_kind,
+            "evidence_kinds": evidence_kinds,
+            "applicable_observation_count": applicable_count,
+            "complete_observation_count": complete_count,
+            "missing_or_incomplete_observation_count": max(
+                0,
+                applicable_count - complete_count,
+            ),
+            "invalid_value_observation_count": invalid_value_count,
+        }
+        measurements[metric_key] = measurement
+        output[f"{metric_key}_status"] = measurement["status"]
+        output[f"{metric_key}_applicable"] = measurement["applicable"]
+        output[f"{metric_key}_complete"] = measurement["complete"]
+        output[f"{metric_key}_evidence_kind"] = measurement["evidence_kind"]
+    return output
 
 
 def json_serialisable_projection(value: Any) -> Any:
@@ -2367,8 +2458,7 @@ def aggregate_five_trial_campaign(
     model_cost_values: list[float] = []
     tool_cost_values: list[float] = []
     timeout_count = 0
-    clarification_count = 0
-    correction_count = 0
+    user_burden_metric_rows: list[dict[str, Any]] = []
     false_success_count = 0
     namespace_violation_count = 0
 
@@ -2434,6 +2524,7 @@ def aggregate_five_trial_campaign(
         trial_blocker_count = 0
         for trial in scenario_trials:
             metrics = _mapping(trial.get("operational_metrics"))
+            user_burden_metric_rows.append(metrics)
             if (duration_ms := _finite_number(metrics.get("duration_ms"))) is not None:
                 duration_ms_values.append(duration_ms)
             if (
@@ -2446,18 +2537,12 @@ def aggregate_five_trial_campaign(
                 tool_cost_values.append(tool_cost)
             timeout_count += int(metrics.get("timeout") is True)
             for metric_key, target_name in (
-                ("clarification_count", "clarification_count"),
-                ("correction_count", "correction_count"),
                 ("false_success_count", "false_success_count"),
                 ("namespace_violation_count", "namespace_violation_count"),
             ):
                 value = metrics.get(metric_key)
                 if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                    if target_name == "clarification_count":
-                        clarification_count += value
-                    elif target_name == "correction_count":
-                        correction_count += value
-                    elif target_name == "false_success_count":
+                    if target_name == "false_success_count":
                         false_success_count += value
                     else:
                         namespace_violation_count += value
@@ -2612,10 +2697,7 @@ def aggregate_five_trial_campaign(
                 "observation_count": len(tool_cost_values),
                 "total": sum(tool_cost_values) if tool_cost_values else None,
             },
-            "user_burden": {
-                "clarification_count": clarification_count,
-                "correction_count": correction_count,
-            },
+            "user_burden": aggregate_user_burden_metrics(user_burden_metric_rows),
             "false_success_count": false_success_count,
             "namespace_violation_count": namespace_violation_count,
         },
@@ -2672,6 +2754,7 @@ __all__ = [
     "CertificationScenarioContract",
     "OperationalCertificationContract",
     "aggregate_five_trial_campaign",
+    "aggregate_user_burden_metrics",
     "evaluate_budget",
     "evaluate_matcher",
     "evaluate_scenario_trial",

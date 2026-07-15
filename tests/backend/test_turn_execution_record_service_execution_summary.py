@@ -9,6 +9,7 @@ from src.backend.services.turn_execution_record_service import (
     build_turn_execution_correctness_summary,
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
+    project_final_answer_tool_evidence,
     _normalise_projection_field_entries,
     _summarise_tool_execution_context,
 )
@@ -325,8 +326,9 @@ def test_turn_record_preserves_final_answer_synthesis_and_projection_telemetry()
             "reason": "missing_from_payload",
         }
     ]
-    assert "#V#gmail_message_final_answer_evidence_view" in (
-        lineage["represented_contract_ids"]
+    assert (
+        "#V#gmail_message_final_answer_evidence_view"
+        in (lineage["represented_contract_ids"])
     )
     assert record["execution"]["summary"]["final_answer_synthesis_observed"] is True
     assert (
@@ -342,6 +344,67 @@ def test_turn_record_preserves_final_answer_synthesis_and_projection_telemetry()
     )
     assert record["final_response"]["synthesis_observed"] is True
     assert record["final_response"]["requested_evidence_lineage_observed"] is True
+
+
+def test_public_final_answer_tool_evidence_is_bounded_and_secret_redacted() -> None:
+    entry = {
+        "context_message_index": 2,
+        "tool": "synthetic_lookup",
+        "source_tool_invocation_id": "tool-call-1",
+        "tool_concept_id": "#V#synthetic_lookup_tool",
+        "evidence_view_concept_ids": ["#V#synthetic_evidence_view"],
+        "preserved_fields": [
+            {
+                "field_concept_id": "#V#synthetic_summary_field",
+                "output_key": "summary",
+                "location": "payload.summary",
+            }
+        ],
+        "missing_required_fields": [
+            {
+                "field_concept_id": "#V#synthetic_missing_field",
+                "output_key": "missing",
+                "reason": "missing_from_payload",
+            }
+        ],
+        "projected_payload": {
+            "summary": "s" * 900,
+            "access_token": "must-not-leak",
+            "session_cookie": "must-also-not-leak",
+            "items": list(range(20)),
+        },
+    }
+    turn_record = {
+        "final_answer_synthesis": {
+            "request": {"prompt": "private prompt"},
+            "llm_call": {"raw_response": "private response"},
+            "tool_evidence_projection": {
+                "schema_version": "tool_evidence_projection_reachability.v1",
+                "projection_count": 20,
+                "tools": ["synthetic_lookup"],
+                "missing_required_field_concept_ids": ["#V#synthetic_missing_field"],
+                "entries": [entry for _ in range(20)],
+            },
+        }
+    }
+
+    projection = project_final_answer_tool_evidence(turn_record)
+
+    assert projection is not None
+    assert projection["projection_count"] == 20
+    assert projection["included_projection_count"] == 16
+    assert projection["omitted_projection_count"] == 4
+    assert len(projection["entries"]) == 16
+    projected_payload = projection["entries"][0]["projected_payload"]
+    assert projected_payload["summary"] == "s" * 700 + "..."
+    assert projected_payload["access_token"] == "[redacted]"
+    assert projected_payload["session_cookie"] == "[redacted]"
+    assert projected_payload["items"][-1] == {"_omitted_items": 12}
+    assert projection["missing_required_field_concept_ids"] == [
+        "#V#synthetic_missing_field"
+    ]
+    assert "request" not in projection
+    assert "llm_call" not in projection
 
 
 def test_turn_record_treats_narration_prompt_as_final_answer_synthesis() -> None:
@@ -2502,16 +2565,21 @@ def test_turn_execution_record_projects_required_write_payload_validation_blocke
     assert create_obligation["last_attempt_status"] == "schema_validation_failed"
     assert create_obligation["last_attempt_message"] == message
     assert create_obligation["tool_call_validation_errors"][0]["message"] == message
-    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
-        summary["required_tool_obligation_blocking_failure_codes"]
+    assert (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+        in (summary["required_tool_obligation_blocking_failure_codes"])
     )
-    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
-        record["completion_gate"]["blocking_failure_codes"]
+    assert (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+        in (record["completion_gate"]["blocking_failure_codes"])
     )
-    assert BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED in (
-        record["workflow_routing_diagnostics"]["dispatch"][
-            "required_tool_obligation_blocking_failure_codes"
-        ]
+    assert (
+        BLOCKER_REQUIRED_WRITE_PAYLOAD_UNRESOLVED
+        in (
+            record["workflow_routing_diagnostics"]["dispatch"][
+                "required_tool_obligation_blocking_failure_codes"
+            ]
+        )
     )
 
 
@@ -2701,6 +2769,7 @@ def test_turn_execution_record_preserves_failed_workflow_action_recovery_evidenc
     assert surface["timeout_phase"] == "file_copy_registration"
     assert surface["workflow_instance_id"] == "#V#wf_instance_1"
     assert "import_url_file_copy" in summary["execution_surface_failed_tool_names"]
-    assert BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED in (
-        summary["required_tool_obligation_blocking_failure_codes"]
+    assert (
+        BLOCKER_REQUIRED_TOOL_ATTEMPT_FAILED
+        in (summary["required_tool_obligation_blocking_failure_codes"])
     )

@@ -117,14 +117,21 @@ _SEARCH_EVIDENCE_PREVIEW_CHARS = 8_000
 _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_DEPTH = 4
 _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_ITEMS = 8
 _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_STRING_CHARS = 700
+_FINAL_ANSWER_PUBLIC_PROJECTION_MAX_ENTRIES = 16
+_FINAL_ANSWER_PUBLIC_PROJECTION_MAX_FIELD_ENTRIES = 32
+_FINAL_ANSWER_PUBLIC_PROJECTION_MAX_IDENTIFIERS = 32
 _FINAL_ANSWER_PROJECTION_SECRET_KEY_PARTS = (
     "access_token",
     "api_key",
+    "apikey",
     "authorization",
     "bearer",
+    "cookie",
     "credential",
+    "encrypted_content",
     "oauth",
     "password",
+    "private_key",
     "refresh_token",
     "secret",
     "token",
@@ -3016,6 +3023,161 @@ def _extract_tool_evidence_projection_reachability(
         "redacted_field_concept_ids": _dedupe_string_sequence(redacted_field_ids),
         "entries": entries,
     }
+
+
+def _bounded_projection_identifier_sequence(
+    value: Any,
+    *,
+    max_items: int = _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_IDENTIFIERS,
+) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return []
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        text = _safe_str(raw)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        identifiers.append(
+            str(
+                _compact_final_answer_projection_payload(
+                    text,
+                    max_string_chars=_FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_STRING_CHARS,
+                )
+            )
+        )
+        if len(identifiers) >= max_items:
+            break
+    return identifiers
+
+
+def _bounded_public_projection_field_entries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return []
+    bounded: list[dict[str, Any]] = []
+    for raw_entry in _normalise_projection_field_entries(
+        value[:_FINAL_ANSWER_PUBLIC_PROJECTION_MAX_FIELD_ENTRIES]
+    ):
+        compact_entry = _compact_final_answer_projection_payload(
+            raw_entry,
+            max_depth=2,
+            max_items=8,
+        )
+        if isinstance(compact_entry, Mapping) and compact_entry:
+            bounded.append(dict(compact_entry))
+    return bounded
+
+
+def project_final_answer_tool_evidence(
+    turn_record: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return bounded semantic tool evidence safe for external evaluation.
+
+    The complete final-answer synthesis record contains prompts, context, model
+    exchanges, and other private diagnostic content.  External evaluators need
+    only the represented tool-evidence view that the final-answer model saw.
+    This projection therefore fail-closes on an unknown schema, whitelists the
+    reachability fields, caps all collections and strings, and reapplies the
+    secret-key redaction used when the turn record is built.
+    """
+
+    if not isinstance(turn_record, Mapping):
+        return None
+    synthesis = turn_record.get("final_answer_synthesis")
+    if not isinstance(synthesis, Mapping):
+        return None
+    raw_projection = synthesis.get("tool_evidence_projection")
+    if (
+        not isinstance(raw_projection, Mapping)
+        or raw_projection.get("schema_version")
+        != TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION
+    ):
+        return None
+    raw_entries = raw_projection.get("entries")
+    if not isinstance(raw_entries, Sequence) or isinstance(
+        raw_entries,
+        (str, bytes, bytearray),
+    ):
+        return None
+
+    entries: list[dict[str, Any]] = []
+    for raw_entry in raw_entries[:_FINAL_ANSWER_PUBLIC_PROJECTION_MAX_ENTRIES]:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry: dict[str, Any] = {}
+        if "context_message_index" in raw_entry:
+            entry["context_message_index"] = min(
+                _safe_non_negative_int(raw_entry.get("context_message_index")),
+                1_000_000_000,
+            )
+        for key in ("tool", "source_tool_invocation_id", "tool_concept_id"):
+            text = _safe_str(raw_entry.get(key))
+            if text:
+                entry[key] = _compact_final_answer_projection_payload(text)
+        evidence_view_concept_ids = _bounded_projection_identifier_sequence(
+            raw_entry.get("evidence_view_concept_ids")
+        )
+        if evidence_view_concept_ids:
+            entry["evidence_view_concept_ids"] = evidence_view_concept_ids
+        for key in (
+            "preserved_fields",
+            "missing_required_fields",
+            "omitted_fields",
+            "redacted_fields",
+        ):
+            fields = _bounded_public_projection_field_entries(raw_entry.get(key))
+            if fields:
+                entry[key] = fields
+        if "projected_payload" in raw_entry:
+            projected_payload = _compact_final_answer_projection_payload(
+                raw_entry.get("projected_payload")
+            )
+            if projected_payload not in (None, [], {}):
+                entry["projected_payload"] = projected_payload
+        if entry:
+            entries.append(entry)
+
+    if not entries:
+        return None
+
+    source_projection_count = min(
+        max(
+            _safe_non_negative_int(raw_projection.get("projection_count")),
+            len(raw_entries),
+        ),
+        1_000_000_000,
+    )
+    included_projection_count = len(entries)
+    projection: dict[str, Any] = {
+        "schema_version": TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION,
+        "projection_count": source_projection_count,
+        "included_projection_count": included_projection_count,
+        "omitted_projection_count": max(
+            0,
+            source_projection_count - included_projection_count,
+        ),
+        "entries": entries,
+    }
+    for key in (
+        "tools",
+        "tool_concept_ids",
+        "source_tool_invocation_ids",
+        "preserved_field_concept_ids",
+        "missing_required_field_concept_ids",
+        "omitted_field_concept_ids",
+        "redacted_field_concept_ids",
+    ):
+        identifiers = _bounded_projection_identifier_sequence(raw_projection.get(key))
+        if identifiers:
+            projection[key] = identifiers
+    return projection
 
 
 def _field_lineage_entries_from_projection_entry(

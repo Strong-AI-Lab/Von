@@ -36,6 +36,7 @@ from src.backend.workflows import (
     WorkflowStateSpec,
 )
 from src.backend.workflows.action_registry import WorkflowEnvironment
+from src.backend.workflows.engine import WorkflowResult
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
@@ -659,6 +660,100 @@ def test_agent_test_execute_workflow_skips_durable_persistence(monkeypatch) -> N
     )
     assert submission_event["status"] == "submission_skipped"
     assert submission_event["reason_code"] == "agent_test_instance"
+
+
+def test_execute_workflow_binds_authority_output_to_runtime_execution_identity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=False,
+    )
+    workflow_id = "#V#represented_authority_bridge_workflow"
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+        purpose="Runtime authority-output provenance bridge regression workflow.",
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=definition,
+            purpose=definition.purpose,
+            source="vontology",
+        )
+    )
+    authority_output = {
+        "schema_version": "represented_learning_release_decision.v1",
+        "decision_id": "decision-bridge-1",
+    }
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *_args, **_kwargs: WorkflowResult(
+            data={
+                "workflow_authority_output": authority_output,
+                "workflow_step_result_envelopes": [
+                    {
+                        "output_payload": {
+                            "prompt_context_diagnostics": {
+                                "resolved_prompt_concept_id": (
+                                    "#V#represented_authority_prompt"
+                                ),
+                                "prompt_content_sha256": "b" * 64,
+                            }
+                        }
+                    }
+                ],
+            },
+            completed=True,
+            final_state="done",
+        ),
+    )
+
+    with override_current_actor(
+        "#V#michael_witbrock",
+        "#V#university_of_auckland_strong_ai_lab",
+    ):
+        result = orchestrator.execute_workflow(
+            workflow_id,
+            data={
+                "user_concept_id": "#V#michael_witbrock",
+                "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+                "conversation_session_id": "session-bridge-1",
+                "turn_id": "request-bridge-1",
+            },
+            llm_client=_DummyLLM(),
+            model="test-model",
+            user_namespace="#V#michael_witbrock",
+            conversation_session_id="session-bridge-1",
+            turn_id="request-bridge-1",
+            episode_source="conversation_turn_selected_workflow",
+        )
+
+    assert result is not None
+    snapshot = orchestrator_module._build_workflow_execution_aux_result_snapshot(result)
+    assert snapshot is not None
+    assert snapshot["workflow_authority_output"] == authority_output
+    metadata = snapshot["workflow_authority_output_snapshot"]
+    execution_identity = metadata["workflow_execution_identity"]
+    assert execution_identity["schema_version"] == "workflow_execution_identity.v1"
+    assert execution_identity["workflow_id"] == workflow_id
+    assert execution_identity["execution_request_id"] == "request-bridge-1"
+    assert execution_identity["conversation_session_id"] == "session-bridge-1"
+    definition_identity = execution_identity["workflow_definition_identity"]
+    assert definition_identity["workflow_id"] == workflow_id
+    assert definition_identity["source"] == "vontology"
+    assert (
+        definition_identity["definition_hash"]
+        == definition_identity["authoritative_definition_hash"]
+    )
+    assert definition_identity["hash_mismatch"] is False
+    assert metadata["prompt_content_sha256"] == "b" * 64
 
 
 def test_execute_workflow_rejects_claims_conflicting_with_parent_actor(
@@ -3519,6 +3614,134 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     assert "File copy concept: #V#file_copy_456." in report["response_text"]
     assert "Paper concept: #V#paper_123." in result.outputs["response_text"]
     assert "File copy concept: #V#file_copy_456." in result.outputs["response_text"]
+
+
+def test_workflow_authority_output_snapshot_preserves_exact_bounded_lineage() -> None:
+    for schema_version in (
+        "represented_operational_learning_candidate_proposal.v1",
+        "represented_learning_release_decision.v1",
+    ):
+        authority_output = {
+            "schema_version": schema_version,
+            "authority": {
+                "authority_concept_id": "#V#represented_workflow",
+                "authority_revision_sha256": "a" * 64,
+                "authority_prompt_revision_sha256": "b" * 64,
+                "authority_execution_request_id": "request-1",
+            },
+            "release_payload": {
+                "behavioural_test_vectors": {
+                    "original_failure": {
+                        "source_request_id": "request-original",
+                        "stimulus": "Bounded original failure stimulus.",
+                    },
+                    "nearby_cases": [
+                        {
+                            "source_request_id": "request-nearby",
+                            "stimulus": "Bounded nearby stimulus.",
+                        }
+                    ],
+                }
+            },
+        }
+        workflow_result = SimpleNamespace(
+            data={
+                "workflow_authority_output": authority_output,
+                "workflow_step_result_envelopes": [
+                    {
+                        "output_payload": {
+                            "prompt_context_diagnostics": {
+                                "resolved_prompt_concept_id": (
+                                    "#V#represented_authority_prompt"
+                                ),
+                                "prompt_content_sha256": "c" * 64,
+                            }
+                        }
+                    }
+                ],
+            }
+        )
+        setattr(
+            workflow_result,
+            orchestrator_module._WORKFLOW_EXECUTION_IDENTITY_ATTRIBUTE,
+            {
+                "schema_version": "workflow_execution_identity.v1",
+                "workflow_id": "#V#represented_workflow",
+                "execution_request_id": "request-1",
+                "conversation_session_id": "session-1",
+                "workflow_instance_id": None,
+                "episode_source": "conversation_turn_selected_workflow",
+                "workflow_definition_identity": {
+                    "schema_version": "workflow_definition_identity.v1",
+                    "workflow_id": "#V#represented_workflow",
+                    "definition_hash": "a" * 64,
+                    "authoritative_definition_hash": "a" * 64,
+                    "hash_mismatch": False,
+                },
+            },
+        )
+        snapshot = orchestrator_module._build_workflow_execution_aux_result_snapshot(
+            workflow_result
+        )
+
+        assert snapshot is not None
+        assert snapshot["workflow_authority_output"] == authority_output
+        metadata = snapshot["workflow_authority_output_snapshot"]
+        assert metadata["schema_version"] == "workflow_authority_output_snapshot.v1"
+        assert metadata["exact"] is True
+        assert metadata["redacted_count"] == 0
+        assert metadata["truncated_count"] == 0
+        assert isinstance(metadata["output_sha256"], str)
+        assert len(metadata["output_sha256"]) == 64
+        assert metadata["prompt_lineage_observed"] is True
+        assert metadata["prompt_lineage_ambiguous"] is False
+        assert metadata["prompt_content_sha256"] == "c" * 64
+        assert metadata["resolved_prompt_concept_id"] == (
+            "#V#represented_authority_prompt"
+        )
+        execution_identity = metadata["workflow_execution_identity"]
+        assert execution_identity["workflow_id"] == "#V#represented_workflow"
+        assert execution_identity["execution_request_id"] == "request-1"
+        assert execution_identity["workflow_definition_identity"][
+            "authoritative_definition_hash"
+        ] == ("a" * 64)
+
+
+def test_workflow_authority_output_snapshot_redacts_and_bounds_untrusted_data() -> None:
+    authority_output = {
+        "schema_version": "represented_operational_learning_candidate_proposal.v1",
+        "release_payload": {
+            "represented_change": {
+                "api_key": "must-not-enter-turn-execution-telemetry",
+                "bounded_text": "x" * 20_000,
+                "oversized_sequence": list(range(200)),
+            }
+        },
+    }
+    snapshot = orchestrator_module._build_workflow_execution_aux_result_snapshot(
+        SimpleNamespace(data={"workflow_authority_output": authority_output})
+    )
+
+    assert snapshot is not None
+    projected = snapshot["workflow_authority_output"]
+    represented_change = projected["release_payload"]["represented_change"]
+    assert represented_change["api_key"] == "[redacted]"
+    assert "must-not-enter-turn-execution-telemetry" not in json.dumps(snapshot)
+    assert len(represented_change["bounded_text"]) == (
+        orchestrator_module._WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_STRING_CHARS
+    )
+    assert len(represented_change["oversized_sequence"]) == (
+        orchestrator_module._WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_ITEMS_PER_CONTAINER
+        + 1
+    )
+    metadata = snapshot["workflow_authority_output_snapshot"]
+    assert metadata["exact"] is False
+    assert metadata["output_sha256"] is None
+    assert metadata["redacted_count"] == 1
+    assert metadata["truncated_count"] >= 2
+    assert metadata["redacted_paths"] == [
+        "$.release_payload.represented_change.api_key"
+    ]
 
 
 def test_execute_selected_progress_includes_selector_route_evidence(

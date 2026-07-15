@@ -361,6 +361,36 @@ class InternalMCPGateway:
             )
             try:
                 with self._access_actor_context(user_id, org_id):
+                    # A trusted in-process AgentTest harness may bind a
+                    # represented, context-scoped fault plan.  Resolve and bind
+                    # the exact authenticated actor before applying it so a
+                    # synthetic transport fact cannot bypass actor-scope
+                    # establishment.  The hook owns no scenario or recovery
+                    # policy and accepts no payload control fields.
+                    from .agent_test_fault_plan import (
+                        maybe_inject_agent_test_mcp_fault,
+                    )
+
+                    injected_fault = maybe_inject_agent_test_mcp_fault(
+                        method_name
+                    )
+                    if injected_fault is not None:
+                        self._record_failure(
+                            method_name,
+                            injected_fault.error_code,
+                        )
+                        logger.warning(
+                            "%s AgentTest fault plan injected %s for %s "
+                            "(fault_id=%s)",
+                            self._log_tag,
+                            injected_fault.event.get("fault_class"),
+                            method_name,
+                            injected_fault.event.get("fault_id"),
+                        )
+                        return TransportResult(
+                            payload=dict(injected_fault.payload),
+                            duration_ms=0.0,
+                        )
                     transport_result = self._transport.execute(
                         method_name=definition.name,
                         handler=definition.handler,

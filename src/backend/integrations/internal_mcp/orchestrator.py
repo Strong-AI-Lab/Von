@@ -1746,6 +1746,36 @@ _WORKFLOW_EXECUTION_SUMMARY_MAX_SIDE_EFFECTS = 24
 _WORKFLOW_EXECUTION_SUMMARY_MAX_IDS_PER_EFFECT = 50
 _WORKFLOW_EXECUTION_SUMMARY_MAX_ACTION_OBSERVATIONS = 80
 _WORKFLOW_EXECUTION_SUMMARY_MAX_SCAN_DEPTH = 3
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_KEY = "workflow_authority_output"
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_METADATA_KEY = (
+    "workflow_authority_output_snapshot"
+)
+_WORKFLOW_EXECUTION_IDENTITY_SCHEMA_VERSION = "workflow_execution_identity.v1"
+_WORKFLOW_EXECUTION_IDENTITY_ATTRIBUTE = "_von_workflow_execution_identity"
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_DEPTH = 12
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_ITEMS_PER_CONTAINER = 64
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_TOTAL_ITEMS = 512
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_STRING_CHARS = 8_000
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_TOTAL_STRING_CHARS = 64_000
+_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_RECORDED_PATHS = 32
+_WORKFLOW_AUTHORITY_OUTPUT_SENSITIVE_KEY_PARTS: tuple[str, ...] = (
+    "access_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "cookie",
+    "credential",
+    "encrypted_content",
+    "id_token",
+    "oauth",
+    "password",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "set_cookie",
+    "token",
+)
 _WORKFLOW_EXECUTION_SUMMARY_IGNORED_KEYS: frozenset[str] = frozenset(
     {
         "aux_llm_calls",
@@ -1791,6 +1821,7 @@ _WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_KEYS: tuple[str, ...] = (
     "source_processing_marker_concept_id",
     "source_processing_markers",
     "learning_signal",
+    _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_KEY,
 )
 _WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_FALLBACK_KEYS: dict[str, tuple[str, ...]] = {
     # Older and workflow-family-specific result payloads may expose evidence
@@ -2445,6 +2476,249 @@ def _safe_workflow_execution_aux_snapshot_value(
     return str(value)
 
 
+def _workflow_authority_output_key_is_sensitive(key: str) -> bool:
+    lowered = key.strip().lower()
+    return bool(lowered) and any(
+        marker in lowered
+        for marker in _WORKFLOW_AUTHORITY_OUTPUT_SENSITIVE_KEY_PARTS
+    )
+
+
+def _build_workflow_authority_output_snapshot(
+    value: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Build a bounded, secret-aware projection for represented authority output.
+
+    Registration consumers require ``exact`` to remain true.  A workflow can
+    therefore expose rich represented output to its persisted Turn Execution
+    Record without allowing an untrusted response to grow telemetry without
+    bounds or to smuggle credential-shaped values into diagnostics.
+    """
+
+    total_items = 0
+    total_string_chars = 0
+    redacted_count = 0
+    truncated_count = 0
+    redacted_paths: list[str] = []
+    truncated_paths: list[str] = []
+
+    def _record_path(paths: list[str], path: str) -> None:
+        if len(paths) < _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_RECORDED_PATHS:
+            paths.append(path)
+
+    def _redact(path: str) -> str:
+        nonlocal redacted_count
+        redacted_count += 1
+        _record_path(redacted_paths, path)
+        return "[redacted]"
+
+    def _truncate(path: str, replacement: Any) -> Any:
+        nonlocal truncated_count
+        truncated_count += 1
+        _record_path(truncated_paths, path)
+        return replacement
+
+    def _walk(current: Any, *, depth: int, path: str) -> Any:
+        nonlocal total_items, total_string_chars
+        if current is None or isinstance(current, (bool, int)):
+            return current
+        if isinstance(current, float):
+            try:
+                json.dumps(current, allow_nan=False)
+            except (TypeError, ValueError):
+                return _truncate(path, str(current))
+            return current
+        if isinstance(current, str):
+            remaining = max(
+                0,
+                _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_TOTAL_STRING_CHARS
+                - total_string_chars,
+            )
+            permitted = min(
+                _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_STRING_CHARS,
+                remaining,
+            )
+            if len(current) > permitted:
+                projected = current[:permitted]
+                total_string_chars += len(projected)
+                return _truncate(path, projected)
+            total_string_chars += len(current)
+            return current
+        if depth >= _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_DEPTH:
+            kind = "mapping" if isinstance(current, Mapping) else "sequence"
+            return _truncate(path, {"_snapshot_truncated": f"{kind}_depth_limit"})
+        if isinstance(current, Mapping):
+            projected_mapping: dict[str, Any] = {}
+            for index, (key, item) in enumerate(current.items()):
+                item_path = f"{path}.{str(key)[:120]}"
+                if index >= (
+                    _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_ITEMS_PER_CONTAINER
+                ):
+                    projected_mapping["_snapshot_truncated_items"] = _truncate(
+                        path,
+                        max(1, len(current) - index),
+                    )
+                    break
+                if total_items >= _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_TOTAL_ITEMS:
+                    projected_mapping["_snapshot_truncated_items"] = _truncate(
+                        path,
+                        max(1, len(current) - index),
+                    )
+                    break
+                total_items += 1
+                if not isinstance(key, str):
+                    _truncate(item_path, None)
+                    continue
+                if len(key) > 120:
+                    _truncate(item_path, None)
+                    continue
+                if callable(item):
+                    projected_mapping[key] = _truncate(
+                        item_path,
+                        f"<{type(item).__name__}>",
+                    )
+                    continue
+                if _workflow_authority_output_key_is_sensitive(key):
+                    projected_mapping[key] = _redact(item_path)
+                    continue
+                projected_mapping[key] = _walk(
+                    item,
+                    depth=depth + 1,
+                    path=item_path,
+                )
+            return projected_mapping
+        if isinstance(current, Sequence) and not isinstance(
+            current,
+            (str, bytes, bytearray),
+        ):
+            projected_items: list[Any] = []
+            for index, item in enumerate(current):
+                item_path = f"{path}[{index}]"
+                if index >= (
+                    _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_ITEMS_PER_CONTAINER
+                ) or total_items >= (
+                    _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_TOTAL_ITEMS
+                ):
+                    projected_items.append(
+                        _truncate(item_path, "<snapshot item limit reached>")
+                    )
+                    break
+                total_items += 1
+                projected_items.append(
+                    _walk(item, depth=depth + 1, path=item_path)
+                )
+            return projected_items
+        return _truncate(path, str(current))
+
+    projected = _walk(value, depth=0, path="$")
+    exact = redacted_count == 0 and truncated_count == 0
+    output_sha256: str | None = None
+    if exact:
+        try:
+            encoded = json.dumps(
+                projected,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            exact = False
+            truncated_count += 1
+            _record_path(truncated_paths, "$")
+        else:
+            output_sha256 = hashlib.sha256(encoded).hexdigest()
+    metadata = {
+        "schema_version": "workflow_authority_output_snapshot.v1",
+        "exact": exact,
+        "output_sha256": output_sha256,
+        "redacted_count": redacted_count,
+        "redacted_paths": redacted_paths,
+        "truncated_count": truncated_count,
+        "truncated_paths": truncated_paths,
+        "projected_item_count": total_items,
+        "projected_string_char_count": total_string_chars,
+        "limits": {
+            "max_depth": _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_DEPTH,
+            "max_items_per_container": (
+                _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_ITEMS_PER_CONTAINER
+            ),
+            "max_total_items": _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_TOTAL_ITEMS,
+            "max_string_chars": (
+                _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_STRING_CHARS
+            ),
+            "max_total_string_chars": (
+                _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_MAX_TOTAL_STRING_CHARS
+            ),
+        },
+    }
+    return projected, metadata
+
+
+def _workflow_authority_prompt_lineage(
+    result_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project hash-only prompt lineage from bounded workflow-step surfaces."""
+
+    prompt_hashes: list[str] = []
+    prompt_ids: list[str] = []
+    pending: list[tuple[Any, int]] = []
+    for key in (
+        "prompt_context_diagnostics",
+        LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
+        WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
+    ):
+        pending.append((result_data.get(key), 0))
+    visited = 0
+    while pending and visited < 256:
+        current, depth = pending.pop()
+        visited += 1
+        if depth > 8:
+            continue
+        if isinstance(current, Mapping):
+            prompt_hash = current.get("prompt_content_sha256")
+            if (
+                isinstance(prompt_hash, str)
+                and len(prompt_hash) == 64
+                and all(character in "0123456789abcdef" for character in prompt_hash)
+                and prompt_hash not in prompt_hashes
+            ):
+                prompt_hashes.append(prompt_hash)
+            prompt_id = current.get("resolved_prompt_concept_id")
+            if (
+                isinstance(prompt_id, str)
+                and prompt_id.strip()
+                and prompt_id.strip() not in prompt_ids
+            ):
+                prompt_ids.append(prompt_id.strip())
+            for index, item in enumerate(current.values()):
+                if index >= 64:
+                    break
+                pending.append((item, depth + 1))
+        elif isinstance(current, Sequence) and not isinstance(
+            current,
+            (str, bytes, bytearray),
+        ):
+            for index, item in enumerate(current):
+                if index >= 64:
+                    break
+                pending.append((item, depth + 1))
+
+    lineage: dict[str, Any] = {
+        "prompt_lineage_observed": bool(prompt_hashes),
+        "prompt_lineage_ambiguous": len(prompt_hashes) > 1,
+    }
+    if len(prompt_hashes) == 1:
+        lineage["prompt_content_sha256"] = prompt_hashes[0]
+    elif prompt_hashes:
+        lineage["prompt_content_sha256s"] = prompt_hashes
+    if len(prompt_ids) == 1:
+        lineage["resolved_prompt_concept_id"] = prompt_ids[0]
+    elif prompt_ids:
+        lineage["resolved_prompt_concept_ids"] = prompt_ids
+    return lineage
+
+
 def _build_workflow_execution_aux_result_snapshot(
     workflow_result: Any,
 ) -> dict[str, Any] | None:
@@ -2466,6 +2740,29 @@ def _build_workflow_execution_aux_result_snapshot(
                     break
             if raw_value is None:
                 continue
+        if key == _WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_KEY:
+            projected_output, projection_metadata = (
+                _build_workflow_authority_output_snapshot(raw_value)
+            )
+            projection_metadata.update(_workflow_authority_prompt_lineage(result_data))
+            workflow_execution_identity = getattr(
+                workflow_result,
+                _WORKFLOW_EXECUTION_IDENTITY_ATTRIBUTE,
+                None,
+            )
+            if isinstance(workflow_execution_identity, Mapping):
+                projection_metadata["workflow_execution_identity"] = (
+                    _safe_workflow_execution_aux_snapshot_value(
+                        workflow_execution_identity,
+                        max_depth=4,
+                        max_items=24,
+                    )
+                )
+            snapshot[key] = projected_output
+            snapshot[_WORKFLOW_AUTHORITY_OUTPUT_SNAPSHOT_METADATA_KEY] = (
+                projection_metadata
+            )
+            continue
         snapshot[key] = _safe_workflow_execution_aux_snapshot_value(raw_value)
     return snapshot or None
 
@@ -33956,6 +34253,28 @@ class InternalMCPChatOrchestrator:
                 environment=env,
                 data=data,
                 trace=trace,
+            )
+            # Bind any persisted represented-authority output to the exact
+            # workflow execution that produced it.  This runtime-derived
+            # identity is deliberately kept outside authored workflow data;
+            # the bounded TER projection copies it into the authority-output
+            # snapshot metadata beside the output digest and prompt lineage.
+            setattr(
+                result,
+                _WORKFLOW_EXECUTION_IDENTITY_ATTRIBUTE,
+                {
+                    "schema_version": _WORKFLOW_EXECUTION_IDENTITY_SCHEMA_VERSION,
+                    "workflow_id": workflow_id,
+                    "execution_request_id": _safe_scalar_text(resolved_turn_id),
+                    "conversation_session_id": _safe_scalar_text(resolved_session_id),
+                    "workflow_instance_id": durable_instance_id,
+                    "episode_source": str(resolved_source),
+                    "workflow_definition_identity": (
+                        dict(workflow_definition_identity)
+                        if isinstance(workflow_definition_identity, Mapping)
+                        else None
+                    ),
+                },
             )
             if isinstance(getattr(result, "data", None), dict):
                 _attach_terminal_success_contract(result)

@@ -8,6 +8,7 @@ orchestrator machinery when a gateway is available.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -3394,6 +3395,12 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
         context=request.data,
         workflow_state_id=request.workflow_state_id,
     )
+    prompt_context_diagnostics = dict(prompt_context_diagnostics or {})
+    prompt_context_diagnostics["prompt_content_sha256"] = hashlib.sha256(
+        base_prompt_text.encode("utf-8")
+    ).hexdigest()
+    if prompt_id:
+        prompt_context_diagnostics["resolved_prompt_concept_id"] = prompt_id
     if not rendered_prompt:
         return WorkflowActionResult(
             status="failed",

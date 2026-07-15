@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -113,9 +114,10 @@ def _contract():
     )
 
 
-def _repo_seed_contract():
+def _repo_seed_contract(*, case_set: str | None = None):
     return parse_operational_certification_contract(
-        json.loads(_OPERATIONAL_SEED_PATH.read_text(encoding="utf-8"))
+        json.loads(_OPERATIONAL_SEED_PATH.read_text(encoding="utf-8")),
+        case_set=case_set,
     )
 
 
@@ -246,6 +248,329 @@ def test_every_repo_unique_state_scenario_declares_executable_absence_probe() ->
         required_action_ids = probe.get("required_action_ids")
         assert isinstance(required_action_ids, list) and required_action_ids
         assert "llm.action" not in required_action_ids
+
+
+def test_pilot_unique_state_scenario_declares_exact_postcondition_probe() -> None:
+    contract = _repo_seed_contract(case_set="trusted_sail_pilot_v1")
+    scenario = next(
+        candidate
+        for candidate in contract.scenarios
+        if candidate.scenario_id == "pilot_unique_state_marker_create_and_read_back"
+    )
+
+    probe = scenario.reset_policy["authoritative_postcondition_probe"]
+    assert probe == {
+        "workflow_id": "#V#operational_marker_readback_probe_workflow",
+        "inputs": {"isolation_id": "{{isolation_id}}"},
+        "required_action_ids": [
+            "workflow_mcp.invoke_tool",
+            "workflow_control.context_project",
+        ],
+        "required_tool_names": [
+            "resolve_concept_by_name",
+            "fetch_concept",
+            "get_text_relations_summary",
+        ],
+        "expected_cardinality": 1,
+        "expected_name": "Operational certification {{isolation_id}}",
+        "expected_description": (
+            "Trusted SAIL pilot certification marker {{isolation_id}}"
+        ),
+    }
+
+
+def _postcondition_probe_fixture(
+    *,
+    isolation_id: str = "isolation-123",
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
+    workflow_id = "#V#synthetic_postcondition_probe_workflow"
+    expected_name = f"Synthetic target {isolation_id}"
+    expected_description = f"Synthetic description {isolation_id}"
+    resolved_concept_id = "#V#synthetic_target"
+    probe_spec = {
+        "workflow_id": workflow_id,
+        "inputs": {"isolation_id": isolation_id},
+        "required_action_ids": [
+            "workflow_mcp.invoke_tool",
+            "workflow_control.context_project",
+        ],
+        "required_tool_names": [
+            "synthetic_resolve",
+            "synthetic_fetch",
+            "synthetic_text_read",
+        ],
+        "expected_cardinality": 1,
+        "expected_name": expected_name,
+        "expected_description": expected_description,
+    }
+    probe_inputs = {"isolation_id": isolation_id}
+    scope = {
+        "namespace": "unit-namespace",
+        "user_id": "#V#unit_user",
+        "org_id": "#V#unit_org",
+        "source_event_type": "operational_certification_postcondition_probe",
+        "source_event_id": "campaign:scenario:1:postcondition",
+        "event_idempotency_key": "postcondition-idempotency-key",
+    }
+    probe_result = {
+        "schema_version": "represented_operational_state_probe_result.v1",
+        "isolation_id": isolation_id,
+        "namespace": scope["namespace"],
+        "target_absent": False,
+        "target_present": True,
+        "resolution_status": "resolved",
+        "resolved_concept_id": resolved_concept_id,
+        "resolution_candidates": [resolved_concept_id],
+        "expected_name": expected_name,
+        "expected_description": expected_description,
+        "readback_concept_id": resolved_concept_id,
+        "names": [{"name": expected_name, "language": "en-NZ"}],
+        "content": expected_description,
+        "text_relation_groups": [
+            {"predicate": "synthetic_name", "texts": [expected_name]},
+            {
+                "predicate": "synthetic_description",
+                "texts": [expected_description],
+            },
+        ],
+        "evidence": [
+            {"kind": "resolution", "tool": "synthetic_resolve"},
+            {
+                "kind": "readback",
+                "tools": ["synthetic_fetch", "synthetic_text_read"],
+            },
+        ],
+    }
+    result_sha256 = certification_script.stable_payload_digest(probe_result)
+    action_evidence = [
+        {
+            "action_id": "workflow_mcp.invoke_tool",
+            "status": "success",
+            "requested_tool_name": tool_name,
+            "resolved_tool_name": tool_name,
+            "inputs_sha256": f"{tool_name}-inputs",
+            "outputs_sha256": f"{tool_name}-outputs",
+        }
+        for tool_name in probe_spec["required_tool_names"]
+    ]
+    action_evidence.append(
+        {
+            "action_id": "workflow_control.context_project",
+            "status": "success",
+            "inputs_sha256": "project-inputs",
+            "outputs_sha256": "project-outputs",
+            "state_probe_result_sha256": result_sha256,
+        }
+    )
+    workflow_output = {"represented_operational_state_probe_result": probe_result}
+    payload = {
+        "success": True,
+        "trace_persisted": True,
+        "workflow_authority_source": "vontology",
+        "workflow_id": workflow_id,
+        "workflow_definition_identity_sha256": "definition-digest",
+        "workflow_output_sha256": certification_script.stable_payload_digest(
+            workflow_output
+        ),
+        "execution_trace_id": "postcondition-trace",
+        "workflow_inputs_sha256": certification_script.stable_payload_digest(
+            probe_inputs
+        ),
+        "exact_scope": scope,
+        "exact_scope_sha256": certification_script.stable_payload_digest(scope),
+        "workflow_action_evidence": action_evidence,
+        "workflow_output": {"represented_operational_state_probe_result": probe_result},
+    }
+    return probe_spec, probe_inputs, payload, scope
+
+
+def _evaluate_postcondition_fixture(
+    probe_spec: Mapping[str, Any],
+    probe_inputs: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    scope: Mapping[str, str],
+) -> dict[str, Any]:
+    return certification_script._evaluate_authoritative_postcondition_probe_execution(
+        probe_spec=probe_spec,
+        probe_inputs=probe_inputs,
+        payload=payload,
+        isolation_id=str(probe_inputs["isolation_id"]),
+        namespace=scope["namespace"],
+        user_id=scope["user_id"],
+        org_id=scope["org_id"],
+        source_event_type=scope["source_event_type"],
+        source_event_id=scope["source_event_id"],
+        event_idempotency_key=scope["event_idempotency_key"],
+    )
+
+
+def test_authoritative_postcondition_probe_accepts_exact_represented_readback() -> None:
+    probe_spec, probe_inputs, payload, scope = _postcondition_probe_fixture()
+
+    evidence = _evaluate_postcondition_fixture(
+        probe_spec,
+        probe_inputs,
+        payload,
+        scope,
+    )
+
+    assert evidence["verified"] is True
+    assert evidence["reason"] is None
+    assert all(evidence["checks"].values())
+    assert evidence["observed_state"]["cardinality"] == 1
+    assert evidence["observed_state"]["resolved_concept_id"] == ("#V#synthetic_target")
+    assert set(evidence["represented_evidence"]["tool_names"]) == {
+        "synthetic_resolve",
+        "synthetic_fetch",
+        "synthetic_text_read",
+    }
+    evidence_without_hash = dict(evidence)
+    evidence_sha256 = evidence_without_hash.pop("evidence_sha256")
+    assert evidence_sha256 == certification_script.stable_payload_digest(
+        evidence_without_hash
+    )
+    encoded = json.dumps(evidence)
+    assert probe_spec["expected_name"] not in encoded
+    assert probe_spec["expected_description"] not in encoded
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "failed_check"),
+    [
+        ("name", "name_readback_exact"),
+        ("description", "description_readback_exact"),
+    ],
+)
+def test_authoritative_postcondition_probe_fails_closed_on_exact_value_mismatch(
+    mismatch: str,
+    failed_check: str,
+) -> None:
+    probe_spec, probe_inputs, payload, scope = _postcondition_probe_fixture()
+    probe_result = payload["workflow_output"][
+        "represented_operational_state_probe_result"
+    ]
+    if mismatch == "name":
+        probe_result["names"] = [{"name": "different name"}]
+        probe_result["text_relation_groups"][0]["texts"] = ["different name"]
+    else:
+        probe_result["content"] = "different description"
+        probe_result["text_relation_groups"][1]["texts"] = ["different description"]
+    result_sha256 = certification_script.stable_payload_digest(probe_result)
+    payload["workflow_action_evidence"][-1]["state_probe_result_sha256"] = result_sha256
+    payload["workflow_output_sha256"] = certification_script.stable_payload_digest(
+        payload["workflow_output"]
+    )
+
+    evidence = _evaluate_postcondition_fixture(
+        probe_spec,
+        probe_inputs,
+        payload,
+        scope,
+    )
+
+    assert evidence["verified"] is False
+    assert evidence["reason"] == "authoritative_postcondition_probe_unverified"
+    assert evidence["checks"][failed_check] is False
+    assert evidence["checks"]["projected_result_causal_action_evidence"] is True
+
+
+def test_authoritative_postcondition_probe_fails_closed_on_cardinality_mismatch() -> (
+    None
+):
+    probe_spec, probe_inputs, payload, scope = _postcondition_probe_fixture()
+    probe_result = payload["workflow_output"][
+        "represented_operational_state_probe_result"
+    ]
+    probe_result["resolution_candidates"].append("#V#duplicate_target")
+    result_sha256 = certification_script.stable_payload_digest(probe_result)
+    payload["workflow_action_evidence"][-1]["state_probe_result_sha256"] = result_sha256
+    payload["workflow_output_sha256"] = certification_script.stable_payload_digest(
+        payload["workflow_output"]
+    )
+
+    evidence = _evaluate_postcondition_fixture(
+        probe_spec,
+        probe_inputs,
+        payload,
+        scope,
+    )
+
+    assert evidence["verified"] is False
+    assert evidence["observed_state"]["cardinality"] == 2
+    assert evidence["checks"]["cardinality_exact"] is False
+    assert evidence["checks"]["name_readback_exact"] is True
+    assert evidence["checks"]["description_readback_exact"] is True
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "failed_check"),
+    [
+        ("isolation", "isolation_id_exact"),
+        ("scope", "exact_authenticated_scope"),
+    ],
+)
+def test_authoritative_postcondition_probe_fails_closed_on_scope_mismatch(
+    mismatch: str,
+    failed_check: str,
+) -> None:
+    probe_spec, probe_inputs, payload, scope = _postcondition_probe_fixture()
+    if mismatch == "isolation":
+        probe_result = payload["workflow_output"][
+            "represented_operational_state_probe_result"
+        ]
+        probe_result["isolation_id"] = "different-isolation"
+        payload["workflow_action_evidence"][-1]["state_probe_result_sha256"] = (
+            certification_script.stable_payload_digest(probe_result)
+        )
+        payload["workflow_output_sha256"] = certification_script.stable_payload_digest(
+            payload["workflow_output"]
+        )
+    else:
+        payload["exact_scope"] = {**payload["exact_scope"], "namespace": "other"}
+        payload["exact_scope_sha256"] = certification_script.stable_payload_digest(
+            payload["exact_scope"]
+        )
+
+    evidence = _evaluate_postcondition_fixture(
+        probe_spec,
+        probe_inputs,
+        payload,
+        scope,
+    )
+
+    assert evidence["verified"] is False
+    assert evidence["checks"][failed_check] is False
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "failed_checks"),
+    [
+        (
+            "action",
+            {"required_actions_executed", "projected_result_causal_action_evidence"},
+        ),
+        ("tool", {"required_tools_executed"}),
+    ],
+)
+def test_authoritative_postcondition_probe_requires_causal_action_and_tool_evidence(
+    mismatch: str,
+    failed_checks: set[str],
+) -> None:
+    probe_spec, probe_inputs, payload, scope = _postcondition_probe_fixture()
+    if mismatch == "action":
+        payload["workflow_action_evidence"] = payload["workflow_action_evidence"][:-1]
+    else:
+        payload["workflow_action_evidence"][0]["resolved_tool_name"] = "different_tool"
+
+    evidence = _evaluate_postcondition_fixture(
+        probe_spec,
+        probe_inputs,
+        payload,
+        scope,
+    )
+
+    assert evidence["verified"] is False
+    assert all(evidence["checks"][check] is False for check in failed_checks)
 
 
 def _args(**overrides: Any) -> argparse.Namespace:
@@ -504,9 +829,9 @@ def test_represented_selector_evidence_rejects_nonrepresented_selection_resoluti
     selection_resolution: str,
 ) -> None:
     turn_record = _represented_selector_diagnostics()
-    turn_record["workflow_routing_diagnostics"]["selector"][
-        "selection_resolution"
-    ] = selection_resolution
+    turn_record["workflow_routing_diagnostics"]["selector"]["selection_resolution"] = (
+        selection_resolution
+    )
 
     evidence = certification_script._represented_selector_evidence(turn_record)
 
@@ -559,6 +884,8 @@ def _patch_live_preflight(
     *,
     actor_contract: Any | None = None,
 ) -> None:
+    experiment_spec_state = {"experiment_spec_id": ""}
+
     monkeypatch.setenv(
         "VON_OPERATIONAL_CERTIFICATION_SIGNING_KEY",
         "unit-test-certification-secret-1234567890",
@@ -610,10 +937,16 @@ def _patch_live_preflight(
         "_canonical_tool_catalogue_digest",
         lambda: "tool-catalogue-digest",
     )
+
+    def _create_experiment_spec(**kwargs: Any) -> dict[str, Any]:
+        experiment_spec_id = kwargs["experiment_spec_id"]
+        experiment_spec_state["experiment_spec_id"] = experiment_spec_id
+        return {"success": True, "experiment_spec_id": experiment_spec_id}
+
     monkeypatch.setattr(
         certification_script,
         "create_experiment_spec",
-        lambda **_kwargs: {"success": True, "experiment_spec_id": "spec-1"},
+        _create_experiment_spec,
     )
     monkeypatch.setattr(
         certification_script,
@@ -627,13 +960,9 @@ def _patch_live_preflight(
     )
 
     def _completed_experiment_state(run_id: str) -> dict[str, Any]:
-        contract = actor_contract or _contract()
         return {
             "run_id": run_id,
-            "experiment_spec_id": (
-                "#V#operational_certification_experiment_spec_"
-                f"{contract.contract_sha256[:20]}"
-            ),
+            "experiment_spec_id": experiment_spec_state["experiment_spec_id"],
             "namespace": "unit-namespace",
             "user_id": "#V#unit_user",
             "org_id": "#V#unit_org",
@@ -745,6 +1074,12 @@ def test_live_trials_use_unique_sessions_and_bind_turn_records(
     fetched_records: list[tuple[str, str]] = []
     evaluator_calls: list[dict[str, Any]] = []
     persisted_observations: list[dict[str, Any]] = []
+    experiment_spec_ids: list[str] = []
+
+    def create_spec(**kwargs: Any) -> dict[str, Any]:
+        experiment_spec_id = kwargs["experiment_spec_id"]
+        experiment_spec_ids.append(experiment_spec_id)
+        return {"success": True, "experiment_spec_id": experiment_spec_id}
 
     def create_chat(**_kwargs: Any) -> dict[str, Any]:
         session_id = f"chat-{len(chat_session_ids) + 1}"
@@ -812,6 +1147,7 @@ def test_live_trials_use_unique_sessions_and_bind_turn_records(
         }
 
     monkeypatch.setattr(certification_script, "create_replay_chat_session", create_chat)
+    monkeypatch.setattr(certification_script, "create_experiment_spec", create_spec)
     monkeypatch.setattr(certification_script, "submit_background_generate", submit)
     monkeypatch.setattr(
         certification_script,
@@ -848,10 +1184,7 @@ def test_live_trials_use_unique_sessions_and_bind_turn_records(
         contract = _contract()
         return {
             "run_id": run_id,
-            "experiment_spec_id": (
-                "#V#operational_certification_experiment_spec_"
-                f"{contract.contract_sha256[:20]}"
-            ),
+            "experiment_spec_id": experiment_spec_ids[-1],
             "namespace": "unit-namespace",
             "user_id": "#V#unit_user",
             "org_id": "#V#unit_org",
@@ -1178,6 +1511,226 @@ def test_unique_state_reset_requires_causal_authoritative_absence_readback(
         assert reset_result["reason"] == "authoritative_absence_probe_unverified"
 
 
+def test_declared_postcondition_probe_runs_after_primary_trial_and_is_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_contract = _contract()
+    scenario = replace(
+        base_contract.scenarios[0],
+        execution={
+            "adapter_id": certification_script.AUTHENTICATED_GENERATE_ADAPTER_ID,
+            "inputs": {"prompt": "Mutate synthetic target {{isolation_id}}."},
+        },
+        reset_policy={
+            "mode": "unique_state",
+            "isolation_binding_paths": ["/prompt"],
+            "authoritative_absence_probe": {
+                "workflow_id": "#V#synthetic_absence_probe_workflow",
+                "inputs": {"isolation_id": "{{isolation_id}}"},
+                "required_action_ids": [
+                    "workflow_mcp.invoke_tool",
+                    "workflow_control.context_project",
+                ],
+            },
+            "authoritative_postcondition_probe": {
+                "workflow_id": "#V#synthetic_postcondition_probe_workflow",
+                "inputs": {"isolation_id": "{{isolation_id}}"},
+                "required_action_ids": [
+                    "workflow_mcp.invoke_tool",
+                    "workflow_control.context_project",
+                ],
+                "required_tool_names": [
+                    "synthetic_resolve",
+                    "synthetic_fetch",
+                    "synthetic_text_read",
+                ],
+                "expected_cardinality": 1,
+                "expected_name": "Synthetic target {{isolation_id}}",
+                "expected_description": ("Synthetic description {{isolation_id}}"),
+            },
+        },
+        permitted_effects=({"effect_type": "synthetic_mutation"},),
+        metadata={"read_only": False},
+    )
+    contract = replace(base_contract, scenarios=(scenario,))
+    _patch_live_preflight(monkeypatch, actor_contract=contract)
+    order: list[str] = []
+    observed_execution: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        certification_script,
+        "create_replay_chat_session",
+        lambda **_kwargs: {"session_id": "isolated-chat"},
+    )
+
+    def _represented_workflow(**kwargs: Any) -> dict[str, Any]:
+        isolation_id = kwargs["inputs"]["isolation_id"]
+        if kwargs["source_event_type"] == "operational_certification_absence_probe":
+            order.append("absence_probe")
+            lineage = {
+                "schema_version": "operational_absence_probe_resolution_lineage.v1",
+                "tool": "synthetic_resolve",
+                "target_name": f"Synthetic target {isolation_id}",
+                "status": "not_found",
+                "resolved_concept_id": None,
+                "candidates": [],
+            }
+            probe_result = {
+                "schema_version": "represented_operational_state_probe_result.v1",
+                "isolation_id": isolation_id,
+                "namespace": "unit-namespace",
+                "target_absent": True,
+                "evidence": [{**lineage, "kind": "resolution"}],
+            }
+            return {
+                "success": True,
+                "trace_persisted": True,
+                "workflow_authority_source": "vontology",
+                "execution_trace_id": "absence-trace",
+                "workflow_definition_identity_sha256": "absence-definition",
+                "workflow_output_sha256": "absence-output",
+                "workflow_action_evidence": [
+                    {
+                        "action_id": "workflow_mcp.invoke_tool",
+                        "status": "success",
+                        "resolution_lineage_sha256": (
+                            certification_script.stable_payload_digest(lineage)
+                        ),
+                    },
+                    {
+                        "action_id": "workflow_control.context_project",
+                        "status": "success",
+                        "state_probe_result_sha256": (
+                            certification_script.stable_payload_digest(probe_result)
+                        ),
+                    },
+                ],
+                "workflow_output": {
+                    "represented_operational_state_probe_result": probe_result
+                },
+            }
+
+        assert kwargs["source_event_type"] == (
+            "operational_certification_postcondition_probe"
+        )
+        order.append("postcondition_probe")
+        _probe_spec, _probe_inputs, payload, _scope = _postcondition_probe_fixture(
+            isolation_id=isolation_id
+        )
+        exact_scope = {
+            "namespace": kwargs["namespace"],
+            "user_id": kwargs["user_id"],
+            "org_id": kwargs["org_id"],
+            "source_event_type": kwargs["source_event_type"],
+            "source_event_id": kwargs["source_event_id"],
+            "event_idempotency_key": kwargs["event_idempotency_key"],
+        }
+        payload["exact_scope"] = exact_scope
+        payload["exact_scope_sha256"] = certification_script.stable_payload_digest(
+            exact_scope
+        )
+        payload["workflow_inputs_sha256"] = certification_script.stable_payload_digest(
+            kwargs["inputs"]
+        )
+        return payload
+
+    monkeypatch.setattr(
+        certification_script,
+        "_execute_represented_workflow_synchronously",
+        _represented_workflow,
+    )
+
+    def _submit(**_kwargs: Any) -> dict[str, Any]:
+        order.append("primary_trial")
+        return {"task_id": "task-1", "request_id": "request-1"}
+
+    monkeypatch.setattr(
+        certification_script,
+        "submit_background_generate",
+        _submit,
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "poll_replay_task",
+        lambda **_kwargs: {
+            "task_result": {"answer": "synthetic mutation completed"},
+            "last_task_status": {"status": "completed"},
+            "task_statuses": [{"status": "completed"}],
+            "progress_snapshots": [],
+            "timed_out": False,
+        },
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "fetch_turn_record",
+        lambda **kwargs: {
+            "schema_version": "turn_execution_record.v1",
+            "session_id": kwargs["chat_session_id"],
+            "request_id": kwargs["request_id"],
+            "namespace": kwargs["namespace"],
+            "completion_gate": {
+                "decision": "complete",
+                "safe_to_claim_completion": True,
+            },
+            "terminal_outcome_receipt": {
+                "outcome": "complete",
+                "committed_effects": [],
+            },
+            "final_response": {"completion_claim_detected": False},
+            **_represented_selector_diagnostics(),
+        },
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "extract_visible_answer",
+        lambda _payload: "synthetic mutation completed",
+    )
+
+    def _inspect_execution(
+        run_contract,
+        *,
+        reset_scenario,
+        execute_scenario,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        run_scenario = run_contract.scenarios[0]
+        reset = reset_scenario(run_scenario, 1)
+        assert reset["success"] is True
+        observed_execution.update(execute_scenario(run_scenario, 1, reset))
+        return {
+            "campaign_result": {
+                "certified": False,
+                "experiment_persistence_complete": False,
+            }
+        }
+
+    monkeypatch.setattr(
+        certification_script,
+        "run_operational_certification_campaign",
+        _inspect_execution,
+    )
+
+    certification_script._live_execution(_args(), contract)
+
+    assert order == ["absence_probe", "primary_trial", "postcondition_probe"]
+    postcondition = observed_execution["authoritative_postcondition_probe"]
+    assert postcondition["verified"] is True
+    assert postcondition["checks"]["exact_authenticated_scope"] is True
+    assert postcondition["checks"]["required_tools_executed"] is True
+    assert (
+        observed_execution["final_state_snapshot"][
+            "authoritative_postcondition_probe_verified"
+        ]
+        is True
+    )
+    assert (
+        observed_execution["final_state_snapshot"][
+            "authoritative_postcondition_probe_evidence_sha256"
+        ]
+        == postcondition["evidence_sha256"]
+    )
+
+
 def test_multi_turn_scenarios_reuse_one_isolated_session_and_preserve_each_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1305,12 +1858,17 @@ def test_multi_turn_scenarios_reuse_one_isolated_session_and_preserve_each_turn(
         observation["conversation_turn_count"] == 2
         and len(observation["turn_execution_request_ids"]) == 2
         and len(observation["path_analysis"]["turns"]) == 2
+        and observation["operational_metrics"]["follow_up_request_count"] == 0
+        and observation["operational_metrics"]["follow_up_request_count_evidence_kind"]
+        == "completion_gate_proxy"
+        and observation["operational_metrics"]["correction_count"] is None
+        and observation["operational_metrics"]["correction_count_complete"] is False
         for observation in execution["trial_observations"]
     )
 
 
 def test_repo_seed_breadth_scenarios_match_supported_runner_adapter_contracts() -> None:
-    contract = _repo_seed_contract()
+    contract = _repo_seed_contract(case_set="executable_engineering_seed")
     scenarios = {scenario.scenario_id: scenario for scenario in contract.scenarios}
 
     multi_turn = scenarios["represented_workflow_concept_same_session_followup"]
@@ -1353,6 +1911,7 @@ def _synthetic_turn_result(
     *,
     request_id: str | None = None,
     model_cost_units: int | None = 1,
+    tool_evidence_projection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "terminal_state": "verified_success",
@@ -1372,9 +1931,20 @@ def _synthetic_turn_result(
             "timeout": False,
             "model_cost_units": model_cost_units,
             "tool_cost_units": 1,
+            "follow_up_request_count": 0,
+            "follow_up_request_count_applicable": True,
+            "follow_up_request_count_complete": True,
+            "follow_up_request_count_evidence_kind": "completion_gate_proxy",
             "clarification_count": 0,
-            "correction_count": 0,
+            "clarification_count_applicable": True,
+            "clarification_count_complete": True,
+            "clarification_count_evidence_kind": "follow_up_request_proxy",
+            "correction_count": None,
+            "correction_count_applicable": True,
+            "correction_count_complete": False,
+            "correction_count_evidence_kind": "missing",
         },
+        "tool_evidence_projection": tool_evidence_projection,
         "turn_execution_request_ids": [request_id or f"request-{index}"],
         "submission": {"task_id": f"task-{index}"},
         "task_evidence": {},
@@ -1409,6 +1979,76 @@ def test_multi_turn_aggregation_marks_partial_cost_measurement_incomplete() -> N
     assert metrics["model_cost_units_complete"] is False
     assert metrics["tool_cost_units"] == 2
     assert metrics["tool_cost_units_complete"] is True
+
+
+def test_multi_turn_aggregation_collects_bounded_tool_evidence_in_turn_order() -> None:
+    projections = [
+        {
+            "schema_version": "tool_evidence_projection_reachability.v1",
+            "projection_count": 1,
+            "entries": [
+                {
+                    "tool": "synthetic_lookup",
+                    "projected_payload": {"fact": f"fact-{index}"},
+                }
+            ],
+        }
+        for index in (1, 2)
+    ]
+
+    aggregated = certification_script._aggregate_authenticated_multi_turn_results(
+        [
+            _synthetic_turn_result(1, tool_evidence_projection=projections[0]),
+            _synthetic_turn_result(2, tool_evidence_projection=projections[1]),
+        ]
+    )
+
+    assert aggregated["tool_evidence_projection_count"] == 2
+    assert [
+        item["tool_evidence_projection"]["entries"][0]["projected_payload"]["fact"]
+        for item in aggregated["tool_evidence_projections"]
+    ] == ["fact-1", "fact-2"]
+    assert all(
+        turn["tool_evidence_projection_available"] is True
+        for turn in aggregated["path_analysis"]["turns"]
+    )
+    metrics = aggregated["operational_metrics"]
+    assert metrics["follow_up_request_count"] == 0
+    assert metrics["follow_up_request_count_complete"] is True
+    assert metrics["clarification_count"] == 0
+    assert metrics["clarification_count_evidence_kind"] == ("follow_up_request_proxy")
+    assert metrics["correction_count"] is None
+    assert metrics["correction_count_complete"] is False
+
+
+def test_turn_record_evaluator_projection_includes_only_public_tool_evidence() -> None:
+    private_prompt = "private evaluator prompt"
+    turn_record = {
+        "schema_version": "turn_execution_record.v1",
+        "request_id": "request-1",
+        "final_answer_synthesis": {
+            "request": {"prompt": private_prompt},
+            "tool_evidence_projection": {
+                "schema_version": "tool_evidence_projection_reachability.v1",
+                "projection_count": 1,
+                "tools": ["synthetic_lookup"],
+                "entries": [
+                    {
+                        "tool": "synthetic_lookup",
+                        "projected_payload": {"fact": "represented safe fact"},
+                    }
+                ],
+            },
+        },
+    }
+
+    projection = certification_script._turn_record_evidence_projection(turn_record)
+
+    assert projection["tool_evidence_projection"]["entries"][0][
+        "projected_payload"
+    ] == {"fact": "represented safe fact"}
+    assert "final_answer_synthesis" not in projection
+    assert private_prompt not in json.dumps(projection)
 
 
 def test_turn_record_must_match_submitted_session_and_request(
@@ -1577,7 +2217,213 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
         is True
     )
     assert observed_execution["operational_metrics"]["timeout"] is False
+    assert observed_execution["operational_metrics"]["follow_up_request_count"] is None
+    assert (
+        observed_execution["operational_metrics"]["follow_up_request_count_applicable"]
+        is False
+    )
+    assert (
+        observed_execution["operational_metrics"][
+            "follow_up_request_count_evidence_kind"
+        ]
+        == "not_applicable"
+    )
+    assert observed_execution["operational_metrics"]["correction_count"] is None
+    assert (
+        observed_execution["operational_metrics"]["correction_count_evidence_kind"]
+        == "not_applicable"
+    )
     assert observed_execution["final_state_snapshot"]["submission_count"] == 2
+
+
+def test_synchronous_scenario_binds_and_records_represented_agent_test_fault_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.integrations.internal_mcp.agent_test_fault_plan import (
+        maybe_inject_agent_test_mcp_fault,
+    )
+
+    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
+    base_contract = _contract()
+    durable_scenario = replace(
+        base_contract.scenarios[0],
+        execution={
+            "adapter_id": certification_script.SYNCHRONOUS_WORKFLOW_ADAPTER_ID,
+            "inputs": {
+                "workflow_id": "#V#unit_fault_recovery_workflow",
+                "workflow_inputs": {"isolation_id": "{{isolation_id}}"},
+                "timeout_seconds": 5.0,
+            },
+        },
+        reset_policy={"mode": "read_only"},
+        fault_injection={
+            "fault_class": "timeout",
+            "recoverable": True,
+            "require_all_fault_rules_consumed": True,
+            "agent_test_mcp_fault_plan": {
+                "schema_version": "agent_test_mcp_fault_plan.v1",
+                "plan_id": "fault-plan-{{trial_index}}-{{isolation_id}}",
+                "faults": [
+                    {
+                        "fault_id": "first-resolution-timeout",
+                        "tool_name": "resolve_concept_by_name",
+                        "fault_class": "timeout",
+                        "max_activations": 1,
+                    }
+                ],
+            },
+        },
+        metadata={"read_only": True, "designated_recoverable_fault": True},
+    )
+    contract = replace(base_contract, scenarios=(durable_scenario,))
+    _patch_live_preflight(monkeypatch, actor_contract=contract)
+    observed_execution: dict[str, Any] = {}
+
+    def workflow_execute(**kwargs: Any) -> dict[str, Any]:
+        first = maybe_inject_agent_test_mcp_fault("resolve_concept_by_name")
+        second = maybe_inject_agent_test_mcp_fault("resolve_concept_by_name")
+        assert first is not None
+        assert first.error_code == "tool_timeout"
+        assert second is None
+        assert kwargs["workflow_id"] == "#V#unit_fault_recovery_workflow"
+        assert kwargs["require_policy_identity"] is False
+        assert kwargs["timeout_seconds"] == 5.0
+        return {
+            "success": True,
+            "final_state": "completed",
+            "execution_trace_id": "fault-recovery-trace",
+            "workflow_output_sha256": "a" * 64,
+            "exact_scope": {
+                "namespace": "unit-namespace",
+                "user_id": "#V#unit_user",
+                "org_id": "#V#unit_org",
+            },
+            "workflow_action_evidence": [
+                {
+                    "action_id": "workflow_mcp.invoke_tool",
+                    "status": "failed",
+                    "requested_tool_name": "resolve_concept_by_name",
+                    "resolved_tool_name": "resolve_concept_by_name",
+                },
+                {
+                    "action_id": "workflow_mcp.invoke_tool",
+                    "status": "success",
+                    "requested_tool_name": "resolve_concept_by_name",
+                    "resolved_tool_name": "resolve_concept_by_name",
+                },
+            ],
+            "workflow_output": {
+                "represented_operational_fault_recovery_probe_result": {
+                    "schema_version": (
+                        "represented_operational_fault_recovery_probe_result.v1"
+                    ),
+                    "recovery_attempt_count": 1,
+                    "final_resolution_status": "not_found",
+                }
+            },
+        }
+
+    def inspect_execution(
+        run_contract,
+        *,
+        reset_scenario,
+        execute_scenario,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        scenario = run_contract.scenarios[0]
+        reset = reset_scenario(scenario, 1)
+        observed_execution.update(execute_scenario(scenario, 1, reset))
+        return {
+            "campaign_result": {
+                "certified": False,
+                "experiment_persistence_complete": False,
+            }
+        }
+
+    monkeypatch.setattr(
+        certification_script,
+        "_execute_represented_workflow_synchronously",
+        workflow_execute,
+    )
+    monkeypatch.setattr(
+        certification_script,
+        "run_operational_certification_campaign",
+        inspect_execution,
+    )
+
+    certification_script._live_execution(_args(), contract)
+
+    events = observed_execution["agent_test_fault_events"]
+    assert len(events) == 1
+    assert events[0]["fault_id"] == "first-resolution-timeout"
+    assert events[0]["fault_class"] == "timeout"
+    assert events[0]["activation_index"] == 1
+    assert observed_execution["operational_metrics"]["timeout"] is False
+    assert observed_execution["operational_metrics"]["injected_fault_count"] == 1
+    assert observed_execution["operational_metrics"]["injected_timeout_count"] == 1
+    assert observed_execution["path_analysis"]["execution_transport"] == (
+        "synchronous_workflow_executor"
+    )
+    assert observed_execution["path_analysis"]["observed_tool_names"] == [
+        "resolve_concept_by_name"
+    ]
+    assert observed_execution["final_state_snapshot"][
+        "agent_test_fault_event_sha256"
+    ] == certification_script.stable_payload_digest(events)
+
+
+def test_fault_plan_consumption_requires_every_activation_in_declared_order() -> None:
+    plan = {
+        "faults": [
+            {"fault_id": "first", "max_activations": 2},
+            {"fault_id": "second", "max_activations": 1},
+        ]
+    }
+    exact_events = [
+        {"fault_id": "first"},
+        {"fault_id": "first"},
+        {"fault_id": "second"},
+    ]
+
+    certification_script._require_exact_agent_test_fault_consumption(
+        fault_plan=plan,
+        fault_events=exact_events,
+    )
+
+    with pytest.raises(RuntimeError, match="not_fully_consumed"):
+        certification_script._require_exact_agent_test_fault_consumption(
+            fault_plan=plan,
+            fault_events=[{"fault_id": "first"}, {"fault_id": "second"}],
+        )
+    with pytest.raises(RuntimeError, match="not_fully_consumed"):
+        certification_script._require_exact_agent_test_fault_consumption(
+            fault_plan=plan,
+            fault_events=[
+                {"fault_id": "first"},
+                {"fault_id": "second"},
+                {"fault_id": "first"},
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    ("final_state", "expected"),
+    [
+        ("completed", False),
+        ("verified", False),
+        ("failed", True),
+        ("subworkflow_failed", True),
+        ("error", True),
+        ("cancelled", True),
+    ],
+)
+def test_synchronous_workflow_terminal_failure_detection(
+    final_state: str,
+    expected: bool,
+) -> None:
+    assert certification_script._workflow_final_state_is_failure(final_state) is (
+        expected
+    )
 
 
 def test_evaluator_transport_uses_stable_correlation_and_failed_campaign_is_not_releasable(
@@ -2009,6 +2855,15 @@ def test_artifact_projection_redacts_private_trial_and_trace_content() -> None:
                     "visible_answer": private_text,
                     "final_response": {"text": private_text},
                     "rationale": private_text,
+                    "tool_evidence_projection": {
+                        "entries": [
+                            {
+                                "projected_payload": {
+                                    "semantic_fact": private_text,
+                                }
+                            }
+                        ]
+                    },
                 }
             ],
             "workflow_trace": {
