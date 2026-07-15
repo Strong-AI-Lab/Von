@@ -29737,7 +29737,6 @@ def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
             "operation": str,
             "result": dict,
             "state_record": dict,
-            "runtime_activation_readback": dict,
         },
         allow_unknown=True,
         description="Persisted operational learning-release mutation and readback.",
@@ -30025,9 +30024,9 @@ def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
                 category="write",
                 description=(
                     f"Apply a represented {action} decision; semantic policy remains "
-                    "in represented evaluator/workflow authority. Promotion persists "
-                    "the canonical active pointer and reads back its exact release "
-                    "hash before returning."
+                    "in represented evaluator/workflow authority. Promotion fails "
+                    "closed unless a canonical affected-artefact activation adapter "
+                    "applies and reads back the exact release hash."
                 ),
             )
             for action in ("promote", "reject")
@@ -30054,8 +30053,9 @@ def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
             category="write",
             description=(
                 "Apply a represented rollback decision after strict evidence and "
-                "authoritative approval validation, then resolve the restored "
-                "active pointer and exact previous release hash from readback."
+                "authoritative approval validation. It fails closed unless a "
+                "canonical runtime adapter restores and reads back the exact "
+                "previous release hash."
             ),
         ),
     ]
