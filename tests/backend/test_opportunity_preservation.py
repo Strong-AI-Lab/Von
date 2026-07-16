@@ -58,10 +58,12 @@ from src.backend.services.tool_metadata_service import (
 from src.backend.services.operational_learning_release_service import (
     project_learning_release_recovery_affordances,
 )
+from src.backend.services import (
+    operational_learning_release_vontology_service as learning_release_vontology,
+)
 from src.backend.services.operational_learning_release_vontology_service import (
-    LearningReleasePersistenceError,
     LearningReleaseStateConflictError,
-    _apply_and_readback_release_activation,
+    _attach_runtime_activation_readback,
 )
 from src.backend.services.operational_certification_cohort_aggregate_service import (
     OperationalCertificationCohortAggregateError,
@@ -646,31 +648,69 @@ def test_learning_release_optimistic_conflict_preserves_inspect_and_retry_paths(
     }
 
 
-def test_missing_release_activation_adapter_retains_active_release_opportunity() -> (
-    None
-):
-    try:
-        _apply_and_readback_release_activation(
-            {
-                "candidate_id": "candidate-synthetic",
-                "affected_artifact": "#V#synthetic_artifact",
-                "release_sha256": "a" * 64,
-            }
-        )
-    except LearningReleasePersistenceError as exc:
-        projection = exc.to_dict()
-    else:  # pragma: no cover - the default adapter must fail closed
-        raise AssertionError("missing activation adapter unexpectedly succeeded")
-
-    assert projection["details"]["decision_state"] == (
-        "promotion_approved_not_activated"
-    )
-    assert {
-        item["action_type"] for item in projection["recovery_affordances"]
-    } == {
-        "register_canonical_release_activation_adapter",
-        "retain_active_release",
+def test_canonical_release_activation_preserves_runtime_readback_opportunity(
+    monkeypatch,
+) -> None:
+    state_record = {
+        "namespace": "#V#synthetic_user@synthetic_org",
+        "user_id": "#V#synthetic_user",
+        "org_id": "#V#synthetic_org",
+        "state_concept_id": "#V#synthetic_learning_release_state",
+        "version": 4,
+        "state_sha256": "b" * 64,
+        "record_sha256": "c" * 64,
     }
+    active_pointer = {
+        "candidate_id": "candidate-synthetic",
+        "affected_artifact": "#V#synthetic_artifact",
+        "release_sha256": "a" * 64,
+    }
+    resolved_projection = {
+        "status": "active_release_resolved",
+        "active_release": active_pointer,
+        "activation_receipt": {
+            "status": "pointer_verified",
+            "receipt_kind": "active_pointer_readback",
+            "runtime_release_sha256": "a" * 64,
+        },
+        "authority": {
+            "state_concept_id": state_record["state_concept_id"],
+            "version": state_record["version"],
+            "state_sha256": state_record["state_sha256"],
+            "record_sha256": state_record["record_sha256"],
+        },
+    }
+
+    def resolve_active_release(**kwargs):
+        assert kwargs == {
+            "namespace": state_record["namespace"],
+            "user_id": state_record["user_id"],
+            "org_id": state_record["org_id"],
+            "affected_artifact": active_pointer["affected_artifact"],
+            "expected_release_sha256": active_pointer["release_sha256"],
+        }
+        return {"success": True, "result": {"active_release": resolved_projection}}
+
+    monkeypatch.setattr(
+        learning_release_vontology,
+        "resolve_operational_learning_active_release_in_vontology",
+        resolve_active_release,
+    )
+
+    result = _attach_runtime_activation_readback(
+        {
+            "result": {
+                "affected_artifact": active_pointer["affected_artifact"],
+                "resulting_active": active_pointer,
+            },
+            "state_record": state_record,
+        }
+    )
+
+    readback = result["runtime_activation_readback"]
+    assert readback["active_release"] == active_pointer
+    assert readback["activation_receipt"]["status"] == "pointer_verified"
+    assert readback["authority"]["state_sha256"] == state_record["state_sha256"]
 
 
 # --- terminal receipts retain represented recovery opportunities ------------
