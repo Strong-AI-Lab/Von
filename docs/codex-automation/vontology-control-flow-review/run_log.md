@@ -293,3 +293,36 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   resolves represented `#V#turn_contract_dispatch_policy` and fails closed
   rather than inventing dispatch rules.
 - No production code was changed by this review run.
+
+## 2026-07-17T02:08:16.7792022+12:00
+
+- Read required repo guidance, security guidance, design index, workflow manual,
+  enduring-memory guide, authority-alignment guide, and all repo-local review
+  memory files. The personal automation memory file was still absent at start.
+- Current `main` matched `origin/main` at `cfdeda00`; the only pre-existing
+  dirty file was `Von.code-workspace`, which this review did not edit or stage.
+  The only commit since the last automation timestamp was the prior
+  review-memory commit (`cfdeda00`), changing no production code.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`.
+  All workflow/prompt/source/policy counters were `0`; the gate still failed
+  only on the known monolith ratchet: orchestrator `49436` vs baseline `45441`,
+  catalogue `34898` vs `32670`, and von_routes `18862` vs `18136`.
+- Runtime attribution companion timed out at both `--limit 50` and `--limit 10`,
+  so no architecture-integrity score or fallback-signature histogram was
+  available from this run.
+- Scanned high-risk Python surfaces (`WorkflowDefinition`/`WorkflowRegistration`,
+  `_POLICY`/`_BLUEPRINTS`/`_ALIASES` tables, fallback/recovery selectors,
+  schedule/profile bootstraps, tool metadata/projection, and representation
+  required-effects paths). The strongest candidates mapped to existing indexed
+  issues or watch items: `JVNAUTOSCI-2193`, `JVNAUTOSCI-2196`,
+  `JVNAUTOSCI-1985`, `JVNAUTOSCI-2284`, `JVNAUTOSCI-2296`,
+  `JVNAUTOSCI-2329`, `JVNAUTOSCI-2357`, `JVNAUTOSCI-2496`, and
+  `JVNAUTOSCI-2586`.
+- Treated the representation required-effects code in
+  `turn_execution_record_service.py` as a watch item rather than a fresh Jira
+  task: it prefers represented contracts/profiles and represented
+  `required_payload_fields`, but still has compatibility defaults for
+  `scholarly_representation` and paper read-back diagnostics that should not be
+  extended to new domains in Python.
+- No new Jira issues were created and no production code was changed by this
+  review run.

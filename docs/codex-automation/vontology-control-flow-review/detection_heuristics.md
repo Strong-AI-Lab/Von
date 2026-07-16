@@ -201,6 +201,12 @@ before creating duplicates.
   structured represented context-adjudication directive; Python should validate
   and project it, not infer continuation/resume/verification semantics from
   English token lists.
+- Representation required-effects support is not drift merely because it
+  evaluates represented effect payloads, checks declared `required_payload_fields`,
+  or emits bounded completion-gate diagnostics. It becomes drift when Python
+  supplies domain profile selection, read-back field lists, required tool sets,
+  postcondition labels, or user/model-visible status wording after represented
+  contracts or Vontology profiles are missing or incomplete.
 
 ## Recent Examples
 

@@ -116,6 +116,10 @@ predicates, and KB assertions should own durable:
   context is discourse-only, expected-outcome evidence, routing evidence,
   tool-planning evidence, answer evidence, continuation/resume/verification, or
   suppressed for the current turn.
+- Representation required-effects authority, including domain profile selection,
+  required tool sets, payload/read-back fields, postcondition labels, failure
+  code meanings, and completion-blocking policy for paper/person/company/meeting
+  or future representation domains.
 
 ## Python Support
 
@@ -228,6 +232,11 @@ Python can remain the surface for:
   carry-forward directives, preserves source-turn lineage, suppresses fields
   exactly as directed, records telemetry, and fails closed when the represented
   directive is missing or invalid;
+- generic required-effects plumbing that materialises represented effect
+  contracts, validates tool invocation payloads against represented
+  `required_payload_fields`, preserves typed blockers, and fails closed when
+  representation contract/profile authority is unavailable rather than adding
+  new domain defaults;
 - generic HTTP/request plumbing that passes represented decisions through.
 - read-only operational diagnostics and Jira triage tooling that computes
   bounded engineering metrics, redacts evidence, and prepares human-review
