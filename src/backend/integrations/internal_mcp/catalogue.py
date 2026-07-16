@@ -29737,6 +29737,7 @@ def _build_operational_learning_release_definitions() -> List[MethodDefinition]:
             "operation": str,
             "result": dict,
             "state_record": dict,
+            "runtime_activation_readback": dict,
         },
         allow_unknown=True,
         description="Persisted operational learning-release mutation and readback.",

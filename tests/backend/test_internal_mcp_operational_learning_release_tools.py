@@ -223,6 +223,15 @@ def test_resolver_tools_forward_only_authenticated_exact_scope(
     }
 
 
+def test_promotion_tool_contract_exposes_runtime_activation_readback() -> None:
+    definition = build_default_catalogue().get(
+        "operational_learning_release_promote_candidate"
+    )
+
+    assert definition.output_schema is not None
+    assert definition.output_schema.optional["runtime_activation_readback"] is dict
+
+
 def test_get_state_accepts_durable_workflow_actor_context_without_flask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
