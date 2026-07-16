@@ -470,6 +470,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             release_ineligible_worker_claims,
             get_system_status,
         )
+        from ..db.transient_errors import run_with_transient_mongo_retry
         from ..services.paper_representation_workflow_vontology_service import (
             bootstrap_canonical_paper_representation_workflows,
         )
@@ -569,12 +570,20 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         if _durable_action_registry is None:
             _durable_action_registry = _build_durable_action_registry()
 
-        recovered = recover_orphaned_instances()
+        recovered = run_with_transient_mongo_retry(
+            recover_orphaned_instances,
+            operation_name="durable_startup_recover_orphaned_instances",
+            logger_obj=app_logger,
+        )
         if recovered > 0:
             app_logger.info(
                 "[durable_workflows] Recovered %d orphaned instances.", recovered
             )
-        released_ineligible_claims = release_ineligible_worker_claims()
+        released_ineligible_claims = run_with_transient_mongo_retry(
+            release_ineligible_worker_claims,
+            operation_name="durable_startup_release_ineligible_worker_claims",
+            logger_obj=app_logger,
+        )
         if released_ineligible_claims > 0:
             app_logger.warning(
                 "[durable_workflows] Released %d ineligible worker claim(s).",
