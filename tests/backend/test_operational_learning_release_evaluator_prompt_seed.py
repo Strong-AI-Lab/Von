@@ -3,6 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from src.backend.services import workflow_repo_seed_bootstrap as seed_bootstrap
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
+from src.backend.workflows.workflow_launch_input_contracts import (
+    normalise_workflow_launch_input_contract,
+)
+
 
 _SEED_DIR = (
     Path(__file__).resolve().parents[2]
@@ -24,6 +32,70 @@ def _release_evaluator_workflow() -> dict:
         for workflow in bundle["workflows"]
         if workflow["workflow_id"]
         == "#V#operational_learning_release_evaluator_workflow"
+    )
+
+
+def test_release_evaluator_seed_authority_uses_canonical_launch_contract() -> None:
+    raw_bundle = json.loads(_WORKFLOW_SEED_PATH.read_text(encoding="utf-8"))
+    assert raw_bundle["seed_version"] == "9"
+    assert "known_legacy_authority_payload_sha256_by_seed_version" not in raw_bundle
+
+    workflow_id = "#V#operational_learning_release_evaluator_workflow"
+    raw_workflow = next(
+        workflow
+        for workflow in raw_bundle["workflows"]
+        if workflow["workflow_id"] == workflow_id
+    )
+    raw_contract = raw_workflow["launch_input_contract"]
+    canonical_contract, error = normalise_workflow_launch_input_contract(raw_contract)
+    assert error is None
+    assert canonical_contract is not None
+    assert canonical_contract != raw_contract
+
+    bundle = authority_service.load_repo_seed_workflow_bundle(_WORKFLOW_SEED_PATH)
+    publication_spec = bundle["publication_specs"][workflow_id]
+    workflow_type_ids = tuple(bundle["workflow_type_ids"][workflow_id])
+    workflow_text_relations = tuple(bundle["workflow_text_relations"][workflow_id])
+    launch_input_contract = bundle["workflow_launch_input_contracts"][workflow_id]
+    step_text_relations = {
+        step_concept_id: tuple(bundle["step_text_relations"].get(step_concept_id) or ())
+        for step_concept_id in authority_service.publication_spec_step_concept_ids(
+            workflow_id=workflow_id,
+            spec=publication_spec,
+        )
+        if bundle["step_text_relations"].get(step_concept_id)
+    }
+
+    authority_payload = (
+        seed_bootstrap._workflow_seed_authority_payload_from_bundle_surfaces(
+            workflow_id=workflow_id,
+            publication_spec=publication_spec,
+            source_workflow_type_ids=workflow_type_ids,
+            scoped_workflow_type_ids=workflow_type_ids,
+            source_workflow_text_relations=workflow_text_relations,
+            scoped_workflow_text_relations=workflow_text_relations,
+            source_launch_input_contract=launch_input_contract,
+            source_step_text_relations=step_text_relations,
+            scoped_step_text_relations=step_text_relations,
+        )
+    )
+
+    assert authority_payload["launch_input_contract"] == canonical_contract
+    assert set(raw_contract["required_inputs"]) <= set(
+        authority_payload["launch_input_contract"]["required_inputs"]
+    )
+    assert {
+        "bound_candidate_id",
+        "bound_candidate_release_sha256",
+        "bound_candidate_namespace",
+        "bound_candidate_user_id",
+        "bound_candidate_org_id",
+        "bound_candidate_context_sha256",
+        "bound_experiment_evidence_sha256",
+        "bound_certification_evidence_sha256",
+    } <= set(authority_payload["launch_input_contract"]["required_inputs"])
+    assert seed_bootstrap._stable_payload_sha256(authority_payload) == (
+        "db13d6e6b85e519a66058a55c8436f11ab3a0874d3cc66735ce28d4e8306a4a0"
     )
 
 

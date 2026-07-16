@@ -37,6 +37,9 @@ from ..workflows.vontology_loader import (
 from ..workflows.workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
+from ..workflows.workflow_launch_input_contracts import (
+    normalise_workflow_launch_input_contract,
+)
 
 _WORKFLOW_STEP_TYPE_ID = "#V#workflow_step"
 _REQUIRED_AUTHORITY_SURFACE_LAUNCH_CONTRACT = "launch_contract"
@@ -996,6 +999,16 @@ def _workflow_seed_authority_payload_from_bundle_surfaces(
         workflow_id=workflow_id,
         spec=publication_spec,
     )
+    canonical_launch_input_contract: dict[str, Any] | None = None
+    if isinstance(source_launch_input_contract, Mapping):
+        canonical_launch_input_contract, launch_input_contract_error = (
+            normalise_workflow_launch_input_contract(source_launch_input_contract)
+        )
+        if canonical_launch_input_contract is None:
+            raise ValueError(
+                "repo_seed_workflow_launch_input_contract_invalid:"
+                f"{launch_input_contract_error or 'invalid_contract'}"
+            )
     source_types = {
         str(item).strip()
         for item in source_workflow_type_ids
@@ -1028,8 +1041,8 @@ def _workflow_seed_authority_payload_from_bundle_surfaces(
             scope_specs=scoped_workflow_text_relations,
         ),
         "launch_input_contract": (
-            copy.deepcopy(dict(source_launch_input_contract))
-            if isinstance(source_launch_input_contract, Mapping)
+            copy.deepcopy(canonical_launch_input_contract)
+            if canonical_launch_input_contract is not None
             else None
         ),
         "step_text_relations": {

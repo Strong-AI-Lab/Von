@@ -2,7 +2,7 @@
   "family_id": "operational_learning_release_authority_workflow_seed_bundle",
   "managed_by": "operational_learning_release_authority_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "8",
+  "seed_version": "9",
   "source_tag": "JVNAUTOSCI-2575",
   "supported_action_ids": [
     "llm.action",
