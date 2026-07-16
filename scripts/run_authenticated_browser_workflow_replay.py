@@ -261,6 +261,7 @@ def _request_json(
 
 def _summarise_server_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     version_details = _as_mapping(payload.get("version_details"))
+    runtime_authority = _as_mapping(payload.get("runtime_authority"))
     return {
         "version": _safe_text(payload.get("version")) or None,
         "git_branch": _safe_text(version_details.get("git_branch")) or None,
@@ -270,6 +271,7 @@ def _summarise_server_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "represented_postcondition_critic_enabled": payload.get(
             "represented_postcondition_critic_enabled"
         ),
+        "runtime_authority": dict(runtime_authority) or None,
         "effective_user_concept_id": (
             _safe_text(payload.get("effective_user_concept_id")) or None
         ),

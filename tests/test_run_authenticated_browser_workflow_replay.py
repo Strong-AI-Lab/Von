@@ -20,6 +20,14 @@ def test_collect_run_environment_records_represented_critic_marker(
             },
             "agent_test_instance": True,
             "represented_postcondition_critic_enabled": True,
+            "runtime_authority": {
+                "schema_version": "health_runtime_authority_projection.v1",
+                "mongo": {
+                    "effective_mongo_location_sha256": "b" * 64,
+                    "effective_database_name_sha256": "c" * 64,
+                },
+                "durable_workflows": {"worker_running": True},
+            },
         },
     )
     monkeypatch.setattr(replay, "_git_capture", lambda *_args: "local-git-value")
@@ -32,6 +40,12 @@ def test_collect_run_environment_records_represented_critic_marker(
 
     assert environment["server_agent_test_instance"] is True
     assert environment["server_represented_postcondition_critic_enabled"] is True
+    assert (
+        environment["server_runtime_authority"]["mongo"][
+            "effective_mongo_location_sha256"
+        ]
+        == "b" * 64
+    )
     assert environment["server_metadata_source"] == "health"
 
 
@@ -503,7 +517,9 @@ def test_classify_replay_reports_gmail_profile_blocker_when_auth_ready() -> None
     assert analysis["blocker"]["type"] == "gmail_oauth_or_profile_blocker"
 
 
-def test_classify_replay_reports_workflow_capability_index_blocker_before_selector() -> None:
+def test_classify_replay_reports_workflow_capability_index_blocker_before_selector() -> (
+    None
+):
     analysis = replay.classify_replay(
         case=replay.GMAIL_ARXIV_REPLAY_CASE,
         auth_login={"success": True},
@@ -512,9 +528,7 @@ def test_classify_replay_reports_workflow_capability_index_blocker_before_select
         task_evidence={"last_task_status": {"status": "completed"}},
         selected_workflow_ids=["#V#tool_calling_workflow"],
         observed_workflow_ids=[],
-        selector_diagnostics=[
-            {"selected_workflow_id": "#V#tool_calling_workflow"}
-        ],
+        selector_diagnostics=[{"selected_workflow_id": "#V#tool_calling_workflow"}],
         progress_facts=[],
         workflow_capability_preflight={
             "ready": False,
@@ -528,7 +542,10 @@ def test_classify_replay_reports_workflow_capability_index_blocker_before_select
     assert analysis["verdict"] == "blocked"
     assert analysis["blocker"]["type"] == "workflow_capability_index_blocker"
     assert analysis["blocker"]["workflow_capability_preflight"]["status"] == "building"
-    assert analysis["workflow_capability_preflight"]["workflow_discovery_available"] is False
+    assert (
+        analysis["workflow_capability_preflight"]["workflow_discovery_available"]
+        is False
+    )
     assert analysis["precondition_blockers"][0]["type"] == (
         "workflow_capability_index_blocker"
     )
@@ -774,9 +791,10 @@ def test_classify_replay_reports_selector_blocker_before_running_timeout() -> No
 
     assert analysis["verdict"] == "blocked"
     assert analysis["blocker"]["type"] == "selector_or_dispatch_blocker"
-    assert "#V#kb_mutation_postcondition_critic_workflow" in analysis["blocker"][
-        "observed_workflow_ids"
-    ]
+    assert (
+        "#V#kb_mutation_postcondition_critic_workflow"
+        in analysis["blocker"]["observed_workflow_ids"]
+    )
 
 
 def test_classify_replay_reports_context_build_blocker_before_selector() -> None:
@@ -949,7 +967,9 @@ def test_analyse_gmail_arxiv_idempotence_sequence_passes_on_stable_ids() -> None
     assert analysis["target"]["file_copy_concept_ids"] == ["#V#file_copy_2406_15341"]
 
 
-def test_analyse_gmail_arxiv_idempotence_sequence_blocks_missing_message_marker() -> None:
+def test_analyse_gmail_arxiv_idempotence_sequence_blocks_missing_message_marker() -> (
+    None
+):
     reports = _passing_idempotence_reports()
     reports[0]["task_result"]["result"]["message_id"] = "msg-1"
     reports[0]["task_result"]["result"].pop("message_processing_marker")

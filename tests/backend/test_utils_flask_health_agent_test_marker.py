@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from flask import Flask
 
 
@@ -16,6 +19,7 @@ class _FakeSocket:
 
 def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
+    from src.backend.db import mongo_client, mongo_uri_redaction
 
     monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
     network_calls = {"socket": 0, "urlopen": 0}
@@ -35,6 +39,23 @@ def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None
         "get_runtime_code_version_info",
         lambda: {"version": "test", "git_branch": "main"},
     )
+    monkeypatch.setattr(
+        mongo_client,
+        "get_effective_mongo_uri",
+        lambda: "mongodb://secret-user:secret-password@db.example/von",
+    )
+    monkeypatch.setattr(mongo_client, "is_using_fallback_uri", lambda: False)
+    monkeypatch.setattr(mongo_client, "get_configured_database_name", lambda: "von")
+    safe_location = {
+        "classification": "atlas",
+        "sanitized_uri": "mongodb+srv://db.example/von",
+        "using_fallback": False,
+    }
+    monkeypatch.setattr(
+        mongo_uri_redaction,
+        "build_safe_mongo_connection_location",
+        lambda *_args, **_kwargs: safe_location,
+    )
 
     app = Flask(__name__)
     app.config["SERVER_START_TIME"] = "test-start"
@@ -47,6 +68,25 @@ def test_health_response_exposes_agent_test_instance_marker(monkeypatch) -> None
     assert payload["represented_postcondition_critic_enabled"] is False
     assert payload["local_ip"] == "127.0.0.1"
     assert payload["public_ip"] is None
+    runtime_authority = payload["runtime_authority"]
+    assert runtime_authority["schema_version"] == (
+        "health_runtime_authority_projection.v1"
+    )
+    assert runtime_authority["mongo"] == {
+        "effective_mongo_location_sha256": hashlib.sha256(
+            json.dumps(
+                safe_location,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest(),
+        "effective_database_name_sha256": hashlib.sha256(b"von").hexdigest(),
+    }
+    assert runtime_authority["durable_workflows"]["worker_running"] is False
+    assert "secret-user" not in json.dumps(payload)
+    assert "secret-password" not in json.dumps(payload)
     assert network_calls == {"socket": 0, "urlopen": 0}
 
 
@@ -139,3 +179,36 @@ def test_diagnostics_use_live_durable_workflow_status_by_default(
     payload = utils_flask._build_diagnostics_durable_workflow_status(app)
 
     assert payload == {"available": True, "worker_running": True}
+
+
+def test_health_runtime_authority_uses_count_free_durable_status(monkeypatch) -> None:
+    import src.backend.server.utils_flask as utils_flask
+    import src.backend.workflows.durable.startup as durable_startup
+
+    monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
+    calls: list[bool] = []
+
+    def _status(*, include_counts: bool = True) -> dict[str, object]:
+        calls.append(include_counts)
+        return {
+            "database_connected": True,
+            "worker_running": True,
+            "scheduler_running": True,
+            "worker_id": "must-not-be-public",
+        }
+
+    monkeypatch.setattr(durable_startup, "get_system_status", _status)
+    app = Flask(__name__)
+    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {"state": "ready"}
+
+    payload = utils_flask._build_health_runtime_authority_projection(app)
+
+    assert calls == [False]
+    assert payload["durable_workflows"] == {
+        "available": True,
+        "state": "ready",
+        "database_connected": True,
+        "worker_running": True,
+        "scheduler_running": True,
+    }
+    assert "worker_id" not in json.dumps(payload)

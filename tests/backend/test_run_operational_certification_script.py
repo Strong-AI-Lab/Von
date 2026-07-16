@@ -699,9 +699,9 @@ def test_represented_selector_evidence_rejects_complete_python_fallback() -> Non
     )
     routing = turn_record["workflow_routing_diagnostics"]
     routing["selector_source"] = "selector_override"
-    routing["selector"][
-        "selection_resolution"
-    ] = "single_specialised_candidate_recovery_from_selector_fallback"
+    routing["selector"]["selection_resolution"] = (
+        "single_specialised_candidate_recovery_from_selector_fallback"
+    )
     turn_record["decision_attribution"]["decisions"][0]["authority"] = "python_fallback"
 
     evidence = certification_script._represented_selector_evidence(turn_record)
@@ -765,9 +765,9 @@ def test_represented_selector_evidence_rejects_unbound_prompt_provenance() -> No
 def test_represented_selector_evidence_binds_selected_workflow_identity() -> None:
     turn_record = _represented_selector_diagnostics()
     turn_record["workflow_selection"]["selected_workflow_id"] = "#V#final_workflow"
-    turn_record["workflow_routing_diagnostics"][
-        "selected_workflow_id"
-    ] = "#V#final_workflow"
+    turn_record["workflow_routing_diagnostics"]["selected_workflow_id"] = (
+        "#V#final_workflow"
+    )
 
     evidence = certification_script._represented_selector_evidence(turn_record)
 
@@ -2193,9 +2193,7 @@ def test_durable_submission_plan_preserves_resume_and_idempotency_evidence(
                 "org_id": "#V#unit_org",
                 "status": "completed" if terminal else "pending",
                 "min_worker_build": "a" * 40,
-                "claimed_by_build": (
-                    {"git_commit": "a" * 40} if terminal else None
-                ),
+                "claimed_by_build": ({"git_commit": "a" * 40} if terminal else None),
             },
             "workflow_execution": {
                 "instance_id": "shared-instance-1",
@@ -2482,9 +2480,10 @@ def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
     assert path["checkpoint_pause_receipts"]
     assert path["checkpoint_pause_receipts"][0]["claim_token_sha256"] == "b" * 64
     assert path["checkpoint_resume_receipts"]
-    assert observed_execution["final_state_snapshot"][
-        "pause_resume_continuity_observed"
-    ] is True
+    assert (
+        observed_execution["final_state_snapshot"]["pause_resume_continuity_observed"]
+        is True
+    )
 
     workflow_calls.clear()
     observed_execution.clear()
@@ -2494,9 +2493,9 @@ def test_durable_submission_plan_certifies_same_instance_checkpoint_resume(
 
     assert len(workflow_calls) == 2
     assert sleep_calls == [0.05, 0.05]
-    assert observed_execution["path_analysis"][
-        "pause_resume_continuity_observed"
-    ] is False
+    assert (
+        observed_execution["path_analysis"]["pause_resume_continuity_observed"] is False
+    )
 
 
 def test_synchronous_scenario_binds_and_records_represented_agent_test_fault_plan(
@@ -2800,9 +2799,7 @@ def test_redacted_evidence_can_be_written_to_a_safe_default_artifact(
                 "claim_token": "raw-worker-claim",
                 "claim_token_sha256": "a" * 64,
             },
-            "malformed_digest": {
-                "claim_token_sha256": "not-a-digest-secret"
-            },
+            "malformed_digest": {"claim_token_sha256": "not-a-digest-secret"},
         }
     )
     encoded = json.dumps(safe_evidence)
@@ -2972,6 +2969,63 @@ def test_runtime_alignment_requires_exact_clean_code_and_mongo_authority(
     )
     assert misaligned["verified"] is False
     assert misaligned["checks"]["clean_server_build"] is False
+
+
+def test_runtime_alignment_prefers_lightweight_health_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        def get(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("health authority projection must avoid /diag")
+
+    from src.backend.db import mongo_client, mongo_uri_redaction
+
+    safe_location = {"classification": "local", "using_fallback": False}
+    monkeypatch.setattr(
+        mongo_client,
+        "get_effective_mongo_uri",
+        lambda: "mongodb://127.0.0.1:27017/von",
+    )
+    monkeypatch.setattr(mongo_client, "is_using_fallback_uri", lambda: False)
+    monkeypatch.setattr(mongo_client, "get_configured_database_name", lambda: "von")
+    monkeypatch.setattr(
+        mongo_uri_redaction,
+        "build_safe_mongo_connection_location",
+        lambda *_args, **_kwargs: safe_location,
+    )
+
+    aligned = certification_script._collect_runtime_authority_alignment(
+        session=Session(),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:5010",
+        environment={
+            "server_agent_test_instance": True,
+            "server_git_commit": "a" * 40,
+            "server_git_dirty": False,
+            "local_repo_git_head": "a" * 40,
+            "local_repo_git_dirty": False,
+            "server_runtime_authority": {
+                "schema_version": "health_runtime_authority_projection.v1",
+                "mongo": {
+                    "effective_mongo_location_sha256": (
+                        certification_script.stable_payload_digest(safe_location)
+                    ),
+                    "effective_database_name_sha256": (
+                        certification_script.hashlib.sha256(b"von").hexdigest()
+                    ),
+                },
+                "durable_workflows": {
+                    "available": True,
+                    "worker_running": True,
+                    "scheduler_running": True,
+                },
+            },
+        },
+    )
+
+    assert aligned["verified"] is True
+    assert aligned["server_metadata_source"] == "health"
+    assert aligned["server_mongo_location"] is None
+    assert aligned["server_durable_workflow_status"]["worker_running"] is True
 
 
 def test_runtime_alignment_honours_explicit_non_agent_test_server_approval(

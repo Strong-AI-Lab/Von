@@ -1,6 +1,8 @@
 import copy
 import datetime as _dt
+import hashlib
 import importlib
+import json
 import logging
 import os
 import sys
@@ -909,9 +911,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 benchmark_suite_bootstrap_report,
             )
         if not bool(
-            operational_learning_release_bootstrap_report.get(
-                "success", False
-            )
+            operational_learning_release_bootstrap_report.get("success", False)
         ):
             app_logger.warning(
                 "[durable_workflows] operational learning release authority "
@@ -2576,7 +2576,9 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
             "state": (
                 "skipped_pytest"
                 if running_under_pytest
-                else "skipped_agent_test" if agent_test_instance else "pending"
+                else "skipped_agent_test"
+                if agent_test_instance
+                else "pending"
             ),
             "ready": False,
             "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -2790,12 +2792,87 @@ def _build_health_check_response(app: Flask):
         represented_postcondition_critic_enabled=(
             represented_postcondition_critic_enabled
         ),
+        runtime_authority=_build_health_runtime_authority_projection(app),
         pid=os.getpid(),
         start_time=app.config["SERVER_START_TIME"],
         local_ip=local_ip,
         public_ip=public_ip,
         rag_pending_count=None,
     )
+
+
+def _build_health_runtime_authority_projection(app: Flask) -> dict[str, object]:
+    """Return secret-safe authority identity and count-free process state."""
+
+    try:
+        from ..db.mongo_client import (
+            get_configured_database_name,
+            get_effective_mongo_uri,
+            is_using_fallback_uri,
+        )
+        from ..db.mongo_uri_redaction import build_safe_mongo_connection_location
+
+        location = build_safe_mongo_connection_location(
+            get_effective_mongo_uri(),
+            using_fallback=is_using_fallback_uri(),
+        )
+        encoded_location = json.dumps(
+            location,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        mongo: dict[str, object] = {
+            "effective_mongo_location_sha256": hashlib.sha256(
+                encoded_location
+            ).hexdigest(),
+            "effective_database_name_sha256": hashlib.sha256(
+                get_configured_database_name().encode("utf-8")
+            ).hexdigest(),
+        }
+    except Exception:
+        mongo = {
+            "effective_mongo_location_sha256": None,
+            "effective_database_name_sha256": None,
+        }
+
+    startup_status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS")
+    startup_state = (
+        startup_status.get("state") if isinstance(startup_status, dict) else None
+    )
+    if _is_agent_test_instance():
+        durable: dict[str, object] = {
+            "available": False,
+            "state": startup_state or "skipped_agent_test",
+            "worker_running": False,
+            "scheduler_running": False,
+        }
+    else:
+        try:
+            from ..workflows.durable.startup import get_system_status
+
+            status = get_system_status(include_counts=False)
+            durable = {
+                "available": True,
+                "state": startup_state,
+                "database_connected": status.get("database_connected"),
+                "worker_running": status.get("worker_running"),
+                "scheduler_running": status.get("scheduler_running"),
+            }
+        except Exception:
+            durable = {
+                "available": False,
+                "state": startup_state,
+                "worker_running": None,
+                "scheduler_running": None,
+            }
+
+    return {
+        "schema_version": "health_runtime_authority_projection.v1",
+        "mongo": mongo,
+        "durable_workflows": durable,
+    }
 
 
 def _build_diagnostics_durable_workflow_status(app: Flask) -> dict[str, object]:

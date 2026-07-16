@@ -2150,14 +2150,25 @@ def _collect_runtime_authority_alignment(
         parsed = urlparse(_text(base_url))
         hostname = (parsed.hostname or "").lower()
         loopback_target = hostname in {"127.0.0.1", "localhost", "::1"}
-        response = session.get(
-            f"{_text(base_url).rstrip('/')}/diag",
-            timeout=diagnostics_timeout_seconds,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, Mapping):
-            raise TypeError("server_diagnostics_mapping_required")
+        runtime_authority = _mapping(environment.get("server_runtime_authority"))
+        metadata_source = "health"
+        if runtime_authority:
+            server_mongo = _mapping(runtime_authority.get("mongo"))
+            durable_workflows = _mapping(runtime_authority.get("durable_workflows"))
+            version_details: Mapping[str, Any] = {}
+        else:
+            response = session.get(
+                f"{_text(base_url).rstrip('/')}/diag",
+                timeout=diagnostics_timeout_seconds,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, Mapping):
+                raise TypeError("server_diagnostics_mapping_required")
+            metadata_source = "diag_fallback"
+            server_mongo = _mapping(payload.get("mongo"))
+            durable_workflows = _mapping(payload.get("durable_workflows"))
+            version_details = _mapping(payload.get("version_details"))
 
         from src.backend.db.mongo_client import (
             get_configured_database_name,
@@ -2168,26 +2179,23 @@ def _collect_runtime_authority_alignment(
             build_safe_mongo_connection_location,
         )
 
-        server_mongo = _mapping(payload.get("mongo"))
-        server_location = _mapping(server_mongo.get("effective_mongo_location"))
         local_location = build_safe_mongo_connection_location(
             get_effective_mongo_uri(),
             using_fallback=is_using_fallback_uri(),
         )
-        server_location_sha256 = (
-            stable_payload_digest(server_location) if server_location else None
-        )
         local_location_sha256 = (
             stable_payload_digest(local_location) if local_location else None
         )
+        server_location = _mapping(server_mongo.get("effective_mongo_location"))
+        server_location_sha256 = _text(
+            server_mongo.get("effective_mongo_location_sha256")
+        ) or (stable_payload_digest(server_location) if server_location else "")
         server_database_name_sha256 = _text(
             server_mongo.get("effective_database_name_sha256")
         )
         local_database_name_sha256 = hashlib.sha256(
             get_configured_database_name().encode("utf-8")
         ).hexdigest()
-        version_details = _mapping(payload.get("version_details"))
-        durable_workflows = _mapping(payload.get("durable_workflows"))
         server_durable_workflow_status = {
             key: durable_workflows.get(key)
             for key in (
@@ -2203,7 +2211,9 @@ def _collect_runtime_authority_alignment(
             version_details.get("git_commit") or environment.get("server_git_commit")
         )
         local_git_commit = _text(environment.get("local_repo_git_head"))
-        server_git_dirty = version_details.get("git_dirty")
+        server_git_dirty = version_details.get(
+            "git_dirty", environment.get("server_git_dirty")
+        )
         checks = {
             "loopback_http_target": loopback_target,
             "approved_server_mode": (
@@ -2229,6 +2239,7 @@ def _collect_runtime_authority_alignment(
         }
         result.update(
             {
+                "server_metadata_source": metadata_source,
                 "verified": all(checks.values()),
                 "checks": checks,
                 "server_git_commit": server_git_commit or None,
@@ -2839,7 +2850,7 @@ def _durable_worker_preflight_blocker(
         "message": (
             "The selected certification contract includes the durable workflow "
             "adapter, but the trial server does not report a running durable "
-            "worker in /diag."
+            "worker in its runtime-authority health projection."
         ),
         "details": {
             "selected_adapter_ids": list(selected_adapter_ids),
