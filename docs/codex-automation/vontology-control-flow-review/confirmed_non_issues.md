@@ -275,6 +275,15 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   `JVNAUTOSCI-2574`. A fresh comment was added there for
   `turn_expected_outcome_obligation_carry_forward.py`; do not file a duplicate
   unless a distinct context-policy surface appears.
+- 2026-07-17: `turn_execution_record_service.py` representation required-effects
+  handling remains a watch item, not a fresh ticket, while it first consumes
+  represented continuation/workflow contracts and Vontology representation
+  profiles, honours represented `required_payload_fields`, and fail-closes when
+  the paper profile cannot be resolved. File or update the representation
+  contract authority track only if the compatibility defaults for
+  `scholarly_representation`, read-back fields, status wording, or
+  `materialise_scholarly_representation_for_file_copy` become the only runtime
+  authority or are expanded to new domains instead of represented profiles.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,
