@@ -190,6 +190,17 @@ before creating duplicates.
   policy parsing. Python may load and validate represented graph policy, but
   missing represented model-policy fields should not silently become complete
   runtime policy.
+- Operational certification and learning-release services are drift candidates
+  when Python fixes campaign shape or release eligibility: trial counts,
+  pass-window names, specific certification gate ids, promotion verdicts, and
+  release-action gate sets should come from represented benchmark/release
+  policy. Python can compute generic aggregates, validate evidence digests and
+  enforce live-source/read-back boundaries.
+- Prior-turn context support becomes drift when Python token aliases or
+  structural defaults decide whether prior obligations carry forward. Prefer a
+  structured represented context-adjudication directive; Python should validate
+  and project it, not infer continuation/resume/verification semantics from
+  English token lists.
 
 ## Recent Examples
 
@@ -252,3 +263,6 @@ before creating duplicates.
   graph and startup publication should move to Vontology-stored VWL.
 - `JVNAUTOSCI-2496` - graph model-policy defaults and stage aliases should move
   from Python into represented workflow-stage/model-policy authority.
+- `JVNAUTOSCI-2586` - operational certification aggregation and learning-release
+  promotion gates are still partly fixed in Python rather than represented
+  benchmark/release authority.

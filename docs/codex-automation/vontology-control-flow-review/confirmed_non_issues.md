@@ -266,6 +266,15 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   that issue if preservation field order, `Execution status:` filtering, or
   completion-ledger replacement keeps acting as presenter/selected-workflow
   evidence policy instead of represented presenter/evidence-contract support.
+- 2026-07-16: `turn_contract_dispatch_policy_service.py` looked like the desired
+  represented-policy resolver for `JVNAUTOSCI-2365`: it loads
+  `#V#turn_contract_dispatch_policy`, validates a closed structural fact
+  vocabulary, fails closed on missing/invalid policy, and does not supply a
+  Python fallback rule ladder.
+- 2026-07-16: prior-turn obligation carry-forward drift is covered by active
+  `JVNAUTOSCI-2574`. A fresh comment was added there for
+  `turn_expected_outcome_obligation_carry_forward.py`; do not file a duplicate
+  unless a distinct context-policy surface appears.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

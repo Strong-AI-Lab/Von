@@ -108,6 +108,14 @@ predicates, and KB assertions should own durable:
   fallback model defaults, fallback-hop limits, inheritance, compatibility
   modes, local-only policy semantics, and any defaults used when represented
   model-policy data is incomplete.
+- Operational certification and learning-release policy, including trial
+  counts, pass-window expectations, certification gate requirements, release
+  eligibility verdicts, promotion/rejection/rollback judgement, and release
+  transition gate sets.
+- Prior-turn evidence and obligation carry-forward policy, including whether
+  context is discourse-only, expected-outcome evidence, routing evidence,
+  tool-planning evidence, answer evidence, continuation/resume/verification, or
+  suppressed for the current turn.
 
 ## Python Support
 
@@ -211,6 +219,15 @@ Python can remain the surface for:
   metadata, validate and normalise types, preserve source concept provenance,
   and fail closed or report incomplete authority instead of supplying hidden
   stage/default policy;
+- generic operational-certification support that parses represented benchmark
+  and release contracts, computes requested aggregates, validates matcher/budget
+  shapes, digests evidence, checks live Vontology/source/read-back provenance,
+  enforces actor scope and authenticated approval, persists release state, and
+  exposes typed blockers/recovery affordances;
+- generic prior-turn context plumbing that carries structured represented
+  carry-forward directives, preserves source-turn lineage, suppresses fields
+  exactly as directed, records telemetry, and fails closed when the represented
+  directive is missing or invalid;
 - generic HTTP/request plumbing that passes represented decisions through.
 - read-only operational diagnostics and Jira triage tooling that computes
   bounded engineering metrics, redacts evidence, and prepares human-review
