@@ -418,6 +418,59 @@ def test_get_predicate_incidence_counts_other_argument_types() -> None:
     )
 
 
+def test_get_predicate_incidence_entity_mode_batches_argument_type_counts(
+    monkeypatch,
+) -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services import concept_relation_service as service
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#entity_anchor",
+            "relationships": {
+                "#V#related_to": ["#V#entity_target_a", "#V#entity_target_b"]
+            },
+        }
+    )
+    for target_id in ("#V#entity_target_a", "#V#entity_target_b"):
+        ConceptsRepository.insert_one(
+            {
+                "concept_id": target_id,
+                "relationships": {"is_an_instance_of": ["#V#entity_target_type"]},
+            }
+        )
+
+    def fail_per_hit_type_resolution(*_args, **_kwargs):
+        raise AssertionError("entity incidence should use batched target type IDs")
+
+    monkeypatch.setattr(
+        service,
+        "_resolve_accessible_concept_type_ids",
+        fail_per_hit_type_resolution,
+    )
+
+    payload = service.get_predicate_incidence(
+        concept_id="#V#entity_anchor",
+        argument_index="subject",
+        relation_kind="binary",
+        include_argument_type_counts=True,
+        include_concept_preview=False,
+    )
+
+    row = next(
+        row
+        for row in payload.get("predicates") or []
+        if row.get("predicate_concept_id") == "#V#related_to"
+    )
+    target_type_count = next(
+        entry
+        for entry in row.get("argument_type_counts") or []
+        if entry.get("type_concept_id") == "#V#entity_target_type"
+    )
+    assert target_type_count["relation_hit_count"] == 2
+    assert target_type_count["concept_count"] == 2
+
+
 def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import get_predicate_incidence

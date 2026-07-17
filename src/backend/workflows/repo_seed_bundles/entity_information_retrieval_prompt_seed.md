@@ -56,6 +56,15 @@ Tool guidance:
   `relation_kind: "binary"`, and a narrow
   `predicate_filter` to retrieve grounded relation hits for the chosen
   predicates. Set `argument_index` to the direction you are testing.
+- `predicate_filter`, `argument_index`, `relation_kind`, and relation paging
+  limits are arguments for `find_relations_with_argument`, not
+  `fetch_concept`. Never send those relation-query arguments to
+  `fetch_concept`: it does not perform a predicate-filtered relation read.
+- An unfiltered relation page is not evidence that a matching relation is
+  absent when the requested predicate may fall outside that page. If an
+  earlier relation read was unfiltered or did not return the matching row,
+  call `find_relations_with_argument` again with the exact narrowed
+  `predicate_filter` before answering.
 - For paper requests, if predicate incidence shows `#V#author_of` or
   `#V#owner_of` with paper-like type counts or sample groundings, your next
   `find_relations_with_argument` call must include a `predicate_filter`

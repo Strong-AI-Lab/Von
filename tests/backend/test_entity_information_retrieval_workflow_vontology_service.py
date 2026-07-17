@@ -72,7 +72,16 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     )
     assert isinstance(discovery_exemplars, dict)
     assert discovery_source.startswith("text_relation:")
-    assert "who am i and list my papers" in (discovery_exemplars.get("keywords") or [])
+    discovery_keywords = discovery_exemplars.get("keywords") or []
+    discovery_examples = discovery_exemplars.get("examples") or []
+    assert "who am i and list my papers" in discovery_keywords
+    assert "people related to an entity" in discovery_keywords
+    assert (
+        "Which people do I supervise in the represented knowledge?"
+        in discovery_examples
+    )
+    assert "Can you list PhD students supervised by me?" in discovery_examples
+    assert "Which projects are linked to this researcher?" in discovery_examples
 
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID
@@ -143,7 +152,6 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         "get_text_relations_summary",
         "get_predicate_incidence",
         "find_relations_with_argument",
-        "search_concepts",
         "fetch_concept",
         "list_uncertain_relationship_assertions",
     ]
@@ -154,14 +162,24 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         "find_relations_with_argument",
         "list_uncertain_relationship_assertions",
     ]
-    assert llm_policy.get("max_tool_invocations") == 8
+    assert llm_policy.get("max_tool_invocations") == 5
+    response_contract = llm_policy.get("response_contract_text")
+    assert isinstance(response_contract, str)
+    assert "Once the five required evidence tools have succeeded" in response_contract
+    assert "Do not fetch or summarise predicate concepts merely" in response_contract
+    assert "outer represented recovery policy" in response_contract
+    assert "the content-bearing read must use find_relations_with_argument" in (
+        response_contract
+    )
+    assert "Never send relation-query arguments to fetch_concept" in response_contract
     assert llm_policy.get("tool_argument_defaults") == {
-        "get_predicate_incidence": {
-            "argument_index": "subject",
-            "relation_kind": "binary",
-            "include_argument_type_counts": True,
-            "limit": 12,
-        },
+            "get_predicate_incidence": {
+                "argument_index": "subject",
+                "relation_kind": "binary",
+                "include_argument_type_counts": True,
+                "include_concept_preview": False,
+                "limit": 32,
+            },
         "get_text_relations_summary": {
             "max_relation_ids_per_group": 25,
         },
@@ -264,6 +282,8 @@ def test_entity_information_retrieval_prompt_support_seeds_content_from_repo_ass
     assert "do not conclude that no matching predicate extent" in prompt_text_lower
     assert "predicate-filtered entity-relative relation questions" in prompt_text_lower
     assert "matching predicate extent" in prompt_text_lower
+    assert "never send those relation-query arguments" in prompt_text_lower
+    assert "an unfiltered relation page is not evidence" in prompt_text_lower
     assert "first ontology-native" in prompt_text_lower
     assert "anchor entity always goes in `concept_id`" in prompt_text_lower
     assert "payload keys named `subject` or `object`" in prompt_text_lower

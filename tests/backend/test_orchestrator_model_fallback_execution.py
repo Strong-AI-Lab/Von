@@ -993,6 +993,119 @@ def test_run_llm_with_tools_fallbacks_retries_when_required_tool_omitted(
     assert recorded_calls[0]["error"] == "required_tool_call_omitted"
 
 
+@pytest.mark.parametrize(
+    ("response", "required_prompt_tools", "expected_reason"),
+    [
+        (
+            LLMResponse(text_response="", tool_calls=[]),
+            [],
+            "empty_structured_response",
+        ),
+        (
+            LLMResponse(
+                text_response="I will look up the represented evidence.",
+                tool_calls=[],
+            ),
+            ["synthetic_lookup"],
+            "required_tool_call_omitted",
+        ),
+    ],
+)
+def test_run_llm_with_tools_fallbacks_rejects_invalid_final_candidate(
+    monkeypatch,
+    response: LLMResponse,
+    required_prompt_tools: list[str],
+    expected_reason: str,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    candidate = _ModelCandidate(
+        provider="ollama",
+        model="synthetic-tool-model",
+        raw="ollama:synthetic-tool-model",
+        source="active_llm",
+        host="http://localhost:11434",
+    )
+    client = _StructuredToolClient(response)
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda *_args, **_kwargs: (
+            client,
+            "synthetic-tool-model",
+            {
+                "provider": "ollama",
+                "model": "synthetic-tool-model",
+                "raw": "ollama:synthetic-tool-model",
+                "source": "active_llm",
+                "host": "http://localhost:11434",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+    recorded_calls: list[dict[str, Any]] = []
+    tool_definition = ToolDefinition(
+        name="synthetic_lookup",
+        description="Retrieve represented evidence.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="all_structured_model_candidates_failed:stage=tool_call",
+    ):
+        orchestrator._run_llm_with_tools_fallbacks(
+            stage="tool_call",
+            prompt="Retrieve represented evidence.",
+            context=[],
+            tool_definitions=[tool_definition],
+            default_client=object(),
+            default_model="synthetic-tool-model",
+            policy_state=_policy_state(),
+            registry_snapshot=None,
+            user_concept_id=None,
+            org_concept_id=None,
+            llm_calls_log=[],
+            aux_log=aux_log,
+            record_llm_call=lambda **payload: recorded_calls.append(dict(payload)),
+            emit_progress=lambda payload: progress_events.append(dict(payload)),
+            method_catalogue={"synthetic_lookup": {"category": "read"}},
+            required_prompt_tools=required_prompt_tools,
+        )
+
+    terminal_event = next(
+        event for event in progress_events if event.get("status") == "llm_call_end"
+    )
+    assert terminal_event["success"] is False
+    assert terminal_event["error"] == expected_reason
+    assert terminal_event["failure_kind"] == "response_validation_failed"
+    stage_summary = next(
+        entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["selected"] is None
+    assert stage_summary["fallback_attempts"][0]["validation"]["reason"] == (
+        expected_reason
+    )
+    assert recorded_calls[0]["status"] == "failed"
+    assert recorded_calls[0]["error"] == expected_reason
+
+
 def test_run_llm_with_tools_fallbacks_stops_after_typed_transport_rejection(
     monkeypatch,
 ) -> None:

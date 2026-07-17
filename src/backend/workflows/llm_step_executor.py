@@ -98,6 +98,7 @@ _COMPLETION_REPORT_NARRATION_PROMPT_IDS = frozenset(
 _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID = (
     "#V#prompt_turn_execution_expected_outcome_inference"
 )
+_AVAILABLE_INTERNAL_TOOL_IDS_CONTEXT_KEY = "available_internal_tool_ids"
 _AGENT_TEST_LOCAL_PROVIDER_NAME = "ollama"
 _AGENT_TEST_GENERIC_SELECTOR_WORKFLOW_IDS = frozenset(
     {
@@ -112,6 +113,67 @@ def _context_string(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value or "").strip()
+
+
+def _hydrate_authored_runtime_context_fields(
+    *,
+    request: WorkflowActionRequest,
+    llm_policy: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Hydrate runtime-owned values only when the workflow explicitly requests them."""
+
+    raw_context_fields = llm_policy.get("context_fields")
+    if not isinstance(raw_context_fields, Sequence) or isinstance(
+        raw_context_fields,
+        (str, bytes, bytearray),
+    ):
+        return None
+    authored_context_keys = {
+        _context_string(item.get("context_key"))
+        for item in raw_context_fields
+        if isinstance(item, Mapping)
+    }
+    if _AVAILABLE_INTERNAL_TOOL_IDS_CONTEXT_KEY not in authored_context_keys:
+        return None
+
+    gateway = request.environment.gateway
+    try:
+        method_catalogue = gateway.describe_methods() if gateway is not None else None
+    except Exception as exc:
+        request.data[_AVAILABLE_INTERNAL_TOOL_IDS_CONTEXT_KEY] = {
+            "status": "unavailable",
+            "tool_ids": [],
+        }
+        return {
+            "context_key": _AVAILABLE_INTERNAL_TOOL_IDS_CONTEXT_KEY,
+            "source": "workflow_environment.gateway.describe_methods",
+            "status": "unavailable",
+            "tool_count": 0,
+            "error_class": type(exc).__name__,
+        }
+
+    tool_ids = sorted(
+        {
+            str(tool_name).strip()
+            for tool_name in (
+                method_catalogue.keys()
+                if isinstance(method_catalogue, Mapping)
+                else ()
+            )
+            if str(tool_name).strip()
+        }
+    )
+    status = "available" if isinstance(method_catalogue, Mapping) else "unavailable"
+    request.data[_AVAILABLE_INTERNAL_TOOL_IDS_CONTEXT_KEY] = {
+        "status": status,
+        "tool_ids": tool_ids,
+    }
+    return {
+        "context_key": _AVAILABLE_INTERNAL_TOOL_IDS_CONTEXT_KEY,
+        "source": "workflow_environment.gateway.describe_methods",
+        "status": status,
+        "tool_count": len(tool_ids),
+    }
 
 
 def _truthy_env_value(value: str | None) -> bool:
@@ -679,8 +741,17 @@ def _resolve_llm_step_max_tool_invocations(
     required_obligation_tools: Sequence[str] | None = None,
 ) -> int:
     env_max_tool_invocations = request.environment.max_tool_invocations
-    if env_max_tool_invocations is not None:
-        return int(env_max_tool_invocations)
+
+    def _apply_environment_cap(resolved_limit: int) -> int:
+        """Keep the global runtime setting as a ceiling, not authored policy."""
+
+        if env_max_tool_invocations is None:
+            return max(0, int(resolved_limit))
+        try:
+            environment_cap = max(0, int(env_max_tool_invocations))
+        except (TypeError, ValueError):
+            return max(0, int(resolved_limit))
+        return min(max(0, int(resolved_limit)), environment_cap)
 
     raw_policy_limit = llm_policy.get("max_tool_invocations")
     if isinstance(raw_policy_limit, bool):
@@ -693,7 +764,7 @@ def _resolve_llm_step_max_tool_invocations(
     else:
         policy_limit = 0
     if policy_limit > 0:
-        return policy_limit
+        return _apply_environment_cap(policy_limit)
 
     required_tools = _merge_required_prompt_tools(
         required_prompt_tools,
@@ -709,9 +780,11 @@ def _resolve_llm_step_max_tool_invocations(
             # read-back.  The authored contract decides which tools are required;
             # this support surface only avoids starving those obligations.
             required_budget += 2
-        return max(_DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP, required_budget)
+        return _apply_environment_cap(
+            max(_DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP, required_budget)
+        )
 
-    return 1
+    return _apply_environment_cap(1)
 
 
 def _coerce_context_messages(value: Any) -> list[dict[str, str]]:
@@ -3428,6 +3501,11 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
     if agent_test_fast_path_result is not None:
         return agent_test_fast_path_result
 
+    runtime_context_hydration = _hydrate_authored_runtime_context_fields(
+        request=request,
+        llm_policy=llm_policy_map,
+    )
+
     prompt_id, base_prompt_text, rendered_variables, prompt_source = (
         _resolve_prompt_render(
             prompt_contract=request.prompt_contract,
@@ -3480,6 +3558,10 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
         workflow_state_id=request.workflow_state_id,
     )
     prompt_context_diagnostics = dict(prompt_context_diagnostics or {})
+    if runtime_context_hydration is not None:
+        prompt_context_diagnostics["runtime_context_hydration"] = (
+            runtime_context_hydration
+        )
     prompt_context_diagnostics["prompt_content_sha256"] = hashlib.sha256(
         base_prompt_text.encode("utf-8")
     ).hexdigest()

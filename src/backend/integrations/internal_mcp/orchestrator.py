@@ -20495,30 +20495,34 @@ class InternalMCPChatOrchestrator:
                             ),
                         }
                     )
-                required_tool_omitted_failure: dict[str, Any] | None = None
-                if required_available_tool_names and not getattr(
-                    llm_response, "tool_calls", None
-                ):
-                    required_tool_omitted_failure = {
+                response_text = str(getattr(llm_response, "text_response", "") or "")
+                response_tool_calls = getattr(llm_response, "tool_calls", None)
+                # A structured response must expose at least one usable path
+                # forward.  Rejecting a blank terminal candidate preserves the
+                # represented recovery/fallback opportunity instead of silently
+                # converting provider failure into a successful no-op.
+                response_validation_failure: dict[str, Any] | None = None
+                if required_available_tool_names and not response_tool_calls:
+                    response_validation_failure = {
                         "reason": "required_tool_call_omitted",
                         "error_class": "RequiredToolCallOmittedError",
                         "failure_kind": "response_validation_failed",
                         "required_prompt_tools": list(required_prompt_tools),
                         "required_available_tools": list(required_available_tool_names),
                     }
-                if (
-                    required_tool_omitted_failure is not None
-                    and attempt_no < total_candidates
-                ):
-                    validation_reason = str(required_tool_omitted_failure["reason"])
+                elif not response_tool_calls and not response_text.strip():
+                    response_validation_failure = {
+                        "reason": "empty_structured_response",
+                        "error_class": "EmptyStructuredResponseError",
+                        "failure_kind": "response_validation_failed",
+                    }
+                if response_validation_failure is not None:
+                    validation_reason = str(response_validation_failure["reason"])
                     validation_error_class = str(
-                        required_tool_omitted_failure["error_class"]
+                        response_validation_failure["error_class"]
                     )
                     validation_failure_kind = str(
-                        required_tool_omitted_failure["failure_kind"]
-                    )
-                    response_text = str(
-                        getattr(llm_response, "text_response", "") or ""
+                        response_validation_failure["failure_kind"]
                     )
                     if callable(emit_progress):
                         emit_progress(
@@ -20549,7 +20553,7 @@ class InternalMCPChatOrchestrator:
                         error_class=validation_error_class,
                         failure_kind=validation_failure_kind,
                     )
-                    failure_extra["validation"] = dict(required_tool_omitted_failure)
+                    failure_extra["validation"] = dict(response_validation_failure)
                     resolved_model_name = (
                         llm_response.model
                         if isinstance(getattr(llm_response, "model", None), str)
@@ -20565,8 +20569,8 @@ class InternalMCPChatOrchestrator:
                             else None
                         ),
                         note=(
-                            "llm.generate_with_tools omitted a required "
-                            "available tool call; trying fallback"
+                            "llm.generate_with_tools response failed validation; "
+                            "trying fallback"
                         ),
                         stage=stage,
                         provider=provider,
@@ -20606,9 +20610,10 @@ class InternalMCPChatOrchestrator:
                             "error": validation_reason,
                             "error_class": validation_error_class,
                             "failure_kind": validation_failure_kind,
-                            "validation": dict(required_tool_omitted_failure),
+                            "validation": dict(response_validation_failure),
                         }
                     )
+                    last_exception = None
                     last_failure_class = validation_error_class
                     fallback_attempts.append(
                         {
@@ -20639,7 +20644,7 @@ class InternalMCPChatOrchestrator:
                                 )
                                 else []
                             ),
-                            "validation": dict(required_tool_omitted_failure),
+                            "validation": dict(response_validation_failure),
                             "candidate": (
                                 dict(telemetry)
                                 if isinstance(telemetry, Mapping)
@@ -21090,6 +21095,45 @@ class InternalMCPChatOrchestrator:
                 "All structured model candidates for stage "
                 f"{stage!r} were skipped because they failed terminally earlier "
                 "in this turn (dead-candidate cache); no live model available."
+            )
+        if errors:
+            failure_summaries = []
+            for error_entry in errors:
+                candidate_info = (
+                    error_entry.get("candidate")
+                    if isinstance(error_entry, Mapping)
+                    else None
+                )
+                provider_name = (
+                    str(candidate_info.get("provider") or "?")
+                    if isinstance(candidate_info, Mapping)
+                    else "?"
+                )
+                model_label = str(
+                    (
+                        error_entry.get("model_resolved")
+                        if isinstance(error_entry, Mapping)
+                        else None
+                    )
+                    or "?"
+                )
+                kind = str(
+                    (
+                        error_entry.get("failure_kind")
+                        if isinstance(error_entry, Mapping)
+                        else None
+                    )
+                    or (
+                        error_entry.get("error_class")
+                        if isinstance(error_entry, Mapping)
+                        else None
+                    )
+                    or "failed"
+                )
+                failure_summaries.append(f"{provider_name}:{model_label}={kind}")
+            raise RuntimeError(
+                f"all_structured_model_candidates_failed:stage={stage}:"
+                + ",".join(failure_summaries[:6])
             )
         raise RuntimeError("No structured model candidates available for stage")
 
@@ -24416,7 +24460,8 @@ class InternalMCPChatOrchestrator:
         cls,
         payload: Mapping[str, Any],
         *,
-        max_predicates: int = 6,
+        max_predicates: int = 32,
+        max_detailed_predicates: int = 6,
         max_groundings: int = 3,
         max_type_counts: int = 8,
         max_role_counts: int = 8,
@@ -24429,7 +24474,8 @@ class InternalMCPChatOrchestrator:
             else []
         )
         compact_rows: list[dict[str, Any]] = []
-        for row in predicate_rows[:max_predicates]:
+        for row_index, row in enumerate(predicate_rows[:max_predicates]):
+            include_detailed_evidence = row_index < max_detailed_predicates
             compact_row: dict[str, Any] = {}
             predicate_id = row.get("predicate_concept_id")
             if isinstance(predicate_id, str) and predicate_id.strip():
@@ -24465,7 +24511,7 @@ class InternalMCPChatOrchestrator:
                 ]
 
             argument_type_counts = row.get("argument_type_counts")
-            if isinstance(argument_type_counts, list):
+            if include_detailed_evidence and isinstance(argument_type_counts, list):
                 compact_type_counts: list[dict[str, Any]] = []
                 for type_count in argument_type_counts[:max_type_counts]:
                     if not isinstance(type_count, Mapping):
@@ -24517,7 +24563,7 @@ class InternalMCPChatOrchestrator:
                     compact_row[count_field] = int(value)
 
             groundings = row.get("sample_groundings")
-            if isinstance(groundings, list):
+            if include_detailed_evidence and isinstance(groundings, list):
                 compact_groundings: list[dict[str, Any]] = []
                 for grounding in groundings[:max_groundings]:
                     if not isinstance(grounding, Mapping):
@@ -24552,7 +24598,7 @@ class InternalMCPChatOrchestrator:
                     compact_row["sample_groundings"] = compact_groundings
 
             instances = row.get("sample_instances")
-            if isinstance(instances, list):
+            if include_detailed_evidence and isinstance(instances, list):
                 compact_instances: list[dict[str, Any]] = []
                 for instance in instances[:max_groundings]:
                     if not isinstance(instance, Mapping):
@@ -24579,7 +24625,7 @@ class InternalMCPChatOrchestrator:
                     compact_row["sample_instances"] = compact_instances
 
             role_expansion = row.get("role_expansion")
-            if isinstance(role_expansion, Mapping):
+            if include_detailed_evidence and isinstance(role_expansion, Mapping):
                 compact_role: dict[str, Any] = {}
                 for text_field in (
                     "anchor_predicate_concept_id",
@@ -24662,7 +24708,10 @@ class InternalMCPChatOrchestrator:
         diagnostics_note = (
             "No predicate-incidence rows were available."
             if not compact_rows
-            else f"{len(compact_rows)} predicate row(s) are shown."
+            else (
+                f"{len(compact_rows)} predicate row(s) are shown; rich samples are "
+                f"bounded to the first {min(len(compact_rows), max_detailed_predicates)}."
+            )
         )
         compact_payload: dict[str, Any] = {
             "_llm_view": "predicate_incidence_results.v1",
@@ -35233,7 +35282,8 @@ class InternalMCPChatOrchestrator:
     ) -> list[str]:
         shaped_payload = cls._shape_get_predicate_incidence_payload_for_llm(
             payload,
-            max_predicates=4,
+            max_predicates=32,
+            max_detailed_predicates=6,
             max_groundings=6,
             max_text_chars=140,
         )
@@ -35256,7 +35306,7 @@ class InternalMCPChatOrchestrator:
             return lines
 
         fragments: list[str] = []
-        for row in predicate_rows[:4]:
+        for row in predicate_rows[:32]:
             if not isinstance(row, Mapping):
                 continue
             predicate_label = row.get("predicate_name") or row.get(

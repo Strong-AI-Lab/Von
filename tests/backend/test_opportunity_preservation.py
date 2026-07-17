@@ -601,6 +601,54 @@ def test_grounded_read_evidence_preserves_target_inspection_opportunity(
     ]
 
 
+def test_unresolved_target_preserves_bounded_read_probe_but_not_write(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        target_validation,
+        "get_tool_required_obligation_metadata",
+        lambda tool_name: ToolRequiredObligationMetadata(
+            operation_class=(
+                "verification_read"
+                if tool_name == "synthetic.inspect_target"
+                else "mutation_write"
+            ),
+            target_argument_names=("target_id",),
+        ),
+    )
+    target_state = {
+        "target_contracts": [
+            {
+                "kind": "natural_language",
+                "binding_kind": "entity",
+                "text": "the target named in the request",
+                "resolution_status": "unresolved",
+            }
+        ]
+    }
+
+    read_result = target_validation.validate_tool_target_contract(
+        tool_name="synthetic.inspect_target",
+        payload={"target_id": "#V#synthetic_candidate"},
+        target_contract_state=target_state,
+    )
+    write_result = target_validation.validate_tool_target_contract(
+        tool_name="synthetic.mutate_target",
+        payload={"target_id": "#V#synthetic_candidate"},
+        target_contract_state=target_state,
+    )
+
+    assert read_result.ok is True
+    assert read_result.resolution_evidence[0]["resolution_scope"] == (
+        "bounded_unresolved_read_probe"
+    )
+    assert read_result.resolution_evidence[0]["preserves_unresolved_state"] is True
+    assert write_result.ok is False
+    assert write_result.first_error_code() == (
+        target_validation.TARGET_CONTRACT_UNRESOLVED_FOR_SYMBOLIC_TOOL
+    )
+
+
 def test_rejected_learning_release_preserves_active_pointer_and_recovery_options() -> (
     None
 ):

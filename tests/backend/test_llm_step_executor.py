@@ -365,6 +365,61 @@ def test_context_field_lineage_includes_model_visible_recovery_marker(
     assert first != second
 
 
+def test_runtime_tool_ids_are_hydrated_only_for_authored_context_field() -> None:
+    gateway = MagicMock()
+    gateway.describe_methods.return_value = {
+        "find_relations_with_argument": {},
+        "get_predicate_incidence": {},
+    }
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), gateway=gateway),
+        data={"available_internal_tool_ids": {"status": "stale", "tool_ids": []}},
+    )
+
+    diagnostics = lse._hydrate_authored_runtime_context_fields(
+        request=request,
+        llm_policy={
+            "context_fields": [
+                {
+                    "context_key": "available_internal_tool_ids",
+                    "label": "Available internal tool IDs",
+                }
+            ]
+        },
+    )
+
+    assert request.data["available_internal_tool_ids"] == {
+        "status": "available",
+        "tool_ids": [
+            "find_relations_with_argument",
+            "get_predicate_incidence",
+        ],
+    }
+    assert diagnostics == {
+        "context_key": "available_internal_tool_ids",
+        "source": "workflow_environment.gateway.describe_methods",
+        "status": "available",
+        "tool_count": 2,
+    }
+
+    untouched_request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), gateway=gateway),
+        data={},
+    )
+    assert (
+        lse._hydrate_authored_runtime_context_fields(
+            request=untouched_request,
+            llm_policy={"context_fields": [{"context_key": "user_prompt"}]},
+        )
+        is None
+    )
+    assert "available_internal_tool_ids" not in untouched_request.data
+
+
 def test_execute_llm_step_parses_json_value_output() -> None:
     request = _build_request(
         llm_response='{"meeting_type":"project_meeting","title":"Roadmap sync"}'
@@ -1627,6 +1682,72 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
         "required_json_fields": [],
         "json_field_defaults": {},
     }
+
+
+def test_llm_step_authored_tool_limit_is_bounded_by_environment_ceiling() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+            max_tool_invocations=300,
+        ),
+        data={},
+    )
+
+    resolved = lse._resolve_llm_step_max_tool_invocations(
+        request=request,
+        llm_policy={"max_tool_invocations": 5},
+        required_prompt_tools=("fetch_concept",),
+    )
+
+    assert resolved == 5
+
+
+def test_llm_step_environment_tool_limit_can_tighten_authored_limit() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+            max_tool_invocations=3,
+        ),
+        data={},
+    )
+
+    resolved = lse._resolve_llm_step_max_tool_invocations(
+        request=request,
+        llm_policy={"max_tool_invocations": 5},
+        required_prompt_tools=("fetch_concept",),
+    )
+
+    assert resolved == 3
+
+
+def test_llm_step_environment_zero_disables_authored_tool_limit() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+            max_tool_invocations=0,
+        ),
+        data={},
+    )
+
+    resolved = lse._resolve_llm_step_max_tool_invocations(
+        request=request,
+        llm_policy={"max_tool_invocations": 5},
+        required_prompt_tools=("fetch_concept",),
+    )
+
+    assert resolved == 0
 
 
 def test_execute_llm_step_tool_mode_filters_turn_contract_tools_to_allowed_workflow_tools(

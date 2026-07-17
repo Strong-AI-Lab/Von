@@ -1,6 +1,7 @@
 from src.backend.services.turn_execution_record_service import (
     build_search_tool_evidence,
     build_turn_execution_record,
+    build_verification_tool_evidence,
 )
 
 
@@ -39,6 +40,40 @@ def test_build_search_tool_evidence_preserves_search_concepts_result() -> None:
     assert evidence[0]["result"]["total_count"] == 1
     assert evidence[0]["result"]["results"][0]["concept_id"] == "#V#under_preparation_paper"
     assert evidence[0]["result_truncated"] is False
+
+
+def test_build_verification_tool_evidence_preserves_relation_result() -> None:
+    tool_invocations = [
+        {
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#supervisor",
+                "argument_index": "subject",
+            },
+            "effective_payload": {
+                "total_hits": 1,
+                "hits": [
+                    {
+                        "predicate_concept_id": "#V#supervises",
+                        "target_value": "#V#student",
+                    }
+                ],
+            },
+            "status": "ok",
+            "result_summary": "Loaded: supervisor",
+        }
+    ]
+
+    evidence = build_verification_tool_evidence(tool_invocations)
+
+    assert len(evidence) == 1
+    assert evidence[0]["tool"] == "find_relations_with_argument"
+    assert evidence[0]["result"]["hits"] == [
+        {
+            "predicate_concept_id": "#V#supervises",
+            "target_value": "#V#student",
+        }
+    ]
 
 
 def test_build_turn_execution_record_carries_search_evidence_into_execution_payload() -> None:

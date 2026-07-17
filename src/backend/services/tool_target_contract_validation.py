@@ -442,6 +442,94 @@ def successful_tool_result_concept_evidence(
     return tuple(receipts)
 
 
+def successful_tool_result_related_entity_evidence(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> tuple[dict[str, Any], ...]:
+    """Return exact related entity IDs from successful relation-result hits.
+
+    This evidence is deliberately narrower than arbitrary concept IDs in tool
+    output. Only source/target entity fields inside content-bearing ``hits``
+    are eligible, so predicate IDs, metadata IDs, and prose cannot authorise a
+    follow-up read. The evidence may support read-only verification of a
+    related entity; it never revises the turn target agreement or authorises a
+    mutation.
+    """
+
+    receipts: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+
+    def _append_receipt(
+        *,
+        raw_value: Any,
+        tool_name: str,
+        call_id: str,
+        result_path: str,
+    ) -> None:
+        if not isinstance(raw_value, str):
+            return
+        concept_id = raw_value.strip()
+        concept_ids = extract_vontology_concept_ids_from_text(concept_id)
+        if len(concept_ids) != 1 or concept_ids[0] != concept_id:
+            return
+        fingerprint = (concept_id.lower(), tool_name.lower(), call_id, result_path)
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        receipt: dict[str, Any] = {
+            "concept_id": concept_id,
+            "tool": tool_name,
+            "result_path": result_path,
+        }
+        if call_id:
+            receipt["call_id"] = call_id
+        receipts.append(receipt)
+
+    for invocation in tool_invocations or ():
+        if not isinstance(
+            invocation, Mapping
+        ) or not _invocation_completed_successfully(invocation):
+            continue
+        tool_name = _safe_str(invocation.get("tool")) or "unknown"
+        call_id = _safe_str(invocation.get("call_id"))
+        for field_name in _STRUCTURED_TOOL_RESULT_FIELDS:
+            result = invocation.get(field_name)
+            if not isinstance(result, Mapping) or _structured_result_mapping_failed(
+                result
+            ):
+                continue
+            hits = result.get("hits")
+            if not isinstance(hits, list):
+                continue
+            for index, hit in enumerate(hits[:256]):
+                if not isinstance(hit, Mapping) or _structured_result_mapping_failed(
+                    hit
+                ):
+                    continue
+                for key in ("source_concept_id", "target_concept_id"):
+                    _append_receipt(
+                        raw_value=hit.get(key),
+                        tool_name=tool_name,
+                        call_id=call_id,
+                        result_path=f"{field_name}.hits[{index}].{key}",
+                    )
+                for preview_key in (
+                    "source_concept_preview",
+                    "target_concept_preview",
+                ):
+                    preview = hit.get(preview_key)
+                    if not isinstance(preview, Mapping):
+                        continue
+                    _append_receipt(
+                        raw_value=preview.get("concept_id"),
+                        tool_name=tool_name,
+                        call_id=call_id,
+                        result_path=(
+                            f"{field_name}.hits[{index}].{preview_key}.concept_id"
+                        ),
+                    )
+    return tuple(receipts)
+
+
 def _provisional_resolution_evidence(
     *,
     tool_name: str,
@@ -474,6 +562,58 @@ def _provisional_resolution_evidence(
     return tuple(matched_receipts)
 
 
+def _bounded_unresolved_read_probe_evidence(
+    *,
+    tool_name: str,
+    planned_targets: Sequence[PlannedTargetValue],
+    unresolved_contracts: Sequence[TurnTargetContract],
+) -> tuple[dict[str, Any], ...]:
+    """Allow inspectable read probes without pretending the target is resolved.
+
+    Natural-language target agreements guide model judgement, but they are not
+    write-safety boundaries.  A capable workflow must be able to inspect an
+    exact symbolic candidate with a read-only tool and use the returned
+    evidence to resolve or reject it.  Ambiguous/candidate contracts and write
+    operations remain fail-closed.
+    """
+
+    metadata = get_tool_required_obligation_metadata(tool_name)
+    if metadata.operation_class not in {
+        "search_or_resolution_read",
+        "verification_read",
+    }:
+        return ()
+    if not planned_targets:
+        return ()
+    if any(
+        contract.resolution_status == "ambiguous"
+        or contract.candidate_concept_ids
+        or contract.kind != "natural_language"
+        for contract in unresolved_contracts
+    ):
+        return ()
+    if any(
+        not any(
+            _field_matches_binding_kind(planned.field, contract.binding_kind)
+            for contract in unresolved_contracts
+        )
+        for planned in planned_targets
+    ):
+        return ()
+    return (
+        {
+            "schema_version": "provisional_target_resolution.v1",
+            "status": "provisional",
+            "tool": tool_name,
+            "resolution_scope": "bounded_unresolved_read_probe",
+            "planned_targets": [planned.to_payload() for planned in planned_targets],
+            "target_contracts": _contract_payloads(unresolved_contracts),
+            "preserves_unresolved_state": True,
+            "evidence": [],
+        },
+    )
+
+
 def validate_tool_target_contract(
     *,
     tool_name: str,
@@ -496,16 +636,122 @@ def validate_tool_target_contract(
     if not contracts:
         return ToolTargetContractValidationResult(ok=True)
 
+    planned_targets = _planned_target_values(
+        payload,
+        field_names=target_argument_names,
+    )
+    resolved_contracts = [
+        contract for contract in contracts if contract.is_symbolically_resolved()
+    ]
+    metadata = get_tool_required_obligation_metadata(clean_tool_name)
+
+    planned_targets_matching_resolved_contracts = [
+        planned
+        for planned in planned_targets
+        if any(
+            _symbolic_value_matches_contract(
+                planned=planned,
+                contract=contract,
+                hierarchy_match_resolver=hierarchy_match_resolver,
+            )
+            for contract in resolved_contracts
+        )
+    ]
+    planned_targets_not_matching_resolved_contracts = [
+        planned
+        for planned in planned_targets
+        if planned not in planned_targets_matching_resolved_contracts
+    ]
+    related_entity_evidence = successful_tool_result_related_entity_evidence(
+        prior_tool_invocations
+    )
+    related_evidence_by_concept_id: dict[str, list[dict[str, Any]]] = {}
+    for receipt in related_entity_evidence:
+        concept_id = _safe_str(receipt.get("concept_id"))
+        if concept_id:
+            related_evidence_by_concept_id.setdefault(
+                concept_id.lower(), []
+            ).append(receipt)
+    grounded_related_receipts: list[dict[str, Any]] = []
+    grounded_related_targets = bool(planned_targets_not_matching_resolved_contracts)
+    for planned in planned_targets_not_matching_resolved_contracts:
+        matches = related_evidence_by_concept_id.get(planned.value.lower()) or []
+        if not _field_matches_binding_kind(planned.field, TARGET_BINDING_ENTITY) or not (
+            matches
+        ):
+            grounded_related_targets = False
+            break
+        grounded_related_receipts.extend(matches)
+    if (
+        metadata.operation_class == "verification_read"
+        and grounded_related_targets
+        and len(planned_targets_matching_resolved_contracts)
+        + len(planned_targets_not_matching_resolved_contracts)
+        == len(planned_targets)
+    ):
+        return ToolTargetContractValidationResult(
+            ok=True,
+            resolution_evidence=(
+                {
+                    "schema_version": "provisional_target_resolution.v1",
+                    "status": "valid",
+                    "tool": clean_tool_name,
+                    "resolution_scope": "grounded_related_entity_verification_read",
+                    "planned_targets": [
+                        planned.to_payload() for planned in planned_targets
+                    ],
+                    "preserved_target_contracts": _contract_payloads(contracts),
+                    "preserves_target_agreement": True,
+                    "evidence": [dict(item) for item in grounded_related_receipts],
+                },
+            ),
+        )
     unresolved_contracts = [
         contract
         for contract in contracts
         if contract.requires_resolution_for_symbolic_tool()
     ]
     if unresolved_contracts:
-        planned_targets = _planned_target_values(
-            payload,
-            field_names=target_argument_names,
+        planned_targets_match_resolved_contracts = bool(planned_targets) and all(
+            any(
+                _symbolic_value_matches_contract(
+                    planned=planned,
+                    contract=contract,
+                    hierarchy_match_resolver=hierarchy_match_resolver,
+                )
+                for contract in resolved_contracts
+            )
+            for planned in planned_targets
         )
+        if (
+            metadata.operation_class
+            in {"search_or_resolution_read", "verification_read"}
+            and planned_targets_match_resolved_contracts
+        ):
+            return ToolTargetContractValidationResult(
+                ok=True,
+                resolution_evidence=(
+                    {
+                        "schema_version": "provisional_target_resolution.v1",
+                        "status": "valid",
+                        "tool": clean_tool_name,
+                        "resolution_scope": (
+                            "resolved_read_target_with_unresolved_secondary_contracts"
+                        ),
+                        "planned_targets": [
+                            planned.to_payload() for planned in planned_targets
+                        ],
+                        "matched_resolved_target_contracts": _contract_payloads(
+                            resolved_contracts
+                        ),
+                        "preserved_unresolved_target_contracts": _contract_payloads(
+                            unresolved_contracts
+                        ),
+                        "preserves_unresolved_state": True,
+                        "evidence": [],
+                    },
+                ),
+            )
         provisional_evidence = _provisional_resolution_evidence(
             tool_name=clean_tool_name,
             planned_targets=planned_targets,
@@ -528,6 +774,16 @@ def validate_tool_target_contract(
                     },
                 ),
             )
+        bounded_probe_evidence = _bounded_unresolved_read_probe_evidence(
+            tool_name=clean_tool_name,
+            planned_targets=planned_targets,
+            unresolved_contracts=unresolved_contracts,
+        )
+        if bounded_probe_evidence:
+            return ToolTargetContractValidationResult(
+                ok=True,
+                resolution_evidence=bounded_probe_evidence,
+            )
         error_code = _unresolved_error_code(unresolved_contracts)
         diagnostic = _diagnostic(
             tool_name=clean_tool_name,
@@ -542,16 +798,9 @@ def validate_tool_target_contract(
         )
         return ToolTargetContractValidationResult(ok=False, diagnostics=(diagnostic,))
 
-    resolved_contracts = [
-        contract for contract in contracts if contract.is_symbolically_resolved()
-    ]
     if not resolved_contracts:
         return ToolTargetContractValidationResult(ok=True)
 
-    planned_targets = _planned_target_values(
-        payload,
-        field_names=target_argument_names,
-    )
     if not planned_targets:
         diagnostic = _diagnostic(
             tool_name=clean_tool_name,
@@ -626,6 +875,7 @@ __all__ = [
     "TARGET_CONTRACT_VALIDATION_SCHEMA_VERSION",
     "ToolTargetContractValidationResult",
     "successful_tool_result_concept_evidence",
+    "successful_tool_result_related_entity_evidence",
     "target_contract_state_from_context",
     "validate_tool_target_contract",
 ]

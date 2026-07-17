@@ -4347,6 +4347,10 @@
                   "label": "Prior-context handoff risks"
                 },
                 {
+                  "context_key": "available_internal_tool_ids",
+                  "label": "Available internal tool IDs (authoritative; copy exact identifiers only)"
+                },
+                {
                   "context_key": "workflow_success_guidance_history",
                   "label": "Historical successful-run guidance: soft hints from prior successful executions."
                 },

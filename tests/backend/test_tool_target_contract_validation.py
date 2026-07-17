@@ -3,8 +3,12 @@ from src.backend.services.tool_target_contract_validation import (
     TARGET_CONTRACT_SYMBOLIC_MISMATCH,
     TARGET_CONTRACT_UNRESOLVED_FOR_SYMBOLIC_TOOL,
     successful_tool_result_concept_evidence,
+    successful_tool_result_related_entity_evidence,
     target_contract_state_from_context,
     validate_tool_target_contract,
+)
+from src.backend.services.tool_metadata_service import (
+    ToolRequiredObligationMetadata,
 )
 
 
@@ -98,9 +102,267 @@ def test_hierarchy_match_requires_explicit_contract_policy() -> None:
     assert subtype_result.ok is True
 
 
-def test_natural_language_target_requires_resolution_before_symbolic_tool() -> None:
+def test_natural_language_target_allows_bounded_symbolic_read_probe() -> None:
     result = validate_tool_target_contract(
         tool_name="find_relations_with_argument",
+        payload={"concept_id": "#V#candidate_entity"},
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "entity",
+                    "text": "the candidate entity from the user's question",
+                    "resolution_status": "unresolved",
+                }
+            ]
+        },
+    )
+
+    assert result.ok is True
+    assert result.diagnostics == ()
+    assert result.resolution_evidence[0]["resolution_scope"] == (
+        "bounded_unresolved_read_probe"
+    )
+    assert result.resolution_evidence[0]["preserves_unresolved_state"] is True
+    assert result.resolution_evidence[0]["evidence"] == []
+
+
+def test_resolved_focal_read_ignores_unresolved_secondary_type_contract() -> None:
+    result = validate_tool_target_contract(
+        tool_name="get_predicate_incidence",
+        payload={"concept_id": "#V#michael_witbrock"},
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#michael_witbrock"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                },
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "type",
+                    "text": "PhD students supervised by the focal user",
+                    "resolution_status": "unresolved",
+                    "matching_policy": "exact",
+                },
+            ]
+        },
+    )
+
+    assert result.ok is True
+    assert result.diagnostics == ()
+    assert len(result.resolution_evidence) == 1
+    evidence = result.resolution_evidence[0]
+    assert evidence["resolution_scope"] == (
+        "resolved_read_target_with_unresolved_secondary_contracts"
+    )
+    assert evidence["planned_targets"] == [
+        {"field": "concept_id", "value": "#V#michael_witbrock"}
+    ]
+    assert evidence["matched_resolved_target_contracts"][0]["concept_ids"] == [
+        "#V#michael_witbrock"
+    ]
+    assert evidence["preserved_unresolved_target_contracts"][0]["text"] == (
+        "PhD students supervised by the focal user"
+    )
+    assert evidence["preserves_unresolved_state"] is True
+    assert evidence["evidence"] == []
+
+
+def test_resolved_focal_mutation_still_blocks_unresolved_secondary_contract(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.tool_target_contract_validation."
+        "get_tool_required_obligation_metadata",
+        lambda _tool_name: ToolRequiredObligationMetadata(
+            operation_class="mutation_write",
+            target_argument_names=("concept_id",),
+        ),
+    )
+
+    result = validate_tool_target_contract(
+        tool_name="synthetic.update_target",
+        payload={"concept_id": "#V#michael_witbrock"},
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#michael_witbrock"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                },
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "type",
+                    "text": "the unresolved result type",
+                    "resolution_status": "unresolved",
+                },
+            ]
+        },
+    )
+
+    assert result.ok is False
+    assert result.first_error_code() == TARGET_CONTRACT_UNRESOLVED_FOR_SYMBOLIC_TOOL
+
+
+def test_relation_grounded_related_entity_allows_verification_read() -> None:
+    prior_invocations = [
+        {
+            "tool": "find_relations_with_argument",
+            "status": "ok",
+            "call_id": "call-relation-1",
+            "effective_payload": {
+                "success": True,
+                "hits": [
+                    {
+                        "source_concept_id": "#V#michael_witbrock",
+                        "predicate_concept_id": "#V#supervises_phd_student",
+                        "target_concept_id": "#V#timothy_pistotti",
+                        "target_concept_preview": {
+                            "concept_id": "#V#timothy_pistotti",
+                            "name": "Timothy Pistotti",
+                        },
+                    }
+                ],
+            },
+        }
+    ]
+
+    result = validate_tool_target_contract(
+        tool_name="fetch_concept",
+        payload={"concept_id": "#V#timothy_pistotti"},
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#michael_witbrock"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ]
+        },
+        prior_tool_invocations=prior_invocations,
+    )
+
+    assert result.ok is True
+    assert result.diagnostics == ()
+    assert result.resolution_evidence[0]["resolution_scope"] == (
+        "grounded_related_entity_verification_read"
+    )
+    assert result.resolution_evidence[0]["preserves_target_agreement"] is True
+    assert result.resolution_evidence[0]["evidence"] == [
+        {
+            "concept_id": "#V#timothy_pistotti",
+            "tool": "find_relations_with_argument",
+            "result_path": (
+                "effective_payload.hits[0].target_concept_id"
+            ),
+            "call_id": "call-relation-1",
+        },
+        {
+            "concept_id": "#V#timothy_pistotti",
+            "tool": "find_relations_with_argument",
+            "result_path": (
+                "effective_payload.hits[0].target_concept_preview.concept_id"
+            ),
+            "call_id": "call-relation-1",
+        },
+    ]
+
+
+def test_related_entity_evidence_excludes_predicates_metadata_and_prose() -> None:
+    evidence = successful_tool_result_related_entity_evidence(
+        [
+            {
+                "tool": "find_relations_with_argument",
+                "status": "ok",
+                "effective_payload": {
+                    "summary": "Related to #V#prose_only",
+                    "metadata": {"concept_id": "#V#metadata_only"},
+                    "hits": [
+                        {
+                            "predicate_concept_id": "#V#predicate_only",
+                            "target_concept_preview": {
+                                "concept_id": "#V#grounded_related"
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+
+    assert evidence == (
+        {
+            "concept_id": "#V#grounded_related",
+            "tool": "find_relations_with_argument",
+            "result_path": (
+                "effective_payload.hits[0].target_concept_preview.concept_id"
+            ),
+        },
+    )
+
+
+def test_relation_grounded_related_entity_does_not_authorise_mutation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.tool_target_contract_validation."
+        "get_tool_required_obligation_metadata",
+        lambda _tool_name: ToolRequiredObligationMetadata(
+            operation_class="mutation_write",
+            target_argument_names=("concept_id",),
+        ),
+    )
+
+    result = validate_tool_target_contract(
+        tool_name="synthetic.update_target",
+        payload={"concept_id": "#V#timothy_pistotti"},
+        target_contract_state={
+            "target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "concept_ids": ["#V#michael_witbrock"],
+                    "resolution_status": "resolved",
+                    "matching_policy": "exact",
+                }
+            ]
+        },
+        prior_tool_invocations=[
+            {
+                "tool": "find_relations_with_argument",
+                "status": "ok",
+                "effective_payload": {
+                    "hits": [
+                        {"target_concept_id": "#V#timothy_pistotti"}
+                    ]
+                },
+            }
+        ],
+    )
+
+    assert result.ok is False
+    assert result.first_error_code() == TARGET_CONTRACT_SYMBOLIC_MISMATCH
+
+
+def test_natural_language_target_still_blocks_symbolic_mutation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.tool_target_contract_validation."
+        "get_tool_required_obligation_metadata",
+        lambda _tool_name: ToolRequiredObligationMetadata(
+            operation_class="mutation_write",
+            target_argument_names=("concept_id",),
+        ),
+    )
+
+    result = validate_tool_target_contract(
+        tool_name="synthetic.update_target",
         payload={"concept_id": "#V#candidate_entity"},
         target_contract_state={
             "target_contracts": [
@@ -167,7 +429,7 @@ def test_grounded_successful_tool_result_allows_provisional_verification_read() 
     )
 
 
-def test_provisional_resolution_ignores_failed_input_and_prose_only_evidence() -> None:
+def test_bounded_read_probe_does_not_claim_failed_or_prose_only_resolution() -> None:
     invocations = [
         {
             "tool": "search_concepts",
@@ -209,8 +471,11 @@ def test_provisional_resolution_ignores_failed_input_and_prose_only_evidence() -
         prior_tool_invocations=invocations,
     )
 
-    assert result.ok is False
-    assert result.first_error_code() == TARGET_CONTRACT_UNRESOLVED_FOR_SYMBOLIC_TOOL
+    assert result.ok is True
+    assert result.resolution_evidence[0]["resolution_scope"] == (
+        "bounded_unresolved_read_probe"
+    )
+    assert result.resolution_evidence[0]["evidence"] == []
 
 
 def test_success_status_does_not_override_failed_result_payload() -> None:
@@ -397,7 +662,7 @@ def test_nested_metadata_predicate_and_subject_ids_are_not_focal_evidence() -> N
     )
 
 
-def test_related_ids_cannot_authorise_a_provisional_focal_fetch() -> None:
+def test_related_ids_do_not_become_resolution_evidence_for_bounded_read_probe() -> None:
     related_ids_by_field = {
         "id": "#V#generic_record_id",
         "instance_of": "#V#related_instance_type",
@@ -435,11 +700,11 @@ def test_related_ids_cannot_authorise_a_provisional_focal_fetch() -> None:
             prior_tool_invocations=prior_tool_invocations,
         )
 
-        assert result.ok is False, related_id
-        assert (
-            result.first_error_code()
-            == TARGET_CONTRACT_UNRESOLVED_FOR_SYMBOLIC_TOOL
+        assert result.ok is True, related_id
+        assert result.resolution_evidence[0]["resolution_scope"] == (
+            "bounded_unresolved_read_probe"
         )
+        assert result.resolution_evidence[0]["evidence"] == []
 
 
 def test_resolved_and_explicit_focal_ids_preserve_provisional_reads() -> None:

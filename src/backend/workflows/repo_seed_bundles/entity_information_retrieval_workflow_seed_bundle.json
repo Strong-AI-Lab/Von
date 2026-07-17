@@ -2,7 +2,7 @@
   "family_id": "entity_information_retrieval_workflow_seed_bundle",
   "managed_by": "entity_information_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "7",
+  "seed_version": "11",
   "source_tag": "JVNAUTOSCI-2075",
   "supported_action_ids": [
     "llm.action"
@@ -40,7 +40,7 @@
         },
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"entity information retrieval workflow\",\"who am i and list my papers\",\"papers of mine\",\"my papers\",\"predicate extent lookup\",\"represented affiliation lookup\"],\"examples\":[\"Tell me who I am and list my papers.\",\"What papers of mine do you know about?\",\"What concepts am I in in a #V#author_of relation with?\",\"Which organisation is Michael Witbrock affiliated with in the represented knowledge?\"]}",
+      "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"entity information retrieval workflow\",\"information about a resolved entity\",\"authenticated self relation lookup\",\"predicate extent lookup\",\"represented relationship lookup\",\"people related to an entity\",\"entities connected by a relation\",\"students supervised by an entity\",\"PhD students supervised by me\",\"represented affiliation role membership and supervision lookup\",\"who am i and list my papers\",\"papers of mine\"],\"examples\":[\"Tell me who I am and list my papers.\",\"What papers of mine do you know about?\",\"Can you list PhD students supervised by me?\",\"Which people do I supervise in the represented knowledge?\",\"Which roles are associated with this person?\",\"Which organisation is Michael Witbrock affiliated with in the represented knowledge?\",\"Which projects are linked to this researcher?\",\"Who is related to this person by the requested predicate?\",\"¿Qué organizaciones están relacionadas con esta persona en el conocimiento representado?\"]}",
           "lang": "en-NZ"
         },
         {
@@ -71,7 +71,6 @@
                 "get_text_relations_summary",
                 "get_predicate_incidence",
                 "find_relations_with_argument",
-                "search_concepts",
                 "fetch_concept",
                 "list_uncertain_relationship_assertions"
               ],
@@ -82,13 +81,14 @@
                 "find_relations_with_argument",
                 "list_uncertain_relationship_assertions"
               ],
-              "max_tool_invocations": 8,
+              "max_tool_invocations": 5,
               "tool_argument_defaults": {
                 "get_predicate_incidence": {
                   "argument_index": "subject",
                   "relation_kind": "binary",
+                  "include_concept_preview": false,
                   "include_argument_type_counts": true,
-                  "limit": 12
+                  "limit": 32
                 },
                 "get_text_relations_summary": {
                   "max_relation_ids_per_group": 25
@@ -132,7 +132,7 @@
                 }
               },
               "context_messages_context_key": "augmented_context",
-              "response_contract_text": "Answer the user directly from grounded represented evidence. For broad self-profile, represented-self, authorship, ownership, affiliation, role, and other entity-relative relation questions, first fetch the focal entity concept, inspect predicate incidence with argument type counts, retrieve narrowed relation evidence, and check uncertainty-bearing relationship assertions for the same focal entity. When the user asks to separate established facts from likely inferences, report asserted relation/focal-concept evidence separately from uncertain or proposed relationship assertions; do not merge those categories. For papers, inspect predicate incidence before relation paging, then filter the resulting extent by the requested type before answering. If predicate incidence for a paper request exposes #V#author_of or #V#owner_of with paper-like type counts or sample groundings, the next relation lookup must use find_relations_with_argument with a predicate_filter containing those exact predicate IDs; do not use an unfiltered relation page first. If predicate incidence exposes role-expansion summaries for reified/event/claim neighbours, use role-filler type counts to choose the follow-up extent and do not treat the reified neighbour itself as the answer entity. Do not claim that no matching results exist unless the relation-bearing and uncertainty-bearing evidence in this turn supports that negative conclusion. If grounded evidence is insufficient, say that clearly instead of guessing. When using relation hits, map the returned related concept by argument direction: if the call used `argument_index` `subject`, use `target_concept_id`; if `object`, use `source_concept_id`. Emit every relation-grounded result as a Markdown bullet with a resolved `#V#...` concept ID wherever that relation-hit concept ID is available. Never emit relation-grounded results as bare assertion syntax such as `subject --predicate--> object`. If a related concept ID is missing, do not fabricate one: omit that item from the list and state clearly that no usable `#V#` ID was returned. Use a single-item bullet if only one grounded entity is returned. Relation-grounded outputs must be bullet entries with the resolved `#V#` ID token for navigation.",
+              "response_contract_text": "Answer the user directly from grounded represented evidence. For broad self-profile, represented-self, authorship, ownership, affiliation, role, and other entity-relative relation questions, first fetch the focal entity concept, inspect predicate incidence with argument type counts, retrieve narrowed relation evidence, and check uncertainty-bearing relationship assertions for the same focal entity. When the user asks to separate established facts from likely inferences, report asserted relation/focal-concept evidence separately from uncertain or proposed relationship assertions; do not merge those categories. Once the five required evidence tools have succeeded and the relation result contains the requested related entity IDs, names, and applicable type evidence, answer immediately from those results. Do not fetch or summarise predicate concepts merely to restate a predicate label or description already present in the incidence and relation evidence. If a required evidence call fails or lacks a necessary field, preserve that typed failure so the outer represented recovery policy can choose a retry, alternate extent, or narrower answer instead of spending successful-path calls on speculative re-reading. For every predicate-filtered entity-relative request, once incidence identifies a matching predicate, the content-bearing read must use find_relations_with_argument with that exact predicate in predicate_filter; an unfiltered relation page is not evidence for a matching row that falls outside the returned page. predicate_filter, argument_index, relation_kind, and relation paging limits belong to find_relations_with_argument, not fetch_concept. Never send relation-query arguments to fetch_concept, and never answer a relation-extent request from such a fetch because it does not perform the required filtered relation read. If an earlier relation read was unfiltered or omitted the matching row, call find_relations_with_argument again with the narrowed predicate_filter before answering. For papers, inspect predicate incidence before relation paging, then filter the resulting extent by the requested type before answering. If predicate incidence for a paper request exposes #V#author_of or #V#owner_of with paper-like type counts or sample groundings, the next relation lookup must use find_relations_with_argument with a predicate_filter containing those exact predicate IDs; do not use an unfiltered relation page first. If predicate incidence exposes role-expansion summaries for reified/event/claim neighbours, use role-filler type counts to choose the follow-up extent and do not treat the reified neighbour itself as the answer entity. Do not claim that no matching results exist unless the relation-bearing and uncertainty-bearing evidence in this turn supports that negative conclusion. If grounded evidence is insufficient, say that clearly instead of guessing. When using relation hits, map the returned related concept by argument direction: if the call used `argument_index` `subject`, use `target_concept_id`; if `object`, use `source_concept_id`. Emit every relation-grounded result as a Markdown bullet with a resolved `#V#...` concept ID wherever that relation-hit concept ID is available. Never emit relation-grounded results as bare assertion syntax such as `subject --predicate--> object`. If a related concept ID is missing, do not fabricate one: omit that item from the list and state clearly that no usable `#V#` ID was returned. Use a single-item bullet if only one grounded entity is returned. Relation-grounded outputs must be bullet entries with the resolved `#V#` ID token for navigation.",
               "context_fields": [
                 {
                   "context_key": "prompt",

@@ -1049,7 +1049,15 @@ def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
             system_message: Optional[str] = None,
             **kwargs: Any,
         ) -> LLMResponse:
-            return LLMResponse(text_response="Direct response", tool_calls=[])
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="search_knowledge_base",
+                        payload={"query": "relevant concept"},
+                    )
+                ],
+            )
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -1129,7 +1137,7 @@ def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
         timeout_override_sec=120.0,
     )
 
-    assert llm_response.text_response == "Direct response"
+    assert llm_response.tool_calls[0].tool_name == "search_knowledge_base"
     assert captured["timeout_override_sec"] == 120.0
     assert captured["attempt_meta"]["timeout_override_sec"] == 120.0
 
@@ -1154,7 +1162,15 @@ def test_structured_calling_forces_single_required_openai_tool():
             **kwargs: Any,
         ) -> LLMResponse:
             self.kwargs = dict(kwargs)
-            return LLMResponse(text_response="", tool_calls=[])
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="gmail_list_messages",
+                        payload={"profile": "personal", "max_results": 10},
+                    )
+                ],
+            )
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -1218,7 +1234,7 @@ def test_structured_calling_forces_single_required_openai_tool():
         required_prompt_tools=["gmail_list_messages"],
     )
 
-    assert response.text_response == ""
+    assert response.tool_calls[0].tool_name == "gmail_list_messages"
     assert llm_client.kwargs["parallel_tool_calls"] is False
     assert llm_client.kwargs["tool_choice"] == {
         "type": "function",
@@ -2267,6 +2283,50 @@ def test_follow_up_summaries_keep_all_paper_like_relation_evidence() -> None:
     assert "Learning To Tell Two Spirals Apart" in relation_text
     assert "Scholarly Paper For File Copy" in predicate_text
     assert "Learning To Tell Two Spirals Apart" in predicate_text
+
+
+def test_predicate_incidence_projection_preserves_low_frequency_predicate_identity():
+    rows = [
+        {
+            "predicate_concept_id": f"#V#high_volume_predicate_{index}",
+            "relation_hit_count": 100 - index,
+            "sample_groundings": [
+                {
+                    "concept_id": f"#V#sample_{index}",
+                    "name": f"Sample {index}",
+                }
+            ],
+        }
+        for index in range(8)
+    ]
+    rows.append(
+        {
+            "predicate_concept_id": "#V#rare_semantically_decisive_predicate",
+            "relation_hit_count": 1,
+            "sample_groundings": [
+                {
+                    "concept_id": "#V#decisive_target",
+                    "name": "Decisive Target",
+                }
+            ],
+        }
+    )
+
+    shaped = InternalMCPChatOrchestrator._shape_get_predicate_incidence_payload_for_llm(
+        {
+            "mode": "entity",
+            "concept_id": "#V#focal_entity",
+            "total_predicates": len(rows),
+            "predicates": rows,
+        }
+    )
+
+    assert [row["predicate_concept_id"] for row in shaped["predicates"]] == [
+        *(f"#V#high_volume_predicate_{index}" for index in range(8)),
+        "#V#rare_semantically_decisive_predicate",
+    ]
+    assert "sample_groundings" in shaped["predicates"][0]
+    assert "sample_groundings" not in shaped["predicates"][-1]
 
 
 if __name__ == "__main__":

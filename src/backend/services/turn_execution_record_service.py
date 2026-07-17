@@ -1314,17 +1314,20 @@ def _capture_search_evidence_value(
     return field_payload
 
 
-def build_search_tool_evidence(
+def _build_tool_evidence(
     tool_invocations: Sequence[Mapping[str, Any]] | None,
     *,
+    include_search_reads: bool,
+    include_verification_reads: bool,
     max_argument_chars: int = _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS,
     max_result_chars: int = _SEARCH_EVIDENCE_MAX_RESULT_CHARS,
 ) -> list[dict[str, Any]]:
-    """Return authoritative search-tool evidence for later quality inspection.
+    """Return authoritative read evidence for later quality inspection.
 
-    Search-tool results are often much more diagnostic than their user-facing
-    summaries. Preserve the exact arguments/result when reasonably sized and
-    fall back to fingerprint + preview metadata when the payload is too large.
+    Search and verification results are often much more diagnostic than their
+    user-facing summaries. Preserve the exact arguments/result when reasonably
+    sized and fall back to fingerprint + preview metadata when the payload is
+    too large.
     """
 
     evidence: list[dict[str, Any]] = []
@@ -1336,7 +1339,14 @@ def build_search_tool_evidence(
         tool_name = _safe_str(invocation.get("tool")) or _safe_str(
             invocation.get("method")
         )
-        if not _is_search_evidence_tool(tool_name):
+        is_search_read = _is_search_evidence_tool(tool_name)
+        is_verification_read = bool(
+            tool_name and is_tool_verification_read(tool_name)
+        )
+        if not (
+            (include_search_reads and is_search_read)
+            or (include_verification_reads and is_verification_read)
+        ):
             continue
 
         arguments_value = invocation.get("effective_arguments")
@@ -1394,6 +1404,40 @@ def build_search_tool_evidence(
         evidence.append(entry)
 
     return evidence
+
+
+def build_search_tool_evidence(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+    *,
+    max_argument_chars: int = _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS,
+    max_result_chars: int = _SEARCH_EVIDENCE_MAX_RESULT_CHARS,
+) -> list[dict[str, Any]]:
+    """Return authoritative search-tool evidence for later quality inspection."""
+
+    return _build_tool_evidence(
+        tool_invocations,
+        include_search_reads=True,
+        include_verification_reads=False,
+        max_argument_chars=max_argument_chars,
+        max_result_chars=max_result_chars,
+    )
+
+
+def build_verification_tool_evidence(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+    *,
+    max_argument_chars: int = _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS,
+    max_result_chars: int = _SEARCH_EVIDENCE_MAX_RESULT_CHARS,
+) -> list[dict[str, Any]]:
+    """Return content-bearing verification-read evidence for critic inspection."""
+
+    return _build_tool_evidence(
+        tool_invocations,
+        include_search_reads=False,
+        include_verification_reads=True,
+        max_argument_chars=max_argument_chars,
+        max_result_chars=max_result_chars,
+    )
 
 
 def _extract_required_evidence_answer_consistency_blocker_from_critic_verdict(
@@ -9220,6 +9264,13 @@ def build_turn_execution_record(
     representation_effects_contract = _build_representation_required_effects_contract(
         aux_llm_calls=aux_llm_calls,
     )
+    workflow_required_effects_contract, workflow_required_effects_contract_source = (
+        _resolve_workflow_required_effects_contract(
+            workflow_id=selected_workflow_id,
+            selected_workflow_trace=selected_workflow_trace_payload,
+            completion_report=completion_report,
+        )
+    )
     prompt_required_mutation_contract = (
         None
         if isinstance(representation_effects_contract, Mapping)
@@ -9229,17 +9280,20 @@ def build_turn_execution_record(
             required_prompt_tools=effective_required_prompt_tools,
         )
     )
-    prompt_required_evidence_contract = _build_prompt_required_evidence_contract(
-        prompt_text=prompt_text,
-        aux_llm_calls=aux_llm_calls,
-        required_prompt_tools=effective_required_prompt_tools,
-        target_concept_ids=required_evidence_target_concept_ids,
-    )
-    workflow_required_effects_contract, workflow_required_effects_contract_source = (
-        _resolve_workflow_required_effects_contract(
-            workflow_id=selected_workflow_id,
-            selected_workflow_trace=selected_workflow_trace_payload,
-            completion_report=completion_report,
+    # A selected workflow's represented required-effects contract is the
+    # completion authority for that execution. Turn-level required tool names
+    # remain routing/planning guidance and telemetry, but must not be promoted
+    # into a second, potentially contradictory hard-effects contract. Generic
+    # tool execution still uses the prompt contract when no workflow-specific
+    # effects authority exists.
+    prompt_required_evidence_contract = (
+        None
+        if isinstance(workflow_required_effects_contract, Mapping)
+        else _build_prompt_required_evidence_contract(
+            prompt_text=prompt_text,
+            aux_llm_calls=aux_llm_calls,
+            required_prompt_tools=effective_required_prompt_tools,
+            target_concept_ids=required_evidence_target_concept_ids,
         )
     )
     prompt_required_evidence_contract = _apply_target_concepts_to_evidence_contract(
@@ -9323,10 +9377,16 @@ def build_turn_execution_record(
         )
         if _tool_requirement_key(tool_name) not in represented_required_tool_keys
     ]
-    if isinstance(required_tool_effect, Mapping) and (
-        not required_effects
-        or bool(required_tool_blocking_codes - {BLOCKER_REQUIRED_TOOL_NOT_PLANNED})
-        or bool(unrepresented_unsatisfied_required_tools)
+    if (
+        not isinstance(workflow_required_effects_contract, Mapping)
+        and isinstance(required_tool_effect, Mapping)
+        and (
+            not required_effects
+            or bool(
+                required_tool_blocking_codes - {BLOCKER_REQUIRED_TOOL_NOT_PLANNED}
+            )
+            or bool(unrepresented_unsatisfied_required_tools)
+        )
     ):
         required_effects.append(dict(required_tool_effect))
 

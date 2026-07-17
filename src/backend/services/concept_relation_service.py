@@ -753,6 +753,10 @@ def get_predicate_incidence(
             uncertainty_mode=uncertainty_mode,
             uncertainty_statuses=uncertainty_statuses,
         )
+        if type_count_options.include:
+            _attach_direct_type_ids_to_fast_incidence_hits(
+                {resolved_concept_id: hits}
+            )
         predicate_rows = _aggregate_predicate_incidence_rows(
             hits=hits,
             include_concept_preview=include_concept_preview,
@@ -1443,17 +1447,19 @@ def _accumulate_predicate_incidence_rows(
                     role_expansion_options=role_expansion_options,
                 )
 
-        for grounding_key, grounding in _extract_predicate_incidence_groundings(
-            hit,
-            anchor_concept_id=anchor_concept_id,
-            include_concept_preview=include_concept_preview,
-            preview_cache=preview_cache,
-        ):
-            if grounding_key in row["_grounding_keys"]:
-                continue
-            row["_grounding_keys"].add(grounding_key)
-            if len(row["sample_groundings"]) < 4:
+        if len(row["sample_groundings"]) < 4:
+            for grounding_key, grounding in _extract_predicate_incidence_groundings(
+                hit,
+                anchor_concept_id=anchor_concept_id,
+                include_concept_preview=include_concept_preview,
+                preview_cache=preview_cache,
+            ):
+                if grounding_key in row["_grounding_keys"]:
+                    continue
+                row["_grounding_keys"].add(grounding_key)
                 row["sample_groundings"].append(grounding)
+                if len(row["sample_groundings"]) >= 4:
+                    break
 
         if mode == "type" and contributing_instance_id:
             row["_instance_ids"].add(contributing_instance_id)

@@ -141,6 +141,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         expected_outcome_text
     )
     assert "extent of an implied or explicit predicate" in expected_outcome_text
+    assert "preserve both sides of the retrieval agreement" in expected_outcome_text
+    assert "Never use the requested result type as the sole target contract" in (
+        expected_outcome_text
+    )
     assert "Resolved-entity predicate extent example" in expected_outcome_text
     assert (
         '"required_tools":["get_predicate_incidence","find_relations_with_argument"]'
@@ -253,6 +257,21 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`no_prior_context`" in expected_outcome_text
     assert "must contain only exact tool IDs" in expected_outcome_text
     assert "Never invent capability-shaped tool names" in expected_outcome_text
+    assert "Treat `available_internal_tool_ids` as the authoritative allow-list" in (
+        expected_outcome_text
+    )
+    assert "`get_related_concepts` is a vector-similarity lookup" in (
+        expected_outcome_text
+    )
+    assert "Never use it as a required tool for an entity-relative predicate extent" in (
+        expected_outcome_text
+    )
+    assert 'must be exactly `["get_predicate_incidence","find_relations_with_argument"]`' in (
+        expected_outcome_text
+    )
+    assert "workflow effects rather than extra turn-contract obligations" in (
+        expected_outcome_text
+    )
 
     context_adjudication_rows = get_texts_for_concept(
         CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
@@ -1415,6 +1434,11 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert any(
         isinstance(field, dict)
         and field.get("context_key") == "turn_context_handoff_decision"
+        for field in expected_outcome_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "available_internal_tool_ids"
         for field in expected_outcome_context_fields
     )
     expected_outcome_metadata = turn_definition.states[

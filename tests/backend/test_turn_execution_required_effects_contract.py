@@ -927,6 +927,83 @@ def test_runtime_selected_workflow_trace_required_evidence_contract_blocks_missi
     )
 
 
+def test_workflow_effects_authority_does_not_promote_turn_tool_guidance_to_hard_effects() -> (
+    None
+):
+    contract = _entity_information_workflow_required_effects_contract()
+    focal_concept_id = "#V#michael_witbrock"
+    observed_tools = [
+        "fetch_concept",
+        "get_text_relations_summary",
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+        "list_uncertain_relationship_assertions",
+    ]
+
+    record = _build_record(
+        prompt_text="Which people do I supervise in represented knowledge?",
+        response_text="- Timothy Pistotti (#V#timothy_pistotti)",
+        turn_expected_outcome_contract={
+            "summary": "List grounded supervision relations for the resolved user.",
+            "required_tools": ["search_concepts", "find_relations_with_argument"],
+        },
+        workflow_routing={
+            "workflow_id": "#V#entity_information_retrieval_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#entity_information_retrieval_workflow",
+            "selected_execution_mode": "custom_workflow",
+            "workflow_required_effects_contract": contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_terminal",
+                "status": "completed",
+                "selected_execution_mode": "custom_workflow",
+                "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
+                "completed": True,
+                "final_state": "completed",
+            }
+        ],
+        tool_invocations=[
+            {
+                "tool": tool_name,
+                "effective_arguments": {"concept_id": focal_concept_id},
+                "effective_payload": {"success": True},
+            }
+            for tool_name in observed_tools
+        ],
+    )
+
+    required_effects = record.get("required_effects") or []
+    assert not any(
+        effect.get("required_tools") == ["search_concepts"]
+        for effect in required_effects
+        if isinstance(effect, dict)
+    ), required_effects
+    workflow_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("effect_id") == "grounded_entity_information_evidence"
+    )
+    assert workflow_effect.get("status") == "satisfied"
+
+    execution = record.get("execution") or {}
+    assert execution.get("required_prompt_tools") == [
+        "search_concepts",
+        "find_relations_with_argument",
+    ]
+    assert execution.get("workflow_required_effects_contract") == contract
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
+
+
 def test_custom_workflow_actions_do_not_make_missing_required_evidence_tools_expected() -> (
     None
 ):

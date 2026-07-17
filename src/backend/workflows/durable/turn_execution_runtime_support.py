@@ -29,7 +29,10 @@ from ...services.tool_evidence_projection_service import (
 from ...services.tool_target_contract_validation import (
     target_contract_state_from_context,
 )
-from ...services.turn_execution_record_service import build_turn_execution_record
+from ...services.turn_execution_record_service import (
+    build_turn_execution_record,
+    build_verification_tool_evidence,
+)
 from ..action_registry import WorkflowActionResult
 from ..definitions import (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
@@ -3221,6 +3224,12 @@ def run_turn_execution_critic(
             max_depth=4,
             max_items=6,
             max_string_length=600,
+        ),
+        "verification_evidence": _bounded_snapshot(
+            build_verification_tool_evidence(tool_invocations),
+            max_depth=6,
+            max_items=12,
+            max_string_length=800,
         ),
         "required_prompt_tools": _bounded_snapshot(
             execution_payload_map.get("required_prompt_tools"),

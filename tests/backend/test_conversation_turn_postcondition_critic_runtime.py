@@ -91,6 +91,60 @@ def test_turn_execution_critic_can_build_evidence_without_default_critic_verdict
     )
 
 
+def test_turn_execution_critic_projects_content_bearing_verification_evidence(
+    monkeypatch,
+) -> None:
+    request = WorkflowActionRequest(
+        action_id="turn_execution.critic",
+        inputs={"emit_default_critic_verdict": False},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), user_namespace="ns"),
+        data={
+            "turn_id": "req-critic-verification-evidence",
+            "conversation_session_id": "sess-critic-verification-evidence",
+            "user_concept_id": "#V#supervisor",
+            "prompt_text": "Who do I supervise?",
+            "response_text": "You supervise Student.",
+            "invocations": [
+                {
+                    "tool": "find_relations_with_argument",
+                    "status": "ok",
+                    "payload": {"concept_id": "#V#supervisor"},
+                    "effective_payload": {
+                        "total_hits": 1,
+                        "hits": [
+                            {
+                                "predicate_concept_id": "#V#supervises",
+                                "target_value": "#V#student",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: {},
+    )
+
+    result = run_turn_execution_critic(
+        request,
+        annotation_component="test",
+        annotation_function=(
+            "test_turn_execution_critic_projects_content_bearing_verification_evidence"
+        ),
+    )
+
+    verification_evidence = result.outputs[
+        "turn_execution_critic_evidence_bundle"
+    ]["verification_evidence"]
+    assert verification_evidence[0]["tool"] == "find_relations_with_argument"
+    assert verification_evidence[0]["result"]["hits"][0] == {
+        "predicate_concept_id": "#V#supervises",
+        "target_value": "#V#student",
+    }
+
+
 def test_turn_execution_critic_projects_verified_current_actor_scope_evidence(
     monkeypatch,
 ) -> None:

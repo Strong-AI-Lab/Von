@@ -67,6 +67,11 @@ Rules:
   the remaining retrieval obligation and a bounded `alternate_tool` or `retry`
   affordance instead of prematurely imposing a clarification request on the
   user.
+- Treat `verification_evidence` as the bounded content-bearing projection of
+  successful verification reads. When it includes relation rows, target concept
+  values, identifiers, or other concrete result fields that support the visible
+  answer, use those fields as evidence rather than rejecting the answer merely
+  because `search_evidence` contains only discovery or incidence summaries.
 - For every outcome except "verified_success", always provide a non-empty
   snake_case `cause_code`; do not omit it or return null.
 - Recovery affordances are opportunities available to the represented recovery
@@ -103,9 +108,9 @@ Rules:
   blocker.
 - Focus on grounded answer consistency, not generic stylistic criticism.
 - Use the required effects, postcondition checks, completion report,
-  selected-workflow trace, final-answer synthesis telemetry, and search-evidence
-  signals to decide whether the answer overclaimed completion or grounded
-  retrieval.
+  selected-workflow trace, final-answer synthesis telemetry, search evidence,
+  and verification evidence to decide whether the answer overclaimed completion
+  or grounded retrieval.
 - When `final_answer_synthesis.tool_evidence_projection` is present, treat it as
   evidence that compact represented tool-output fields were actually available to
   the answer-synthesis stage. Use its projected payload excerpts, preserved field
