@@ -11,6 +11,10 @@ from src.backend.services import (
 from src.backend.services.tool_evidence_projection_service import (
     project_tool_payload_for_llm,
 )
+from src.backend.services.text_value_service import (
+    get_preferred_text_for_concept,
+    upsert_singleton_text_relation,
+)
 
 
 @pytest.fixture
@@ -110,6 +114,42 @@ def test_bootstrap_is_idempotent_after_clean_environment_materialisation(
     )
     assert second["validation"]["success"] is True
     assert second["errors"] == []
+
+
+def test_bootstrap_repairs_managed_jira_tool_contract_descriptions(
+    _reset_mock_db: Any,
+) -> None:
+    first = service.bootstrap_jira_tool_evidence_contract()
+    assert first["success"] is True
+
+    for concept_id in (service.JIRA_SEARCH_TOOL_ID, service.JIRA_GET_ISSUE_TOOL_ID):
+        upsert_singleton_text_relation(
+            subject_concept_id=concept_id,
+            predicate="hasDescription",
+            text="Stale tool description.",
+            lang="en-NZ",
+            garbage_collect=True,
+        )
+
+    repaired = service.bootstrap_jira_tool_evidence_contract()
+
+    assert repaired["success"] is True
+    assert {
+        service.JIRA_SEARCH_TOOL_ID,
+        service.JIRA_GET_ISSUE_TOOL_ID,
+    }.issubset(set(repaired["repaired_concept_ids"]))
+    expected_descriptions = {
+        service.JIRA_SEARCH_TOOL_ID: service.JIRA_SEARCH_TOOL_DESCRIPTION,
+        service.JIRA_GET_ISSUE_TOOL_ID: service.JIRA_GET_ISSUE_TOOL_DESCRIPTION,
+    }
+    for concept_id, expected_description in expected_descriptions.items():
+        preferred = get_preferred_text_for_concept(
+            concept_id,
+            predicate_precedence=(("hasDescription", "#V#hasDescription"),),
+            preferred_languages=("en-NZ", "en"),
+        )
+        assert preferred is not None
+        assert preferred["text"] == expected_description
 
 
 def test_conversation_turn_support_bootstrap_materialises_jira_contract(

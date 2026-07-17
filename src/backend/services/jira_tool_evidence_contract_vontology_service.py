@@ -7,6 +7,10 @@ from typing import Any, Mapping, Sequence
 
 from . import concept_service
 from .relationship_write_service import add_relationship
+from .text_value_service import (
+    get_preferred_text_for_concept,
+    upsert_singleton_text_relation,
+)
 from .tool_evidence_contract_vontology_service import (
     TOOL_EVIDENCE_CONTRACT_VOCABULARY_ID,
     bootstrap_tool_evidence_contract_vocabulary,
@@ -26,6 +30,17 @@ JIRA_TOOL_EVIDENCE_CONTRACT_ID = "#V#jira_tool_evidence_contract_v1"
 JIRA_ISSUE_ENTITY_TYPE_ID = "#V#jira_issue_result_entity_type"
 JIRA_SEARCH_TOOL_ID = "#V#jira_search_tool"
 JIRA_GET_ISSUE_TOOL_ID = "#V#jira_get_issue_tool"
+JIRA_SEARCH_TOOL_DESCRIPTION = (
+    "Run a JQL query against Jira. Use when you need to find issues by status, "
+    "assignee, project, or other fields. Requires valid ATLASSIAN_BASE_URL, "
+    "ATLASSIAN_EMAIL, and ATLASSIAN_API_TOKEN in the environment. Returns the "
+    "Jira search response including issues array."
+)
+JIRA_GET_ISSUE_TOOL_DESCRIPTION = (
+    "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when "
+    "you need issue fields, summary, status, metadata, or expanded sections such "
+    "as changelog."
+)
 JIRA_FINAL_ANSWER_VIEW_ID = "#V#jira_issue_final_answer_evidence_view"
 JIRA_SEARCH_FINAL_ANSWER_VIEW_ID = "#V#jira_search_final_answer_evidence_view"
 
@@ -153,7 +168,7 @@ _CORE_CONCEPT_SPECS: tuple[JiraConceptSpec, ...] = (
     _concept(
         concept_id=JIRA_SEARCH_TOOL_ID,
         name="jira_search tool",
-        description="Built-in internal MCP tool that searches Jira issues.",
+        description=JIRA_SEARCH_TOOL_DESCRIPTION,
         parent_concept_ids=("#V#mcp_tool",),
         category="tool",
         attributes={
@@ -169,7 +184,7 @@ _CORE_CONCEPT_SPECS: tuple[JiraConceptSpec, ...] = (
     _concept(
         concept_id=JIRA_GET_ISSUE_TOOL_ID,
         name="jira_get_issue tool",
-        description="Built-in internal MCP tool that fetches one Jira issue by key.",
+        description=JIRA_GET_ISSUE_TOOL_DESCRIPTION,
         parent_concept_ids=("#V#mcp_tool",),
         category="tool",
         attributes={
@@ -768,6 +783,36 @@ def _ensure_concept_attributes(spec: JiraConceptSpec) -> bool:
     return True
 
 
+def _ensure_managed_tool_description(spec: JiraConceptSpec) -> bool:
+    if spec.concept_id not in {JIRA_SEARCH_TOOL_ID, JIRA_GET_ISSUE_TOOL_ID}:
+        return False
+    preferred = get_preferred_text_for_concept(
+        spec.concept_id,
+        predicate_precedence=(("hasDescription", "#V#hasDescription"),),
+        preferred_languages=("en-NZ", "en"),
+    )
+    current_text = preferred.get("text") if isinstance(preferred, Mapping) else None
+    if isinstance(current_text, str) and current_text.strip() == spec.description:
+        return False
+    result = upsert_singleton_text_relation(
+        subject_concept_id=spec.concept_id,
+        predicate="hasDescription",
+        text=spec.description,
+        lang="en-NZ",
+        context={
+            "jira": JIRA_TOOL_EVIDENCE_CONTRACT_SOURCE_TAG,
+            "source": JIRA_TOOL_EVIDENCE_CONTRACT_MANAGED_BY,
+            "reason": "managed_tool_contract_description_repair",
+        },
+        garbage_collect=True,
+    )
+    if result.get("success") is not True:
+        raise RuntimeError(
+            f"managed_tool_description_repair_failed:{spec.concept_id}"
+        )
+    return True
+
+
 def _ensure_concept(spec: JiraConceptSpec) -> str:
     concept_doc = load_concept(spec.concept_id)
     if not isinstance(concept_doc, Mapping):
@@ -794,6 +839,7 @@ def _ensure_concept(spec: JiraConceptSpec) -> str:
         target_ids=spec.parent_concept_ids,
     )
     repaired = _ensure_concept_attributes(spec) or repaired
+    repaired = _ensure_managed_tool_description(spec) or repaired
     return "repaired" if repaired else "existing"
 
 
@@ -834,6 +880,14 @@ def bootstrap_jira_tool_evidence_contract() -> dict[str, Any]:
                         "reason_code": str(exc),
                     }
                 )
+
+        if any(
+            concept_status_by_id.get(concept_id) in {"created", "repaired"}
+            for concept_id in (JIRA_SEARCH_TOOL_ID, JIRA_GET_ISSUE_TOOL_ID)
+        ):
+            from .tool_metadata_service import invalidate_cache
+
+            invalidate_cache()
 
         for relationship_spec in _jira_relationship_specs():
             try:
