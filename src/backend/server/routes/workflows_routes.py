@@ -264,10 +264,10 @@ def _actor_visible_workflow_count() -> int | None:
 
     try:
         from ...workflows.durable.registry_factory import (
-            build_durable_workflow_registry_read_only,
+            get_shared_workflow_registry_read_only,
         )
 
-        registry = build_durable_workflow_registry_read_only(
+        registry = get_shared_workflow_registry_read_only(
             defer_parity_work=True
         )
         return len(

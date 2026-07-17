@@ -656,6 +656,41 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     )
 
 
+def test_actor_visible_workflow_count_reuses_shared_registry(monkeypatch):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    class _Registry:
+        @staticmethod
+        def all_workflow_ids():
+            return ["#V#visible_workflow", "#V#hidden_workflow"]
+
+    shared_registry_calls = {"count": 0}
+
+    def _shared_registry(*, defer_parity_work):
+        assert defer_parity_work is True
+        shared_registry_calls["count"] += 1
+        return _Registry()
+
+    monkeypatch.setattr(
+        registry_factory,
+        "get_shared_workflow_registry_read_only",
+        _shared_registry,
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: [
+            workflow_id
+            for workflow_id in workflow_ids
+            if workflow_id == "#V#visible_workflow"
+        ],
+    )
+
+    assert workflows_routes._actor_visible_workflow_count() == 1
+    assert shared_registry_calls["count"] == 1
+
+
 def test_workflow_capability_index_status_endpoint_returns_readiness_report(
     monkeypatch, app_client
 ):
