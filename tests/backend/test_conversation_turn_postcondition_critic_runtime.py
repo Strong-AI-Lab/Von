@@ -91,6 +91,99 @@ def test_turn_execution_critic_can_build_evidence_without_default_critic_verdict
     )
 
 
+def test_turn_execution_critic_projects_verified_current_actor_scope_evidence(
+    monkeypatch,
+) -> None:
+    request = WorkflowActionRequest(
+        action_id="turn_execution.critic",
+        inputs={"emit_default_critic_verdict": False},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            user_namespace="#V#test_user@test_org",
+            user_concept_id="#V#test_user",
+            org_concept_id="#V#test_org",
+        ),
+        data={
+            "turn_id": "req-critic-actor-scope",
+            "conversation_session_id": "sess-critic-actor-scope",
+            "prompt": "Who am I and which organisation namespace am I using?",
+            "final_response": "You are Test User in Test Org.",
+            "invocations": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: {},
+    )
+
+    result = run_turn_execution_critic(
+        request,
+        annotation_component="test",
+        annotation_function=(
+            "test_turn_execution_critic_projects_verified_current_actor_scope_evidence"
+        ),
+    )
+
+    evidence_bundle = result.outputs["turn_execution_critic_evidence_bundle"]
+    actor_scope = evidence_bundle["current_actor_scope_evidence"]
+    assert actor_scope == {
+        "schema_version": "current_actor_scope_evidence.v1",
+        "authority_source": "workflow_environment",
+        "authority_status": "verified",
+        "user": {"concept_id": "#V#test_user"},
+        "organisation": {"concept_id": "#V#test_org"},
+        "namespace": "#V#test_user@test_org",
+        "namespace_consistency": {
+            "user_matches": True,
+            "organisation_matches": True,
+        },
+    }
+    assert "augmented_context" not in actor_scope
+
+
+def test_turn_execution_critic_marks_actor_scope_namespace_mismatch_inconsistent(
+    monkeypatch,
+) -> None:
+    request = WorkflowActionRequest(
+        action_id="turn_execution.critic",
+        inputs={"emit_default_critic_verdict": False},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            user_namespace="#V#other_user@test_org",
+            user_concept_id="#V#test_user",
+            org_concept_id="#V#test_org",
+        ),
+        data={
+            "turn_id": "req-critic-actor-mismatch",
+            "conversation_session_id": "sess-critic-actor-mismatch",
+            "prompt": "Who am I?",
+            "final_response": "You are Test User.",
+            "invocations": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: {},
+    )
+
+    result = run_turn_execution_critic(
+        request,
+        annotation_component="test",
+        annotation_function=(
+            "test_turn_execution_critic_marks_actor_scope_namespace_mismatch_inconsistent"
+        ),
+    )
+
+    actor_scope = result.outputs["turn_execution_critic_evidence_bundle"][
+        "current_actor_scope_evidence"
+    ]
+    assert actor_scope["authority_status"] == "inconsistent"
+    assert actor_scope["namespace_consistency"] == {
+        "user_matches": False,
+        "organisation_matches": True,
+    }
+
+
 def test_turn_execution_critic_accepts_represented_fallback_receipt_input(
     monkeypatch,
 ) -> None:

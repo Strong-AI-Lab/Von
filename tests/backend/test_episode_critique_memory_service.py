@@ -686,7 +686,7 @@ def test_record_episode_critique_memory_self_improvement_merges_entries(monkeypa
     )
 
 
-def test_chat_history_projection_path_invokes_episode_critique_memory_upsert(monkeypatch):
+def test_chat_history_projection_path_schedules_episode_critique_memory(monkeypatch):
     captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
@@ -694,13 +694,13 @@ def test_chat_history_projection_path_invokes_episode_critique_memory_upsert(mon
         lambda **kwargs: {"updated": True, "request_id": kwargs["record"]["request_id"]},
     )
 
-    def _fake_upsert_episode_critique_memory_from_turn(**kwargs):
+    def _fake_schedule_episode_critique_memory_from_turn(**kwargs):
         captured.update(kwargs)
-        return {"success": True, "memory_id": "#V#episode_critique_memory_xyz"}
+        return {"success": True, "scheduled": True, "request_id": "req-1607-1"}
 
     monkeypatch.setattr(
-        "src.backend.services.chat_history_service.upsert_episode_critique_memory_from_turn",
-        _fake_upsert_episode_critique_memory_from_turn,
+        "src.backend.services.chat_history_service.schedule_episode_critique_memory_from_turn",
+        _fake_schedule_episode_critique_memory_from_turn,
     )
 
     llm_debug_data = {"turn_execution_record": _sample_record()}
@@ -716,3 +716,83 @@ def test_chat_history_projection_path_invokes_episode_critique_memory_upsert(mon
     assert captured["record"]["request_id"] == "req-1607-1"
     assert captured["llm_debug_data"] is llm_debug_data
     assert captured["namespace"] == "#V#user@org"
+
+
+def test_episode_critique_memory_scheduler_is_non_blocking_and_bounded(monkeypatch):
+    from src.backend.services import episode_critique_memory_service as service
+
+    queued_jobs: list[dict[str, Any]] = []
+
+    class _CapturingQueue:
+        def put_nowait(self, job):
+            queued_jobs.append(job)
+
+    class _LiveWorker:
+        @staticmethod
+        def is_alive():
+            return True
+
+    monkeypatch.setattr(service, "_BACKGROUND_QUEUE", _CapturingQueue())
+    monkeypatch.setattr(service, "_BACKGROUND_PENDING_REQUEST_IDS", set())
+    monkeypatch.setattr(service, "_BACKGROUND_WORKER_THREAD", _LiveWorker())
+    monkeypatch.setattr(
+        service,
+        "upsert_episode_critique_memory_from_turn",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scheduler must not persist synchronously")
+        ),
+    )
+
+    first = service.schedule_episode_critique_memory_from_turn(
+        record=_sample_record(),
+        llm_debug_data=_sample_llm_debug(),
+        user_id="#V#user",
+        session_id="sess-1607-1",
+        namespace="#V#user@org",
+        org_id="#V#org",
+    )
+    duplicate = service.schedule_episode_critique_memory_from_turn(
+        record=_sample_record(),
+    )
+
+    assert first == {
+        "success": True,
+        "scheduled": True,
+        "request_id": "req-1607-1",
+    }
+    assert duplicate["reason"] == "already_scheduled"
+    assert len(queued_jobs) == 1
+    assert queued_jobs[0]["record"]["request_id"] == "req-1607-1"
+
+
+def test_episode_critique_memory_scheduler_fails_soft_when_queue_is_full(monkeypatch):
+    from src.backend.services import episode_critique_memory_service as service
+
+    class _FullQueue:
+        @staticmethod
+        def put_nowait(_job):
+            raise service.queue.Full
+
+    class _LiveWorker:
+        @staticmethod
+        def is_alive():
+            return True
+
+    pending_request_ids: set[str] = set()
+    monkeypatch.setattr(service, "_BACKGROUND_QUEUE", _FullQueue())
+    monkeypatch.setattr(
+        service, "_BACKGROUND_PENDING_REQUEST_IDS", pending_request_ids
+    )
+    monkeypatch.setattr(service, "_BACKGROUND_WORKER_THREAD", _LiveWorker())
+
+    outcome = service.schedule_episode_critique_memory_from_turn(
+        record=_sample_record(),
+    )
+
+    assert outcome == {
+        "success": False,
+        "scheduled": False,
+        "reason": "queue_full",
+        "request_id": "req-1607-1",
+    }
+    assert pending_request_ids == set()

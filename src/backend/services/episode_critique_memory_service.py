@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import queue
 import re
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -40,6 +42,14 @@ EPISODE_CRITIQUE_MEMORY_PARENT_TYPE_ID = "#V#artifact"
 EPISODE_CRITIQUE_MEMORY_SERVICE_SOURCE = "episode_critique_memory_service"
 
 _INDEXES_READY = False
+
+_BACKGROUND_QUEUE_MAXSIZE = 8
+_BACKGROUND_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(
+    maxsize=_BACKGROUND_QUEUE_MAXSIZE
+)
+_BACKGROUND_LOCK = threading.Lock()
+_BACKGROUND_PENDING_REQUEST_IDS: set[str] = set()
+_BACKGROUND_WORKER_THREAD: threading.Thread | None = None
 
 _CONCEPT_ID_PATTERN = re.compile(r"#V#[A-Za-z0-9][A-Za-z0-9._:@/-]*")
 _JIRA_ISSUE_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
@@ -1857,6 +1867,137 @@ def upsert_episode_critique_memory_from_turn(
         "memory_id": memory_id,
         "state": persisted,
         "projection": projection,
+    }
+
+
+def _episode_critique_memory_background_worker() -> None:
+    work_queue = _BACKGROUND_QUEUE
+    while True:
+        job = work_queue.get()
+        request_id = _safe_str(job.get("request_id"))
+        try:
+            outcome = upsert_episode_critique_memory_from_turn(
+                record=job["record"],
+                llm_debug_data=job.get("llm_debug_data"),
+                user_id=job.get("user_id"),
+                session_id=job.get("session_id"),
+                namespace=job.get("namespace"),
+                org_id=job.get("org_id"),
+            )
+            if isinstance(outcome, Mapping) and not outcome.get("success", False):
+                logger.debug(
+                    "episode_critique_memory background update skipped for "
+                    "request_id=%s (%s)",
+                    request_id,
+                    outcome.get("reason"),
+                )
+        except Exception as exc:  # pragma: no cover - defensive worker boundary
+            logger.warning(
+                "episode_critique_memory background update failed for "
+                "request_id=%s: %s",
+                request_id,
+                exc,
+            )
+        finally:
+            if request_id:
+                with _BACKGROUND_LOCK:
+                    _BACKGROUND_PENDING_REQUEST_IDS.discard(request_id)
+            work_queue.task_done()
+
+
+def schedule_episode_critique_memory_from_turn(
+    *,
+    record: Mapping[str, Any],
+    llm_debug_data: Mapping[str, Any] | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    namespace: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    """Queue best-effort critique-memory enrichment off the response path.
+
+    The canonical turn-execution projection remains synchronous and durable.
+    If this bounded queue is saturated or the process exits, the existing
+    chat-history backfill can reconstruct the derived critique memory later.
+    """
+
+    if not isinstance(record, Mapping):
+        return {"success": False, "scheduled": False, "reason": "invalid_record"}
+    request_id = _safe_str(record.get("request_id"))
+    if not request_id:
+        return {
+            "success": False,
+            "scheduled": False,
+            "reason": "missing_request_id",
+        }
+
+    job = {
+        "request_id": request_id,
+        "record": dict(record),
+        "llm_debug_data": (
+            dict(llm_debug_data) if isinstance(llm_debug_data, Mapping) else None
+        ),
+        "user_id": _safe_str(user_id),
+        "session_id": _safe_str(session_id),
+        "namespace": _safe_str(namespace),
+        "org_id": _safe_str(org_id),
+    }
+
+    global _BACKGROUND_WORKER_THREAD
+    with _BACKGROUND_LOCK:
+        if request_id in _BACKGROUND_PENDING_REQUEST_IDS:
+            return {
+                "success": True,
+                "scheduled": False,
+                "reason": "already_scheduled",
+                "request_id": request_id,
+            }
+
+        if (
+            _BACKGROUND_WORKER_THREAD is None
+            or not _BACKGROUND_WORKER_THREAD.is_alive()
+        ):
+            try:
+                _BACKGROUND_WORKER_THREAD = threading.Thread(
+                    target=_episode_critique_memory_background_worker,
+                    name="episode-critique-memory",
+                    daemon=True,
+                )
+                _BACKGROUND_WORKER_THREAD.start()
+            except Exception as exc:  # pragma: no cover - defensive
+                _BACKGROUND_WORKER_THREAD = None
+                logger.warning(
+                    "Could not start episode_critique_memory background worker: %s",
+                    exc,
+                )
+                return {
+                    "success": False,
+                    "scheduled": False,
+                    "reason": "worker_start_failed",
+                    "request_id": request_id,
+                }
+
+        _BACKGROUND_PENDING_REQUEST_IDS.add(request_id)
+        try:
+            _BACKGROUND_QUEUE.put_nowait(job)
+        except queue.Full:
+            _BACKGROUND_PENDING_REQUEST_IDS.discard(request_id)
+            logger.warning(
+                "episode_critique_memory background queue full; "
+                "request_id=%s remains recoverable from chat-history backfill",
+                request_id,
+            )
+            return {
+                "success": False,
+                "scheduled": False,
+                "reason": "queue_full",
+                "request_id": request_id,
+            }
+
+    return {
+        "success": True,
+        "scheduled": True,
+        "request_id": request_id,
     }
 
 

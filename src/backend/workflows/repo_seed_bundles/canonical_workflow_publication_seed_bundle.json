@@ -5447,6 +5447,8 @@
               "json_field_defaults": {
                 "turn_next_action.action_type": "respond_with_follow_up",
                 "turn_next_action.response_text": "I could not complete this reliably because the required evidence-producing action did not execute. The terminal outcome receipt records the exact cause and safe recovery options, but no further automated action remained applicable.",
+                "turn_next_action.target_workflow_id": null,
+                "turn_next_action.tool_calls": null,
                 "turn_next_action.target_contracts": [],
                 "reasoning": "The represented recovery output did not identify an applicable automated action with the fields required by the workflow transition."
               },

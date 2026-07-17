@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 from ...services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
+from ...services.namespace_service import derive_actor_context_from_namespace
 from ...services.required_tool_identity_service import (
     canonical_required_tool_key,
     canonical_required_tool_keys,
@@ -52,6 +53,54 @@ def _safe_str(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _build_current_actor_scope_evidence(
+    *,
+    environment: Any,
+) -> dict[str, Any]:
+    """Project bounded authenticated actor scope for represented evaluation."""
+
+    user_concept_id = _safe_str(getattr(environment, "user_concept_id", None))
+    org_concept_id = _safe_str(getattr(environment, "org_concept_id", None))
+    namespace = _safe_str(getattr(environment, "user_namespace", None))
+    namespace_user_id, namespace_org_id = derive_actor_context_from_namespace(
+        namespace
+    )
+    user_matches = (
+        user_concept_id == namespace_user_id
+        if user_concept_id and namespace_user_id
+        else None
+    )
+    organisation_matches = (
+        org_concept_id == namespace_org_id
+        if org_concept_id and namespace_org_id
+        else None
+    )
+    inconsistent = user_matches is False or organisation_matches is False
+    verified = bool(
+        user_concept_id
+        and namespace
+        and user_matches is True
+        and (not org_concept_id or organisation_matches is True)
+    )
+    authority_status = (
+        "inconsistent" if inconsistent else "verified" if verified else "missing"
+    )
+    return {
+        "schema_version": "current_actor_scope_evidence.v1",
+        "authority_source": "workflow_environment",
+        "authority_status": authority_status,
+        "user": {"concept_id": user_concept_id} if user_concept_id else None,
+        "organisation": (
+            {"concept_id": org_concept_id} if org_concept_id else None
+        ),
+        "namespace": namespace,
+        "namespace_consistency": {
+            "user_matches": user_matches,
+            "organisation_matches": organisation_matches,
+        },
+    }
 
 
 def _truthy_env_value(value: Any) -> bool:
@@ -3127,6 +3176,9 @@ def run_turn_execution_critic(
         "schema_version": "turn_execution_postcondition_critic_bundle.v1",
         "request_id": turn_execution_record.get("request_id"),
         "workflow_id": KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+        "current_actor_scope_evidence": _build_current_actor_scope_evidence(
+            environment=env
+        ),
         "prompt_text": prompt_text,
         "response_text": response_text,
         "completion_report": data.get("completion_report"),

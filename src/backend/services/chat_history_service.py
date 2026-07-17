@@ -21,7 +21,7 @@ from .turn_execution_record_service import (
     infer_turn_execution_workflow_routing_from_debug,
     upsert_turn_execution_record_projection,
 )
-from .episode_critique_memory_service import upsert_episode_critique_memory_from_turn
+from .episode_critique_memory_service import schedule_episode_critique_memory_from_turn
 from .coding_agent_identity_bootstrap_service import (
     CODING_AGENT_TYPE_ID,
     GITHUB_COPILOT_INSTANCE_ID,
@@ -1903,7 +1903,7 @@ def _upsert_turn_execution_projection_for_message(
                 record.get("request_id"),
             )
             return
-        critique_outcome = upsert_episode_critique_memory_from_turn(
+        critique_outcome = schedule_episode_critique_memory_from_turn(
             record=record,
             llm_debug_data=llm_debug_data,
             user_id=user_id,
@@ -1912,12 +1912,12 @@ def _upsert_turn_execution_projection_for_message(
             org_id=org_id,
         )
         if isinstance(critique_outcome, dict) and not critique_outcome.get(
-            "success", False
+            "scheduled", False
         ):
             reason = critique_outcome.get("reason")
-            if isinstance(reason, str) and reason:
+            if isinstance(reason, str) and reason not in {"already_scheduled"}:
                 logger.debug(
-                    "episode_critique_memory not updated for request_id=%s (%s)",
+                    "episode_critique_memory not scheduled for request_id=%s (%s)",
                     record.get("request_id"),
                     reason,
                 )

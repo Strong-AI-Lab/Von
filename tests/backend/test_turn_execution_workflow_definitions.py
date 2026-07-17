@@ -1347,6 +1347,18 @@ def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_ga
     assert (recovery_validation_policy.get("json_field_defaults") or {}).get(
         "turn_next_action.target_contracts"
     ) == []
+    assert "turn_next_action.target_workflow_id" in (
+        recovery_validation_policy.get("json_field_defaults") or {}
+    )
+    assert (
+        recovery_validation_policy.get("json_field_defaults") or {}
+    ).get("turn_next_action.target_workflow_id") is None
+    assert "turn_next_action.tool_calls" in (
+        recovery_validation_policy.get("json_field_defaults") or {}
+    )
+    assert (
+        recovery_validation_policy.get("json_field_defaults") or {}
+    ).get("turn_next_action.tool_calls") is None
     assert "turn_next_action.target_contracts" in (
         recovery_validation_policy.get("required_json_fields") or []
     )
@@ -2006,6 +2018,78 @@ def test_conversation_turn_recovery_can_complete_with_direct_answer() -> None:
     assert result.data["response_text"] == "You are Michael Witbrock."
     assert result.data["final_response"] == "You are Michael Witbrock."
     assert result.data["selected_workflow_user_response"] == "You are Michael Witbrock."
+
+
+def test_conversation_turn_recovery_plain_text_fails_soft_without_missing_write() -> None:
+    workflow = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    recovery_definition = WorkflowDefinition(
+        workflow_id=workflow.workflow_id,
+        initial_state="recovery_decision",
+        states={
+            "reconcile_recovery_outcome": WorkflowStateSpec(
+                state_id="reconcile_recovery_outcome",
+                transitions=workflow.states["reconcile_recovery_outcome"].transitions,
+                terminal=False,
+            ),
+            "recovery_decision": WorkflowStateSpec(
+                state_id="recovery_decision",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs=workflow.states["recovery_decision"].actions[0].inputs,
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                        prompt_contract={
+                            "prompt_text": "Return JSON only with a turn_next_action."
+                        },
+                        llm_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .llm_policy,
+                        validation_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .validation_policy,
+                    ),
+                ),
+                transitions=workflow.states["recovery_decision"].transitions,
+                terminal=workflow.states["recovery_decision"].terminal,
+                metadata=workflow.states["recovery_decision"].metadata,
+            ),
+            **{
+                state_id: workflow.states[state_id]
+                for state_id in (
+                    "apply_recovery_retry",
+                    "apply_recovery_answer",
+                    "apply_recovery_follow_up",
+                    "completed",
+                    "failed",
+                )
+            },
+        },
+        termination_states=workflow.termination_states,
+        purpose=workflow.purpose,
+        metadata=workflow.metadata,
+    )
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _wid: None)
+    llm_client = MagicMock()
+    llm_client.generate.return_value = "The bounded evidence is not sufficient."
+
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        recovery_definition,
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "failed"
+    assert result.error is None
+    assert result.data["turn_next_action_type"] == "respond_with_follow_up"
+    assert result.data["turn_next_action_target_workflow_id"] is None
+    assert result.data["turn_next_action_tool_calls"] is None
+    assert result.data["response_text"]
+    assert "metadata_write_context_key_missing" not in str(result.data)
 
 
 def test_conversation_turn_recovery_reconciles_receipt_after_answer_changes() -> None:
