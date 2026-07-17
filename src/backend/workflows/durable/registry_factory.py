@@ -283,6 +283,13 @@ def get_shared_workflow_registry_read_only(
     return registry
 
 
+def get_cached_shared_workflow_registry_read_only() -> WorkflowRegistry | None:
+    """Return the current shared registry without building it on the caller path."""
+
+    with _shared_workflow_registry_lock:
+        return _shared_workflow_registry
+
+
 def invalidate_shared_workflow_registry_read_only() -> dict[str, Any]:
     """Drop the cached shared read-only workflow registry."""
 

@@ -667,15 +667,14 @@ def test_actor_visible_workflow_count_reuses_shared_registry(monkeypatch):
 
     shared_registry_calls = {"count": 0}
 
-    def _shared_registry(*, defer_parity_work):
-        assert defer_parity_work is True
+    def _cached_shared_registry():
         shared_registry_calls["count"] += 1
         return _Registry()
 
     monkeypatch.setattr(
         registry_factory,
-        "get_shared_workflow_registry_read_only",
-        _shared_registry,
+        "get_cached_shared_workflow_registry_read_only",
+        _cached_shared_registry,
     )
     monkeypatch.setattr(
         workflows_routes,
@@ -689,6 +688,28 @@ def test_actor_visible_workflow_count_reuses_shared_registry(monkeypatch):
 
     assert workflows_routes._actor_visible_workflow_count() == 1
     assert shared_registry_calls["count"] == 1
+
+
+def test_actor_visible_workflow_count_does_not_build_when_shared_cache_is_cold(
+    monkeypatch,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    monkeypatch.setattr(
+        registry_factory,
+        "get_cached_shared_workflow_registry_read_only",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "filter_workflow_ids_for_current_actor",
+        lambda _workflow_ids: (_ for _ in ()).throw(
+            AssertionError("cold status path must not filter or build a registry")
+        ),
+    )
+
+    assert workflows_routes._actor_visible_workflow_count() is None
 
 
 def test_workflow_capability_index_status_endpoint_returns_readiness_report(

@@ -264,12 +264,12 @@ def _actor_visible_workflow_count() -> int | None:
 
     try:
         from ...workflows.durable.registry_factory import (
-            get_shared_workflow_registry_read_only,
+            get_cached_shared_workflow_registry_read_only,
         )
 
-        registry = get_shared_workflow_registry_read_only(
-            defer_parity_work=True
-        )
+        registry = get_cached_shared_workflow_registry_read_only()
+        if registry is None:
+            return None
         return len(
             filter_workflow_ids_for_current_actor(registry.all_workflow_ids())
         )

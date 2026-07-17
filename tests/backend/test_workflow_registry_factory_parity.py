@@ -85,6 +85,27 @@ def test_get_shared_workflow_registry_read_only_starts_capability_index_warmup(
     assert observed == [(False, sentinel_registry)]
 
 
+def test_get_cached_shared_workflow_registry_read_only_never_builds(monkeypatch):
+    sentinel_registry = object()
+    monkeypatch.setattr(
+        registry_factory,
+        "_shared_workflow_registry",
+        sentinel_registry,
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_registry_read_only",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached registry read must not build")
+        ),
+    )
+
+    assert (
+        registry_factory.get_cached_shared_workflow_registry_read_only()
+        is sentinel_registry
+    )
+
+
 def test_core_workflow_definition_prewarm_resolves_conversation_turn_family(
     monkeypatch,
 ):
