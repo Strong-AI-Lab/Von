@@ -1214,6 +1214,37 @@ or switch to an explicitly authorised GitHub authentication path first.
 - If an internal MCP tool fails in a way that suggests a product defect, treat
   that as a Von bug to document and fix, not merely as session-local friction.
 
+#### 6.7.1 Internal MCP handler deadlines
+
+Internal MCP handler execution has separate advisory and hard deadlines. Keep
+that distinction intact when diagnosing latency:
+
+- advisory read/write budgets only mark telemetry and never convert a handler
+  result that completed before the hard deadline into a failure;
+- hard deadline expiry is terminal for the current turn and produces a typed
+  timeout payload. A read timeout is retryable through represented recovery
+  policy; a write timeout has an unknown mutation outcome and must be inspected
+  before retry;
+- handlers execute in a bounded daemon worker pool with a bounded queue. Python
+  cannot forcibly stop arbitrary handler code, so long-running reusable
+  handlers should call the cooperative cancellation helpers exported by
+  `src.backend.integrations.internal_mcp.transport` at safe interruption points;
+- a non-cooperative handler may finish after its caller receives the timeout,
+  but the late payload is discarded and retained only as bounded transport
+  diagnostics. It must never replace the terminal turn result;
+- use `VON_INTERNAL_MCP_READ_HARD_TIMEOUT_SEC` and
+  `VON_INTERNAL_MCP_WRITE_HARD_TIMEOUT_SEC` for hard defaults, the corresponding
+  `*_ADVISORY_TIMEOUT_SEC` variables for telemetry budgets, and
+  `VON_INTERNAL_MCP_HANDLER_WORKERS` / `_QUEUE_CAPACITY` for bounded isolation;
+- diagnose the path from durable `transport` metadata rather than one elapsed
+  number. Queue time, handler time or handler elapsed-at-timeout, transport
+  overhead, and chat-history persistence are recorded separately.
+
+The transport supplies bounded execution, validation, cancellation signalling,
+and telemetry only. Retry, alternate-tool, alternate-workflow, follow-up, and
+user-facing recovery policy remain in represented workflow and prompt
+artefacts.
+
 ## 7. Testing and Acceptance Practice
 
 ### 7.1 Start narrow, but real

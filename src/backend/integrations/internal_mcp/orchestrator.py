@@ -4904,6 +4904,11 @@ class InternalMCPChatOrchestrator:
                 tool_name=tool_name,
                 payload=result.payload,
                 duration_ms=result.duration_ms,
+                transport_metadata=(
+                    result.telemetry_metadata()
+                    if callable(getattr(result, "telemetry_metadata", None))
+                    else None
+                ),
             )
         except Exception as exc:
             try:
@@ -10657,7 +10662,31 @@ class InternalMCPChatOrchestrator:
                 invocation_record: dict[str, Any] = {
                     "tool": tool_name,
                     "payload": payload_before_invoke,
+                    "duration_ms": result.duration_ms,
                 }
+                transport_metadata_fn = getattr(result, "telemetry_metadata", None)
+                transport_metadata = (
+                    transport_metadata_fn()
+                    if callable(transport_metadata_fn)
+                    else None
+                )
+                if isinstance(transport_metadata, Mapping):
+                    invocation_record["transport"] = dict(transport_metadata)
+                    for transport_key in (
+                        "execution_id",
+                        "queue_duration_ms",
+                        "handler_duration_ms",
+                        "handler_elapsed_ms",
+                        "transport_overhead_ms",
+                        "timeout_sec",
+                        "advisory_timeout_sec",
+                        "advisory_budget_exceeded",
+                        "timeout_phase",
+                    ):
+                        if transport_key in transport_metadata:
+                            invocation_record[transport_key] = transport_metadata.get(
+                                transport_key
+                            )
                 if isinstance(result.payload, Mapping):
                     invocation_record["effective_payload"] = dict(result.payload)
                 if payload != payload_before_invoke:
@@ -10722,7 +10751,12 @@ class InternalMCPChatOrchestrator:
                 if call_id:
                     invocation_record["call_id"] = call_id
                 if logical_error:
-                    invocation_record["status"] = "error"
+                    invocation_record["status"] = (
+                        "timeout"
+                        if isinstance(transport_metadata, Mapping)
+                        and transport_metadata.get("outcome") == "timed_out"
+                        else "error"
+                    )
                     invocation_record["error"] = logical_error
                     if logical_error_code:
                         invocation_record["error_code"] = logical_error_code

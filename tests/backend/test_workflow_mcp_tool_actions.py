@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 from src.backend.integrations.internal_mcp.catalogue import build_default_catalogue
@@ -227,6 +228,60 @@ def test_workflow_mcp_action_distinguishes_output_schema_failure() -> None:
         "retryable": False,
         "validation_stage": "output_schema",
     }
+
+
+def test_workflow_mcp_action_preserves_typed_transport_timeout_and_timings(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow_mcp_mod,
+        "validate_tool_target_contract",
+        lambda **_kwargs: SimpleNamespace(ok=True),
+    )
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="synthetic_slow_read",
+            handler=lambda: time.sleep(0.15),
+            input_schema=Schema(required={}, optional={}, allow_unknown=False),
+            output_schema=None,
+            category="read",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(
+            read_timeout_sec=0.03,
+            read_advisory_timeout_sec=0.01,
+        ),
+        enabled=True,
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    started_at = time.perf_counter()
+    result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={"tool_name": "synthetic_slow_read"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None, gateway=gateway),
+        workflow_id="#V#synthetic_timeout_recovery_workflow",
+        workflow_state_id="invoke_slow_read",
+    )
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert result.status == "failed"
+    assert result.outputs["mcp_result"]["error_code"] == "tool_timeout"
+    assert result.outputs["mcp_result"]["retryable"] is True
+    assert result.outputs["mcp_transport"]["outcome"] == "timed_out"
+    assert result.outputs["mcp_transport"]["timeout_phase"] == "handler"
+    assert result.outputs["mcp_transport"]["late_result_policy"] == (
+        "discard_from_turn"
+    )
+    assert result.outputs["mcp_queue_duration_ms"] is not None
+    assert result.outputs["mcp_handler_duration_ms"] is None
+    assert result.outputs["mcp_transport_overhead_ms"] is not None
 
 
 def test_workflow_mcp_action_omits_namespace_for_strict_schema_without_namespace():

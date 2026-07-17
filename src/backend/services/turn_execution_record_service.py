@@ -5117,6 +5117,14 @@ def _classify_tool_invocation_status(
 
     if blocked:
         return "blocked"
+    invocation_status = (_safe_str(invocation.get("status")) or "").lower()
+    error_code = (_safe_str(invocation.get("error_code")) or "").lower()
+    if (
+        invocation_status in {"timeout", "timed_out"}
+        or payload_status in {"timeout", "timed_out"}
+        or error_code in {"tool_timeout", "tool_timeout_outcome_unknown"}
+    ):
+        return "timeout"
     if (
         error_value
         or payload_status in {"error", "failed", "failure"}
@@ -5172,12 +5180,54 @@ def _summarise_tool_invocations(
         serialised_invocation = {
             "tool": tool_name,
             "status": status,
-            "started_at_utc": None,
-            "completed_at_utc": None,
+            "started_at_utc": _safe_str(invocation.get("started_at_utc")),
+            "completed_at_utc": _safe_str(invocation.get("completed_at_utc")),
             "error": error_value,
+            "error_code": _safe_str(invocation.get("error_code")),
             "result_summary": result_summary,
             "payload_fingerprint": _hash_payload(payload_value),
         }
+        for timing_key in (
+            "duration_ms",
+            "queue_duration_ms",
+            "handler_duration_ms",
+            "handler_elapsed_ms",
+            "transport_overhead_ms",
+            "timeout_sec",
+            "advisory_timeout_sec",
+        ):
+            timing_value = _safe_float(invocation.get(timing_key))
+            if timing_value is not None:
+                serialised_invocation[timing_key] = timing_value
+        for identifier_key in ("call_id", "execution_id", "timeout_phase"):
+            identifier_value = _safe_str(invocation.get(identifier_key))
+            if identifier_value:
+                serialised_invocation[identifier_key] = identifier_value
+        if isinstance(invocation.get("advisory_budget_exceeded"), bool):
+            serialised_invocation["advisory_budget_exceeded"] = invocation.get(
+                "advisory_budget_exceeded"
+            )
+        transport_metadata = invocation.get("transport")
+        if isinstance(transport_metadata, Mapping):
+            serialised_invocation["transport"] = {
+                key: transport_metadata.get(key)
+                for key in (
+                    "schema_version",
+                    "execution_id",
+                    "outcome",
+                    "duration_ms",
+                    "timeout_sec",
+                    "advisory_timeout_sec",
+                    "advisory_budget_exceeded",
+                    "queue_duration_ms",
+                    "handler_duration_ms",
+                    "handler_elapsed_ms",
+                    "transport_overhead_ms",
+                    "timeout_phase",
+                    "late_result_policy",
+                )
+                if key in transport_metadata
+            }
         if target_ids:
             serialised_invocation["target_ids"] = target_ids
         serialised.append(serialised_invocation)

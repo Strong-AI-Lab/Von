@@ -918,6 +918,11 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
             tool_name=tool_name,
             payload=result.payload,
             duration_ms=result.duration_ms,
+            transport_metadata=(
+                result.telemetry_metadata()
+                if callable(getattr(result, "telemetry_metadata", None))
+                else None
+            ),
         )
         action_result.outputs["workflow_actor_scope_enforced"] = True
         return action_result

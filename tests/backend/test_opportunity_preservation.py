@@ -22,12 +22,14 @@ Barrier classes (from JVNAUTOSCI-2553):
 """
 
 import json
+import time
 
 from src.backend.integrations.internal_mcp.catalogue import (
     _bool_input_normalisation_record,
     _coerce_bool_input,
 )
 from src.backend.integrations.internal_mcp.schemas import Schema
+from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.workflows.mcp_tool_bridge import (
     apply_runtime_defaults_to_mcp_payload,
 )
@@ -101,6 +103,37 @@ from src.backend.languagemodels.structured_tool_calling.providers import OpenAIC
 
 
 # --- retrieval barriers remain inspectable and recoverable ------------------
+
+
+def test_internal_mcp_timeout_keeps_represented_recovery_affordances_visible() -> (
+    None
+):
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.02,
+        read_advisory_timeout_sec=0.005,
+    )
+
+    result = transport.execute(
+        method_name="synthetic_grounded_read",
+        handler=lambda: time.sleep(0.1),
+        payload={},
+        timeout_sec=0.02,
+        category="read",
+        advisory_timeout_sec=0.005,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.payload["success"] is False
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.payload["retryable"] is True
+    assert result.payload["outcome_finality"] == "terminal_for_turn"
+    assert result.payload["late_result_policy"] == "discard_from_turn"
+    assert result.payload["recovery_affordances"] == [
+        {"action_type": "bounded_retry"},
+        {"action_type": "choose_alternate_represented_path"},
+        {"action_type": "return_bounded_failure"},
+    ]
+    assert result.duration_ms < 100.0
 
 
 def test_nested_represented_evidence_remains_available_for_projection() -> None:

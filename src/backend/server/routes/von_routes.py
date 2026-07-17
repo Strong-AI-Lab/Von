@@ -6930,6 +6930,15 @@ def _serialise_tool_invocations_for_llm_debug(
             "result_summary",
             "direct_user_call",
             "duration_ms",
+            "execution_id",
+            "queue_duration_ms",
+            "handler_duration_ms",
+            "handler_elapsed_ms",
+            "transport_overhead_ms",
+            "timeout_sec",
+            "advisory_timeout_sec",
+            "advisory_budget_exceeded",
+            "timeout_phase",
             "ok",
             "auto_retry",
             "knowledge_interaction",
@@ -6941,6 +6950,12 @@ def _serialise_tool_invocations_for_llm_debug(
         ):
             if key in raw_invocation:
                 entry[key] = raw_invocation.get(key)
+
+        transport_metadata = raw_invocation.get("transport")
+        if isinstance(transport_metadata, Mapping):
+            entry["transport"] = _sanitise_diagnostic_export_payload(
+                transport_metadata
+            )
 
         serialised.append(entry)
 
@@ -6977,6 +6992,15 @@ def _serialise_tool_invocations_for_turn_execution_record(
             "call_id",
             "result_summary",
             "duration_ms",
+            "execution_id",
+            "queue_duration_ms",
+            "handler_duration_ms",
+            "handler_elapsed_ms",
+            "transport_overhead_ms",
+            "timeout_sec",
+            "advisory_timeout_sec",
+            "advisory_budget_exceeded",
+            "timeout_phase",
             "workflow_step_evidence",
             "workflow_action_id",
             "workflow_id",
@@ -6984,6 +7008,12 @@ def _serialise_tool_invocations_for_turn_execution_record(
         ):
             if key in raw_invocation:
                 entry[key] = raw_invocation.get(key)
+
+        transport_metadata = raw_invocation.get("transport")
+        if isinstance(transport_metadata, Mapping):
+            entry["transport"] = _sanitise_diagnostic_export_payload(
+                transport_metadata
+            )
 
         for key in (
             "effective_payload",

@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence, cast
 
-from src.backend.integrations.internal_mcp.gateway import MethodDefinition
+from src.backend.integrations.internal_mcp.gateway import (
+    InternalMCPGateway,
+    MethodCatalogue,
+    MethodDefinition,
+)
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.integrations.internal_mcp import orchestrator as orchestrator_mod
 from src.backend.integrations.internal_mcp.schemas import Schema
+from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+from src.backend.workflows.action_registry import (
+    WorkflowActionRequest,
+    WorkflowEnvironment,
+)
 
 
 @dataclass(frozen=True)
@@ -117,3 +129,86 @@ def test_tool_unavailable_returns_validation_error() -> None:
     assert result.tool_invocations
     assert result.tool_invocations[-1]["tool"] == "__tool_call_validation_error__"
     assert "Unavailable tools" in result.response_text
+
+
+def test_tool_calling_loop_records_terminal_timeout_not_late_success(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        orchestrator_mod,
+        "validate_tool_target_contract",
+        lambda **_kwargs: SimpleNamespace(ok=True, resolution_evidence=()),
+    )
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="synthetic_slow_read",
+            handler=lambda: time.sleep(0.15),
+            input_schema=Schema(required={}, optional={}, allow_unknown=False),
+            output_schema=None,
+            category="read",
+            description="Synthetic bounded read used to verify deadline propagation.",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(
+            read_timeout_sec=0.03,
+            read_advisory_timeout_sec=0.01,
+        ),
+        enabled=True,
+    )
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=1,
+    )
+    request = WorkflowActionRequest(
+        action_id="tool_calling.execute",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#user",
+            max_tool_invocations=1,
+        ),
+        data={
+            "prompt": "Use the synthetic bounded read.",
+            "response": "",
+            "augmented_context": [],
+            "tool_calls": [
+                {
+                    "action": "call_tool",
+                    "tool": "synthetic_slow_read",
+                    "payload": {},
+                    "_call_id": "call-synthetic-timeout-1",
+                }
+            ],
+            "method_catalogue": gateway.describe_methods(),
+            "tool_categories": {"synthetic_slow_read": "read"},
+            "iteration_count": 0,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+        },
+    )
+
+    started_at = time.perf_counter()
+    result = orchestrator._action_tool_calling_execute(request)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.2
+    assert result.outputs["tool_execution_complete"] is True
+    invocation = request.data["invocations"][0]
+    assert invocation["status"] == "timeout"
+    assert invocation["error_code"] == "tool_timeout"
+    assert invocation["effective_payload"]["success"] is False
+    assert invocation["effective_payload"]["retryable"] is True
+    assert invocation["transport"]["outcome"] == "timed_out"
+    assert invocation["transport"]["late_result_policy"] == "discard_from_turn"
+    assert invocation["handler_duration_ms"] is None
+    assert invocation["handler_elapsed_ms"] is not None
+    assert (
+        InternalMCPChatOrchestrator._tool_invocation_completed_successfully(
+            invocation
+        )
+        is False
+    )

@@ -484,6 +484,11 @@ def _handle_workflow_mcp_invoke_tool(
             tool_name=resolved_tool_name,
             payload=result.payload,
             duration_ms=result.duration_ms,
+            transport_metadata=(
+                result.telemetry_metadata()
+                if callable(getattr(result, "telemetry_metadata", None))
+                else None
+            ),
         )
         action_result.outputs["mcp_requested_tool"] = requested_tool_name
         action_result.outputs["mcp_resolved_tool"] = resolved_tool_name

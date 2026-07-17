@@ -101,14 +101,20 @@ class MethodDefinition:
 class MethodMetrics:
     calls: int = 0
     failures: int = 0
+    timeouts: int = 0
+    saturations: int = 0
     last_error: str | None = None
+    last_outcome: str | None = None
     last_duration_ms: float | None = None
 
     def snapshot(self) -> Dict[str, Any]:
         return {
             "calls": self.calls,
             "failures": self.failures,
+            "timeouts": self.timeouts,
+            "saturations": self.saturations,
             "last_error": self.last_error,
+            "last_outcome": self.last_outcome,
             "last_duration_ms": self.last_duration_ms,
         }
 
@@ -322,6 +328,10 @@ class InternalMCPGateway:
             raise SchemaValidationError(error_message, stage="input_schema")
 
         timeout = definition.resolved_timeout(self._transport)
+        advisory_timeout = self._transport.advisory_timeout_sec(
+            definition.category,
+            hard_timeout_sec=float(timeout or self._transport.read_timeout_sec),
+        )
         try:
             from src.backend.security.access_control import (
                 get_effective_organisation_concept_id,
@@ -396,6 +406,8 @@ class InternalMCPGateway:
                         handler=definition.handler,
                         payload=dict(payload_dict),
                         timeout_sec=timeout,
+                        category=definition.category,
+                        advisory_timeout_sec=advisory_timeout,
                         log_tag=self._log_tag,
                     )
             finally:
@@ -410,6 +422,20 @@ class InternalMCPGateway:
             raise
 
         result_payload = transport_result.payload
+        if transport_result.outcome != "completed":
+            error_code = (
+                str(result_payload.get("error_code") or transport_result.outcome)
+                if isinstance(result_payload, Mapping)
+                else transport_result.outcome
+            )
+            self._record_failure(
+                method_name,
+                error_code,
+                duration_ms=transport_result.duration_ms,
+                outcome=transport_result.outcome,
+            )
+            return transport_result
+
         if definition.output_schema is not None:
             if not isinstance(result_payload, MutableMapping):
                 message = (
@@ -436,14 +462,28 @@ class InternalMCPGateway:
         metrics.calls += 1
         metrics.last_duration_ms = duration_ms
         metrics.last_error = None
+        metrics.last_outcome = "completed"
 
-    def _record_failure(self, method_name: str, error_message: str) -> None:
+    def _record_failure(
+        self,
+        method_name: str,
+        error_message: str,
+        *,
+        duration_ms: float | None = None,
+        outcome: str = "failed",
+    ) -> None:
         self._total_calls += 1
         self._total_failures += 1
         metrics = self._method_metrics[method_name]
         metrics.calls += 1
         metrics.failures += 1
         metrics.last_error = error_message
+        metrics.last_duration_ms = duration_ms
+        metrics.last_outcome = outcome
+        if outcome == "timed_out":
+            metrics.timeouts += 1
+        elif outcome == "saturated":
+            metrics.saturations += 1
 
     def get_diagnostics(self) -> Dict[str, Any]:
         diagnostics = {
@@ -466,6 +506,13 @@ class InternalMCPGateway:
             diagnostics["dynamic_tool_registration"] = {
                 "loaded_at_utc": None,
                 "source": "vontology:#V#mcp_tool",
+                "error": str(exc),
+            }
+        try:
+            diagnostics["transport"] = self._transport.get_diagnostics()
+        except Exception as exc:
+            diagnostics["transport"] = {
+                "status": "unavailable",
                 "error": str(exc),
             }
         return diagnostics

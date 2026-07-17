@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from src.backend.services.turn_decision_attribution_service import (
     DECISION_KINDS,
@@ -9,7 +10,9 @@ from src.backend.services.turn_execution_record_service import (
     build_turn_execution_correctness_summary,
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
+    get_turn_execution_record_projection,
     project_final_answer_tool_evidence,
+    upsert_turn_execution_record_projection,
     _normalise_projection_field_entries,
     _summarise_tool_execution_context,
 )
@@ -29,6 +32,109 @@ _KR_REQUIRED_TOOLS = [
     "fetch_concept",
     "get_text_relations_summary",
 ]
+
+
+def test_timeout_transport_metadata_survives_durable_turn_record_readback(
+    monkeypatch,
+) -> None:
+    class _Collection:
+        document = None
+
+        def update_one(self, _query, update, **_kwargs):
+            self.document = dict(update["$set"])
+            return SimpleNamespace(modified_count=0, matched_count=0, upserted_id="1")
+
+        def find_one(self, query, **_kwargs):
+            if self.document and self.document.get("request_id") == query.get(
+                "request_id"
+            ):
+                return dict(self.document)
+            return None
+
+    collection = _Collection()
+    import src.backend.services.turn_execution_record_service as record_service
+
+    monkeypatch.setattr(
+        record_service,
+        "get_turn_execution_records_collection",
+        lambda: collection,
+    )
+    transport_metadata = {
+        "schema_version": "internal_mcp_transport.v1",
+        "execution_id": "mcp_timeout_readback",
+        "outcome": "timed_out",
+        "duration_ms": 40.5,
+        "timeout_sec": 0.04,
+        "advisory_timeout_sec": 0.01,
+        "advisory_budget_exceeded": True,
+        "queue_duration_ms": 1.5,
+        "handler_duration_ms": None,
+        "handler_elapsed_ms": 38.5,
+        "transport_overhead_ms": 0.5,
+        "timeout_phase": "handler",
+        "late_result_policy": "discard_from_turn",
+    }
+    record = build_turn_execution_record(
+        request_id="req-timeout-readback",
+        session_id="session-timeout-readback",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Use the represented workflow to inspect the target.",
+        response_text="The bounded read timed out.",
+        interaction_timestamp_utc="2026-07-18T00:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#synthetic_retrieval_workflow",
+            "verdict": "rag_selected",
+        },
+        tool_invocations=[
+            {
+                "tool": "synthetic_grounded_read",
+                "status": "timeout",
+                "error": "Hard deadline exceeded.",
+                "error_code": "tool_timeout",
+                "duration_ms": 40.5,
+                "execution_id": "mcp_timeout_readback",
+                "queue_duration_ms": 1.5,
+                "handler_duration_ms": None,
+                "handler_elapsed_ms": 38.5,
+                "transport_overhead_ms": 0.5,
+                "timeout_sec": 0.04,
+                "advisory_timeout_sec": 0.01,
+                "advisory_budget_exceeded": True,
+                "timeout_phase": "handler",
+                "transport": transport_metadata,
+                "effective_payload": {
+                    "success": False,
+                    "status": "timed_out",
+                    "error_code": "tool_timeout",
+                },
+            }
+        ],
+    )
+
+    outcome = upsert_turn_execution_record_projection(
+        record=record,
+        user_id="#V#user",
+        session_id="session-timeout-readback",
+        namespace="#V#user@org",
+        org_id="#V#org",
+    )
+    readback = get_turn_execution_record_projection(
+        request_id="req-timeout-readback",
+        namespace="#V#user@org",
+    )
+
+    assert outcome["updated"] is True
+    assert readback is not None
+    invocation = readback["execution"]["tool_invocations"][0]
+    assert invocation["status"] == "timeout"
+    assert invocation["error_code"] == "tool_timeout"
+    assert invocation["execution_id"] == "mcp_timeout_readback"
+    assert invocation["queue_duration_ms"] == 1.5
+    assert invocation["handler_elapsed_ms"] == 38.5
+    assert invocation["transport_overhead_ms"] == 0.5
+    assert invocation["transport"] == transport_metadata
 
 
 def test_projection_field_telemetry_preserves_bounded_collection_row_index() -> None:

@@ -211,6 +211,18 @@ Runtime semantics:
 - workflow context bindings inside `tool_arguments` are resolved by the normal action-input resolver before invocation;
 - authenticated namespace context is propagated into the MCP payload as `namespace` when available;
 - the action returns the workflow-visible MCP payload under `result` and `mcp_result`, with `mcp_tool`, `mcp_requested_tool`, `mcp_resolved_tool`, and `mcp_duration_ms` diagnostics;
+- internal MCP advisory budgets are telemetry only: a handler that completes
+  before its hard deadline remains successful even when the advisory budget was
+  exceeded;
+- a hard-deadline expiry is a terminal failed action for the current turn. The
+  action preserves the typed timeout under `mcp_result` and the bounded
+  transport facts under `mcp_transport`, including execution identity,
+  queue/handler/transport timing, deadline, timeout phase, and the explicit
+  `discard_from_turn` late-result policy;
+- a late handler completion cannot rewrite the workflow action outcome. Reads
+  expose represented recovery affordances such as bounded retry or alternate
+  path selection; writes report an indeterminate mutation outcome and require
+  state inspection before any retry;
 - when the invoked tool has a represented tool-evidence projection, `result` and `mcp_result` carry that compact projected payload and projection telemetry instead of raw source-specific bulk data;
 - `tool_output_context_mappings` should map fields from `result.<field>` or `mcp_result.<field>` into workflow context for downstream steps and subworkflows.
 

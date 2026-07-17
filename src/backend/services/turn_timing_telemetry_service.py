@@ -565,12 +565,33 @@ def _tool_spans(
                     "tool": tool_name,
                     "method": _safe_str(entry.get("method")) or tool_name,
                     "call_id": _safe_str(entry.get("call_id")),
+                    "execution_id": _safe_str(entry.get("execution_id")),
                     "workflow_id": _safe_str(entry.get("workflow_id")),
                     "workflow_state_id": _safe_str(entry.get("workflow_state_id")),
                     "workflow_action_id": _safe_str(entry.get("workflow_action_id")),
                     "argument_keys": argument_keys,
                     "blocked": entry.get("blocked"),
                     "direct_user_call": entry.get("direct_user_call"),
+                    "queue_duration_ms": _safe_int_ms(
+                        entry.get("queue_duration_ms")
+                    ),
+                    "handler_duration_ms": _safe_int_ms(
+                        entry.get("handler_duration_ms")
+                    ),
+                    "handler_elapsed_ms": _safe_int_ms(
+                        entry.get("handler_elapsed_ms")
+                    ),
+                    "transport_overhead_ms": _safe_int_ms(
+                        entry.get("transport_overhead_ms")
+                    ),
+                    "timeout_sec": _safe_number(entry.get("timeout_sec")),
+                    "advisory_timeout_sec": _safe_number(
+                        entry.get("advisory_timeout_sec")
+                    ),
+                    "advisory_budget_exceeded": entry.get(
+                        "advisory_budget_exceeded"
+                    ),
+                    "timeout_phase": _safe_str(entry.get("timeout_phase")),
                 },
             }
         )
@@ -1013,6 +1034,39 @@ def build_turn_timing_trace(
                 int(span["duration_ms"])
                 for span in stored_spans
                 if _safe_str(span.get("operation_kind")) == "tool_call"
+            ),
+            "tool_queue_elapsed_ms": sum(
+                int(_safe_int_ms((span.get("attributes") or {}).get("queue_duration_ms")) or 0)
+                for span in stored_spans
+                if _safe_str(span.get("operation_kind")) == "tool_call"
+                and isinstance(span.get("attributes"), Mapping)
+            ),
+            "tool_handler_elapsed_ms": sum(
+                int(
+                    _safe_int_ms(
+                        (span.get("attributes") or {}).get("handler_duration_ms")
+                    )
+                    or _safe_int_ms(
+                        (span.get("attributes") or {}).get("handler_elapsed_ms")
+                    )
+                    or 0
+                )
+                for span in stored_spans
+                if _safe_str(span.get("operation_kind")) == "tool_call"
+                and isinstance(span.get("attributes"), Mapping)
+            ),
+            "tool_transport_overhead_ms": sum(
+                int(
+                    _safe_int_ms(
+                        (span.get("attributes") or {}).get(
+                            "transport_overhead_ms"
+                        )
+                    )
+                    or 0
+                )
+                for span in stored_spans
+                if _safe_str(span.get("operation_kind")) == "tool_call"
+                and isinstance(span.get("attributes"), Mapping)
             ),
         },
         "stage_totals": _aggregate_stage_totals(stored_spans),

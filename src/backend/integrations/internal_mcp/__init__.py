@@ -14,7 +14,13 @@ from .gateway import (
     GatewayDisabledError,
 )
 from .catalogue import build_default_catalogue
-from .transport import InternalMCPTransport
+from .transport import (
+    InternalMCPHandlerCancelled,
+    InternalMCPTransport,
+    get_internal_mcp_execution_scope,
+    internal_mcp_cancellation_requested,
+    raise_if_internal_mcp_cancelled,
+)
 from .schemas import Schema, SchemaValidationError, validate_payload
 
 if TYPE_CHECKING:
@@ -68,6 +74,10 @@ __all__ = [
     "validate_payload",
     "build_default_catalogue",
     "InternalMCPTransport",
+    "InternalMCPHandlerCancelled",
+    "get_internal_mcp_execution_scope",
+    "internal_mcp_cancellation_requested",
+    "raise_if_internal_mcp_cancelled",
     "CancellationRequested",
     "InternalMCPChatOrchestrator",
     "OrchestratorResult",

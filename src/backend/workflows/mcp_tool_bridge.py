@@ -340,6 +340,7 @@ def workflow_action_result_from_mcp_payload(
     tool_name: str,
     payload: Any,
     duration_ms: float | None,
+    transport_metadata: Mapping[str, Any] | None = None,
 ) -> WorkflowActionResult:
     """Convert an MCP gateway payload into a workflow action result.
 
@@ -359,6 +360,38 @@ def workflow_action_result_from_mcp_payload(
         "mcp_duration_ms": duration_ms,
         "result": workflow_payload,
     }
+    if isinstance(transport_metadata, Mapping):
+        bounded_transport_metadata = {
+            str(key): value
+            for key, value in transport_metadata.items()
+            if isinstance(key, str)
+            and key
+            in {
+                "schema_version",
+                "execution_id",
+                "outcome",
+                "duration_ms",
+                "timeout_sec",
+                "advisory_timeout_sec",
+                "advisory_budget_exceeded",
+                "queue_duration_ms",
+                "handler_duration_ms",
+                "handler_elapsed_ms",
+                "transport_overhead_ms",
+                "timeout_phase",
+                "late_result_policy",
+            }
+        }
+        outputs["mcp_transport"] = bounded_transport_metadata
+        outputs["mcp_queue_duration_ms"] = bounded_transport_metadata.get(
+            "queue_duration_ms"
+        )
+        outputs["mcp_handler_duration_ms"] = bounded_transport_metadata.get(
+            "handler_duration_ms"
+        )
+        outputs["mcp_transport_overhead_ms"] = bounded_transport_metadata.get(
+            "transport_overhead_ms"
+        )
     outputs.update(projection_metadata)
     if isinstance(payload, Mapping) and payload.get("success") is False:
         return WorkflowActionResult(

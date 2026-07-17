@@ -102,6 +102,58 @@ def test_tool_invocation_spans_keep_argument_keys_not_argument_values() -> None:
     assert tool_span["attributes"]["argument_keys"] == ["concept_id", "query"]
 
 
+def test_tool_timing_separates_queue_handler_transport_and_persistence() -> None:
+    trace = build_turn_timing_trace(
+        request_id="req-tool-deadline",
+        tool_invocations=[
+            {
+                "tool": "synthetic_grounded_read",
+                "execution_id": "mcp_synthetic",
+                "duration_ms": 42,
+                "status": "timeout",
+                "queue_duration_ms": 5,
+                "handler_duration_ms": None,
+                "handler_elapsed_ms": 35,
+                "transport_overhead_ms": 2,
+                "timeout_sec": 0.04,
+                "advisory_timeout_sec": 0.01,
+                "advisory_budget_exceeded": True,
+                "timeout_phase": "handler",
+            }
+        ],
+        extra_spans=[
+            {
+                "span_id": "persist-assistant",
+                "stage_id": "response_finalising",
+                "operation_kind": "chat_history_persistence",
+                "operation_name": "persist_assistant_message",
+                "duration_ms": 9,
+                "status": "success",
+            }
+        ],
+    )
+
+    tool_span = next(
+        span for span in trace["spans"] if span["operation_kind"] == "tool_call"
+    )
+    assert tool_span["status"] == "timeout"
+    assert tool_span["attributes"]["execution_id"] == "mcp_synthetic"
+    assert tool_span["attributes"]["queue_duration_ms"] == 5
+    assert tool_span["attributes"]["handler_duration_ms"] is None
+    assert tool_span["attributes"]["handler_elapsed_ms"] == 35
+    assert tool_span["attributes"]["transport_overhead_ms"] == 2
+    assert tool_span["attributes"]["timeout_phase"] == "handler"
+    assert trace["summary"]["tool_queue_elapsed_ms"] == 5
+    assert trace["summary"]["tool_handler_elapsed_ms"] == 35
+    assert trace["summary"]["tool_transport_overhead_ms"] == 2
+    assert any(
+        row["operation_kind"] == "chat_history_persistence"
+        and row["operation_name"] == "persist_assistant_message"
+        and row["duration_ms"] == 9
+        for row in trace["operation_totals"]
+    )
+
+
 def test_merge_timing_spans_deduplicates_and_bounds() -> None:
     merged = merge_timing_spans(
         [{"span_id": "a", "stage_id": "x", "operation_kind": "support", "duration_ms": 1}],
