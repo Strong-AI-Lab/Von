@@ -120,6 +120,10 @@ predicates, and KB assertions should own durable:
   required tool sets, payload/read-back fields, postcondition labels, failure
   code meanings, and completion-blocking policy for paper/person/company/meeting
   or future representation domains.
+- Tool-evidence contract authority, including tool concepts, field/path/view
+  concepts, payload-wire bindings, required final-answer evidence fields,
+  evidence-view semantics, and planner-facing tool descriptions for grounded
+  read, Jira, Gmail, RAG, arXiv, concept lookup, or future integrations.
 
 ## Python Support
 
@@ -237,6 +241,9 @@ Python can remain the surface for:
   `required_payload_fields`, preserves typed blockers, and fails closed when
   representation contract/profile authority is unavailable rather than adding
   new domain defaults;
+- generic tool-evidence contract loaders/materialisers that read represented
+  contract facts, validate graph shape, project payloads, and fail closed when
+  source-specific field/view/tool-description authority is missing;
 - generic HTTP/request plumbing that passes represented decisions through.
 - read-only operational diagnostics and Jira triage tooling that computes
   bounded engineering metrics, redacts evidence, and prepares human-review

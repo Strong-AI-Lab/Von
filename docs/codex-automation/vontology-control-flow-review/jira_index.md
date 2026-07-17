@@ -127,3 +127,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
 - `JVNAUTOSCI-2586` - operational certification aggregation and learning-release
   promotion gates: fixed trial/pass-window shape and named release gates live in
   Python rather than represented benchmark/release authority.
+- `JVNAUTOSCI-2589` - grounded-read and Jira tool-evidence contract content:
+  source-specific tool concepts, field/path/view ids, required final-answer
+  fields, and tool descriptions are materialised from Python bootstraps rather
+  than independent Vontology authority.

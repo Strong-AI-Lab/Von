@@ -284,6 +284,20 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   `scholarly_representation`, read-back fields, status wording, or
   `materialise_scholarly_representation_for_file_copy` become the only runtime
   authority or are expanded to new domains instead of represented profiles.
+- 2026-07-18: legacy durable modules still contain
+  `build_*_test_registration()` helpers returning `source="built_in"`, but
+  `_register_python_defined_workflows()` remains empty and the purity registry
+  reported `built_in_registration_count=0` with runtime registry
+  `source_counts={"vontology":99}`. Treat those builders as bootstrap/test
+  support unless they are reintroduced into production registry construction or
+  become the reproducible source for workflow graph/control policy. Existing
+  concrete source-authority issues remain `JVNAUTOSCI-2472`, `JVNAUTOSCI-2341`,
+  `JVNAUTOSCI-2315`, and related repo-seed tracks.
+- 2026-07-18: grounded-read target-contract validation is support-only while it
+  validates represented tool metadata and preserves unresolved state. The fresh
+  drift is narrower and now tracked by `JVNAUTOSCI-2589`: Python-owned
+  grounded-read/Jira tool-evidence contract bootstraps that repopulate
+  source-specific KB facts.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

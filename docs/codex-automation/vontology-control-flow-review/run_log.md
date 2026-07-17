@@ -326,3 +326,36 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   extended to new domains in Python.
 - No new Jira issues were created and no production code was changed by this
   review run.
+
+## 2026-07-18T02:13:51.9491652+12:00
+
+- Read required repo guidance, security guidance, design index, workflow manual,
+  enduring-memory guide, operational guide, authority-alignment guide, personal
+  automation memory, and all repo-local review memory files.
+- Started from `main` at `b6286b71`, then fetch/push preparation showed
+  `origin/main` had advanced 39 commits to `99dc6f19`. Rebased the review-memory
+  commit and rescanned the newer `origin/main`; the only pre-existing dirty file
+  was `Von.code-workspace`, which this review did not edit or stage.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`.
+  All workflow/prompt/source/policy counters were `0`; the gate still failed
+  only on the known monolith ratchet: orchestrator `49605` vs baseline `45441`,
+  catalogue `35061` vs `32670`, and von_routes `18866` vs `18136`.
+- Runtime attribution companion
+  `.venv\Scripts\python.exe scripts\report_turn_decision_attribution.py --limit 10`
+  timed out after about two minutes, so no architecture-integrity score or
+  fallback-signature histogram was available.
+- Rechecked source-only `WorkflowDefinition(...)`,
+  `WorkflowRegistration(...)`, `source="built_in"`, selector-fallback,
+  prior-obligation, certification/release-gate, representation-effects, and
+  new grounded-read/tool-evidence contract surfaces.
+- Confirmed legacy `source="built_in"` test-registration helpers are not active
+  runtime authority while `_register_python_defined_workflows()` is empty and
+  purity reports `built_in_registration_count=0` plus Vontology-only runtime
+  registry sources.
+- Created `JVNAUTOSCI-2589` for fresh Python-owned grounded-read/Jira
+  tool-evidence contract authority: startup support bootstraps now materialise
+  source-specific tool concepts, field/path/view ids, required final-answer
+  fields, and tool descriptions from Python constants rather than independent
+  represented Vontology authority. Linked it to `JVNAUTOSCI-1913`,
+  `JVNAUTOSCI-1985`, and `JVNAUTOSCI-2575`.
+- No production code was changed by this review run.

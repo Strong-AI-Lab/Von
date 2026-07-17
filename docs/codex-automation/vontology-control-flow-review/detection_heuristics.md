@@ -43,6 +43,10 @@ before creating duplicates.
 - Vontology-backed metadata/profile services that merge Python defaults when
   authority is missing or partial. The defect is often fail-open fallback, not
   absence of a service.
+- Startup support bootstraps are drift candidates when they materialise
+  source-specific tool-evidence contract content from Python constants:
+  integration/tool concept IDs, field/path/view IDs, final-answer evidence
+  requirements, payload-wire semantics, or planner-facing tool descriptions.
 - Event-emission helpers that filter process events by hard-coded or env-var
   status/type allow-lists before persisted bindings or VWL conditions run.
 - Publisher scripts that embed production workflow prompt text, discovery
@@ -207,6 +211,13 @@ before creating duplicates.
   supplies domain profile selection, read-back field lists, required tool sets,
   postcondition labels, or user/model-visible status wording after represented
   contracts or Vontology profiles are missing or incomplete.
+- Legacy `WorkflowDefinition(...)` / `WorkflowRegistration(source="built_in")`
+  helpers are not enough to file a fresh ticket when production registry
+  construction leaves `_register_python_defined_workflows()` empty and the
+  purity report confirms zero built-in registrations. File only when a helper
+  is registered on a production path, is startup-published as workflow
+  authority, or is the only reproducible source for a workflow graph,
+  transition, prompt, or control policy.
 
 ## Recent Examples
 
@@ -272,3 +283,5 @@ before creating duplicates.
 - `JVNAUTOSCI-2586` - operational certification aggregation and learning-release
   promotion gates are still partly fixed in Python rather than represented
   benchmark/release authority.
+- `JVNAUTOSCI-2589` - grounded-read/Jira tool-evidence contract facts are
+  bootstrapped from Python specs instead of represented Vontology authority.
