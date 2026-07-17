@@ -1,8 +1,13 @@
 # Agent Memory and Enduring Knowledge
 
+- **Kind:** Memory and retrieval design guide
+- **Lifecycle:** Active
+- **Authority:** Normative only within its stated memory/retrieval scope
+- **Last reviewed:** 18 July 2026
+
 ## 1. When to read this
 
-Read this document before planning or implementing work that touches:
+Consult the relevant sections before planning or implementing work that touches:
 
 - retrieval or RAG
 - long-horizon context
@@ -37,6 +42,10 @@ Promote information into durable represented form when it is:
 - important across sessions or users
 
 Do not leave all durable knowledge trapped in opaque model state.
+
+Representation does not imply that every payload belongs in Vontology. Raw
+documents, event streams, embeddings, caches, and high-volume traces may remain
+in fit-for-purpose stores with stable identity and provenance links.
 
 ## 5. Retrieval is policy
 

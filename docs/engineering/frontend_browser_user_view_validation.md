@@ -2,10 +2,11 @@
 
 - **Kind:** Browser-acceptance protocol and practical guidance
 - **Lifecycle:** Active
-- **Authority:** Required by `AGENTS.md` for frontend, browser acceptance, and
-  authenticated user-view testing
+- **Authority:** Canonical browser-validation guidance routed by `AGENTS.md`;
+  apply it at the validation tier justified by the claim
 - **Created:** 2026-04-06
 - **Last substantive content update before this metadata review:** 2026-06-08
+- **Last reviewed:** 2026-07-18
 - **Evidence boundary:** Each acceptance claim still requires its own dated
   user-view evidence
 
@@ -45,7 +46,7 @@ For many Von UI tasks, the best acceptance evidence is not:
 - a mocked DOM tree alone; or
 - an anonymous browser session alone.
 
-The best evidence is usually:
+For a user-visible layout or interaction claim, the best evidence is usually:
 
 1. targeted automated tests for the changed code path;
 2. a live browser check on the actual UI surface; and
@@ -71,7 +72,9 @@ complete substitute for a dependable authenticated browser-testing path.
 
 ## 5. Preferred Validation Ladder
 
-Use this order unless the task clearly needs something different:
+Use this order for Tier 1 or higher browser-relevant claims unless the task
+clearly needs something different. Tier 0 documentation, copy-only, or
+mechanical changes do not automatically require a live browser:
 
 1. Run targeted impacted tests for the changed module(s).
 2. Run the frontend static JS lint gate on the changed browser-side files.
@@ -232,13 +235,15 @@ before treating it as a missing dependency. A typical sandbox failure includes:
 
 `MachPortRendezvousServer... Permission denied`
 
-In that case, rerun the Playwright command with escalated sandbox permissions so
-Chromium can start and connect to `127.0.0.1`. A quick smoke check is:
+If the current tool host permits an approved unsandboxed or browser-enabled
+execution path, use it. If it does not, record the host limitation and use the
+nearest available faithful surface; do not repeatedly retry an unavailable
+permission mode. A quick smoke check, where permitted, is:
 
 `node -e "import('playwright').then(async ({ chromium }) => { const b = await chromium.launch({ headless: true }); const p = await b.newPage(); await p.goto('http://127.0.0.1:5010/health'); console.log(await p.textContent('body')); await b.close(); })"`
 
 The acceptance note should state whether browser evidence came from Playwright,
-the target URL, and whether the command required sandbox escalation.
+the target URL, and any host limitation that materially reduced fidelity.
 
 ## 9. When Mocking Is Still Appropriate
 

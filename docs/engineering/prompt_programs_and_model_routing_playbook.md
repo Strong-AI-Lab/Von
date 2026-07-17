@@ -1,5 +1,10 @@
 # Prompt Programs and Model Routing Playbook
 
+- **Kind:** Prompt and model-routing playbook
+- **Lifecycle:** Active
+- **Authority:** Normative within its stated prompt/model scope
+- **Last reviewed:** 18 July 2026
+
 ## 1. When to read this
 
 Read this document before planning or implementing work that touches:
@@ -37,22 +42,26 @@ discipline as response, narration, and recovery prompts.
 
 ## 3A. Shared turn-context discipline
 
-For multi-stage turns, the accumulated turn context is itself part of the
-behaviour contract.
+For multi-stage turns, canonical accumulated turn state and each stage's
+model-visible projection are both part of the behaviour contract.
 
-Default to one shared turn-context object reused across selector, planner,
-tool-use, and response stages. Stage prompts may add instructions or evidence,
-but should not silently replace the underlying context unless a narrower
-context is explicitly required, justified, and evaluated.
+Maintain one shared canonical turn-state object. Give selector, planner,
+tool-use, and response stages the minimum sufficient projection for their job.
+Stage prompts may add instructions or evidence; projections may omit or
+summarise material when that improves relevance, safety, latency, or cost.
+Material additions, omissions, and summaries must be explicit, justified, and
+evaluated.
 
-If code quietly gives different stages materially different contexts, Python
-has become a hidden policy layer even when the prompt text still lives in
-Vontology.
+Different projections are not authority drift by themselves. Undocumented or
+unevaluated projection policy is. Keep stable projection mechanisms in code and
+author adaptable semantic selection policy in represented profiles/prompts when
+independent governance is needed.
 
 Telemetry should expose:
 
-- the effective stage context summary
-- any stage-local additions or reductions
+- the canonical state/version used
+- the effective stage projection summary
+- material stage-local additions, omissions, compaction, or retrieval
 - enough lineage to distinguish a prompt fragment from the full
   model-visible context
 
@@ -147,7 +156,7 @@ Cheap/local model use should be certified per workflow stage, prompt profile,
 and replay set. A passing single turn is evidence, not authority to update the
 runtime policy.
 
-For `JVNAUTOSCI-1894`-style replay work, the live sampler emits
+For replay campaigns that use the maintained live prompt bank, the sampler emits
 model-portfolio evidence alongside the normal response and telemetry summary:
 
 - selector evidence: selected workflow, raw selector response capture,
@@ -195,10 +204,9 @@ the following policy constraints intact:
 4. Require explicit authoring intent before routing into workflow-creation or
    workflow-authoring flows. Casual mention of “workflow”, or discussion of what
    workflow might eventually be needed, is not sufficient.
-5. Default to the same accumulated turn context across selector-adjacent stages
-   and later answer-generation stages. Stage-local prompt layers may add to
-   that context, but silent phase-specific thinning is an architectural smell
-   that requires explicit justification and telemetry.
+5. Preserve one canonical accumulated turn state while giving each stage a
+   minimum-sufficient projection. Silent or unevaluated thinning is an
+   architectural smell; explicit, telemetry-visible curation is expected.
 6. Do not let workflow execution bookkeeping become the user-facing answer.
    Completion reports, dispatch summaries, and renderer diagnostics are
    supporting surfaces unless the user explicitly asked for an operational

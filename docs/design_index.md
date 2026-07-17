@@ -6,7 +6,7 @@
   override current user direction, `AGENTS.md`, live represented authority, or
   live evidence
 - **Owner:** Von maintainers
-- **Last reviewed:** 12 July 2026
+- **Last reviewed:** 18 July 2026
 - **Review trigger:** Any change to `AGENTS.md` reading routes, canonical
   document selection, or document supersession
 - **Scope:** Tracked design, engineering, operational, review, and generated
@@ -20,10 +20,12 @@ not all describe the same system or carry the same authority. A confident old
 status report is not a current implementation guide, and a live defect is not a
 new design principle.
 
-Coding agents must therefore use this index before treating an engineering note
-as current authority. In particular:
+Coding agents should use this index before treating an engineering note as
+current authority when the task is substantial, architecture-sensitive,
+documentation-sensitive, or depends on an older design claim. In particular:
 
-- read [`AGENTS.md`](../AGENTS.md) and the documents it selects;
+- read [`AGENTS.md`](../AGENTS.md), then progressively disclose only the
+  documents and sections relevant to the task;
 - determine what kind of claim the document is making;
 - check its lifecycle, authority scope, and evidence date separately;
 - verify present behaviour on the live authority and evidence surfaces; and
@@ -69,39 +71,46 @@ way.
 
 ## 4. Start here
 
-The direct links in `AGENTS.md` remain authoritative if this index ever drifts.
+`AGENTS.md` contains the governing invariants. This index routes deeper reading;
+it does not make every line of a canonical document compulsory for every task.
+Use the smallest relevant reading set and verify changing operational facts
+live.
 
 | Work | Required or primary documents |
 |---|---|
-| Every task | [`AGENTS.md`](../AGENTS.md), [security considerations](engineering/security_considerations.md), and this index |
-| Substantial implementation | [modern agentic AI primer](engineering/intro_to_modern_agentic_ai_for_coding_agents.md) |
-| Workflow or orchestration | [VWL manual](engineering/von_workflow_language_manual.md) |
+| Every task | [`AGENTS.md`](../AGENTS.md) |
+| Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
+| Authentication, private/cross-namespace data, writes, untrusted content, integrations, deployment, or administrator surfaces | [Security considerations](engineering/security_considerations.md) |
+| Substantial agent-behaviour implementation | Relevant sections of the [modern agentic AI primer](engineering/intro_to_modern_agentic_ai_for_coding_agents.md) |
+| Workflow or orchestration | Relevant vocabulary/semantics in the [VWL manual](engineering/von_workflow_language_manual.md); domain examples and appendices are reference material |
 | Prompts, models, routing, optimisation, or fine-tuning | [prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) |
 | Retrieval, memory, RAG, KB growth, or long-horizon state | [agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) |
 | Evaluation, benchmarks, or research-sensitive architecture | [agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) |
 | Minimal imposition, elicitation, or write policy | [minimal-imposition principle](engineering/minimal_imposition_design_principle.md) |
-| Frontend or authenticated browser acceptance | [frontend browser validation](engineering/frontend_browser_user_view_validation.md) |
-| Live user-visible behaviour or telemetry diagnosis | [real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md) |
+| Frontend or browser acceptance | [Frontend browser validation](engineering/frontend_browser_user_view_validation.md), at the validation tier justified by the claim |
+| Live user-visible behaviour or telemetry diagnosis | Applicable sections of the [real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md), using the risk tier in `AGENTS.md` |
 | Practical repository operation | [operational engineering guide](engineering/operational_engineering_guide.md), [authority-alignment scan](engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md) |
 
-## 5. Current governing and mandatory guidance
+## 5. Current governing and routed guidance
 
-These documents are current because `AGENTS.md` selects them, not merely because
-their own headers say so.
+`AGENTS.md` is governing. The documents below are current routed references in
+their stated scope. Their current status depends on maintainer review,
+implementation evidence, and freshness metadata—not circularly on being linked
+from `AGENTS.md`.
 
 | Document | Kind and lifecycle | Authority and freshness boundary |
 |---|---|---|
 | [`AGENTS.md`](../AGENTS.md) | Active constitution | Governing repository instructions, subordinate to current explicit user direction and higher-level safety rules |
-| [Security considerations](engineering/security_considerations.md) | Active security guide with dated posture observations | Always mandatory; verify deployment-profile and implementation claims live |
-| [Modern agentic AI primer](engineering/intro_to_modern_agentic_ai_for_coding_agents.md) | Active principle/background guide | Mandatory before substantial implementation planning; not a current-status report |
-| [VWL manual](engineering/von_workflow_language_manual.md) | Active manual | Canonical reference for VWL vocabulary, authoring, and runtime interfaces; live Vontology and current runtime evidence govern actual artefacts and behaviour |
-| [Prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) | Active playbook | Normative in the scope selected by `AGENTS.md` |
-| [Agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) | Active design guide | Normative in the scope selected by `AGENTS.md` |
-| [Agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) | Active protocol/design guide | Normative in the scope selected by `AGENTS.md` |
-| [Minimal-imposition principle](engineering/minimal_imposition_design_principle.md) | Active principle | Normative in the scope selected by `AGENTS.md`, subject to the precedence stated there |
-| [Frontend browser validation](engineering/frontend_browser_user_view_validation.md) | Active practical guide | Required for its named acceptance scope; browser evidence still needs a dated locator |
-| [Real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md) | Active practical guide | Required for its named validation scope; exact-path evidence outranks prose |
-| [Operational engineering guide](engineering/operational_engineering_guide.md) | Active companion runbook | Canonical practical guidance; revalidate environment- and tool-specific details |
+| [Security considerations](engineering/security_considerations.md) | Active security guide with dated posture observations | Required for security-sensitive scopes; verify deployment-profile and implementation claims live |
+| [Modern agentic AI primer](engineering/intro_to_modern_agentic_ai_for_coding_agents.md) | Active principle/background guide | Routed background for substantial agent-behaviour planning; not a current-status report |
+| [VWL manual](engineering/von_workflow_language_manual.md) | Active manual | Canonical reference for VWL vocabulary and runtime interfaces; consult relevant sections, and verify live artefacts/behaviour |
+| [Prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) | Active playbook | Normative only within its stated prompt/model scope |
+| [Agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) | Active design guide | Normative only within its stated memory/retrieval scope |
+| [Agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) | Active protocol/design guide | Normative only for the evaluation or research claim being made |
+| [Minimal-imposition principle](engineering/minimal_imposition_design_principle.md) | Active principle | Normative within its stated scope, subject to user direction, security, and authority boundaries |
+| [Frontend browser validation](engineering/frontend_browser_user_view_validation.md) | Active practical guide | Risk-tiered reference; browser evidence needs a dated locator when used |
+| [Real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md) | Active practical guide | Risk-tiered protocol; exact-path evidence outranks prose, but full protocol is not universal |
+| [Operational engineering guide](engineering/operational_engineering_guide.md) | Active companion runbook | Consult by operational need and revalidate host/tool-specific details |
 | [Authority-alignment scan](engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md) | Active companion guide | Advisory structural review procedure under `AGENTS.md` |
 
 ## 6. Programme direction and current synthesis
@@ -109,7 +118,9 @@ their own headers say so.
 No formal Architecture Decision Record corpus existed at this review. Do not
 mistake a design proposal or Jira implementation summary for an accepted ADR.
 Until an ADR process is established, acceptance must be grounded in current
-human direction, `AGENTS.md`, and the relevant live Jira decision record.
+human direction, `AGENTS.md`, and the relevant live Jira decision record. A
+design proposal or private synthesis becomes governing only after explicit
+human acceptance and promotion into a current public authority surface.
 
 | Document | Classification | Correct use |
 |---|---|---|

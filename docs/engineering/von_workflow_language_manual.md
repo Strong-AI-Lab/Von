@@ -3,19 +3,29 @@
 - **Kind:** Workflow-language manual
 - **Lifecycle:** Active
 - **Authority:** Canonical reference for VWL vocabulary, authoring rules, and
-  runtime interfaces; required by `AGENTS.md` for workflow/orchestration work
+  runtime interfaces; consult the sections relevant to the workflow change
 - **Live-authority boundary:** Live Vontology artefacts govern individual
   workflow definitions; current code, tests, and telemetry govern observed
   runtime behaviour
 - **Created:** 2026-05-03
-- **Last substantive content update before this metadata review:** 2026-07-11
+- **Last substantive content update:** 2026-07-15
+- **Last reviewed:** 2026-07-18
 - **Audience:** Human engineers and AI agents
 
 ## 1. Purpose and Scope
 
 Von Workflow Language (VWL) is the executable workflow language used by Von for LLM-era agent behaviour orchestration. VWL is not a standalone parser language. It is a graph-native language represented in Vontology concepts and predicates, then compiled into runtime workflow definitions.
 
-VWL workflow creation and modification are implementation activities, not documentation-only activities. When a behaviour can be expressed in VWL, engineers and AI agents SHOULD create or update the workflow directly in Vontology as part of the task, rather than deferring it to later bespoke code.
+VWL workflow creation and modification are implementation activities, not
+documentation-only activities. Once a capability slice has selected VWL as the
+right authority surface, engineers and AI agents SHOULD create or update the
+workflow directly in Vontology as part of the task rather than deferring its
+authored behaviour to later bespoke code.
+
+This manual is a reference, not a cover-to-cover prerequisite for every
+workflow change. Sections 1--15 define current language and runtime semantics.
+Section 16 and Appendix A retain planning refinements, worked examples, and
+diagram contracts that should be consulted only when relevant.
 
 This manual documents:
 
@@ -62,15 +72,22 @@ Primary implementation anchors:
 Authoring policy:
 
 - Vontology workflow graphs, mappings, schedules, and event bindings are first-class implementation artefacts.
-- When behaviour can be expressed in VWL, preferred implementation is to materialise it in Vontology and then add only the supporting code/tooling needed for execution, validation, and telemetry.
-- Backend code SHOULD primarily supply reusable actions, validators, loaders, and telemetry for workflows, rather than embedding task-specific orchestration that VWL could already express.
+- For a capability that selects VWL as its authority surface, preferred
+  implementation is to materialise the authored behaviour in Vontology and add
+  the supporting code/tooling needed for execution, validation, and telemetry.
+- Backend code SHOULD primarily supply reusable actions, validators, loaders,
+  and telemetry for those workflows rather than embedding their task-specific
+  orchestration in code.
 - Repo-side workflow/template/prompt files are non-authoritative by default. They MAY exist only as migration seeds, generated snapshots, test fixtures, or exports unless an explicitly approved exception says otherwise.
 - Replacing bespoke Python workflow builders with repo-side declarative files is therefore not, by itself, workflow-first convergence. The authoritative authored logic still belongs in Vontology-native artefacts.
-- Workflow-related Jira work SHOULD follow the workflow-authority readiness/closure checklist in `AGENTS.md` before implementation and before `Done`.
+- Workflow-related Jira work SHOULD record the capability slice, selected
+  authority surfaces, and applicable validation tier from `AGENTS.md`.
 
 ### 2.1 Workflow Authority Model
 
-Canonical workflow definitions, reusable workflow-authoring metadata, routing metadata, and prompt metadata SHOULD be authored directly in Vontology-native graph/text/policy structures whenever the runtime can represent them there.
+When a workflow is selected as represented production authority, its canonical
+definition, reusable authoring metadata, routing metadata, and governed prompt
+metadata SHOULD be authored in Vontology-native graph/text/policy structures.
 
 Normative authority rule:
 

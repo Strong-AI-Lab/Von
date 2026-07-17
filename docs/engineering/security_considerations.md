@@ -2,11 +2,25 @@
 
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
-- **Authority:** Always mandatory under [`AGENTS.md`](../../AGENTS.md)
+- **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
+- **Last reviewed:** 18 July 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
   changes
+
+## When to read this guide
+
+Read the applicable sections before work involving authentication,
+authorisation, private or cross-namespace data, writes, untrusted content,
+external integrations, secrets, deployment, or administrator/operator
+surfaces. The hard security invariants in `AGENTS.md` apply to every task; this
+longer guide is not compulsory reading for unrelated documentation or
+mechanical code work.
+
+Implementation and deployment observations in this document are dated. Verify
+the affected current code and deployment profile before relying on a statement
+labelled "Current".
 
 ## Critical Security Context
 

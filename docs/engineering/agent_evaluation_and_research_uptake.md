@@ -1,8 +1,13 @@
 # Agent Evaluation and Research Uptake
 
+- **Kind:** Evaluation and research-uptake guide
+- **Lifecycle:** Active
+- **Authority:** Normative only for the evaluation or research claim being made
+- **Last reviewed:** 18 July 2026
+
 ## 1. When to read this
 
-Read this document before planning or implementing work that is:
+Consult the relevant sections before planning or implementing work that is:
 
 - architecture-shaping
 - benchmark-related

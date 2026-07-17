@@ -6,6 +6,7 @@
   write-policy scope selected by `AGENTS.md`, subject to the precedence stated
   below
 - **Created:** 2026-04-03
+- **Last reviewed:** 2026-07-18
 - **Freshness boundary:** Principle, not current implementation evidence
 
 ## 1. Purpose
@@ -66,12 +67,14 @@ In practical terms, a minimal-imposition Von should learn from the user's actual
 
 ## 5. Current Policy Stance in This Repo
 
-The current `AGENTS.md` guidance already encodes a fairly strong operational version of minimal imposition. In particular, it says that agents should:
+The current `AGENTS.md` guidance encodes a strong operational version of
+minimal imposition. In particular, it says that agents should:
 
 - exhaust existing context, data, and search before asking humans for more;
 - treat human interruption as the exception rather than the default control loop;
-- allow evidence-backed, low-risk additive Vontology writes by default;
-- treat canonical identifiers and URLs as sufficient evidence for closely related low-risk additive work in many cases;
+- prefer low-burden, reversible progress when task authority is clear;
+- treat canonical identifiers and URLs as identity/provenance evidence, not as
+  blanket permission for unrelated writes;
 - route destructive changes through confirmation or explicit workflow escalation;
 - preserve Vontology and workflow authority rather than hiding policy in ad-hoc code.
 
@@ -112,11 +115,15 @@ For Von this implies:
 
 ### 6.3 Prefer low-risk additive action over unnecessary permission loops
 
-When the system has strong evidence for a **low-risk additive** action, requiring extra ceremony can itself be a form of imposition. In Von this often supports:
+When the system has clear task authority and strong evidence for a **low-risk
+additive** action, requiring extra ceremony can itself be a form of imposition.
+In Von this often supports:
 
 - representing clearly identified scholarly artefacts;
 - attaching reversible or provenance-preserving metadata;
-- proceeding from canonical identifiers or URLs when the intended additive action is clear.
+- proceeding from canonical identifiers or URLs when the intended additive
+  action is clear, authorised, provenance-preserving, and read back through the
+  canonical surface.
 
 This is not blanket permission. It is a strong default that must still yield to stronger constraints around security, user denial, destructive effects, or ambiguous intent.
 
