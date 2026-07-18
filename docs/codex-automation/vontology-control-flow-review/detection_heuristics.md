@@ -218,6 +218,12 @@ before creating duplicates.
   is registered on a production path, is startup-published as workflow
   authority, or is the only reproducible source for a workflow graph,
   transition, prompt, or control policy.
+- Internal-MCP timeout/deadline handling is a hard support boundary when it
+  reports typed execution facts, bounded telemetry, late-result discard, and
+  generic recovery affordance kinds. It becomes drift if the transport, gateway,
+  route serialiser, or timing summary chooses source-specific retry/fallback
+  sequencing, branches to named workflows, or writes model/user-facing recovery
+  copy that should be represented.
 
 ## Recent Examples
 

@@ -298,6 +298,15 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   drift is narrower and now tracked by `JVNAUTOSCI-2589`: Python-owned
   grounded-read/Jira tool-evidence contract bootstraps that repopulate
   source-specific KB facts.
+- 2026-07-19: `JVNAUTOSCI-2588` internal MCP deadline enforcement looked
+  support-only for this drift scan. `transport.py` enforces bounded hard
+  deadlines, records advisory-budget telemetry, returns typed timeout or pool
+  saturation payloads, and discards late handler results; workflow-visible
+  actions preserve these facts under `mcp_result`/`mcp_transport`. Do not file
+  merely because the timeout payload names generic affordance kinds such as
+  bounded retry or state inspection. File if Python starts selecting the
+  concrete recovery workflow/branch, adding integration-specific timeout
+  policy, or authoring user-facing recovery wording.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

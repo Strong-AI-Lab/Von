@@ -359,3 +359,37 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   represented Vontology authority. Linked it to `JVNAUTOSCI-1913`,
   `JVNAUTOSCI-1985`, and `JVNAUTOSCI-2575`.
 - No production code was changed by this review run.
+
+## 2026-07-19T02:05:55.0443309+12:00
+
+- Read current repo guidance, security guidance, design index, relevant VWL
+  manual sections, enduring-memory guidance, authority-alignment guidance,
+  repo-local review memory, and the automation memory path. `CODEX_HOME` was
+  unset in the shell, so the personal automation memory was created under the
+  standard local Codex home.
+- Fast-forwarded local `main` from `b2141c2e` to `ea61cece`; the only
+  pre-existing dirty file was `Von.code-workspace`, which this review did not
+  edit or stage.
+- Reviewed the two fresh commits since the previous run: `7403e296`
+  (`JVNAUTOSCI-2588` internal MCP deadlines) and `ea61cece` design-guidance
+  refresh.
+- Ran `.venv\Scripts\python.exe scripts\check_workflow_purity.py --verbose`.
+  All workflow/prompt/source/policy counters were `0`; the gate still failed
+  only on the known monolith ratchet: orchestrator `49639` vs baseline `45441`,
+  catalogue `35061` vs `32670`, and von_routes `18896` vs `18136`.
+- Runtime attribution companion
+  `.venv\Scripts\python.exe scripts\report_turn_decision_attribution.py --limit 10`
+  timed out after about two minutes, so no architecture-integrity score or
+  fallback-signature histogram was available.
+- Treated the internal MCP deadline path as support-only for this scan:
+  `transport.py` enforces bounded hard deadlines and exposes typed timeout,
+  saturation, queue/handler timing, and late-result-discard facts;
+  `workflow_mcp_tool_actions.py`, `mcp_tool_bridge.py`, `orchestrator.py`,
+  route serialisation, and timing summaries preserve those facts without
+  choosing domain workflows or authoring user-facing recovery wording.
+- Rechecked production `WorkflowDefinition(...)`,
+  `WorkflowRegistration(...)`, and `source="built_in"` surfaces. They remain
+  watch items rather than fresh tickets while `_register_python_defined_workflows()`
+  is empty and the purity registry reports Vontology-only runtime sources.
+- No new Jira issues were created and no production code was changed by this
+  review run.

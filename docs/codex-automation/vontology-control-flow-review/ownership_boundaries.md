@@ -249,6 +249,12 @@ Python can remain the surface for:
   bounded engineering metrics, redacts evidence, and prepares human-review
   tasks, provided it does not become recurring workflow policy, user-facing Von
   answer semantics, or prompt/model/workflow learning authority.
+- generic internal-MCP transport deadline handling, worker-pool bounding,
+  cooperative cancellation hooks, timeout/saturation result envelopes, late
+  result discard policy, and timing telemetry. Python may report typed timeout
+  facts and generic recovery affordance kinds; represented workflows/prompts
+  should still decide whether to retry, inspect state, choose an alternate
+  path, or surface a bounded failure to the user.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
 not normal runtime authority after Vontology authority exists.
