@@ -206,6 +206,52 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
     assert detail_payload["subject"] == "Subject line"
     assert detail_payload["date"] == "Sat, 25 Apr 2026 09:00:00 +0000"
     assert detail_payload["snippet"] == "Short preview"
+    assert "body" not in detail_payload
+
+
+def test_internal_mcp_gmail_get_message_includes_body_only_when_requested(
+    monkeypatch,
+):
+    import base64
+
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    requested_formats: list[str] = []
+
+    def fake_get_message(**kwargs):
+        requested_formats.append(kwargs["format"])
+        return {
+            "id": "msg-body",
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {
+                    "data": base64.urlsafe_b64encode(
+                        b"Explicitly requested message body"
+                    ).decode("ascii")
+                },
+                "headers": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.get_message",
+        fake_get_message,
+    )
+
+    metadata_payload = catalogue_module._gmail_get_message(
+        profile="zhan-gmail",
+        message_id="msg-body",
+    )
+    body_payload = catalogue_module._gmail_get_message(
+        profile="zhan-gmail",
+        message_id="msg-body",
+        include_body=True,
+    )
+
+    assert requested_formats == ["metadata", "full"]
+    assert "body" not in metadata_payload
+    assert body_payload["body"] == "Explicitly requested message body"
+    assert body_payload["body_truncated"] is False
 
 
 def test_gmail_list_messages_zero_results_exposes_empty_messages(monkeypatch):

@@ -73,6 +73,13 @@ def test_bootstrap_materialises_concept_search_instance_retrieval_workflow(
     assert isinstance(discovery_exemplars, dict)
     assert discovery_source.startswith("text_relation:")
     assert "concept profile retrieval" in (discovery_exemplars.get("keywords") or [])
+    assert "do you have a represented vontology concept for" in (
+        discovery_exemplars.get("excluded_query_cues") or []
+    )
+    assert any(
+        "zero-result exact search" in note
+        for note in (discovery_exemplars.get("routing_notes") or [])
+    )
 
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         CONCEPT_SEARCH_INSTANCE_RETRIEVAL_WORKFLOW_ID

@@ -259,6 +259,45 @@ def _split_request_timeout_from_llm_params(
     return params, timeout_seconds
 
 
+def resolve_openai_responses_max_output_tokens(
+    llm_params: Optional[Mapping[str, Any]] = None,
+) -> int:
+    """Return a bounded Responses output budget for ordinary LLM calls.
+
+    The Responses API may reserve against the model's full default output
+    allowance when no limit is supplied.  That can produce a misleading
+    ``insufficient_quota`` failure for a large prompt even though the same key
+    and model succeed with a bounded output.  Callers can override the default
+    per request or with ``VON_OPENAI_RESPONSES_MAX_OUTPUT_TOKENS``.
+    """
+
+    raw_value: Any = None
+    if isinstance(llm_params, Mapping):
+        raw_value = llm_params.get("max_output_tokens")
+        nested = llm_params.get("model_parameters")
+        if raw_value is None and isinstance(nested, Mapping):
+            raw_value = nested.get("max_output_tokens")
+    if raw_value is None:
+        raw_value = os.environ.get("VON_OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "4096")
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = 4096
+    return max(16, min(100_000, parsed))
+
+
+def _openai_model_defaults_to_responses(model: str | None) -> bool:
+    """Return whether ordinary generation should use the Responses API.
+
+    The 5.6 family is probed and exposed through Responses. Routing it to Chat
+    Completions merely because no optional Responses parameter was supplied
+    makes readiness and runtime exercise different provider surfaces.
+    """
+
+    resolved = str(resolve_openai_model_name(model) or model or "").strip().lower()
+    return resolved.startswith("gpt-5.6")
+
+
 def get_ollama_auto_pull_state_snapshot() -> Dict[str, Any]:
     """Return diagnostics for recent Ollama model auto-pull activity."""
     with _OLLAMA_AUTO_PULL_LOCK:
@@ -620,6 +659,31 @@ def resolve_openai_model_name(model: Optional[str]) -> Optional[str]:
     return direct or raw
 
 
+def _resolve_effective_llm_actor_scope(
+    user_concept_id: Optional[str] = None,
+    org_concept_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve actor scope in HTTP and background workflow contexts alike."""
+
+    resolved_user = user_concept_id
+    resolved_org = org_concept_id
+    if resolved_user and resolved_org:
+        return resolved_user, resolved_org
+    try:
+        from ..security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
+
+        if not resolved_user:
+            resolved_user = get_effective_user_concept_id()
+        if not resolved_org:
+            resolved_org = get_effective_organisation_concept_id()
+    except Exception:
+        pass
+    return resolved_user, resolved_org
+
+
 def initialize_clients(force: bool = False):
     """
     Initialize LLM clients based on settings.
@@ -644,17 +708,10 @@ def initialize_clients(force: bool = False):
     if _openai_client is None or openai_settings_changed:
         try:
             if current_env_var and current_key:
-                # Get current model from settings for validation (try session context first)
-                user_concept_id = None
-                org_concept_id = None
-                try:
-                    from flask import session, has_request_context
-
-                    if has_request_context():
-                        user_concept_id = session.get("user_concept_id")
-                        org_concept_id = session.get("organisation_concept_id")
-                except Exception:
-                    pass
+                # Validate against the same actor-scoped model that a durable
+                # workflow will use. Background execution carries this scope in
+                # access-control ContextVars rather than a Flask session.
+                user_concept_id, org_concept_id = _resolve_effective_llm_actor_scope()
                 active_llm = resolve_llm_setting(
                     user_concept_id=user_concept_id, org_concept_id=org_concept_id
                 )
@@ -1807,7 +1864,13 @@ class OpenAIClient(LLMInterface):
                 llm_params_for_model,
                 model=target_model,
             )
-            if responses_params:
+            if responses_params or _openai_model_defaults_to_responses(target_model):
+                responses_params.setdefault(
+                    "max_output_tokens",
+                    resolve_openai_responses_max_output_tokens(
+                        llm_params_for_model
+                    ),
+                )
                 response = request_client.responses.create(  # type: ignore[attr-defined]
                     model=target_model,
                     input=messages,  # type: ignore[arg-type]
@@ -2251,6 +2314,9 @@ def get_llm_client(
             f"Overriding database setting with explicit client type: {client_type}"
         )
         provider = client_type.lower()
+        requested_host = kwargs.get("host")
+        if isinstance(requested_host, str) and requested_host.strip():
+            host = requested_host.strip()
     else:
         # Use resolve_llm_setting to get user > org > global precedence
         from ..services.settings_service import resolve_llm_setting
@@ -2449,18 +2515,12 @@ def get_active_model_name(
     """Helper function to get the model name from the active LLM setting."""
     resolved_user_concept_id = user_concept_id
     resolved_org_concept_id = org_concept_id
-    if not resolved_user_concept_id or not resolved_org_concept_id:
-        try:
-            from flask import has_request_context, session
-            from ..security.access_control import get_effective_user_concept_id
-
-            if has_request_context():
-                if not resolved_user_concept_id:
-                    resolved_user_concept_id = get_effective_user_concept_id()
-                if not resolved_org_concept_id:
-                    resolved_org_concept_id = session.get("organisation_concept_id")
-        except Exception:
-            pass
+    resolved_user_concept_id, resolved_org_concept_id = (
+        _resolve_effective_llm_actor_scope(
+            resolved_user_concept_id,
+            resolved_org_concept_id,
+        )
+    )
 
     active_llm = resolve_llm_setting(
         user_concept_id=resolved_user_concept_id,
@@ -2479,3 +2539,37 @@ def get_active_model_name(
             return resolve_ollama_model_name(model)
         return model
     return None
+
+
+def get_active_model_parameters(
+    *,
+    user_concept_id: Optional[str] = None,
+    org_concept_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return parameters from the same scoped setting as the active model.
+
+    Durable workflows must inherit the complete active-model configuration,
+    not merely its model name.  In particular, dropping a reasoning effort can
+    make an otherwise usable OpenAI request reserve materially more output
+    budget and fail differently from the settings readiness probe.
+    """
+
+    resolved_user_concept_id = user_concept_id
+    resolved_org_concept_id = org_concept_id
+    resolved_user_concept_id, resolved_org_concept_id = (
+        _resolve_effective_llm_actor_scope(
+            resolved_user_concept_id,
+            resolved_org_concept_id,
+        )
+    )
+
+    active_llm = resolve_llm_setting(
+        user_concept_id=resolved_user_concept_id,
+        org_concept_id=resolved_org_concept_id,
+    )
+    if not isinstance(active_llm, Mapping):
+        return {}
+    raw_parameters = active_llm.get("model_parameters")
+    if not isinstance(raw_parameters, Mapping):
+        return {}
+    return dict(raw_parameters)

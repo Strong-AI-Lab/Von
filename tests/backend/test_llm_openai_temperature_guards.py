@@ -237,3 +237,80 @@ def test_llm_interface_openai_generate_uses_responses_reasoning_effort(
     assert result == "ok"
     assert captured_responses_kwargs["model"] == "gpt-5.5"
     assert captured_responses_kwargs["reasoning"] == {"effort": "low"}
+    assert captured_responses_kwargs["max_output_tokens"] == 4096
+
+
+def test_llm_interface_openai_generate_honours_bounded_responses_output(
+    monkeypatch,
+) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    captured_responses_kwargs: dict[str, object] = {}
+
+    def _responses_create(**kwargs):
+        captured_responses_kwargs.update(kwargs)
+        return types.SimpleNamespace(output_text="ok", model="gpt-5.6-luna")
+
+    monkeypatch.setattr(
+        mod.openai,
+        "OpenAI",
+        lambda **_kwargs: types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=_responses_create),
+            chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(
+                    create=lambda **_kwargs: (_ for _ in ()).throw(
+                        AssertionError("chat completions should not be used")
+                    )
+                )
+            ),
+        ),
+    )
+
+    client = mod.OpenAIClient(api_key="test-key")
+    result = client.generate(
+        prompt="hello",
+        model="gpt-5.6-luna",
+        llm_params={
+            "model_parameters": {
+                "reasoning_effort": "low",
+                "max_output_tokens": 2048,
+            }
+        },
+    )
+
+    assert result == "ok"
+    assert captured_responses_kwargs["max_output_tokens"] == 2048
+
+
+def test_llm_interface_openai_generate_defaults_luna_to_responses(
+    monkeypatch,
+) -> None:
+    import src.backend.languagemodels.llm_interface as mod
+
+    captured_responses_kwargs: dict[str, object] = {}
+
+    def _responses_create(**kwargs):
+        captured_responses_kwargs.update(kwargs)
+        return types.SimpleNamespace(output_text="ok", model="gpt-5.6-luna")
+
+    monkeypatch.setattr(
+        mod.openai,
+        "OpenAI",
+        lambda **_kwargs: types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=_responses_create),
+            chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(
+                    create=lambda **_kwargs: (_ for _ in ()).throw(
+                        AssertionError("Luna must use the Responses API")
+                    )
+                )
+            ),
+        ),
+    )
+
+    client = mod.OpenAIClient(api_key="test-key")
+    result = client.generate(prompt="hello", model="gpt-5.6-luna")
+
+    assert result == "ok"
+    assert captured_responses_kwargs["model"] == "gpt-5.6-luna"
+    assert captured_responses_kwargs["max_output_tokens"] == 4096

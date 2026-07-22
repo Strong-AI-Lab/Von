@@ -52,6 +52,59 @@ def _build_request(*, llm_response: str) -> WorkflowActionRequest:
     )
 
 
+def test_active_only_no_tool_policy_bypasses_gateway_registry_setup(
+    monkeypatch,
+) -> None:
+    llm_client = MagicMock()
+    llm_client.generate.return_value = '{"status":"ok"}'
+    gateway = MagicMock()
+    gateway_runtime_calls = 0
+
+    def fail_if_gateway_runtime_is_loaded(*_args, **_kwargs):
+        nonlocal gateway_runtime_calls
+        gateway_runtime_calls += 1
+        raise AssertionError("active-only no-tool calls must not load gateway registry")
+
+    monkeypatch.setattr(
+        lse,
+        "_build_gateway_runtime",
+        fail_if_gateway_runtime_is_loaded,
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=llm_client,
+            model="gpt-5.6-luna",
+            gateway=gateway,
+        ),
+        data={"user_concept_id": "#V#user"},
+        workflow_id="#V#bounded_digest_workflow",
+        workflow_state_id="#V#bounded_digest_synthesis",
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "policy_stage": "bounded_digest",
+            "selection_policy": "active_only",
+            "tool_mode": "none",
+            "max_output_tokens": 2048,
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert gateway_runtime_calls == 0
+    llm_client.generate.assert_called_once()
+    assert llm_client.generate.call_args.kwargs["llm_params"][
+        "max_output_tokens"
+    ] == 2048
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["selection_policy"] == "active_only"
+    assert envelope["selected_model"] == "gpt-5.6-luna"
+
+
 def test_compose_llm_prompt_includes_workflow_experience_guidance_labels() -> None:
     prompt = _compose_llm_prompt(
         base_prompt="Use the workflow policy.",

@@ -134,6 +134,8 @@ class Schema:
         optional: mapping of optional keys to acceptable Python types.
         allow_unknown: whether keys outside required/optional should be allowed.
         description: human readable context for diagnostics / errors.
+        comma_separated_list_fields: list-valued fields whose string items may
+            be safely split on commas at the tool boundary.
     """
 
     required: Mapping[str, JsonCompatibleType] = field(default_factory=dict)
@@ -144,6 +146,7 @@ class Schema:
     batch_propagated_fields: Sequence[str] = field(default_factory=tuple)
     enum_values: Mapping[str, Sequence[Any]] = field(default_factory=dict)
     scalar_source_fields: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    comma_separated_list_fields: Sequence[str] = field(default_factory=tuple)
 
     def expect(self, key: str) -> JsonCompatibleType | None:
         if key in self.required:
@@ -260,6 +263,12 @@ def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
             for field_name, source_fields in schema.scalar_source_fields.items()
             if isinstance(field_name, str) and field_name.strip()
         }
+    if schema.comma_separated_list_fields:
+        payload["x-von-comma-separated-list-fields"] = [
+            field_name.strip()
+            for field_name in schema.comma_separated_list_fields
+            if isinstance(field_name, str) and field_name.strip()
+        ]
     return payload
 
 
@@ -398,6 +407,31 @@ def coerce_payload_types(
         if value is None:
             return value
 
+        comma_separated_fields = {
+            field_name.strip()
+            for field_name in schema.comma_separated_list_fields
+            if isinstance(field_name, str) and field_name.strip()
+        }
+        if list in allowed and key in comma_separated_fields and isinstance(
+            value, (str, list, tuple)
+        ):
+            source_items = [value] if isinstance(value, str) else list(value)
+            normalised_items: list[Any] = []
+            split_applied = False
+            for item in source_items:
+                if not isinstance(item, str):
+                    normalised_items.append(item)
+                    continue
+                parts = [part.strip() for part in item.split(",") if part.strip()]
+                if len(parts) != 1 or parts != [item]:
+                    split_applied = True
+                normalised_items.extend(parts)
+            if split_applied or not isinstance(value, list):
+                warnings.append(
+                    f"Normalised comma-separated list field '{key}' to individual items."
+                )
+            return normalised_items
+
         if isinstance(value, Mapping):
             source_fields = schema.scalar_source_fields.get(key) or ()
             if str in allowed and source_fields:
@@ -414,6 +448,11 @@ def coerce_payload_types(
         if isinstance(value, str):
             raw = value.strip()
             if not raw:
+                if list in allowed:
+                    warnings.append(
+                        f"Coerced empty string field '{key}' to an empty list."
+                    )
+                    return []
                 return value
 
             if int in allowed and raw.isdigit():
@@ -476,6 +515,19 @@ def coerce_payload_types(
 
     for key, expected in schema.optional.items():
         if key not in payload:
+            continue
+        value = payload[key]
+        allowed = _normalise_expected(expected)
+        if (
+            isinstance(value, str)
+            and not value.strip()
+            and str not in allowed
+            and list not in allowed
+        ):
+            payload.pop(key, None)
+            warnings.append(
+                f"Omitted empty optional non-string field '{key}'."
+            )
             continue
         payload[key] = _coerce_value(key, payload[key], expected)
 

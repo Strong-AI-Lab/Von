@@ -130,6 +130,16 @@ def test_jira_methods_registered_in_catalogue():
     assert transitions_definition.input_schema.description is not None
     assert "transition list" in transitions_definition.input_schema.description
 
+    search_definition = catalogue.get("jira_search")
+    assert tuple(search_definition.input_schema.comma_separated_list_fields) == (
+        "fields",
+    )
+    get_issue_definition = catalogue.get("jira_get_issue")
+    assert tuple(get_issue_definition.input_schema.comma_separated_list_fields) == (
+        "fields",
+        "expand",
+    )
+
 
 def test_jira_handlers_require_minimum_fields():
     # Missing required params should return a friendly error and not raise

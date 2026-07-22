@@ -48,6 +48,7 @@ GMAIL_BYPASS_PROFILE_FILTER_ARGUMENT_FIELD_ID = (
     "#V#gmail_bypass_profile_filter_argument_field"
 )
 GMAIL_FORMAT_ARGUMENT_FIELD_ID = "#V#gmail_format_argument_field"
+GMAIL_INCLUDE_BODY_ARGUMENT_FIELD_ID = "#V#gmail_include_body_argument_field"
 GMAIL_MESSAGE_ID_FIELD_ID = "#V#gmail_message_id_field"
 GMAIL_MESSAGE_ID_ARGUMENT_FIELD_ID = "#V#gmail_message_id_argument_field"
 GMAIL_THREAD_ID_FIELD_ID = "#V#gmail_thread_id_field"
@@ -57,6 +58,8 @@ GMAIL_DATE_FIELD_ID = "#V#gmail_date_field"
 GMAIL_SNIPPET_FIELD_ID = "#V#gmail_snippet_field"
 GMAIL_LABEL_IDS_FIELD_ID = "#V#gmail_label_ids_field"
 GMAIL_PAYLOAD_FIELD_ID = "#V#gmail_payload_field"
+GMAIL_BODY_FIELD_ID = "#V#gmail_body_field"
+GMAIL_BODY_TRUNCATED_FIELD_ID = "#V#gmail_body_truncated_field"
 GMAIL_EFFECTIVE_QUERY_FIELD_ID = "#V#gmail_effective_query_field"
 GMAIL_NOTES_FIELD_ID = "#V#gmail_notes_field"
 
@@ -294,6 +297,12 @@ _FIELD_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         field_key="format",
     ),
     _field(
+        GMAIL_INCLUDE_BODY_ARGUMENT_FIELD_ID,
+        "Gmail include body argument field",
+        "Explicit opt-in argument for bounded message-body retrieval.",
+        field_key="include_body",
+    ),
+    _field(
         GMAIL_MESSAGE_ID_FIELD_ID,
         "Gmail message identifier field",
         "Stable Gmail message identifier returned by list and detail calls.",
@@ -348,6 +357,18 @@ _FIELD_CONCEPT_SPECS: tuple[GmailConceptSpec, ...] = (
         field_key="payload",
     ),
     _field(
+        GMAIL_BODY_FIELD_ID,
+        "Gmail body field",
+        "Bounded plain-text message body returned only after explicit opt-in.",
+        field_key="body",
+    ),
+    _field(
+        GMAIL_BODY_TRUNCATED_FIELD_ID,
+        "Gmail body truncated field",
+        "Whether the returned bounded message body omitted trailing characters.",
+        field_key="body_truncated",
+    ),
+    _field(
         GMAIL_EFFECTIVE_QUERY_FIELD_ID,
         "Gmail effective query field",
         "Diagnostic field describing profile and caller query filters applied to a list call.",
@@ -369,6 +390,7 @@ _WIRE_KEYS = (
     "maxResults",
     "bypass_profile_query_prefix",
     "format",
+    "include_body",
     "messages",
     "message_id",
     "id",
@@ -380,6 +402,8 @@ _WIRE_KEYS = (
     "snippet",
     "labelIds",
     "payload",
+    "body",
+    "body_truncated",
     "effective_query",
     "notes",
 )
@@ -406,6 +430,8 @@ _PAYLOAD_PATH_SPECS: tuple[GmailConceptSpec, ...] = (
     _payload_path("#V#gmail_payload_path_snippet", "snippet"),
     _payload_path("#V#gmail_payload_path_label_ids", "labelIds"),
     _payload_path("#V#gmail_payload_path_payload", "payload"),
+    _payload_path("#V#gmail_payload_path_body", "body"),
+    _payload_path("#V#gmail_payload_path_body_truncated", "body_truncated"),
     _payload_path("#V#gmail_payload_path_header_from", "payload.headers[name=From]"),
     _payload_path(
         "#V#gmail_payload_path_header_subject", "payload.headers[name=Subject]"
@@ -445,6 +471,7 @@ def _field_alias_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_MAX_RESULTS_ARGUMENT_FIELD_ID: ("max_results", "maxResults"),
         GMAIL_BYPASS_PROFILE_FILTER_ARGUMENT_FIELD_ID: ("bypass_profile_query_prefix",),
         GMAIL_FORMAT_ARGUMENT_FIELD_ID: ("format",),
+        GMAIL_INCLUDE_BODY_ARGUMENT_FIELD_ID: ("include_body",),
         GMAIL_MESSAGE_ID_FIELD_ID: ("message_id", "id"),
         GMAIL_MESSAGE_ID_ARGUMENT_FIELD_ID: ("message_id", "id"),
         GMAIL_THREAD_ID_FIELD_ID: ("threadId",),
@@ -454,6 +481,8 @@ def _field_alias_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_SNIPPET_FIELD_ID: ("snippet",),
         GMAIL_LABEL_IDS_FIELD_ID: ("labelIds",),
         GMAIL_PAYLOAD_FIELD_ID: ("payload",),
+        GMAIL_BODY_FIELD_ID: ("body",),
+        GMAIL_BODY_TRUNCATED_FIELD_ID: ("body_truncated",),
         GMAIL_EFFECTIVE_QUERY_FIELD_ID: ("effective_query",),
         GMAIL_NOTES_FIELD_ID: ("notes",),
     }
@@ -494,6 +523,10 @@ def _field_payload_path_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_SNIPPET_FIELD_ID: ("#V#gmail_payload_path_snippet",),
         GMAIL_LABEL_IDS_FIELD_ID: ("#V#gmail_payload_path_label_ids",),
         GMAIL_PAYLOAD_FIELD_ID: ("#V#gmail_payload_path_payload",),
+        GMAIL_BODY_FIELD_ID: ("#V#gmail_payload_path_body",),
+        GMAIL_BODY_TRUNCATED_FIELD_ID: (
+            "#V#gmail_payload_path_body_truncated",
+        ),
         GMAIL_EFFECTIVE_QUERY_FIELD_ID: ("#V#gmail_payload_path_effective_query",),
         GMAIL_NOTES_FIELD_ID: ("#V#gmail_payload_path_notes",),
     }
@@ -517,6 +550,9 @@ def _field_role_relationships() -> tuple[GmailRelationshipSpec, ...]:
             "#V#tool_field_role_follow_up_argument",
         ),
         GMAIL_FORMAT_ARGUMENT_FIELD_ID: ("#V#tool_field_role_follow_up_argument",),
+        GMAIL_INCLUDE_BODY_ARGUMENT_FIELD_ID: (
+            "#V#tool_field_role_follow_up_argument",
+        ),
         GMAIL_MESSAGE_ID_FIELD_ID: (
             "#V#tool_field_role_entity_identifier",
             "#V#tool_field_role_follow_up_argument",
@@ -535,6 +571,11 @@ def _field_role_relationships() -> tuple[GmailRelationshipSpec, ...]:
         ),
         GMAIL_LABEL_IDS_FIELD_ID: ("#V#tool_field_role_answer_evidence",),
         GMAIL_PAYLOAD_FIELD_ID: ("#V#tool_field_role_sensitive_content",),
+        GMAIL_BODY_FIELD_ID: (
+            "#V#tool_field_role_answer_evidence",
+            "#V#tool_field_role_sensitive_content",
+        ),
+        GMAIL_BODY_TRUNCATED_FIELD_ID: ("#V#tool_field_role_answer_evidence",),
         GMAIL_EFFECTIVE_QUERY_FIELD_ID: ("#V#tool_field_role_answer_evidence",),
         GMAIL_NOTES_FIELD_ID: ("#V#tool_field_role_answer_evidence",),
     }
@@ -588,6 +629,13 @@ def _field_policy_relationships() -> tuple[GmailRelationshipSpec, ...]:
             "#V#tool_redaction_policy_redact_by_default",
         )
     )
+    relationships.append(
+        _relationship(
+            GMAIL_BODY_FIELD_ID,
+            "#V#field_has_redaction_policy",
+            "#V#tool_redaction_policy_include_plaintext",
+        )
+    )
     return tuple(relationships)
 
 
@@ -611,6 +659,7 @@ def _tool_field_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_PROFILE_ARGUMENT_FIELD_ID,
         GMAIL_MESSAGE_ID_ARGUMENT_FIELD_ID,
         GMAIL_FORMAT_ARGUMENT_FIELD_ID,
+        GMAIL_INCLUDE_BODY_ARGUMENT_FIELD_ID,
     )
     detail_output_fields = (
         GMAIL_MESSAGE_ID_FIELD_ID,
@@ -621,6 +670,8 @@ def _tool_field_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_SENDER_FIELD_ID,
         GMAIL_SUBJECT_FIELD_ID,
         GMAIL_DATE_FIELD_ID,
+        GMAIL_BODY_FIELD_ID,
+        GMAIL_BODY_TRUNCATED_FIELD_ID,
     )
 
     relationships: list[GmailRelationshipSpec] = []
@@ -648,6 +699,8 @@ def _evidence_view_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_MESSAGE_ID_FIELD_ID,
         GMAIL_THREAD_ID_FIELD_ID,
         GMAIL_LABEL_IDS_FIELD_ID,
+        GMAIL_BODY_FIELD_ID,
+        GMAIL_BODY_TRUNCATED_FIELD_ID,
         *GMAIL_REQUIRED_FINAL_ANSWER_FIELD_IDS,
     )
     user_display_fields = (
@@ -760,6 +813,8 @@ def _entity_relationships() -> tuple[GmailRelationshipSpec, ...]:
         GMAIL_SNIPPET_FIELD_ID,
         GMAIL_LABEL_IDS_FIELD_ID,
         GMAIL_PAYLOAD_FIELD_ID,
+        GMAIL_BODY_FIELD_ID,
+        GMAIL_BODY_TRUNCATED_FIELD_ID,
     )
     return tuple(
         _relationship(
@@ -868,6 +923,8 @@ def _list_detail_relationships() -> tuple[GmailRelationshipSpec, ...]:
             GMAIL_SNIPPET_FIELD_ID,
             GMAIL_LABEL_IDS_FIELD_ID,
             GMAIL_PAYLOAD_FIELD_ID,
+            GMAIL_BODY_FIELD_ID,
+            GMAIL_BODY_TRUNCATED_FIELD_ID,
         )
     )
     relationships.extend(
@@ -892,6 +949,8 @@ def _list_detail_relationships() -> tuple[GmailRelationshipSpec, ...]:
             GMAIL_SUBJECT_FIELD_ID,
             GMAIL_DATE_FIELD_ID,
             GMAIL_SNIPPET_FIELD_ID,
+            GMAIL_BODY_FIELD_ID,
+            GMAIL_BODY_TRUNCATED_FIELD_ID,
         )
     )
     return tuple(relationships)
@@ -1201,6 +1260,8 @@ def validate_gmail_tool_evidence_contract() -> dict[str, Any]:
 
 
 __all__ = [
+    "GMAIL_BODY_FIELD_ID",
+    "GMAIL_BODY_TRUNCATED_FIELD_ID",
     "GMAIL_DATE_FIELD_ID",
     "GMAIL_FINAL_ANSWER_VIEW_ID",
     "GMAIL_FOLLOW_UP_VIEW_ID",

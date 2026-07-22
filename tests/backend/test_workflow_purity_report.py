@@ -628,6 +628,10 @@ def test_build_workflow_purity_report_allows_retrieval_monitoring_seed_bootstrap
         ): "bootstrap_canonical_multilingual_concept_enrichment_workflow",
         (
             "src/backend/services/"
+            "lab_status_digest_workflow_vontology_service.py"
+        ): "bootstrap_canonical_lab_status_digest_workflow",
+        (
+            "src/backend/services/"
             "turn_pipeline_monitoring_workflow_vontology_service.py"
         ): "bootstrap_canonical_turn_pipeline_monitoring_workflows",
     }.items():

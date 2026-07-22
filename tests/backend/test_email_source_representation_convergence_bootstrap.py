@@ -103,6 +103,31 @@ def test_email_source_seed_keeps_claim_enrichment_out_of_source_completion() -> 
     assert all("claim" not in json.dumps(step).lower() for step in steps)
 
 
+def test_email_source_seed_excludes_mail_profile_status_questions() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        item
+        for item in payload.get("workflows") or []
+        if item.get("workflow_id") == mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID
+    )
+    discovery_relation = next(
+        item
+        for item in workflow.get("text_relations") or []
+        if item.get("predicate") == "#V#hasWorkflowDiscoveryExemplarsJson"
+    )
+    discovery = json.loads(discovery_relation["text"])
+
+    assert "which gmail profile" in discovery["excluded_query_cues"]
+    assert any(
+        "profile or account" in note
+        for note in discovery["routing_notes"]
+    )
+
+
 def test_email_source_seed_uses_represented_markers_instead_of_gmail_writes() -> None:
     from src.backend.services import (
         email_source_representation_convergence_workflow_vontology_service as mod,

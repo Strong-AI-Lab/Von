@@ -1333,6 +1333,19 @@ def _render_selected_workflow_artefact_lines(
     surfaceable_evidence = project_surfaceable_concept_evidence(
         concept_evidence_source if concept_evidence_source is not None else data
     )
+    raw_arxiv_ids = data.get("arxiv_ids")
+    arxiv_ids = (
+        [raw_arxiv_ids]
+        if isinstance(raw_arxiv_ids, str)
+        else raw_arxiv_ids
+        if isinstance(raw_arxiv_ids, Sequence)
+        and not isinstance(raw_arxiv_ids, (str, bytes, bytearray))
+        else []
+    )
+    for raw_arxiv_id in arxiv_ids[:3]:
+        arxiv_id = _coerce_non_empty_text(raw_arxiv_id)
+        if arxiv_id:
+            lines.append(f"arXiv paper: {arxiv_id}.")
     paper_concept_id = _coerce_non_empty_text(data.get("paper_concept_id"))
     file_copy_concept_id = _coerce_non_empty_text(data.get("file_copy_concept_id"))
     if paper_concept_id:
@@ -2405,10 +2418,16 @@ def build_turn_execution_selected_workflow_outputs(
         derived_user_response = preserved_child_user_response
 
     if derived_user_response and initial_surfaceable_evidence:
-        missing_surface_lines = render_surfaceable_concept_lines(
-            initial_surfaceable_evidence,
-            existing_text=derived_user_response,
+        missing_surface_lines = _render_selected_workflow_artefact_lines(
+            child_outputs_map,
+            concept_evidence_source={
+                "child_outputs": child_outputs_map,
+                "child_result_snapshot": child_snapshot,
+            },
         )
+        missing_surface_lines = [
+            line for line in missing_surface_lines if line not in derived_user_response
+        ]
         if missing_surface_lines:
             derived_user_response = "\n".join(
                 [*missing_surface_lines, "", derived_user_response]
@@ -3221,8 +3240,8 @@ def run_turn_execution_critic(
         "critic_summary": dict(critic_summary),
         "search_evidence": _bounded_snapshot(
             execution_payload_map.get("search_evidence"),
-            max_depth=4,
-            max_items=6,
+            max_depth=6,
+            max_items=12,
             max_string_length=600,
         ),
         "verification_evidence": _bounded_snapshot(

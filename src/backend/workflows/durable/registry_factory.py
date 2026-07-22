@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 from ...db.transient_errors import is_transient_mongo_error
 from .. import WorkflowRegistry
@@ -362,6 +362,38 @@ def get_shared_durable_action_registry(
         if force_rebuild or _shared_action_registry is None:
             _shared_action_registry = build_durable_action_registry()
         return _shared_action_registry
+
+
+def get_supported_durable_workflow_action_ids() -> tuple[str, ...]:
+    """Return actions accepted by the same surface used at execution time.
+
+    Durable execution supports registered actions, ``llm.action`` (handled by
+    the executor), and exact internal MCP tool names through the registry's
+    fallback handler.  Authoring validation must use that complete executable
+    surface or it incorrectly rejects an existing workflow as soon as the
+    workflow contains a first-class MCP action.
+    """
+
+    registry = get_shared_durable_action_registry()
+    supported = set(registry.all_action_ids())
+    supported.add("llm.action")
+    if registry.has_fallback_handler():
+        try:
+            gateway = _get_or_build_durable_mcp_gateway()
+            methods = gateway.describe_methods()
+            if isinstance(methods, Mapping):
+                supported.update(
+                    str(tool_name).strip()
+                    for tool_name in methods
+                    if str(tool_name).strip()
+                )
+        except Exception:
+            logger.warning(
+                "[workflow_registry] Internal MCP catalogue unavailable for "
+                "authoring validation",
+                exc_info=True,
+            )
+    return tuple(sorted(supported))
 
 
 def invalidate_shared_durable_action_registry() -> dict[str, Any]:

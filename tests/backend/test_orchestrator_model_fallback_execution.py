@@ -1878,6 +1878,49 @@ def test_active_llm_local_model_switches_from_openai_client_to_ollama(
     assert telemetry["host"] == "http://localhost:11434"
 
 
+def test_enabled_ollama_candidate_preserves_its_scoped_host(monkeypatch) -> None:
+    orchestrator = _bare_orchestrator()
+    ollama_client = _StubOllamaClient(default_model="gemma4:latest")
+    ollama_client.host = "http://127.0.0.1:11434"
+    requested_clients: list[dict[str, Any]] = []
+
+    def _get_llm_client(**kwargs: Any) -> Any:
+        requested_clients.append(dict(kwargs))
+        return ollama_client
+
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_llm_client",
+        _get_llm_client,
+    )
+
+    client, model_name, telemetry = orchestrator._create_client_for_candidate(
+        _ModelCandidate(
+            provider="ollama",
+            model="gemma4:latest",
+            raw="ollama:gemma4:latest",
+            source="enabled_settings",
+            host="http://127.0.0.1:11434",
+        ),
+        default_client=object(),
+        default_model="gpt-5.6-luna",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+    )
+
+    assert client is ollama_client
+    assert requested_clients == [
+        {
+            "client_type": "ollama",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "host": "http://127.0.0.1:11434",
+        }
+    ]
+    assert model_name == "gemma4:latest"
+    assert telemetry["provider"] == "ollama"
+    assert telemetry["host"] == "http://127.0.0.1:11434"
+
+
 def test_provider_diagnostics_treat_raw_ollama_tags_as_ollama() -> None:
     assert (
         InternalMCPChatOrchestrator._infer_provider_from_model_reference("gemma4:26b")

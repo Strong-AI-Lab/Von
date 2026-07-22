@@ -527,6 +527,7 @@ def test_selected_workflow_outputs_surface_nested_paper_concept_handles() -> Non
         failure_detail=None,
         child_outputs={
             "response_text": "Represented the requested arXiv papers.",
+            "arxiv_ids": ["2402.18144", "2603.24621"],
             "workflow_execution_summary": {
                 "result": {
                     "successful_results": [
@@ -565,6 +566,8 @@ def test_selected_workflow_outputs_surface_nested_paper_concept_handles() -> Non
     assert "#V#paper_on_arxiv_2402_18144_c100899e" in response_text
     assert "#V#paper_on_arxiv_2603_24621_eb7a21c4" in response_text
     assert "Paper concept: #V#paper_on_arxiv_2402_18144_c100899e." in response_text
+    assert "arXiv paper: 2402.18144." in response_text
+    assert "arXiv paper: 2603.24621." in response_text
     assert outputs["completion_report"]["surfaceable_concept_ids"] == [
         "#V#paper_on_arxiv_2402_18144_c100899e",
         "#V#file_copy_arxiv_2402_18144_c100899e",
@@ -1424,12 +1427,9 @@ def test_concept_profile_wrong_target_evidence_blocks_completion() -> None:
     assert workflow_effect["status"] == "not_executed"
     assert workflow_effect["targets"] == ["#V#kobe_knowles"]
     assert workflow_effect["failure_code"] == "concept_profile_evidence_wrong_target"
-    prompt_fetch_effect = effect_by_id[
-        "effect_prompt_required_evidence_fetch_concept_1"
-    ]
-    assert prompt_fetch_effect["targets"] == ["#V#kobe_knowles"]
-    assert prompt_fetch_effect["failure_code"] == (
-        "prompt_required_evidence_fetch_concept_wrong_target"
+    assert not any(
+        effect_id.startswith("effect_prompt_required_evidence_")
+        for effect_id in effect_by_id
     )
     assert record["execution"]["summary"]["required_evidence_target_concept_ids"] == [
         "#V#kobe_knowles"

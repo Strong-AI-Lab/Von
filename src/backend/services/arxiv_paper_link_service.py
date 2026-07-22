@@ -164,6 +164,17 @@ def _ensure_predicate_concept(
     from . import concept_service
 
     if _concept_exists(concept_id):
+        existing = concept_service.get_concept_by_concept_id(concept_id) or {}
+        relationships = existing.get("relationships") or {}
+        instance_types = list(relationships.get("is_an_instance_of") or [])
+        if "#V#predicate" not in instance_types:
+            from .relationship_write_service import add_relationship
+
+            add_relationship(
+                source_id=concept_id,
+                predicate="is_an_instance_of",
+                target="#V#predicate",
+            )
         return
 
     try:

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from ..db.repositories.concepts_repository import (
     ConceptsRepository,
 )
+from ..security.access_control import bypass_access_control
 from .concept_predicate_metadata_service import (
     get_relationship_kinds_set,
     get_structural_predicate_aliases,
@@ -375,9 +376,14 @@ def validate_predicate_concept(
         return True, None, None
 
     # Check for persisted or code-registered concept
-    pred_doc = repo.find_one(
-        {"concept_id": predicate}, {"concept_id": 1, "relationships": 1}
-    )
+    # Predicate typing is a hard schema invariant, not user-visible domain data.
+    # Actor-scoped relationship sanitisation must not hide ``#V#predicate`` here
+    # and turn an authorised write into a false ``predicate_concept_not_typed``
+    # failure. Source and target checks below remain access-controlled.
+    with bypass_access_control():
+        pred_doc = repo.find_one(
+            {"concept_id": predicate}, {"concept_id": 1, "relationships": 1}
+        )
     if pred_doc is None and is_code_concept_id(predicate):
         pred_doc = build_virtual_concept_doc(predicate)
 

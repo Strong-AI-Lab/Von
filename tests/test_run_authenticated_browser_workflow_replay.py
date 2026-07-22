@@ -171,6 +171,19 @@ def test_extract_progress_facts_from_nested_progress_payloads() -> None:
     assert replay.extract_observed_workflow_ids(payload) == []
 
 
+def test_extract_observed_workflow_ids_rejects_summarised_mapping_values() -> None:
+    payload = {
+        "workflow_id": "#V#source_neutral_paper_reference_ingestion_workflow",
+        "nested": {
+            "workflow_id": {"depth_limited": True, "summary": "[summarised]"},
+        },
+    }
+
+    assert replay.extract_observed_workflow_ids(payload) == [
+        "#V#source_neutral_paper_reference_ingestion_workflow"
+    ]
+
+
 def test_build_report_uses_task_status_snapshots_for_route_and_progress_evidence() -> (
     None
 ):

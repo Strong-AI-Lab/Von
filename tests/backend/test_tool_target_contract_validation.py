@@ -171,6 +171,43 @@ def test_resolved_focal_read_ignores_unresolved_secondary_type_contract() -> Non
     assert evidence["evidence"] == []
 
 
+def test_authenticated_actor_binding_allows_bounded_profile_lookup() -> None:
+    target_state = target_contract_state_from_context(
+        {
+            "turn_expected_target_contracts": [
+                {
+                    "kind": "symbolic",
+                    "binding_kind": "entity",
+                    "text": "Authenticated user whose account must be resolved.",
+                    "resolution_status": "unresolved",
+                },
+                {
+                    "kind": "natural_language",
+                    "binding_kind": "unknown",
+                    "text": "the requested external account resource",
+                    "resolution_status": "unresolved",
+                },
+            ],
+            "target_concept_ids": ["#V#michael_witbrock"],
+        }
+    )
+
+    result = validate_tool_target_contract(
+        tool_name="find_relations_with_argument",
+        payload={"concept_id": "#V#michael_witbrock"},
+        target_contract_state=target_state,
+    )
+
+    assert result.ok is True
+    assert result.diagnostics == ()
+    assert result.resolution_evidence[0]["resolution_scope"] == (
+        "resolved_read_target_with_unresolved_secondary_contracts"
+    )
+    assert result.resolution_evidence[0]["matched_resolved_target_contracts"][0][
+        "concept_ids"
+    ] == ["#V#michael_witbrock"]
+
+
 def test_resolved_focal_mutation_still_blocks_unresolved_secondary_contract(
     monkeypatch,
 ) -> None:

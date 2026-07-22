@@ -62,6 +62,7 @@ CONCEPT_NAME_FIELD_ID = "#V#concept_name_field"
 CONCEPT_DESCRIPTION_FIELD_ID = "#V#concept_description_field"
 CONCEPT_RELATIONSHIPS_FIELD_ID = "#V#concept_relationships_field"
 CONCEPT_RELATIONS_FIELD_ID = "#V#concept_relations_field"
+CONCEPT_RUNTIME_PROFILE_ALIAS_FIELD_ID = "#V#concept_runtime_profile_alias_field"
 
 ARXIV_PAPERS_COLLECTION_FIELD_ID = "#V#arxiv_papers_collection_field"
 ARXIV_PAPER_ID_FIELD_ID = "#V#arxiv_paper_identifier_field"
@@ -420,6 +421,15 @@ _FIELD_CONCEPT_SPECS: tuple[GroundedReadConceptSpec, ...] = (
         field_key="description",
     ),
     _field(
+        CONCEPT_RUNTIME_PROFILE_ALIAS_FIELD_ID,
+        "Concept runtime profile alias field",
+        (
+            "Bounded represented runtime alias used to identify an external "
+            "integration profile without exposing credentials or token material."
+        ),
+        field_key="runtime_profile_alias",
+    ),
+    _field(
         CONCEPT_RELATIONSHIPS_FIELD_ID,
         "Concept relationships field",
         "Structural predicate-to-target relationships carried by a concept read.",
@@ -619,6 +629,7 @@ _FIELD_ALIASES: Mapping[str, tuple[str, ...]] = {
     CONCEPT_ID_FIELD_ID: ("concept_id",),
     CONCEPT_NAME_FIELD_ID: ("name", "direct_concept_name"),
     CONCEPT_DESCRIPTION_FIELD_ID: ("description",),
+    CONCEPT_RUNTIME_PROFILE_ALIAS_FIELD_ID: ("runtime_profile_alias",),
     CONCEPT_RELATIONSHIPS_FIELD_ID: ("relationships",),
     CONCEPT_RELATIONS_FIELD_ID: ("relations",),
     ARXIV_PAPERS_COLLECTION_FIELD_ID: ("papers", "results"),
@@ -670,6 +681,7 @@ _FIELD_PAYLOAD_PATHS: Mapping[str, tuple[str, ...]] = {
         "concept_data.preserved_fields.description",
         "concept_data.description",
     ),
+    CONCEPT_RUNTIME_PROFILE_ALIAS_FIELD_ID: ("attributes.runtime_profile_alias",),
     ARXIV_PAPERS_COLLECTION_FIELD_ID: ("papers", "results"),
     ARXIV_PAPER_ID_FIELD_ID: _collection_paths(("papers", "results"), "id", "arxiv_id"),
     ARXIV_TITLE_FIELD_ID: _collection_paths(("papers", "results"), "title"),
@@ -818,6 +830,7 @@ FETCH_CONCEPT_OUTPUT_FIELD_IDS: tuple[str, ...] = (
     CONCEPT_ID_FIELD_ID,
     CONCEPT_NAME_FIELD_ID,
     CONCEPT_DESCRIPTION_FIELD_ID,
+    CONCEPT_RUNTIME_PROFILE_ALIAS_FIELD_ID,
     CONCEPT_RELATIONSHIPS_FIELD_ID,
     CONCEPT_RELATIONS_FIELD_ID,
     *SHARED_STATUS_FIELD_IDS,

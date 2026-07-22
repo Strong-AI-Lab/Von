@@ -131,6 +131,13 @@ def test_gmail_final_answer_view_requires_detail_completed_message_fields(
         service.GMAIL_SNIPPET_FIELD_ID,
     }
 
+    included_fields = _targets(
+        service.GMAIL_FINAL_ANSWER_VIEW_ID,
+        "#V#evidence_view_includes_field",
+    )
+    assert service.GMAIL_BODY_FIELD_ID in included_fields
+    assert service.GMAIL_BODY_TRUNCATED_FIELD_ID in included_fields
+
     completed_fields = _targets(
         service.GMAIL_GET_MESSAGE_TOOL_ID,
         "#V#detail_tool_completes_field",
@@ -142,6 +149,8 @@ def test_gmail_final_answer_view_requires_detail_completed_message_fields(
         "#V#tool_result_preserves_field",
     )
     assert required_fields.issubset(preserved_detail_fields)
+    assert service.GMAIL_BODY_FIELD_ID in preserved_detail_fields
+    assert service.GMAIL_BODY_TRUNCATED_FIELD_ID in preserved_detail_fields
 
 
 def test_gmail_list_detail_affordance_maps_list_identifier_to_detail_argument(

@@ -500,6 +500,57 @@ def test_output_context_mapping_applies_before_post_action_validation() -> None:
     assert events[0].get("value_present") is True
 
 
+def test_output_context_mapping_resolves_nested_attributes_from_result_envelope() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#writes_nested_result_attribute_mapping",
+        initial_state="write",
+        states={
+            "write": WorkflowStateSpec(
+                state_id="write",
+                actions=(WorkflowActionInvocation(action_id="tool.write"),),
+                terminal=True,
+                metadata={
+                    "writes_context_keys": ["mail_review_profile_id"],
+                    "tool_output_context_mappings": [
+                        {
+                            "tool_output_field": "attributes.runtime_profile_alias",
+                            "context_key": "mail_review_profile_id",
+                        }
+                    ],
+                },
+            )
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            outputs={
+                "result": {
+                    "attributes": {
+                        "runtime_profile_alias": "vonwitbrock-gmail",
+                    }
+                }
+            }
+        )
+
+    registry.register(ActionSpec(action_id="tool.write", handler=handler))
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data.get("mail_review_profile_id") == "vonwitbrock-gmail"
+    events = result.data.get("workflow_tool_output_mapping_events")
+    assert isinstance(events, list)
+    assert events[0].get("resolved_path") == (
+        "result.attributes.runtime_profile_alias"
+    )
+
+
 def test_metadata_validation_blocks_missing_writes_context_key() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#writes_context_key_validation_negative",
