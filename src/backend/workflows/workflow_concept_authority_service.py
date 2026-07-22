@@ -1928,17 +1928,6 @@ def _build_definition_from_publication_spec(
             else ()
         )
         transitions: list[WorkflowTransitionSpec] = []
-        for index, branch in enumerate(step.conditional_transitions):
-            reason = str(branch.reason or f"condition_{index + 1}").strip()
-            if not reason:
-                reason = f"condition_{index + 1}"
-            transitions.append(
-                _build_publication_transition(
-                    to_state=branch.to_state,
-                    reason=reason,
-                    condition_spec=branch.condition_spec,
-                )
-            )
         if isinstance(step.on_failure_state, str) and step.on_failure_state.strip():
             transitions.append(
                 _build_publication_transition(
@@ -1998,6 +1987,21 @@ def _build_definition_from_publication_spec(
                         "kind": "control_signal",
                         "signal": "continue",
                     },
+                )
+            )
+        # Failure, uncertainty, approval, and loop-control routes are hard
+        # execution boundaries.  Evaluate them before authored declarative
+        # branches, because an authored ``always`` branch must not mask a
+        # failed action or another control signal.
+        for index, branch in enumerate(step.conditional_transitions):
+            reason = str(branch.reason or f"condition_{index + 1}").strip()
+            if not reason:
+                reason = f"condition_{index + 1}"
+            transitions.append(
+                _build_publication_transition(
+                    to_state=branch.to_state,
+                    reason=reason,
+                    condition_spec=branch.condition_spec,
                 )
             )
         if isinstance(step.on_true_state, str) and step.on_true_state.strip():

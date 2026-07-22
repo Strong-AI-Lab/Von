@@ -57,6 +57,9 @@ def test_openai_model_probe_chat_fallback_omits_temperature(monkeypatch) -> None
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["usable"] is True
+    assert payload["api_surface"] == "chat_completions"
+    assert payload["fallback_used"] is True
+    assert payload["responses_failure_kind"] == "unexpected_error"
     assert captured_completion_kwargs["model"] == "gpt-5.5-2026-04-23"
     assert "temperature" not in captured_completion_kwargs
 
@@ -109,7 +112,10 @@ def test_openai_model_probe_passes_reasoning_effort_to_responses(
     payload = response.get_json()
     assert payload["usable"] is True
     assert payload["model_parameters"] == {"reasoning_effort": "low"}
+    assert payload["api_surface"] == "responses"
+    assert payload["fallback_used"] is False
     assert captured_responses_kwargs["reasoning"] == {"effort": "low"}
+    assert captured_responses_kwargs["max_output_tokens"] == 4096
 
 
 def test_ollama_model_probe_uses_selected_host_and_model(monkeypatch) -> None:

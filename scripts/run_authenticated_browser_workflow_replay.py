@@ -1121,7 +1121,10 @@ def extract_observed_workflow_ids(*payloads: Any) -> list[str]:
             if not isinstance(value, Mapping):
                 continue
             workflow_id = _safe_text(value.get("workflow_id"))
-            if workflow_id and workflow_id not in workflow_ids:
+            if (
+                workflow_id.startswith("#V#")
+                and workflow_id not in workflow_ids
+            ):
                 workflow_ids.append(workflow_id)
     return workflow_ids
 

@@ -31,6 +31,13 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
                     "drift_detected": False,
                 },
             },
+            "lab_status_digest_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "current",
+                    "drift_detected": False,
+                },
+            },
             "represented_artefact_creation_workflow_bootstrap": {
                 "success": True,
                 "publication": {
@@ -83,6 +90,11 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
             "materialisation_status": "current",
             "drift_detected": False,
         },
+        "lab_status_digest_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "current",
+            "drift_detected": False,
+        },
         "represented_artefact_creation_workflow_bootstrap": {
             "success": True,
             "materialisation_status": "current",
@@ -124,6 +136,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         episode_evaluation_workflow_vontology_service as episode_evaluation_workflow_bootstrap,
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
         jira_task_incremental_import_workflow_vontology_service as jira_task_incremental_import_workflow_bootstrap,
+        lab_status_digest_workflow_vontology_service as lab_status_digest_workflow_bootstrap,
         mongo_query_diagnostics_maintenance_workflow_vontology_service as mongo_query_diagnostics_workflow_bootstrap,
         multilingual_concept_enrichment_schedule_bootstrap_service as multilingual_schedule_bootstrap,
         multilingual_concept_enrichment_vontology_service as multilingual_workflow_bootstrap,
@@ -337,6 +350,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        lab_status_digest_workflow_bootstrap,
+        "bootstrap_canonical_lab_status_digest_workflow",
+        lambda: {
+            "success": True,
+            "workflow_ids": ["#V#lab_project_status_digest_workflow"],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         represented_artefact_creation_workflow_bootstrap,
         "bootstrap_canonical_represented_artefact_creation_workflow",
         lambda: {
@@ -488,6 +510,9 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         lambda: {
             "success": True,
             "schema_version": "operational_learning_release_authority_bootstrap.v1",
+            "candidate_behaviour_workflow_id": (
+                "#V#operational_learning_candidate_behaviour_evaluation_workflow"
+            ),
         },
     )
     monkeypatch.setattr(
@@ -577,6 +602,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         concept_search_instance_retrieval_workflow_bootstrap_report.get("success")
         is True
     )
+    lab_status_digest_workflow_bootstrap_report = result.get(
+        "lab_status_digest_workflow_bootstrap"
+    )
+    assert isinstance(lab_status_digest_workflow_bootstrap_report, dict)
+    assert lab_status_digest_workflow_bootstrap_report.get("success") is True
     represented_artefact_creation_workflow_bootstrap_report = result.get(
         "represented_artefact_creation_workflow_bootstrap"
     )

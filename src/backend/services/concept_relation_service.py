@@ -348,7 +348,10 @@ def find_relations_with_argument(
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     hits: List[Dict[str, Any]] = []
 
-    subject_doc = _load_accessible_relation_subject_document(resolved_concept_id)
+    subject_doc = _load_accessible_relation_subject_document(
+        resolved_concept_id,
+        predicate_terms=predicate_terms,
+    )
 
     if include_asserted_rows and include_structural and subject_doc:
         relationships = (subject_doc.get("relationships") or {}) if subject_doc else {}
@@ -2741,6 +2744,8 @@ def _build_concept_preview_from_document(doc: Mapping[str, Any]) -> Dict[str, An
 
 def _load_accessible_relation_subject_document(
     concept_id: str,
+    *,
+    predicate_terms: Optional[Sequence[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     if should_enforce_access_control() and not can_access_concept(concept_id):
         return None
@@ -2759,8 +2764,27 @@ def _load_accessible_relation_subject_document(
         return None
     materialised = dict(doc)
     relationships = materialised.get("relationships")
-    if isinstance(relationships, Mapping) and should_enforce_access_control():
-        materialised["relationships"] = _filter_accessible_relationships(relationships)
+    if isinstance(relationships, Mapping):
+        # Apply the caller's predicate constraint before per-target visibility
+        # checks.  A subject can have hundreds of unrelated targets, and
+        # checking all of them before discarding them can exceed the bounded
+        # MCP read deadline.  The subset uses the same predicate matcher as the
+        # result loop; access checks still run for every value that can be
+        # returned.
+        filtered_relationships = (
+            {
+                predicate_id: raw_targets
+                for predicate_id, raw_targets in relationships.items()
+                if _predicate_matches_terms(predicate_id, predicate_terms)
+            }
+            if predicate_terms
+            else dict(relationships)
+        )
+        materialised["relationships"] = (
+            _filter_accessible_relationships(filtered_relationships)
+            if should_enforce_access_control()
+            else filtered_relationships
+        )
     return materialised
 
 

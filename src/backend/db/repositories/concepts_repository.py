@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Iterable, Literal, Mapping, Set
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Iterable, Literal, Mapping, Set
 from pymongo.collection import Collection
 from pymongo.database import Database
 import logging
@@ -8,6 +9,7 @@ from ..mongo_client import get_db, get_concepts_collection
 from ...security.access_control import (
     apply_concept_query_filter,
     apply_pipeline_filter,
+    prewarm_concept_relationship_access,
     sanitize_concept_document,
 )
 
@@ -64,19 +66,33 @@ RELATIONSHIP_KINDS: tuple[str, ...] = (
 class _AccessControlledCursor:
     """Wrap a PyMongo cursor to sanitise concept documents on iteration."""
 
+    _SANITISATION_BATCH_SIZE = 64
+
     def __init__(self, cursor):
         self._cursor = cursor
+        self._buffer: Deque[Dict[str, Any]] = deque()
+        self._exhausted = False
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        while True:
-            doc = next(self._cursor)
-            sanitised = sanitize_concept_document(doc)
-            if sanitised is None:
-                continue
-            return sanitised
+        while not self._buffer:
+            if self._exhausted:
+                raise StopIteration
+            batch: List[Dict[str, Any]] = []
+            for _ in range(self._SANITISATION_BATCH_SIZE):
+                try:
+                    batch.append(next(self._cursor))
+                except StopIteration:
+                    self._exhausted = True
+                    break
+            prewarm_concept_relationship_access(batch)
+            for doc in batch:
+                sanitised = sanitize_concept_document(doc)
+                if sanitised is not None:
+                    self._buffer.append(sanitised)
+        return self._buffer.popleft()
 
     def __getattr__(self, item):  # pragma: no cover - simple proxy
         return getattr(self._cursor, item)

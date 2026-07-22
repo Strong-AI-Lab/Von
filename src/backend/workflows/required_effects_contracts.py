@@ -162,6 +162,9 @@ def _normalise_required_effect_template(
     normalised = {
         "effect_id": effect_id,
         "effect_type": effect_type,
+        "postcondition_strategy": _normalise_text(
+            raw_effect.get("postcondition_strategy")
+        ),
         "description": _normalise_text(raw_effect.get("description")),
         "required_tools": required_tools,
         "required_tools_match": _normalise_match_mode(

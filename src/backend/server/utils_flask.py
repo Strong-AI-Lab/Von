@@ -230,6 +230,7 @@ def _build_durable_workflow_bootstrap_summary(
         "entity_workflow_bootstrap",
         "entity_information_retrieval_workflow_bootstrap",
         "concept_search_instance_retrieval_workflow_bootstrap",
+        "lab_status_digest_workflow_bootstrap",
         "represented_artefact_creation_workflow_bootstrap",
         "multilingual_concept_enrichment_workflow_bootstrap",
         "conversation_turn_workflow_bootstrap",
@@ -489,6 +490,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.concept_search_instance_retrieval_workflow_vontology_service import (
             bootstrap_canonical_concept_search_instance_retrieval_workflow,
         )
+        from ..services.lab_status_digest_workflow_vontology_service import (
+            bootstrap_canonical_lab_status_digest_workflow,
+        )
         from ..services.represented_artefact_creation_workflow_vontology_service import (
             bootstrap_canonical_represented_artefact_creation_workflow,
         )
@@ -622,6 +626,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="concept-search instance retrieval workflow",
             bootstrap_fn=bootstrap_canonical_concept_search_instance_retrieval_workflow,
         )
+        lab_status_digest_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="lab and project status digest workflow",
+            bootstrap_fn=bootstrap_canonical_lab_status_digest_workflow,
+        )
         represented_artefact_creation_workflow_bootstrap_report = (
             _run_workflow_family_bootstrap(
                 label="represented-artefact creation workflow",
@@ -729,6 +737,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["concept_search_instance_retrieval_workflow_bootstrap"] = (
             concept_search_instance_retrieval_workflow_bootstrap_report
         )
+        result["lab_status_digest_workflow_bootstrap"] = (
+            lab_status_digest_workflow_bootstrap_report
+        )
         result["represented_artefact_creation_workflow_bootstrap"] = (
             represented_artefact_creation_workflow_bootstrap_report
         )
@@ -775,6 +786,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["operational_learning_release_bootstrap"] = (
             operational_learning_release_bootstrap_report
         )
+        result["operational_learning_release_authority_bootstrap"] = (
+            operational_learning_release_bootstrap_report
+        )
         result["ai_chat_session_source_profile_bootstrap"] = (
             ai_chat_session_source_profile_bootstrap_report
         )
@@ -803,6 +817,11 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] concept-search instance retrieval workflow bootstrap failed: %s",
                 concept_search_instance_retrieval_workflow_bootstrap_report,
+            )
+        if not bool(lab_status_digest_workflow_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] lab status digest workflow bootstrap failed: %s",
+                lab_status_digest_workflow_bootstrap_report,
             )
         if not bool(
             represented_artefact_creation_workflow_bootstrap_report.get(

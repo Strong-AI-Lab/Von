@@ -93,6 +93,27 @@ def test_add_relationship_rejects_dynamic_concepts_that_are_not_predicates(monke
     assert result.get("error_code") == "predicate_concept_not_typed"
 
 
+def test_predicate_typing_validation_uses_hard_authority_view(monkeypatch):
+    from src.backend.security import access_control
+    from src.backend.services.relationship_write_service import (
+        validate_predicate_concept,
+    )
+
+    def _fake_find_one(filter_doc, projection=None):
+        assert access_control._BYPASS.get() is True
+        return {
+            "concept_id": filter_doc["concept_id"],
+            "relationships": {"is_an_instance_of": ["#V#predicate"]},
+        }
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        _fake_find_one,
+    )
+
+    assert validate_predicate_concept("#V#about") == (True, None, None)
+
+
 def test_add_relationship_returns_structured_error_for_missing_source(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue
 

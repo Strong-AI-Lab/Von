@@ -167,6 +167,11 @@ class MethodCatalogue:
                 for field_name, source_fields in schema.scalar_source_fields.items()
                 if isinstance(field_name, str) and field_name
             },
+            "comma_separated_list_fields": [
+                field_name
+                for field_name in schema.comma_separated_list_fields
+                if isinstance(field_name, str) and field_name
+            ],
         }
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:

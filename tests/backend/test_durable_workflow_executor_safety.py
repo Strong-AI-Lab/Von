@@ -58,6 +58,10 @@ def _stub_trace_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
         "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
         lambda _trace_doc: "trace-test",
     )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_active_model_parameters",
+        lambda **_kwargs: {},
+    )
 
 
 def _build_instance(workflow_id: str) -> WorkflowInstance:
@@ -806,6 +810,78 @@ def test_durable_executor_uses_scoped_active_model_and_context_defaults() -> Non
     get_active_model_name.assert_called_once_with(
         user_concept_id=instance.user_id,
         org_concept_id=instance.org_id,
+    )
+
+
+def test_durable_executor_inherits_scoped_active_model_parameters() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_scoped_model_parameters",
+        initial_state="capture",
+        states={
+            "capture": WorkflowStateSpec(
+                state_id="capture",
+                actions=(WorkflowActionInvocation(action_id="capture.action"),),
+                terminal=True,
+            ),
+        },
+    )
+    captured: dict[str, object] = {}
+    registry = ActionRegistry()
+
+    def capture_handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        captured["model"] = request.environment.model
+        captured["model_parameters"] = request.environment.model_parameters
+        return WorkflowActionResult(outputs={"captured": True})
+
+    registry.register(ActionSpec(action_id="capture.action", handler=capture_handler))
+    manager = MagicMock()
+    instance = _build_instance(definition.workflow_id)
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="gpt-5.6-luna",
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_parameters",
+            return_value={"reasoning_effort": "low"},
+        ) as get_active_model_parameters,
+        patch(
+            "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+            return_value="trace-active-parameters",
+        ) as insert_trace,
+    ):
+        result = executor.run_durable(
+            instance.instance_id,
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert captured == {
+        "model": "gpt-5.6-luna",
+        "model_parameters": {"reasoning_effort": "low"},
+    }
+    get_active_model_parameters.assert_called_once_with(
+        user_concept_id=instance.user_id,
+        org_concept_id=instance.org_id,
+    )
+    stored_doc = insert_trace.call_args.args[0]
+    assert stored_doc["metadata"]["effective_model_parameters"] == {
+        "reasoning_effort": "low"
+    }
+    assert (
+        stored_doc["metadata"]["effective_model_parameters_source"]
+        == "active_setting"
     )
 
 

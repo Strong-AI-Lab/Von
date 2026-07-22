@@ -3587,6 +3587,7 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
                 },
                 "paper_concept_id": "#V#paper_123",
                 "file_copy_concept_id": "#V#file_copy_456",
+                "arxiv_ids": ["2408.12065"],
             },
         ),
     )
@@ -3620,6 +3621,7 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     )
     assert "Paper concept: #V#paper_123." in report["response_text"]
     assert "File copy concept: #V#file_copy_456." in report["response_text"]
+    assert "arXiv paper: 2408.12065." in report["response_text"]
     assert "Paper concept: #V#paper_123." in result.outputs["response_text"]
     assert "File copy concept: #V#file_copy_456." in result.outputs["response_text"]
 

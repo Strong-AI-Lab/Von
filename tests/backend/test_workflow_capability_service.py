@@ -2184,14 +2184,12 @@ def test_workflow_routing_text_relation_change_invalidates_projection(
 ) -> None:
     from src.backend.services import text_value_service
 
-    invalidations: list[str | None] = []
+    invalidations: list[dict[str, object]] = []
     discovery_cache_clears: list[bool] = []
 
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
-        lambda **kwargs: (
-            invalidations.append(kwargs.get("reason")) or {"success": True}
-        ),
+        lambda **kwargs: (invalidations.append(dict(kwargs)) or {"success": True}),
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.invalidate_workflow_discovery_executability_caches",
@@ -2212,7 +2210,10 @@ def test_workflow_routing_text_relation_change_invalidates_projection(
     )
 
     assert len(invalidations) == 1
-    assert "workflow_routing_text_relation_changed" in str(invalidations[0])
+    assert "workflow_routing_text_relation_changed" in str(
+        invalidations[0].get("reason")
+    )
+    assert invalidations[0].get("reset_backend_namespace") is True
     assert discovery_cache_clears == [True]
 
 

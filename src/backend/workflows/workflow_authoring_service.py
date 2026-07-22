@@ -16,7 +16,11 @@ from .engine import (
     WorkflowTransitionSpec,
     build_transition_condition,
 )
-from .subworkflow_contracts import WORKFLOW_SUBWORKFLOW_ACTION_ID
+from .subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
+    build_subworkflow_contract,
+)
 from .static_input_binding_utils import coerce_static_input_binding
 
 _TRANSIENT_WORKFLOW_EXECUTION_INPUT_SUFFIX_REASON_CODES: tuple[
@@ -206,6 +210,93 @@ def _build_action_inputs_from_authoring_row(
     if subworkflow_id_text:
         inputs["workflow_id"] = subworkflow_id_text
     return inputs
+
+
+def _build_subworkflow_contract_from_authoring_row(
+    *,
+    row: Mapping[str, Any],
+    action: WorkflowActionInvocation,
+) -> dict[str, Any] | None:
+    """Build preview-time subworkflow metadata from the authored edge.
+
+    Publication builds the same contract before persisting a workflow.  The
+    authoring preview must materialise it too, otherwise a valid explicit
+    ``subworkflow_id`` is rejected as contractless before publication can run.
+    """
+
+    workflow_id = _clean_text(action.subworkflow_id)
+    if not workflow_id:
+        return None
+
+    input_mappings: list[dict[str, str]] = []
+    static_input_keys: list[str] = []
+    inputs = action.inputs if isinstance(action.inputs, Mapping) else {}
+    for child_input_key, raw_value in inputs.items():
+        child_input_key_text = _clean_text(child_input_key)
+        if not child_input_key_text or child_input_key_text in {
+            "workflow_id",
+            "failure_mode",
+            "__failure_mode",
+            "max_transitions",
+        }:
+            continue
+        if isinstance(raw_value, Mapping):
+            parent_context_key = _clean_text(raw_value.get("$context_key"))
+            if not parent_context_key:
+                continue
+            mapping = {
+                "child_input_key": child_input_key_text,
+                "parent_context_key": parent_context_key,
+            }
+            mapping_concept_id = _clean_text(
+                raw_value.get("$mapping_concept_id")
+            )
+            if mapping_concept_id:
+                mapping["mapping_concept_id"] = mapping_concept_id
+            input_mappings.append(mapping)
+            continue
+        static_input_keys.append(child_input_key_text)
+
+    output_mappings: list[dict[str, str]] = []
+    raw_output_mappings = row.get("tool_output_context_mappings")
+    if isinstance(raw_output_mappings, Sequence) and not isinstance(
+        raw_output_mappings, (str, bytes, bytearray)
+    ):
+        for raw_mapping in raw_output_mappings:
+            if not isinstance(raw_mapping, Mapping):
+                continue
+            tool_output_field = _clean_text(raw_mapping.get("tool_output_field"))
+            child_output_field = (
+                tool_output_field[len("result.") :]
+                if tool_output_field.startswith("result.")
+                else tool_output_field
+            )
+            parent_context_key = _clean_text(raw_mapping.get("context_key"))
+            if not child_output_field or not parent_context_key:
+                continue
+            mapping = {
+                "child_output_field": child_output_field,
+                "parent_context_key": parent_context_key,
+            }
+            mapping_concept_id = _clean_text(
+                raw_mapping.get("mapping_concept_id")
+            )
+            if mapping_concept_id:
+                mapping["mapping_concept_id"] = mapping_concept_id
+            output_mappings.append(mapping)
+
+    failure_mode = _clean_text(
+        inputs.get("failure_mode") or inputs.get("__failure_mode")
+    )
+    return build_subworkflow_contract(
+        workflow_id=workflow_id,
+        input_mappings=input_mappings,
+        output_mappings=output_mappings,
+        static_input_keys=list(dict.fromkeys(static_input_keys)),
+        failure_mode=(
+            failure_mode or WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE
+        ),
+    )
 
 
 def strip_transient_execution_defaults_from_authoring_spec(
@@ -531,6 +622,12 @@ def serialise_workflow_definition_to_authoring_spec(
             if action_id:
                 row["action_id"] = action_id
             subworkflow_id = _clean_text(action.subworkflow_id)
+            if (
+                not subworkflow_id
+                and action_id == WORKFLOW_SUBWORKFLOW_ACTION_ID
+                and isinstance(action.inputs, Mapping)
+            ):
+                subworkflow_id = _clean_text(action.inputs.get("workflow_id"))
             if subworkflow_id:
                 row["subworkflow_id"] = subworkflow_id
             execution_mode = _clean_text(action.execution_mode)
@@ -695,6 +792,14 @@ def build_workflow_definition_from_authoring_spec(
         mutation_authority = raw_row.get("mutation_authority")
         if isinstance(mutation_authority, Mapping):
             metadata["mutation_authority"] = dict(mutation_authority)
+        if action is not None and _clean_text(action.subworkflow_id):
+            metadata["invokes_workflow"] = _clean_text(action.subworkflow_id)
+            subworkflow_contract = _build_subworkflow_contract_from_authoring_row(
+                row=raw_row,
+                action=action,
+            )
+            if subworkflow_contract is not None:
+                metadata["subworkflow_contract"] = subworkflow_contract
 
         states[state_id] = WorkflowStateSpec(
             state_id=state_id,

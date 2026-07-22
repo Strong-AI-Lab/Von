@@ -13,6 +13,24 @@ class _FakeConceptCollection:
         return self.docs.get(concept_id)
 
 
+class _BatchOnlyConceptCollection(_FakeConceptCollection):
+    def __init__(self, *docs: dict) -> None:
+        super().__init__(*docs)
+        self.find_calls = 0
+
+    def find(self, query: dict, projection: dict | None = None):
+        self.find_calls += 1
+        concept_ids = query.get("concept_id", {}).get("$in", [])
+        return [
+            self.docs[concept_id]
+            for concept_id in concept_ids
+            if concept_id in self.docs
+        ]
+
+    def find_one(self, query: dict, projection: dict | None = None):
+        raise AssertionError("relationship sanitisation must use one batch query")
+
+
 def test_validate_person_concept_uses_raw_exact_lookup(monkeypatch) -> None:
     import src.backend.security.access_control as access_control
     import src.backend.services.concept_service as concept_service
@@ -294,6 +312,86 @@ def test_filter_accessible_concept_ids_uses_batch_visibility_semantics(
         )
 
     assert allowed == {"#V#global_note", "#V#owner_note", "#V#team_note"}
+
+
+def test_sanitize_concept_document_batches_relationship_visibility_checks(
+    monkeypatch,
+) -> None:
+    import src.backend.security.access_control as access_control
+
+    collection = _BatchOnlyConceptCollection(
+        {"concept_id": "#V#batch_global_target", "relationships": {}},
+        {
+            "concept_id": "#V#batch_team_target",
+            "relationships": {"specific_to_org": ["#V#sail"]},
+        },
+        {
+            "concept_id": "#V#batch_private_target",
+            "relationships": {"specific_to_user": ["#V#other_user"]},
+        },
+    )
+    monkeypatch.setattr(access_control, "get_concepts_collection", lambda: collection)
+    source = {
+        "concept_id": "#V#batch_source",
+        "relationships": {
+            "related_to": [
+                "#V#batch_global_target",
+                "#V#batch_team_target",
+                "#V#batch_private_target",
+                "#V#batch_missing_target",
+            ],
+            "nested_evidence": {
+                "target": "#V#batch_team_target",
+            },
+        },
+    }
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#sail",
+    ):
+        sanitised = access_control.sanitize_concept_document(source)
+
+    assert sanitised is not None
+    assert sanitised["relationships"] == {
+        "related_to": ["#V#batch_global_target", "#V#batch_team_target"],
+        "nested_evidence": {"target": "#V#batch_team_target"},
+    }
+    assert collection.find_calls == 1
+
+
+def test_access_controlled_cursor_prewarms_relationships_in_bounded_batches(
+    monkeypatch,
+) -> None:
+    import src.backend.db.repositories.concepts_repository as concepts_repository
+
+    documents = [
+        {
+            "concept_id": f"#V#batch_cursor_source_{index}",
+            "relationships": {"related_to": [f"#V#batch_cursor_target_{index}"]},
+        }
+        for index in range(130)
+    ]
+    prewarmed_batches: list[list[str]] = []
+
+    def _record_prewarm(batch: list[dict]) -> None:
+        prewarmed_batches.append([str(doc["concept_id"]) for doc in batch])
+
+    monkeypatch.setattr(
+        concepts_repository,
+        "prewarm_concept_relationship_access",
+        _record_prewarm,
+    )
+    monkeypatch.setattr(
+        concepts_repository,
+        "sanitize_concept_document",
+        lambda doc: doc,
+    )
+
+    returned = list(concepts_repository._AccessControlledCursor(iter(documents)))
+
+    assert returned == documents
+    assert [len(batch) for batch in prewarmed_batches] == [64, 64, 2]
 
 
 def test_window_session_organisation_context_controls_visibility(monkeypatch) -> None:

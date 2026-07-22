@@ -343,6 +343,10 @@ def test_concept_lookup_views_keep_safe_identity_and_typed_not_found_evidence(
                     }
                 ],
             },
+            "attributes": {
+                "runtime_profile_alias": "represented-profile",
+                "oauth_tokens": "must not survive",
+            },
             "guid": "private-storage-identifier",
         },
     )
@@ -371,6 +375,8 @@ def test_concept_lookup_views_keep_safe_identity_and_typed_not_found_evidence(
     assert fetched["description"] == "A workflow represented in Vontology."
     assert fetched["relationships"] == {"is_an_instance_of": ["#V#ai_workflow"]}
     assert fetched["relations"]["hits"][0]["predicate_concept_id"] == ("#V#hasStep")
+    assert fetched["runtime_profile_alias"] == "represented-profile"
+    assert "oauth_tokens" not in repr(fetched)
     assert "guid" not in fetched
 
     assert not_found is not None

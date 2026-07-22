@@ -692,6 +692,50 @@ def _sanitize_relationship_value(
     return value, False
 
 
+def _relationship_concept_ids(value: Any) -> set[str]:
+    """Collect relationship targets for one batch visibility preflight.
+
+    Sanitisation still delegates the final decision for every value to the
+    request-local evaluator.  Pre-populating that evaluator avoids issuing one
+    MongoDB query per relationship target while iterating large concept
+    cursors, which can otherwise turn workflow discovery into an unbounded
+    sequence of remote reads.
+    """
+
+    concept_ids: set[str] = set()
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, list):
+            pending.extend(item)
+            continue
+        if isinstance(item, dict):
+            pending.extend(item.values())
+            continue
+        normalised = _normalise_concept_id(item)
+        if normalised is not None:
+            concept_ids.add(normalised)
+    return concept_ids
+
+
+def prewarm_concept_relationship_access(
+    documents: Iterable[Dict[str, Any]],
+) -> None:
+    """Batch-cache visibility for relationship targets in concept documents."""
+
+    if not should_enforce_access_control():
+        return
+    concept_ids: set[str] = set()
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        relationships = document.get("relationships")
+        if isinstance(relationships, dict):
+            concept_ids.update(_relationship_concept_ids(relationships))
+    if concept_ids:
+        _current_evaluator().accessible_concept_ids(concept_ids)
+
+
 def sanitize_concept_document(
     doc: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
@@ -735,6 +779,7 @@ def sanitize_concept_document(
     if not isinstance(relationships, dict):
         return doc
     evaluator = _current_evaluator()
+    prewarm_concept_relationship_access((doc,))
     new_relationships: Dict[str, Any] = {}
     changed = False
     for predicate, value in relationships.items():

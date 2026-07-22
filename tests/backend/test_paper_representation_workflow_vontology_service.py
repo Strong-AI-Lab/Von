@@ -101,7 +101,7 @@ _LIVE_ARXIV_ACCEPTANCE_NAMESPACE = f"{_LIVE_ARXIV_ACCEPTANCE_USER_ID}@{_LIVE_ARX
 
 
 class _EvidenceSummaryLLM:
-    def generate(self, prompt: str, context=None, model=None) -> str:
+    def generate(self, prompt: str, context=None, model=None, llm_params=None) -> str:
         assert "scholarly article representation workflow" in prompt.lower()
         return json.dumps(
             {
@@ -480,6 +480,15 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID
     )
     assert source_dispatch_action.inputs["success_policy"] == "allow_partial"
+    source_required_effects = source_neutral_definition.metadata.get(
+        "required_effects_contract"
+    )
+    assert isinstance(source_required_effects, dict)
+    assert {
+        effect.get("postcondition_strategy")
+        for effect in source_required_effects.get("required_effects") or []
+        if isinstance(effect, dict)
+    } == {"execution_observed"}
 
     item_prepare_state_id = authority_service._step_concept_id(
         workflow_id=SOURCE_NEUTRAL_PAPER_REFERENCE_ITEM_INGESTION_WORKFLOW_ID,
@@ -674,6 +683,26 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
                 "expected": False,
             },
         ],
+    }
+    ensure_arxiv_paper_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
+        state_id="ensure_arxiv_paper_concept",
+    )
+    assert (
+        normalise_metadata_transitions["canonical_arxiv_identity_available"].to_state
+        == ensure_arxiv_paper_state_id
+    )
+    ensure_arxiv_paper_state = metadata_definition.states[
+        ensure_arxiv_paper_state_id
+    ]
+    ensure_arxiv_paper_action = ensure_arxiv_paper_state.actions[0]
+    assert ensure_arxiv_paper_action.action_id == (
+        "scholarly_paper.ensure_paper_concept"
+    )
+    assert ensure_arxiv_paper_state.metadata.get("mutation_authority") == {
+        "maximum_level": "additive_vontology",
+        "reason_code": "canonical_arxiv_paper_identity_additive_writes",
+        "schema_version": "workflow_step_mutation_authority.v1",
     }
     resolve_topics_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_ARTICLE_METADATA_REPRESENTATION_WORKFLOW_ID,
@@ -1137,6 +1166,21 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
             "value": "import_arxiv_pdf_from_url",
         },
     ]
+    optional_pdf_diagnostics = record_pdf_import_skipped_action.inputs.get(
+        "assignments"
+    )[3:]
+    assert {
+        assignment["key"] for assignment in optional_pdf_diagnostics
+    } == {
+        "arxiv_pdf_import_error",
+        "arxiv_pdf_import_message",
+        "arxiv_pdf_import_status_code",
+        "arxiv_pdf_import_final_url",
+    }
+    assert all(
+        "skip_if_unresolved" not in assignment
+        for assignment in optional_pdf_diagnostics
+    )
     decide_acquisition_mode_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="decide_acquisition_mode",
@@ -1690,6 +1734,19 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         predicate="#V#hasWorkflowLaunchInputContractJson",
         payload=old_launch_contract,
     )
+    invalidate_workflow_discovery_executability_caches()
+    reviewed_legacy_report = bootstrap_canonical_paper_representation_workflows()
+    reviewed_legacy_gate = reviewed_legacy_report.get("repo_seed_version_gate") or {}
+    reviewed_legacy_adjudication = (
+        reviewed_legacy_gate.get("authority_adjudication_by_workflow") or {}
+    ).get(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID) or {}
+    reviewed_legacy_sha256 = str(
+        reviewed_legacy_adjudication.get("observed_authority_payload_sha256") or ""
+    ).strip()
+    assert reviewed_legacy_sha256
+    assert reviewed_legacy_adjudication.get("reason") == (
+        "live_authority_requires_explicit_migration"
+    )
     upsert_singleton_text_relation(
         subject_concept_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         predicate="#V#hasWorkflowRepoSeedVersionJson",
@@ -1699,6 +1756,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
                 "seed_version": "8",
                 "family_id": "paper_representation_workflow_seed_bundle",
                 "source_tag": "JVNAUTOSCI-2192",
+                "authority_payload_sha256": reviewed_legacy_sha256,
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -1769,7 +1827,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "16" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "17" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -2106,7 +2164,9 @@ def test_metadata_workflow_executes_direct_scholarly_article_representation(
     )
 
     assert result.completed is True
-    assert result.final_state.endswith("_completed")
+    assert result.final_state.endswith("_completed"), result.data.get(
+        "last_action_outputs"
+    )
     paper_concept_id = result.data.get("paper_concept_id")
     assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
     assert result.data.get("verification_passed") is True
@@ -2262,8 +2322,10 @@ def test_metadata_workflow_treats_null_paper_concept_id_as_absent(
     )
 
     assert result.completed is True, result.error
-    assert result.final_state.endswith("_completed")
-    assert isinstance(result.data.get("create_article_result"), dict)
+    assert result.final_state.endswith("_completed"), result.data.get(
+        "last_action_outputs"
+    )
+    assert result.data.get("paper_concept_created") is True
     paper_concept_id = result.data.get("paper_concept_id")
     assert isinstance(paper_concept_id, str) and paper_concept_id.startswith("#V#")
 
@@ -2390,7 +2452,16 @@ def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stal
     assert repair_publication.get("bundle_snapshot_drift_workflow_ids") == []
     assert repair_publication.get("bundle_snapshot_issue_codes") == []
     assert repair_counts.get("workflows_published") == 0
-    assert repair_counts.get("errors") == 0
+    assert repair_counts.get("errors") == 1
+    authority_blockers = (
+        (repair_report.get("repo_seed_version_gate") or {}).get(
+            "authority_blockers_by_workflow"
+        )
+        or {}
+    )
+    assert authority_blockers[ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID][
+        "error_code"
+    ] == "live_authority_requires_explicit_migration"
 
     repaired_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -2457,9 +2528,21 @@ def test_bootstrap_repairs_explicit_unpublished_lifecycle(
         preflight.get("drift_workflow_ids") or []
     )
     assert "workflow_not_published" in (preflight.get("issue_codes") or [])
-    assert publication.get("materialisation_status") == "repaired_from_repo_seed"
-    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+    assert publication.get("materialisation_status") == "current"
+    assert (publication.get("counts") or {}).get("errors") == 1
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID not in (
         publication.get("published_workflow_ids") or []
+    )
+
+    explicit_repair_report = bootstrap_canonical_paper_representation_workflows(
+        force_republish=True
+    )
+    explicit_repair_publication = explicit_repair_report.get("publication") or {}
+    assert explicit_repair_publication.get("materialisation_status") == (
+        "repaired_from_repo_seed"
+    )
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        explicit_repair_publication.get("published_workflow_ids") or []
     )
 
     repaired_lifecycle, repaired_source = resolve_workflow_publication_lifecycle(
@@ -2519,9 +2602,21 @@ def test_bootstrap_repairs_missing_required_launch_metadata_surfaces(
         "launch_contract",
         "launch_input_contract",
     ]
-    assert publication.get("materialisation_status") == "repaired_from_repo_seed"
-    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+    assert publication.get("materialisation_status") == "current"
+    assert (publication.get("counts") or {}).get("errors") == 1
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID not in (
         publication.get("published_workflow_ids") or []
+    )
+
+    explicit_repair_report = bootstrap_canonical_paper_representation_workflows(
+        force_republish=True
+    )
+    explicit_repair_publication = explicit_repair_report.get("publication") or {}
+    assert explicit_repair_publication.get("materialisation_status") == (
+        "repaired_from_repo_seed"
+    )
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        explicit_repair_publication.get("published_workflow_ids") or []
     )
 
     repaired_definition = load_workflow_definition_from_vontology(

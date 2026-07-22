@@ -2049,6 +2049,40 @@ class TestDeclarativeConditionBranches:
         assert branch_transitions[0].condition({"route": "fallback"}) is False
         assert branch_transitions[1].reason == "next_step"
 
+    def test_on_failure_precedes_explicit_always_branch(self):
+        steps = [
+            _make_step(
+                "#V#branch",
+                invokes_action="route.action",
+                on_failure="#V#failed",
+            ),
+            _make_step("#V#continued"),
+            _make_step("#V#failed"),
+        ]
+        steps[0]["control_flow"]["conditions"] = [
+            {
+                "to": "#V#continued",
+                "reason": "action_completed",
+                "condition": {"kind": "always"},
+            }
+        ]
+        graph = _make_graph(initial_step="#V#branch", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        transitions = defn.states["#V#branch"].transitions
+        assert [transition.reason for transition in transitions] == [
+            "on_failure",
+            "action_completed",
+        ]
+        assert transitions[0].condition({"last_action_failed": True}) is True
+
     def test_invalid_explicit_condition_branch_fails_fast_with_reason_code(self):
         steps = [
             _make_step("#V#branch", invokes_action="route.action", next_step="#V#fallback"),

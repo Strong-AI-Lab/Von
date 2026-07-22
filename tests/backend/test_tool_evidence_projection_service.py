@@ -229,6 +229,8 @@ def test_gmail_detail_projection_preserves_final_answer_fields_and_omits_raw_pay
             "subject": "A useful message",
             "date": "Fri, 8 May 2026 12:00:00 +0000",
             "snippet": "The short useful description.",
+            "body": "The explicitly requested useful body.",
+            "body_truncated": False,
             "payload": {"headers": [], "parts": [{"body": "large" * 100}]},
         },
     )
@@ -239,6 +241,8 @@ def test_gmail_detail_projection_preserves_final_answer_fields_and_omits_raw_pay
     assert projected["subject"] == "A useful message"
     assert projected["date"] == "Fri, 8 May 2026 12:00:00 +0000"
     assert projected["snippet"] == "The short useful description."
+    assert projected["body"] == "The explicitly requested useful body."
+    assert projected["body_truncated"] is False
     assert projected["labelIds"] == ["INBOX", "IMPORTANT"]
     assert "payload" not in projected
 
@@ -252,6 +256,8 @@ def test_gmail_detail_projection_preserves_final_answer_fields_and_omits_raw_pay
         "#V#gmail_date_field",
         "#V#gmail_snippet_field",
         "#V#gmail_label_ids_field",
+        "#V#gmail_body_field",
+        "#V#gmail_body_truncated_field",
     }.issubset(preserved_ids)
     assert telemetry["missing_required_fields"] == []
 

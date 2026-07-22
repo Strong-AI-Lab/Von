@@ -648,6 +648,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
 
         # Create execution environment
         from ...languagemodels.llm_interface import (
+            get_active_model_parameters,
             get_active_model_name,
             get_llm_client,
             resolve_provider_from_model_concept,
@@ -663,6 +664,12 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         effective_model = requested_model or get_active_model_name(
             user_concept_id=instance.user_id,
             org_concept_id=instance.org_id,
+        )
+        effective_model_parameters = requested_model_parameters or (
+            get_active_model_parameters(
+                user_concept_id=instance.user_id,
+                org_concept_id=instance.org_id,
+            )
         )
         if requested_model:
             context.setdefault("requested_model", requested_model)
@@ -680,7 +687,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             llm_client=llm_client,
             gateway=_get_or_build_durable_mcp_gateway(),
             model=effective_model,
-            model_parameters=requested_model_parameters or None,
+            model_parameters=effective_model_parameters or None,
             user_namespace=instance.namespace,
             user_concept_id=instance.user_id,
             org_concept_id=instance.org_id,
@@ -735,6 +742,13 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             if requested_model_parameters:
                 trace.metadata["requested_model_parameters"] = dict(
                     requested_model_parameters
+                )
+            if effective_model_parameters:
+                trace.metadata["effective_model_parameters"] = dict(
+                    effective_model_parameters
+                )
+                trace.metadata["effective_model_parameters_source"] = (
+                    "requested" if requested_model_parameters else "active_setting"
                 )
             resolved_provider = resolve_provider_from_model_concept(default_model)
             if resolved_provider is None:

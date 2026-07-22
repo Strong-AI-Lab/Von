@@ -1,0 +1,450 @@
+{
+  "family_id": "lab_status_digest_workflow_seed_bundle",
+  "managed_by": "lab_status_digest_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "6",
+  "source_tag": "JVNAUTOSCI-2590",
+  "supported_action_ids": [
+    "workflow_mcp.invoke_tool",
+    "llm.action"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#lab_project_status_digest_workflow",
+      "display_name": "Lab and Project Status Digest Workflow",
+      "description": "Produce and persist an evidence-backed lab or project status digest from current Jira, repository, and represented prior-state evidence while preserving actor scope, explicit evidence gaps, and unresolved obligations without mutating external systems.",
+      "content": "Read the prior durable digest, current Jira status, and bounded repository activity; distinguish tracker, workflow, and capability states; synthesise verified changes, blockers, obligations, decisions, deadlines, and missing evidence; update one stable actor-scoped digest work product; and verify the canonical Vontology read-back.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "The requested status-digest scope and reporting window."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"lab status digest\",\"project status digest\",\"weekly SAIL progress report\",\"operational reliability daily digest\",\"obligation watch\",\"project blockers and deadlines\"],\"examples\":[\"Prepare the weekly SAIL activity and progress digest with evidence and unresolved obligations.\",\"Create today's operational-reliability programme digest from Jira and repository evidence.\",\"Give me a project status digest showing verified changes, blockers, owners, deadlines, and evidence gaps, and persist it for the next run.\"],\"negative_keywords\":[\"transition Jira issue\",\"close task\",\"reassign issue\"],\"required_capabilities\":[\"jira_search\",\"repo_dossier_git_metadata\",\"fetch_concept_content\",\"upsert_singleton_text_relation\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"evidence_backed_lab_status_digest\",\"required_effects\":[{\"effect_id\":\"current_cross_source_status_evidence\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must inspect current Jira and repository evidence plus the prior represented digest before synthesis.\",\"required_tools\":[\"jira_search\",\"repo_dossier_git_metadata\",\"fetch_concept_content\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"status_digest_source_evidence_missing\",\"failed_failure_code\":\"status_digest_source_evidence_failed\"},{\"effect_id\":\"digest_persistence_and_readback\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must update the stable represented digest and read back both content and text-relation evidence before success.\",\"required_tools\":[\"upsert_singleton_text_relation\",\"fetch_concept_content\",\"get_text_relations_summary\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"status_digest_readback_missing\",\"failed_failure_code\":\"status_digest_readback_failed\"}]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "read_prior_digest",
+        "steps": [
+          {
+            "state_id": "read_prior_digest",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "fetch_concept_content"
+              },
+              {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
+              },
+              {
+                "key": "reconstruct_md",
+                "value": false
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_prior_digest_result_to_prior_digest_evidence",
+                "tool_output_field": "result",
+                "context_key": "prior_digest_evidence"
+              }
+            ],
+            "writes_context_keys": [
+              "prior_digest_evidence"
+            ],
+            "next_state": "read_current_jira",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_current_jira",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "jira_search"
+              },
+              {
+                "key": "jql",
+                "value": "project = JVNAUTOSCI ORDER BY updated DESC"
+              },
+              {
+                "key": "max_results",
+                "value": 12
+              },
+              {
+                "key": "fields",
+                "value": [
+                  "summary",
+                  "status",
+                  "assignee",
+                  "updated",
+                  "created",
+                  "duedate",
+                  "priority",
+                  "issuetype",
+                  "parent",
+                  "labels"
+                ]
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_jira_result_to_jira_evidence",
+                "tool_output_field": "result",
+                "context_key": "jira_evidence"
+              }
+            ],
+            "writes_context_keys": [
+              "jira_evidence"
+            ],
+            "next_state": "read_current_repository",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_current_repository",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "repo_dossier_git_metadata"
+              },
+              {
+                "key": "compare_base",
+                "value": "origin/main"
+              },
+              {
+                "key": "commit_limit",
+                "value": 12
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_repo_result_to_repo_evidence",
+                "tool_output_field": "result",
+                "context_key": "repo_evidence"
+              }
+            ],
+            "writes_context_keys": [
+              "repo_evidence"
+            ],
+            "next_state": "synthesise_digest",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "synthesise_digest",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#lab_status_digest_prompt"
+            ],
+            "llm_policy": {
+              "policy_stage": "lab_project_status_digest",
+              "selection_policy": "active_only",
+              "tool_mode": "none",
+              "project_raw_response_to_final_response": true,
+              "max_output_tokens": 4096,
+              "response_contract_text": "Return status_digest_synthesis.v1 JSON with digest_markdown, work_product_id, evidence_window, and unavailable_source_classes. Use only the supplied prior-digest, Jira, and repository evidence. Every material claim must carry an issue key, commit, branch, or represented concept locator. Keep Jira Done, workflow completed, and capability passed distinct. Do not emit tool calls or claim persistence; represented deterministic states own persistence and read-back.",
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Current status-digest request"
+                },
+                {
+                  "context_key": "user_concept_id",
+                  "label": "Authenticated user concept"
+                },
+                {
+                  "context_key": "org_concept_id",
+                  "label": "Authenticated organisation concept"
+                },
+                {
+                  "context_key": "prior_digest_evidence",
+                  "label": "Prior represented digest; historical context only"
+                },
+                {
+                  "context_key": "jira_evidence",
+                  "label": "Current bounded Jira evidence"
+                },
+                {
+                  "context_key": "repo_evidence",
+                  "label": "Current bounded repository evidence"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value",
+              "required_json_fields": [
+                "schema_version",
+                "digest_markdown",
+                "work_product_id",
+                "evidence_window",
+                "unavailable_source_classes"
+              ]
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_digest_markdown_to_digest_markdown",
+                "tool_output_field": "validated_json.digest_markdown",
+                "context_key": "digest_markdown"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_evidence_window_to_evidence_window",
+                "tool_output_field": "validated_json.evidence_window",
+                "context_key": "evidence_window"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_unavailable_sources_to_unavailable_source_classes",
+                "tool_output_field": "validated_json.unavailable_source_classes",
+                "context_key": "unavailable_source_classes"
+              }
+            ],
+            "writes_context_keys": [
+              "digest_markdown",
+              "evidence_window",
+              "unavailable_source_classes"
+            ],
+            "next_state": "persist_digest",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "persist_digest",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_digest_markdown_to_upsert_text",
+                "context_key": "digest_markdown",
+                "tool_param": "text",
+                "required": true
+              }
+            ],
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "upsert_singleton_text_relation"
+              },
+              {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
+              },
+              {
+                "key": "predicate",
+                "value": "hasContent"
+              },
+              {
+                "key": "language",
+                "value": "en-NZ"
+              },
+              {
+                "key": "policy",
+                "value": "replace_others"
+              },
+              {
+                "key": "garbage_collect",
+                "value": true
+              },
+              {
+                "key": "provenance",
+                "value": {
+                  "source": "#V#lab_project_status_digest_workflow",
+                  "work_product": "#V#operational_reliability_status_digest"
+                }
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_upsert_relation_id_to_digest_relation_id",
+                "tool_output_field": "result.kept_relation_id",
+                "context_key": "digest_relation_id"
+              }
+            ],
+            "writes_context_keys": [
+              "digest_relation_id"
+            ],
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "actor_scoped_status_digest_work_product_update"
+            },
+            "next_state": "read_back_digest",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_back_digest",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "fetch_concept_content"
+              },
+              {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
+              },
+              {
+                "key": "reconstruct_md",
+                "value": false
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_readback_result_to_digest_readback",
+                "tool_output_field": "result",
+                "context_key": "digest_readback"
+              }
+            ],
+            "writes_context_keys": [
+              "digest_readback"
+            ],
+            "next_state": "read_back_text_relations",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "read_back_text_relations",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "get_text_relations_summary"
+              },
+              {
+                "key": "concept_id",
+                "value": "#V#operational_reliability_status_digest"
+              },
+              {
+                "key": "predicates",
+                "value": [
+                  "hasContent"
+                ]
+              },
+              {
+                "key": "max_relation_ids_per_group",
+                "value": 5
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_lab_status_text_groups_to_digest_text_groups",
+                "tool_output_field": "result.groups",
+                "context_key": "digest_text_groups"
+              }
+            ],
+            "writes_context_keys": [
+              "digest_text_groups"
+            ],
+            "conditional_transitions": [
+              {
+                "to_state": "completed",
+                "reason": "digest_persisted_and_read_back",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "digest_relation_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "digest_readback",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_cardinality",
+                      "key": "digest_text_groups",
+                      "operator": "gt",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "to_state": "failed",
+                "reason": "digest_readback_incomplete",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ],
+  "support_concepts": [
+    {
+      "concept_id": "#V#lab_status_digest",
+      "name": "Lab Status Digest",
+      "parent_concept_ids": [
+        "#V#research_lab_artefact"
+      ],
+      "create_as_instance": false,
+      "description": "A durable, evidence-bearing digest of lab or project changes, blockers, obligations, deadlines, decisions, and explicit evidence gaps.",
+      "system_tags": [
+        "status-digest",
+        "research-lab",
+        "workflow-work-product"
+      ]
+    },
+    {
+      "concept_id": "#V#operational_reliability_status_digest",
+      "name": "Operational Reliability Status Digest",
+      "parent_concept_ids": [
+        "#V#lab_status_digest"
+      ],
+      "create_as_instance": true,
+      "description": "Stable actor-scoped work product updated by the represented lab and project status digest workflow and read as prior state by the next run.",
+      "system_tags": [
+        "status-digest",
+        "operational-reliability",
+        "workflow-work-product"
+      ],
+      "materialise_for_targeted_workflow_bootstrap": true
+    }
+  ]
+}

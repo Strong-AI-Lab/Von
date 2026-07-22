@@ -189,6 +189,27 @@ def test_workflow_required_effects_contract_normalises_recovery_strategies() -> 
     ]
 
 
+def test_workflow_required_effects_contract_preserves_postcondition_strategy() -> None:
+    contract = normalise_workflow_required_effects_contract(
+        {
+            "contract_id": "context_projection",
+            "required_effects": [
+                {
+                    "effect_id": "normalised_context",
+                    "effect_type": "workflow_context_projection",
+                    "postcondition_strategy": "execution_observed",
+                    "required_tools": ["workflow_control.context_set"],
+                }
+            ],
+        }
+    )
+
+    assert contract is not None
+    assert contract["required_effects"][0]["postcondition_strategy"] == (
+        "execution_observed"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _stub_shared_workflow_registry(monkeypatch):
     class _EmptyRegistry:

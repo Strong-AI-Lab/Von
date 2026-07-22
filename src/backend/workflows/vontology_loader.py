@@ -1222,7 +1222,13 @@ def _extract_step_llm_policy(
         policy.setdefault("agent_profile_ids", list(agent_profiles))
 
     selection_policy = str(policy.get("selection_policy") or "").strip().lower()
-    if selection_policy not in {"fixed", "adaptive", "bandit"}:
+    if selection_policy not in {
+        "fixed",
+        "adaptive",
+        "bandit",
+        "active_only",
+        "active_model_only",
+    }:
         policy["selection_policy"] = "adaptive"
 
     return policy
@@ -3731,44 +3737,8 @@ def load_workflow_definition_from_vontology(
                 }
             )
 
-        explicit_condition_branches = control_flow.get("conditions")
-        if explicit_condition_branches is None:
-            explicit_condition_branches = control_flow.get("declarative_conditions")
-        if explicit_condition_branches is not None:
-            if not isinstance(explicit_condition_branches, list):
-                raise ValueError(
-                    "workflow_transition_condition_invalid:"
-                    f"{workflow_id}:{step_id}:conditions_not_list"
-                )
-            for index, branch in enumerate(explicit_condition_branches):
-                if not isinstance(branch, Mapping):
-                    raise ValueError(
-                        "workflow_transition_condition_invalid:"
-                        f"{workflow_id}:{step_id}:branch_not_mapping:{index}"
-                    )
-                to_state = (
-                    str(
-                        branch.get("to")
-                        or branch.get("to_state")
-                        or branch.get("next")
-                        or ""
-                    ).strip()
-                )
-                reason = str(branch.get("reason") or f"condition_{index + 1}").strip()
-                raw_condition_spec = branch.get("condition")
-                if not isinstance(raw_condition_spec, Mapping):
-                    raise ValueError(
-                        "workflow_transition_condition_invalid:"
-                        f"{workflow_id}:{step_id}:{reason}:condition_missing"
-                    )
-                _append_transition_from_spec(
-                    to_state=to_state,
-                    reason=reason,
-                    condition_spec=raw_condition_spec,
-                )
-
-        # Priority: on_failure → on_unknown → on_approval_required → on_break/on_continue →
-        # on_true/on_false → next.
+        # Priority: on_failure → on_unknown → on_approval_required →
+        # on_break/on_continue → declarative conditions → on_true/on_false → next.
         # Canonical Vontology workflows rely on this deterministic ordering.
         if on_failure_target:
             _append_transition_from_spec(
@@ -3822,6 +3792,42 @@ def load_workflow_definition_from_vontology(
                     "signal": "continue",
                 },
             )
+
+        explicit_condition_branches = control_flow.get("conditions")
+        if explicit_condition_branches is None:
+            explicit_condition_branches = control_flow.get("declarative_conditions")
+        if explicit_condition_branches is not None:
+            if not isinstance(explicit_condition_branches, list):
+                raise ValueError(
+                    "workflow_transition_condition_invalid:"
+                    f"{workflow_id}:{step_id}:conditions_not_list"
+                )
+            for index, branch in enumerate(explicit_condition_branches):
+                if not isinstance(branch, Mapping):
+                    raise ValueError(
+                        "workflow_transition_condition_invalid:"
+                        f"{workflow_id}:{step_id}:branch_not_mapping:{index}"
+                    )
+                to_state = (
+                    str(
+                        branch.get("to")
+                        or branch.get("to_state")
+                        or branch.get("next")
+                        or ""
+                    ).strip()
+                )
+                reason = str(branch.get("reason") or f"condition_{index + 1}").strip()
+                raw_condition_spec = branch.get("condition")
+                if not isinstance(raw_condition_spec, Mapping):
+                    raise ValueError(
+                        "workflow_transition_condition_invalid:"
+                        f"{workflow_id}:{step_id}:{reason}:condition_missing"
+                    )
+                _append_transition_from_spec(
+                    to_state=to_state,
+                    reason=reason,
+                    condition_spec=raw_condition_spec,
+                )
 
         if on_true_target:
             _append_transition_from_spec(

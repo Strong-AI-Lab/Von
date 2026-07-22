@@ -130,6 +130,44 @@ class TestOpenAIKeyFileResolution:
             api_key_env_var="OPENAI_API_KEY",
         )
 
+    @patch("src.backend.languagemodels.llm_interface.warnings.warn")
+    @patch("src.backend.languagemodels.llm_interface.resolve_llm_setting")
+    @patch("src.backend.languagemodels.llm_interface.get_openai_env_var")
+    @patch("src.backend.languagemodels.llm_interface.OpenAIClient")
+    def test_initialize_clients_uses_background_actor_model_for_validation(
+        self,
+        mock_openai_client,
+        mock_get_openai_env_var,
+        mock_resolve_llm_setting,
+        mock_warn,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import src.backend.languagemodels.llm_interface as mod
+        from src.backend.security.access_control import override_current_actor
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "x" * 50)
+        mock_get_openai_env_var.return_value = "OPENAI_API_KEY"
+        mock_resolve_llm_setting.return_value = {
+            "provider": "openai",
+            "model": "gpt-5.6-luna",
+        }
+        mod._openai_client = None
+        mod._last_openai_env_var = None
+        mod._last_openai_key = None
+
+        with override_current_actor("#V#actor", "#V#lab"):
+            mod.initialize_clients(force=True)
+
+        mock_resolve_llm_setting.assert_called_with(
+            user_concept_id="#V#actor",
+            org_concept_id="#V#lab",
+        )
+        assert not any(
+            "OpenAI model not configured" in str(call.args[0])
+            for call in mock_warn.call_args_list
+        )
+        mock_openai_client.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Lazy Ollama initialisation
@@ -170,6 +208,26 @@ class TestLazyOllamaInit:
         MockOllama.assert_called_once()
         assert result is mock_instance
         assert mod._ollama_client is mock_instance
+
+    @patch("src.backend.languagemodels.llm_interface.initialize_clients")
+    @patch("src.backend.languagemodels.llm_interface.OllamaClient")
+    def test_explicit_ollama_candidate_host_reaches_client_factory(
+        self,
+        MockOllama,
+        _mock_initialize_clients,
+    ):
+        import src.backend.languagemodels.llm_interface as mod
+
+        mock_instance = MagicMock()
+        MockOllama.return_value = mock_instance
+
+        result = mod.get_llm_client(
+            client_type="ollama",
+            host="http://127.0.0.1:11434",
+        )
+
+        assert result is mock_instance
+        MockOllama.assert_called_once_with(host="http://127.0.0.1:11434")
 
     @patch("src.backend.languagemodels.llm_interface.OllamaClient")
     def test_ensure_ollama_client_reuses_existing(self, MockOllama):

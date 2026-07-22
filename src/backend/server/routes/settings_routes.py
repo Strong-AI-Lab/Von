@@ -96,6 +96,7 @@ from ...services.concept_service import ConceptNotFoundError
 from ...languagemodels.llm_interface import (
     OpenAIClient,
     get_ollama_auto_pull_state_snapshot,
+    resolve_openai_responses_max_output_tokens,
 )
 from ...db.repositories.concepts_repository import ConceptsRepository
 from bson import ObjectId
@@ -3444,6 +3445,10 @@ def test_openai_model():
                 }
             )
 
+        api_surface = "responses"
+        fallback_used = False
+        responses_failure_kind = None
+        responses_failure_reason = None
         try:
             response_kwargs = openai_responses_kwargs_from_model_parameters(
                 model_parameters,
@@ -3452,10 +3457,15 @@ def test_openai_model():
             client.client.responses.create(
                 model=resolved_model,
                 input="Reply exactly with OK.",
-                max_output_tokens=8,
+                max_output_tokens=resolve_openai_responses_max_output_tokens(
+                    model_parameters
+                ),
                 **response_kwargs,
             )
         except Exception as responses_exc:
+            responses_failure_kind, responses_failure_reason = (
+                _classify_openai_probe_exception(responses_exc)
+            )
             try:
                 client.client.chat.completions.create(
                     model=resolved_model,
@@ -3465,6 +3475,8 @@ def test_openai_model():
                     ],
                     max_completion_tokens=8,
                 )
+                api_surface = "chat_completions"
+                fallback_used = True
             except Exception as completion_exc:
                 failure_kind, reason = _classify_openai_probe_exception(completion_exc)
                 current_app.logger.warning(
@@ -3495,6 +3507,10 @@ def test_openai_model():
                 "model_parameter_capabilities": parameter_capabilities,
                 "failure_kind": None,
                 "reason": "The selected premium model completed a live probe successfully.",
+                "api_surface": api_surface,
+                "fallback_used": fallback_used,
+                "responses_failure_kind": responses_failure_kind,
+                "responses_failure_reason": responses_failure_reason,
             }
         )
     except Exception as exc:

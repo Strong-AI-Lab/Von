@@ -44,6 +44,7 @@ from scripts.run_authenticated_browser_workflow_replay import (
     collect_run_environment,
     create_replay_chat_session,
     establish_browser_test_session,
+    extract_observed_workflow_ids,
     extract_selected_workflow_ids,
     extract_visible_answer,
     poll_replay_task,
@@ -402,6 +403,14 @@ def _carry_forward_projection(turn_record: Mapping[str, Any]) -> dict[str, Any]:
     return _as_mapping(summary.get("expected_outcome_obligation_carry_forward"))
 
 
+def _selected_workflow_execution_summary(
+    turn_record: Mapping[str, Any],
+) -> dict[str, Any]:
+    execution = _as_mapping(turn_record.get("execution"))
+    selected_trace = _as_mapping(execution.get("selected_workflow_trace"))
+    return _as_mapping(selected_trace.get("workflow_execution_summary"))
+
+
 # --------------------------------------------------------------------------
 # Oracle (pure; unit-tested)
 # --------------------------------------------------------------------------
@@ -463,6 +472,68 @@ def evaluate_turn_expectations(
     if expectations.get("require_completed"):
         status = (_safe_text(terminal_status) or "").lower()
         add("require_completed", status == "completed", status, "completed")
+
+    # A background task can reach its transport-level ``completed`` state after
+    # Von has safely returned a grounded non-success.  That is not capability
+    # success.  Whenever the persisted completion gate is present, require its
+    # own canonical acceptance signal so a timeout or represented workflow
+    # failure cannot be reported green merely because polling terminated.
+    completion_gate = _as_mapping(turn_record.get("completion_gate"))
+    if completion_gate:
+        safe_to_claim_completion = completion_gate.get(
+            "safe_to_claim_completion"
+        )
+        add(
+            "completion_gate_safe_to_claim_completion",
+            safe_to_claim_completion is True,
+            {
+                "decision": completion_gate.get("decision"),
+                "decision_reason": completion_gate.get("decision_reason"),
+                "safe_to_claim_completion": safe_to_claim_completion,
+                "requires_follow_up": completion_gate.get("requires_follow_up"),
+                "blocking_failure_codes": list(
+                    completion_gate.get("blocking_failure_codes") or []
+                ),
+            },
+            "persisted completion gate safe_to_claim_completion=true",
+        )
+
+    # A recovery stage must not turn a failed selected workflow into a green
+    # capability result merely by producing plausible prose.  When the
+    # persisted selected-workflow execution summary is available, require all
+    # of its observed actions to have succeeded.  This is deliberately generic:
+    # it applies to every workflow and does not encode domain-specific policy.
+    selected_execution_summary = _selected_workflow_execution_summary(turn_record)
+    if selected_execution_summary:
+        failed_action_ids = [
+            _safe_text(action_id)
+            for action_id in (selected_execution_summary.get("failed_action_ids") or [])
+            if _safe_text(action_id)
+        ]
+        raw_failure_count = selected_execution_summary.get("action_failure_count")
+        action_failure_count = (
+            raw_failure_count if isinstance(raw_failure_count, int) else None
+        )
+        selected_workflow_clean = not failed_action_ids and action_failure_count in {
+            None,
+            0,
+        }
+        add(
+            "selected_workflow_has_no_failed_actions",
+            selected_workflow_clean,
+            {
+                "workflow_id": selected_execution_summary.get("workflow_id"),
+                "action_failure_count": action_failure_count,
+                "failed_action_ids": failed_action_ids,
+                "first_failing_state_id": selected_execution_summary.get(
+                    "first_failing_state_id"
+                ),
+                "first_failing_action_id": selected_execution_summary.get(
+                    "first_failing_action_id"
+                ),
+            },
+            "selected workflow execution has zero failed actions",
+        )
 
     expected_workflow = _safe_text(expectations.get("expected_workflow_id"))
     if expected_workflow:
@@ -700,11 +771,19 @@ def run_case(
             turn_record,
             evidence.get("last_progress"),
         )
+        observed_workflow_ids = extract_observed_workflow_ids(
+            task_result,
+            turn_record,
+            evidence.get("last_progress"),
+        )
+        workflow_evidence_ids = list(
+            dict.fromkeys([*selected_workflow_ids, *observed_workflow_ids])
+        )
         evaluation = evaluate_turn_expectations(
             expectations=expectations,
             visible_answer=visible_answer,
             terminal_status=terminal_status,
-            selected_workflow_ids=selected_workflow_ids,
+            selected_workflow_ids=workflow_evidence_ids,
             turn_record=turn_record,
         )
         turn_reports.append(
@@ -718,6 +797,8 @@ def run_case(
                 "visible_answer": visible_answer,
                 "visible_answer_source": visible_answer_source,
                 "selected_workflow_ids": selected_workflow_ids,
+                "observed_workflow_ids": observed_workflow_ids,
+                "workflow_evidence_ids": workflow_evidence_ids,
                 "turn_record_decision": _safe_text(turn_record.get("decision")) or None,
                 "turn_record_available": bool(turn_record),
                 "obligation_carry_forward": _carry_forward_projection(turn_record),

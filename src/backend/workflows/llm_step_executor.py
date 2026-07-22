@@ -1117,6 +1117,33 @@ def _default_model_parameters_for_request(
     return None
 
 
+def _model_parameters_for_llm_policy(
+    request: WorkflowActionRequest,
+    llm_policy: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Merge a represented per-step output ceiling into model parameters."""
+
+    parameters = dict(_default_model_parameters_for_request(request) or {})
+    raw_output_limit = llm_policy.get("max_output_tokens")
+    if raw_output_limit is not None:
+        try:
+            represented_limit = max(16, min(100_000, int(raw_output_limit)))
+        except (TypeError, ValueError):
+            represented_limit = None
+        if represented_limit is not None:
+            current_limit = parameters.get("max_output_tokens")
+            try:
+                current_limit_int = int(current_limit)
+            except (TypeError, ValueError):
+                current_limit_int = None
+            parameters["max_output_tokens"] = (
+                min(current_limit_int, represented_limit)
+                if current_limit_int is not None
+                else represented_limit
+            )
+    return parameters or None
+
+
 def _model_parameters_with_timeout(
     model_parameters: Mapping[str, Any] | None,
     timeout_seconds: float | None,
@@ -2680,6 +2707,14 @@ def _select_model_context_for_prompt_variant(
 
     if not request.environment.gateway:
         return selected_model, selected_candidate, registry_snapshot, diagnostics
+    selection_policy = _context_string(
+        (request.llm_policy or {}).get("selection_policy")
+        if isinstance(request.llm_policy, Mapping)
+        else None
+    ).lower()
+    if selection_policy in {"active_only", "active_model_only"}:
+        diagnostics["source"] = "active_model_only_policy"
+        return selected_model, selected_candidate, registry_snapshot, diagnostics
     if _prefer_default_model_for_request(request):
         requested_model = _context_string(request.data.get("requested_model"))
         if requested_model:
@@ -3093,7 +3128,7 @@ def _run_direct_llm_step(
                 context=context_messages or None,
                 model=model_name,
                 llm_params=_model_parameters_with_timeout(
-                    _default_model_parameters_for_request(request),
+                    _model_parameters_for_llm_policy(request, llm_policy_map),
                     timeout_override_sec,
                 ),
             ),
@@ -3168,7 +3203,7 @@ def _run_direct_llm_step(
         llm_policy_map=llm_policy_map,
         validation_policy_map=validation_policy_map,
         selected_model=model_name,
-        selected_candidate=None,
+        selected_candidate=selected_candidate,
         tool_invocations=(),
         tool_messages=(),
         llm_calls=request.data.get("llm_calls") or [],
@@ -3605,7 +3640,16 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
                 "workflow_state_id": telemetry_phase,
             },
         )
-    if not request.environment.gateway:
+    selection_policy = _context_string(
+        llm_policy_map.get("selection_policy")
+    ).lower()
+    active_model_only = selection_policy in {
+        "active_only",
+        "active_model_only",
+    }
+    if not request.environment.gateway or (
+        active_model_only and _tool_mode(llm_policy_map) != "allowed"
+    ):
         return _run_direct_llm_step(
             request=request,
             stage=stage,

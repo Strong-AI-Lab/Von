@@ -2,7 +2,7 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "16",
+  "seed_version": "17",
   "source_tag": "JVNAUTOSCI-2434",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
@@ -490,7 +490,62 @@
                     }
                   ]
                 }
+              },
+              {
+                "to_state": "ensure_arxiv_paper_concept",
+                "reason": "canonical_arxiv_identity_available",
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_exists",
+                      "key": "arxiv_id",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "arxiv_id",
+                      "expected": false
+                    },
+                    {
+                      "kind": "not",
+                      "condition": {
+                        "kind": "context_value_equals",
+                        "key": "arxiv_id",
+                        "value": ""
+                      }
+                    }
+                  ]
+                }
               }
+            ]
+          },
+          {
+            "state_id": "ensure_arxiv_paper_concept",
+            "action_id": "scholarly_paper.ensure_paper_concept",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "additive_vontology",
+              "reason_code": "canonical_arxiv_paper_identity_additive_writes"
+            },
+            "next_state": "attach_metadata",
+            "on_failure_state": "failed",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_ensure_arxiv_paper_concept_paper_concept_id_to_paper_concept_id",
+                "context_key": "paper_concept_id",
+                "tool_output_field": "paper_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_scholarly_article_metadata_representation_workflow_ensure_arxiv_paper_concept_paper_concept_created_to_paper_concept_created",
+                "context_key": "paper_concept_created",
+                "tool_output_field": "paper_concept_created"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_concept_id",
+              "paper_concept_created"
             ]
           },
           {
@@ -2343,22 +2398,18 @@
                   },
                   {
                     "key": "arxiv_pdf_import_error",
-                    "skip_if_unresolved": true,
                     "value_from_context": "last_action_outputs.result.error"
                   },
                   {
                     "key": "arxiv_pdf_import_message",
-                    "skip_if_unresolved": true,
                     "value_from_context": "last_action_outputs.result.message"
                   },
                   {
                     "key": "arxiv_pdf_import_status_code",
-                    "skip_if_unresolved": true,
                     "value_from_context": "last_action_outputs.result.status_code"
                   },
                   {
                     "key": "arxiv_pdf_import_final_url",
-                    "skip_if_unresolved": true,
                     "value_from_context": "last_action_outputs.result.final_url"
                   }
                 ]
@@ -2601,7 +2652,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"source_neutral_paper_reference_ingestion\",\"required_effects\":[{\"effect_id\":\"normalised_paper_reference_set\",\"effect_type\":\"workflow_context_projection\",\"description\":\"Normalise the request into paper_reference_set.v1 while preserving source_context provenance fields.\",\"required_payload_fields\":[\"normalised_paper_reference_set\",\"paper_reference_items\"],\"missing_failure_code\":\"paper_reference_set_not_normalised\",\"failed_failure_code\":\"paper_reference_set_normalisation_failed\",\"required_tools\":[\"paper_reference.normalise_reference_set\"]},{\"effect_id\":\"paper_reference_item_delegation\",\"effect_type\":\"workflow_delegation\",\"description\":\"Delegate each non-preview item to the represented source-specific paper workflow for its reference kind.\",\"required_payload_fields\":[\"iteration_results\"],\"required_tools\":[\"workflow_control.for_each\",\"workflow_invoke_subworkflow\"],\"missing_failure_code\":\"paper_reference_items_not_dispatched\",\"failed_failure_code\":\"paper_reference_item_dispatch_failed\"},{\"effect_id\":\"paper_reference_item_outcomes\",\"effect_type\":\"workflow_result_projection\",\"description\":\"Return per-item outcomes, preserving partial success and typed failures.\",\"required_payload_fields\":[\"for_each_success_count\",\"for_each_error_count\",\"iteration_results\"],\"missing_failure_code\":\"paper_reference_item_outcomes_missing\",\"failed_failure_code\":\"paper_reference_item_outcomes_failed\",\"required_tools\":[\"workflow_control.for_each\"]}]}",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"source_neutral_paper_reference_ingestion\",\"required_effects\":[{\"effect_id\":\"normalised_paper_reference_set\",\"effect_type\":\"workflow_context_projection\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Normalise the request into paper_reference_set.v1 while preserving source_context provenance fields.\",\"required_payload_fields\":[\"normalised_paper_reference_set\",\"paper_reference_items\"],\"missing_failure_code\":\"paper_reference_set_not_normalised\",\"failed_failure_code\":\"paper_reference_set_normalisation_failed\",\"required_tools\":[\"paper_reference.normalise_reference_set\"]},{\"effect_id\":\"paper_reference_item_delegation\",\"effect_type\":\"workflow_delegation\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Delegate each non-preview item to the represented source-specific paper workflow for its reference kind.\",\"required_payload_fields\":[\"iteration_results\"],\"required_tools\":[\"workflow_control.for_each\",\"workflow_invoke_subworkflow\"],\"missing_failure_code\":\"paper_reference_items_not_dispatched\",\"failed_failure_code\":\"paper_reference_item_dispatch_failed\"},{\"effect_id\":\"paper_reference_item_outcomes\",\"effect_type\":\"workflow_result_projection\",\"postcondition_strategy\":\"execution_observed\",\"description\":\"Return per-item outcomes, preserving partial success and typed failures.\",\"required_payload_fields\":[\"for_each_success_count\",\"for_each_error_count\",\"iteration_results\"],\"missing_failure_code\":\"paper_reference_item_outcomes_missing\",\"failed_failure_code\":\"paper_reference_item_outcomes_failed\",\"required_tools\":[\"workflow_control.for_each\"]}]}",
           "lang": "en-NZ"
         },
         {

@@ -54,6 +54,36 @@ def test_coerce_plain_string_wraps_in_list() -> None:
     assert any("string to list" in w for w in warnings)
 
 
+def test_coerce_empty_string_to_empty_list() -> None:
+    """An empty optional list from a model means no values, not a bad scalar."""
+    schema = Schema(required={}, optional={"label_ids": list})
+    payload: dict = {"label_ids": ""}
+
+    coerced, warnings = coerce_payload_types(schema, payload)
+
+    assert coerced["label_ids"] == []
+    assert any("empty string" in warning for warning in warnings)
+    assert validate_payload(schema, coerced) == (True, [])
+
+
+def test_coerce_empty_optional_numeric_string_to_omission() -> None:
+    """Empty model placeholders should not invalidate optional numeric fields."""
+    schema = Schema(
+        required={"query": str},
+        optional={"min_similarity": float},
+    )
+    payload: dict = {"query": "JVNAUTOSCI-2593", "min_similarity": ""}
+
+    coerced, warnings = coerce_payload_types(schema, payload)
+
+    assert coerced == {"query": "JVNAUTOSCI-2593"}
+    assert any(
+        "Omitted empty optional non-string field 'min_similarity'" in warning
+        for warning in warnings
+    )
+    assert validate_payload(schema, coerced) == (True, [])
+
+
 def test_coerce_invalid_json_string_wraps_in_list() -> None:
     """Malformed JSON starting with [ should fall back to wrapping."""
     schema = Schema(required={"items": list}, optional={})
@@ -63,6 +93,25 @@ def test_coerce_invalid_json_string_wraps_in_list() -> None:
 
     assert coerced["items"] == ["[not valid json"]
     assert any("string to list" in w for w in warnings)
+
+
+def test_coerce_declared_comma_separated_list_items() -> None:
+    """Declared identifier lists recover comma-joined items without broad splitting."""
+    schema = Schema(
+        required={},
+        optional={"fields": list, "labels": list},
+        comma_separated_list_fields=("fields",),
+    )
+    payload: dict = {
+        "fields": ["summary,status", "created"],
+        "labels": ["keep,this-together"],
+    }
+
+    coerced, warnings = coerce_payload_types(schema, payload)
+
+    assert coerced["fields"] == ["summary", "status", "created"]
+    assert coerced["labels"] == ["keep,this-together"]
+    assert any("comma-separated list field 'fields'" in warning for warning in warnings)
 
 
 def test_coerce_json_object_string_not_treated_as_list() -> None:
@@ -134,6 +183,42 @@ def test_gateway_invoke_coerces_numeric_strings_without_mutating_caller_payload(
     assert observed["top_k_type"] == "int"
     assert result.payload["success"] is True
     assert result.payload["top_k"] == 10
+
+
+def test_gateway_invoke_splits_declared_comma_separated_list_items() -> None:
+    observed: dict[str, object] = {}
+
+    def _handler(*, fields: list[str]) -> dict[str, object]:
+        observed["fields"] = fields
+        return {"success": True, "fields": fields}
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="field_lookup",
+            handler=_handler,
+            input_schema=Schema(
+                required={"fields": list},
+                comma_separated_list_fields=("fields",),
+            ),
+            output_schema=Schema(
+                required={"success": bool, "fields": list},
+            ),
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "field_lookup",
+        {"fields": ["summary,status,created"]},
+    )
+
+    assert observed["fields"] == ["summary", "status", "created"]
+    assert result.payload["fields"] == ["summary", "status", "created"]
 
 
 def test_coerce_declared_scalar_from_object_payload() -> None:
@@ -248,6 +333,7 @@ def test_schema_metadata_round_trips_to_json_schema_extensions() -> None:
         batch_propagated_fields=("profile",),
         enum_values={"profile": ("zhan-gmail", "lab-gmail")},
         scalar_source_fields={"query": ("search_query",)},
+        comma_separated_list_fields=("query",),
     )
 
     json_schema = schema_to_json_schema(schema)
@@ -255,6 +341,7 @@ def test_schema_metadata_round_trips_to_json_schema_extensions() -> None:
     assert json_schema["x-von-argument-aliases"] == {"identity": "profile"}
     assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
     assert json_schema["x-von-scalar-source-fields"] == {"query": ["search_query"]}
+    assert json_schema["x-von-comma-separated-list-fields"] == ["query"]
     assert json_schema["properties"]["profile"]["enum"] == [
         "zhan-gmail",
         "lab-gmail",
@@ -267,12 +354,13 @@ def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> No
     json_schema = orchestrator._mcp_schema_to_json_schema(
         {
             "required": {"profile": str},
-            "optional": {"query": str},
+            "optional": {"query": str, "fields": list},
             "description": "List records.",
             "aliases": {"identity": "profile"},
             "batch_propagated_fields": ["profile"],
             "enum_values": {"profile": ["zhan-gmail", "lab-gmail"]},
             "scalar_source_fields": {"query": ["search_query"]},
+            "comma_separated_list_fields": ["fields"],
         }
     )
 
@@ -280,6 +368,7 @@ def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> No
     assert json_schema["x-von-argument-aliases"] == {"identity": "profile"}
     assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
     assert json_schema["x-von-scalar-source-fields"] == {"query": ["search_query"]}
+    assert json_schema["x-von-comma-separated-list-fields"] == ["fields"]
     assert json_schema["properties"]["profile"]["enum"] == [
         "zhan-gmail",
         "lab-gmail",
@@ -327,6 +416,46 @@ def test_preflight_emits_contract_validation_diagnostics() -> None:
     assert diagnostic["tool"] == "gmail_list_messages"
     assert diagnostic["contract"]["input_schema"]["required"] == ["profile"]
     assert diagnostic["contract"]["input_schema"]["additionalProperties"] is False
+
+
+def test_preflight_coerces_empty_optional_gmail_label_ids() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+    catalogue = {
+        "gmail_list_messages": {
+            "name": "gmail_list_messages",
+            "description": "List Gmail messages.",
+            "input_schema": {
+                "required": {"profile": str},
+                "optional": {"label_ids": list, "max_results": int},
+                "allow_unknown": False,
+                "description": "Gmail list arguments",
+            },
+            "output_schema": None,
+            "category": "read",
+        }
+    }
+
+    preflight = orchestrator._preflight_tool_calls(
+        [
+            {
+                "action": "call_tool",
+                "tool": "gmail_list_messages",
+                "payload": {
+                    "profile": "vonwitbrock-gmail",
+                    "label_ids": "",
+                    "max_results": 3,
+                },
+            }
+        ],
+        catalogue,
+        allowed_tool_names=None,
+        user_namespace="#V#test_user",
+        selected_gmail_profile=None,
+    )
+
+    assert preflight.errors == []
+    assert preflight.tool_calls is not None
+    assert preflight.tool_calls[0]["payload"]["label_ids"] == []
 
 
 def test_preflight_rejects_symbolic_target_contract_mismatch() -> None:
@@ -510,6 +639,7 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
                         "properties": {
                             "user_concept_id": {"type": "string"},
                             "top_k": {"type": "integer"},
+                            "fields": {"type": "array", "items": {}},
                         },
                         "required": ["user_concept_id"],
                         "description": "Grounded current-user paper lookup.",
@@ -518,6 +648,7 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
                         "x-von-scalar-source-fields": {
                             "user_concept_id": ["concept_id"]
                         },
+                        "x-von-comma-separated-list-fields": ["fields"],
                     }
                 }
             }
@@ -534,6 +665,7 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
     assert schema.aliases == {"user_id": "user_concept_id"}
     assert tuple(schema.batch_propagated_fields) == ("user_concept_id",)
     assert tuple(schema.scalar_source_fields["user_concept_id"]) == ("concept_id",)
+    assert tuple(schema.comma_separated_list_fields) == ("fields",)
     ok, errors = validate_payload(
         schema,
         {"user_concept_id": "#V#test_user", "top_k": 3},
@@ -597,6 +729,7 @@ def test_search_concepts_rejects_target_contract_metadata_before_invoke() -> Non
     )
     assert schema is not None
     assert schema.allow_unknown is False
+    assert tuple(schema.comma_separated_list_fields) == ("filter_kind",)
     assert {
         "direct_instances_only",
         "system_tags",
@@ -605,6 +738,18 @@ def test_search_concepts_rejects_target_contract_metadata_before_invoke() -> Non
         "per_page",
         "use_two_pass",
     }.issubset(schema.optional)
+
+    coerced, warnings = coerce_payload_types(
+        schema,
+        {
+            "query": "Ada Lovelace",
+            "filter_kind": ["individual,type"],
+        },
+    )
+    assert coerced["filter_kind"] == ["individual", "type"]
+    assert warnings == [
+        "Normalised comma-separated list field 'filter_kind' to individual items."
+    ]
 
     preflight = orchestrator._preflight_tool_calls(
         [

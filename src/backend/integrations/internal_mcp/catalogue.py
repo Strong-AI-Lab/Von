@@ -6996,6 +6996,7 @@ def _concept_search_input_schema() -> Schema:
         # before invocation rather than allowing a late unexpected-keyword
         # failure inside the handler.
         allow_unknown=False,
+        comma_separated_list_fields=("filter_kind",),
         description="search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)",
     )
 
@@ -18432,8 +18433,11 @@ def _jira_search_input_schema() -> Schema:
             "fields": (list,),
         },
         allow_unknown=True,
+        comma_separated_list_fields=("fields",),
         description=(
-            "jira_search input: jql (str, required) plus optional max_results, next_page_token, start_at (deprecated), and fields (list of field names)."
+            "jira_search input: jql (str, required) plus optional max_results, "
+            "next_page_token, start_at (deprecated), and fields (list of "
+            "individual field names; do not combine names into one item)."
         ),
     )
 
@@ -18443,10 +18447,11 @@ def _jira_get_issue_input_schema() -> Schema:
         required={"issue_key": str},
         optional={"fields": (list,), "expand": (list,)},
         allow_unknown=True,
+        comma_separated_list_fields=("fields", "expand"),
         description=(
             "jira_get_issue input: issue_key (str, required), optional fields "
-            "(list of field names), and optional expand (list of Jira expand "
-            "tokens such as ['changelog'])."
+            "(list of individual field names), and optional expand (list of "
+            "individual Jira expand tokens such as ['changelog'])."
         ),
     )
 
@@ -21672,12 +21677,14 @@ def _gmail_get_message_output_schema() -> Schema:
             "from": str,
             "subject": str,
             "date": str,
+            "body": str,
+            "body_truncated": bool,
         },
         allow_unknown=True,
         description=(
             "gmail_get_message output: full Gmail message payload plus normalised "
             "message_id, sender/from, subject, date, and snippet fields when "
-            "available."
+            "available. Body text is returned only when include_body=true."
         ),
     )
 
@@ -21916,6 +21923,7 @@ def _gmail_list_messages(**kwargs):
 
 def _gmail_get_message(**kwargs):
     from ...integrations.google import gmail_service as gs
+    from ...integrations.google.gmail_message_body import extract_gmail_message_body
 
     profile = _resolve_gmail_profile_argument(
         kwargs.get("profile") or kwargs.get("profile_id")
@@ -21929,18 +21937,28 @@ def _gmail_get_message(**kwargs):
             suggestions=["Provide both profile ID and message ID"],
         )
 
+    include_body = bool(kwargs.get("include_body") or False)
+    requested_format = kwargs.get("format", "metadata")
+    effective_format = "full" if include_body else requested_format
+
     try:
         result = gs.get_message(
             profile_id=profile,
             message_id=message_id,
-            format=kwargs.get("format", "metadata"),
+            format=effective_format,
             audit_context={
                 "namespace": kwargs.get("namespace"),
                 "source": "internal_mcp_gateway",
                 "tool": "gmail_get_message",
             },
         )
-        return _normalise_gmail_message_detail_payload(result)
+        normalised = _normalise_gmail_message_detail_payload(result)
+        if include_body:
+            body, body_truncated = extract_gmail_message_body(result)
+            if body is not None:
+                normalised["body"] = body
+                normalised["body_truncated"] = body_truncated
+        return normalised
     except Exception as exc:  # noqa: BLE001
         return make_error_response(
             "gmail_api_error",
@@ -30759,9 +30777,14 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     )
     gmail_get_message_input_schema = Schema(
         required={"profile": str, "message_id": str},
-        optional={"format": str},
+        optional={"format": str, "include_body": bool},
         allow_unknown=False,
-        description="Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal).",
+        description=(
+            "Fetch a Gmail message for a profile (formats: "
+            "metadata|full|raw|minimal). Set include_body=true only when the "
+            "user explicitly requests message body text; this forces format=full "
+            "and returns bounded plain-text body evidence."
+        ),
         aliases={
             "profile_id": "profile",
             "identity": "profile",
@@ -31307,7 +31330,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "the configured profile alias or the authorised Gmail address. "
                 "Supports Gmail API formats "
                 "metadata|full|raw|minimal and returns normalised sender, "
-                "subject, date, and snippet fields when available. Read-only; "
+                "subject, date, and snippet fields when available. Set "
+                "include_body=true only for an explicit user request for body "
+                "text; that returns a bounded plain-text body and truncation flag. Read-only; "
                 "profile token required."
             ),
         ),

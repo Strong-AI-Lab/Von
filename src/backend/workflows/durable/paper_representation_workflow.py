@@ -1123,6 +1123,7 @@ def _build_scholarly_paper_ensure_paper_concept_handler():
             _ensure_type_concept,
             _stable_file_copy_paper_instance_concept_id,
             ensure_arxiv_paper_instance,
+            predict_arxiv_paper_concept_id,
         )
 
         user_concept_id = _resolve_user_concept_id(request)
@@ -1148,12 +1149,16 @@ def _build_scholarly_paper_ensure_paper_concept_handler():
 
         # 2. Determine or create the paper instance
         if arxiv_id:
+            expected_paper_concept_id = predict_arxiv_paper_concept_id(
+                arxiv_id=arxiv_id
+            )
+            existed_before = _concept_exists(expected_paper_concept_id)
             paper_concept_id = ensure_arxiv_paper_instance(
                 user_concept_id=user_concept_id,
                 arxiv_id=arxiv_id,
                 logger=logger,
             )
-            created = not _concept_exists(paper_concept_id) # ensure_arxiv_paper_instance might have created it
+            created = not existed_before
         elif file_copy_concept_id:
             paper_concept_id = _stable_file_copy_paper_instance_concept_id(file_copy_concept_id)
             created = False
@@ -1356,11 +1361,32 @@ def _build_scholarly_paper_resolve_topics_handler():
                 logger=logger,
             )
             topic_concept_ids.append(topic_concept_id)
-            add_relationship(
+            relationship_result = add_relationship(
                 source_id=paper_concept_id,
                 predicate="#V#about",
                 target=topic_concept_id,
             )
+            if relationship_result.get("error") == "predicate_concept_not_typed":
+                _ensure_predicate_concept("#V#about", "About", logger=logger)
+                relationship_result = add_relationship(
+                    source_id=paper_concept_id,
+                    predicate="#V#about",
+                    target=topic_concept_id,
+                )
+            if not bool(relationship_result.get("success")):
+                return WorkflowActionResult(
+                    status="failed",
+                    error=(
+                        "scholarly_topic_relationship_write_failed:"
+                        f"{relationship_result.get('error') or 'unknown_error'}"
+                    ),
+                    outputs={
+                        "paper_concept_id": paper_concept_id,
+                        "topic_labels": topic_labels,
+                        "topic_concept_ids": topic_concept_ids,
+                        "relationship_write_result": relationship_result,
+                    },
+                )
 
         if topic_labels:
             upsert_text_for_concept(

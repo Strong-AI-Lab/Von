@@ -51,7 +51,7 @@ from ..services.workflow_actor_scope_service import (
 )
 from .durable.registry_factory import (
     get_or_build_workflow_registry_inventory_snapshot,
-    get_shared_durable_action_registry,
+    get_supported_durable_workflow_action_ids,
     get_shared_workflow_registry_read_only,
     resolve_workflow_definition_from_authority,
 )
@@ -1436,10 +1436,9 @@ def _build_authoring_payload(
         definition=definition,
         authoritative_definition=definition if source.lower() == "vontology" else None,
     )
-    action_registry = get_shared_durable_action_registry()
     validation = validate_workflow_definition_contract(
         definition=definition,
-        supported_action_ids=action_registry.all_action_ids(),
+        supported_action_ids=get_supported_durable_workflow_action_ids(),
         enforce_supported_actions=True,
         known_workflow_ids=get_shared_workflow_registry_read_only(
             defer_parity_work=True
@@ -1950,13 +1949,12 @@ def preview_workflow_authoring_spec(
     if _clean_text(getattr(proposed_definition, "workflow_id", "")) != workflow_id_clean:
         raise ValueError("workflow_id_mismatch")
 
-    action_registry = get_shared_durable_action_registry()
     known_workflow_ids = get_shared_workflow_registry_read_only(
         defer_parity_work=True
     ).all_workflow_ids()
     contract_validation = validate_workflow_definition_contract(
         definition=proposed_definition,
-        supported_action_ids=action_registry.all_action_ids(),
+        supported_action_ids=get_supported_durable_workflow_action_ids(),
         enforce_supported_actions=True,
         known_workflow_ids=known_workflow_ids,
         workflow_definition_loader=_workflow_definition_loader,

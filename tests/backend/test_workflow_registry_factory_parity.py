@@ -684,3 +684,44 @@ def test_agent_test_registry_uses_repo_seed_without_vontology_discovery(monkeypa
     assert registration is not None
     assert registration.source == "repo_seed_agent_test"
     assert registration.definition.workflow_id == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+
+
+def test_supported_durable_workflow_actions_include_executor_and_mcp_surfaces(
+    monkeypatch,
+):
+    class _ActionRegistry:
+        @staticmethod
+        def all_action_ids():
+            return ("workflow_control.context_set",)
+
+        @staticmethod
+        def has_fallback_handler():
+            return True
+
+    class _Gateway:
+        @staticmethod
+        def describe_methods():
+            return {
+                "create_concepts": object(),
+                "upsert_text_relation": object(),
+            }
+
+    monkeypatch.setattr(
+        registry_factory,
+        "get_shared_durable_action_registry",
+        lambda: _ActionRegistry(),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_get_or_build_durable_mcp_gateway",
+        lambda: _Gateway(),
+    )
+
+    supported = set(registry_factory.get_supported_durable_workflow_action_ids())
+
+    assert supported == {
+        "create_concepts",
+        "llm.action",
+        "upsert_text_relation",
+        "workflow_control.context_set",
+    }

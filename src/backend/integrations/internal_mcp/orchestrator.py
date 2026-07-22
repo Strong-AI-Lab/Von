@@ -6780,6 +6780,19 @@ class InternalMCPChatOrchestrator:
         data: Mapping[str, Any],
     ) -> list[str]:
         lines: list[str] = []
+        raw_arxiv_ids = data.get("arxiv_ids")
+        arxiv_ids = (
+            [raw_arxiv_ids]
+            if isinstance(raw_arxiv_ids, str)
+            else raw_arxiv_ids
+            if isinstance(raw_arxiv_ids, Sequence)
+            and not isinstance(raw_arxiv_ids, (str, bytes, bytearray))
+            else []
+        )
+        for raw_arxiv_id in arxiv_ids[:3]:
+            arxiv_id = cls._coerce_non_empty_text(raw_arxiv_id)
+            if arxiv_id:
+                lines.append(f"arXiv paper: {arxiv_id}.")
         paper_concept_id = cls._coerce_non_empty_text(data.get("paper_concept_id"))
         file_copy_concept_id = cls._coerce_non_empty_text(
             data.get("file_copy_concept_id")
@@ -13473,6 +13486,9 @@ class InternalMCPChatOrchestrator:
         batch_propagated_fields = mcp_schema.get("batch_propagated_fields")
         enum_values = mcp_schema.get("enum_values")
         scalar_source_fields = mcp_schema.get("scalar_source_fields")
+        comma_separated_list_fields = mcp_schema.get(
+            "comma_separated_list_fields"
+        )
         description = mcp_schema.get("description")
 
         properties: Dict[str, Any] = {}
@@ -13567,6 +13583,18 @@ class InternalMCPChatOrchestrator:
                 and isinstance(source_fields, Sequence)
                 and not isinstance(source_fields, (str, bytes, bytearray))
             }
+        if (
+            isinstance(comma_separated_list_fields, Sequence)
+            and not isinstance(
+                comma_separated_list_fields, (str, bytes, bytearray)
+            )
+            and comma_separated_list_fields
+        ):
+            json_schema["x-von-comma-separated-list-fields"] = [
+                field_name.strip()
+                for field_name in comma_separated_list_fields
+                if isinstance(field_name, str) and field_name.strip()
+            ]
 
         return json_schema
 
@@ -18283,10 +18311,18 @@ class InternalMCPChatOrchestrator:
             )
 
             if provider:
+                client_kwargs: dict[str, Any] = {}
+                if (
+                    provider == "ollama"
+                    and isinstance(candidate.host, str)
+                    and candidate.host.strip()
+                ):
+                    client_kwargs["host"] = candidate.host.strip()
                 client = get_llm_client(
                     client_type=provider,
                     user_concept_id=user_concept_id,
                     org_concept_id=org_concept_id,
+                    **client_kwargs,
                 )
             else:
                 client = default_client
@@ -22200,6 +22236,24 @@ class InternalMCPChatOrchestrator:
                     )
                     else {}
                 ),
+                comma_separated_list_fields=(
+                    tuple(
+                        str(field_name).strip()
+                        for field_name in raw_json_schema.get(
+                            "x-von-comma-separated-list-fields", ()
+                        )
+                        if isinstance(field_name, str) and field_name.strip()
+                    )
+                    if isinstance(
+                        raw_json_schema.get("x-von-comma-separated-list-fields"),
+                        Sequence,
+                    )
+                    and not isinstance(
+                        raw_json_schema.get("x-von-comma-separated-list-fields"),
+                        (str, bytes, bytearray),
+                    )
+                    else ()
+                ),
             )
 
         get_definition = getattr(self._gateway, "get_method_definition", None)
@@ -22297,6 +22351,23 @@ class InternalMCPChatOrchestrator:
                 }
                 if isinstance(raw_schema.get("scalar_source_fields"), Mapping)
                 else {}
+            ),
+            comma_separated_list_fields=(
+                tuple(
+                    str(field_name).strip()
+                    for field_name in raw_schema.get(
+                        "comma_separated_list_fields", ()
+                    )
+                    if isinstance(field_name, str) and field_name.strip()
+                )
+                if isinstance(
+                    raw_schema.get("comma_separated_list_fields"), Sequence
+                )
+                and not isinstance(
+                    raw_schema.get("comma_separated_list_fields"),
+                    (str, bytes, bytearray),
+                )
+                else ()
             ),
         )
 

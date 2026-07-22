@@ -117,6 +117,10 @@ def _invalidate_workflow_routing_projection_for_text_relation_change(
                 "workflow_routing_text_relation_changed:"
                 f"{subject_concept_id}:{predicate_text}"
             ),
+            # The persisted capability manifest embeds this represented routing
+            # metadata.  Dropping only the process cache can immediately reload
+            # the stale manifest and silently undo the semantic update.
+            reset_backend_namespace=True,
         )
         invalidate_workflow_discovery_executability_caches()
     except Exception:

@@ -350,6 +350,45 @@ def test_find_relations_with_argument_splits_bracketed_predicate_filter_string()
     }
 
 
+def test_subject_relation_predicate_filter_precedes_target_access_checks(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    subject_doc = {
+        "concept_id": "#V#alice",
+        "relationships": {
+            "#V#has_default_mail_profile": ["#V#gmail_profile"],
+            "#V#unrelated": ["#V#slow_target_one", "#V#slow_target_two"],
+        },
+    }
+    checked_concept_ids: list[str] = []
+
+    monkeypatch.setattr(service, "should_enforce_access_control", lambda: True)
+
+    def fake_can_access_concept(concept_id: str) -> bool:
+        checked_concept_ids.append(concept_id)
+        return True
+
+    monkeypatch.setattr(service, "can_access_concept", fake_can_access_concept)
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find_one",
+        lambda *_args, **_kwargs: subject_doc,
+    )
+
+    loaded = service._load_accessible_relation_subject_document(
+        "#V#alice",
+        predicate_terms=["#v#has_default_mail_profile"],
+    )
+
+    assert loaded is not None
+    assert loaded["relationships"] == {
+        "#V#has_default_mail_profile": ["#V#gmail_profile"]
+    }
+    assert checked_concept_ids == ["#V#alice", "#V#gmail_profile"]
+
+
 def test_get_predicate_incidence_counts_other_argument_types() -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import get_predicate_incidence

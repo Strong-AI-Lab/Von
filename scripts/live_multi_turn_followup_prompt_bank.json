@@ -166,6 +166,38 @@
       ]
     },
     {
+      "case_id": "jira_idempotent_label_write_readback",
+      "domain": "jira",
+      "motivating_issues": ["JVNAUTOSCI-2568", "JVNAUTOSCI-2591"],
+      "turns": [
+        {
+          "role": "task",
+          "prompt": "On Jira issue JVNAUTOSCI-2591, add the label uc05-live-validated if it is absent, without changing any other field. Then fetch that exact issue directly from Jira and report its key, status, and complete label list so the change is verified by read-back.",
+          "expectations": {
+            "require_completed": true,
+            "response_must_mention_all_groups": [
+              ["JVNAUTOSCI-2591"],
+              ["uc05-live-validated"]
+            ],
+            "notes": "Authorised bounded UC-05 mutation. The turn must resolve the exact key, preserve other fields, perform at most one label update, and verify canonical Jira state after the write."
+          }
+        },
+        {
+          "role": "explicit_continuation",
+          "prompt": "Repeat that exact operation for JVNAUTOSCI-2591. Do not create a duplicate label or change another field. Fetch the issue again and report the complete label list from Jira.",
+          "expectations": {
+            "require_completed": true,
+            "allow_obligation_carry_forward": true,
+            "response_must_mention_all_groups": [
+              ["JVNAUTOSCI-2591"],
+              ["uc05-live-validated"]
+            ],
+            "notes": "Repeated UC-05 mutation must be idempotent: the same label remains present exactly once after direct Jira read-back."
+          }
+        }
+      ]
+    },
+    {
       "case_id": "generic_concept_followup_family",
       "domain": "vontology_generic",
       "motivating_issues": ["JVNAUTOSCI-2563"],
@@ -204,6 +236,43 @@
       ]
     },
     {
+      "case_id": "lab_status_digest_obligation_watch",
+      "domain": "team_continuity",
+      "motivating_issues": ["JVNAUTOSCI-2590"],
+      "turns": [
+        {
+          "role": "task",
+          "prompt": "Create today's operational-reliability programme status digest from current JVNAUTOSCI Jira evidence, current repository evidence, and the prior represented digest. Persist it as the canonical digest work product. Include verified changes, milestones, blockers, unresolved or stale obligations, decisions needed, deadlines, and evidence gaps. Keep Jira Done, workflow completed, and capability passed distinct. Read-only outside the digest work product: do not transition, comment on, close, assign, or otherwise change Jira, GitHub, mail, or workflow instances.",
+          "expectations": {
+            "expected_workflow_id": "#V#lab_project_status_digest_workflow",
+            "require_completed": true,
+            "response_must_mention_all_groups": [
+              ["#V#operational_reliability_status_digest"],
+              ["JVNAUTOSCI-"],
+              ["evidence gap", "unavailable"],
+              ["capability", "accepted", "passed"]
+            ],
+            "notes": "Real UC-06 foreground path. The represented workflow must read current Jira/repository evidence and prior durable state, update only the stable digest concept, read it back, and avoid conflating issue, workflow, and capability states."
+          }
+        },
+        {
+          "role": "explicit_continuation",
+          "prompt": "Run that digest again against current evidence. Reuse the same represented digest work product, carry forward only obligations that are still unresolved, and do not duplicate an obligation with the same source, owner, and due date. Tell me what changed since the prior digest and what evidence is unavailable. Keep every external system read-only.",
+          "expectations": {
+            "expected_workflow_id": "#V#lab_project_status_digest_workflow",
+            "require_completed": true,
+            "allow_obligation_carry_forward": true,
+            "response_must_mention_all_groups": [
+              ["#V#operational_reliability_status_digest"],
+              ["evidence gap", "unavailable"],
+              ["obligation", "unresolved"]
+            ],
+            "notes": "Repeated UC-06 execution checks stable work-product identity and evidence-based obligation carry-forward without duplication or external mutations."
+          }
+        }
+      ]
+    },
+    {
       "case_id": "arxiv_degraded_success_ingestion",
       "domain": "arxiv",
       "motivating_issues": ["JVNAUTOSCI-2553", "JVNAUTOSCI-2557"],
@@ -215,7 +284,12 @@
             "expected_workflow_id": "#V#arxiv_paper_representation_workflow",
             "require_completed": true,
             "response_must_mention_any": ["2408.12065"],
-            "response_must_not_mention": ["remote_file_copy_timeout"],
+            "response_must_not_mention": [
+              "remote_file_copy_timeout",
+              "arxiv_paper_representation_not_executed",
+              "failed to complete the mandatory scholarly representation",
+              "scholarly representation of the paper could not be executed"
+            ],
             "notes": "The JVNAUTOSCI-2553 motivating paper. Success is metadata representation + read-back; PDF acquisition is optional enrichment. If acquisition failed, the answer must say so honestly (degraded success), never convert it into a terminal failure or surface raw support-error codes as the answer."
           }
         }

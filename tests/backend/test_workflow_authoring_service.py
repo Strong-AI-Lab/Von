@@ -186,6 +186,112 @@ def test_build_workflow_definition_from_authoring_spec_accepts_explicit_input_sc
     }
 
 
+def test_authoring_build_materialises_explicit_subworkflow_contract() -> None:
+    definition = build_workflow_definition_from_authoring_spec(
+        {
+            "workflow_id": "#V#parent_workflow",
+            "initial_state_key": "delegate",
+            "steps": [
+                {
+                    "state_id": "delegate",
+                    "action_id": "workflow_invoke_subworkflow",
+                    "subworkflow_id": "#V#child_workflow",
+                    "static_input_bindings": [
+                        {"tool_param": "preview_only", "value": False},
+                    ],
+                    "context_input_mappings": [
+                        {
+                            "tool_param": "query",
+                            "context_key": "request_text",
+                            "mapping_concept_id": "#V#mapping_parent_query",
+                        }
+                    ],
+                    "tool_output_context_mappings": [
+                        {
+                            "tool_output_field": "result.answer",
+                            "context_key": "child_answer",
+                            "mapping_concept_id": "#V#mapping_child_answer",
+                        }
+                    ],
+                    "next_state_key": "done",
+                },
+                {"state_id": "done", "terminal": True},
+            ],
+        }
+    )
+
+    state = definition.states["delegate"]
+    assert state.metadata["invokes_workflow"] == "#V#child_workflow"
+    assert state.metadata["subworkflow_contract"] == {
+        "schema_version": "workflow_subworkflow_contract.v1",
+        "workflow_id": "#V#child_workflow",
+        "workflow_id_context_key": "",
+        "workflow_id_mapping_concept_id": "",
+        "candidate_workflow_ids": [],
+        "failure_mode": "propagate_as_action_failure",
+        "input_mappings": [
+            {
+                "child_input_key": "query",
+                "parent_context_key": "request_text",
+                "mapping_concept_id": "#V#mapping_parent_query",
+            }
+        ],
+        "output_mappings": [
+            {
+                "child_output_field": "answer",
+                "parent_context_key": "child_answer",
+                "mapping_concept_id": "#V#mapping_child_answer",
+            }
+        ],
+        "static_input_keys": ["preview_only"],
+        "provided_inputs": ["query", "preview_only"],
+        "mapped_outputs": ["answer"],
+        "required_inputs": ["query", "preview_only"],
+        "required_outputs": ["answer"],
+    }
+
+    roundtrip_spec = serialise_workflow_definition_to_authoring_spec(definition)
+    delegate_row = roundtrip_spec["steps"][0]
+    assert delegate_row["subworkflow_id"] == "#V#child_workflow"
+    assert all(
+        binding["tool_param"] != "workflow_id"
+        for binding in delegate_row.get("static_input_bindings", [])
+    )
+
+
+def test_authoring_serialiser_recovers_subworkflow_id_from_action_inputs() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#legacy_parent_workflow",
+        initial_state="delegate",
+        states={
+            "delegate": WorkflowStateSpec(
+                state_id="delegate",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="workflow_invoke_subworkflow",
+                        inputs={
+                            "workflow_id": "#V#legacy_child_workflow",
+                            "query": {"$context_key": "request_text"},
+                        },
+                    ),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("delegate",),
+    )
+
+    authoring_spec = serialise_workflow_definition_to_authoring_spec(definition)
+
+    assert authoring_spec["steps"][0]["subworkflow_id"] == (
+        "#V#legacy_child_workflow"
+    )
+    assert authoring_spec["steps"][0]["context_input_mappings"] == [
+        {"tool_param": "query", "context_key": "request_text"}
+    ]
+    assert "static_input_bindings" not in authoring_spec["steps"][0]
+
+
 def test_strip_transient_execution_defaults_from_authoring_spec_removes_persisted_turn_defaults():
     cleaned = strip_transient_execution_defaults_from_authoring_spec(
         {

@@ -65,7 +65,6 @@ def test_turn_execution_critic_can_build_evidence_without_default_critic_verdict
         "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
         lambda: {},
     )
-
     result = run_turn_execution_critic(
         request,
         annotation_component="test",
@@ -142,6 +141,72 @@ def test_turn_execution_critic_projects_content_bearing_verification_evidence(
     assert verification_evidence[0]["result"]["hits"][0] == {
         "predicate_concept_id": "#V#supervises",
         "target_value": "#V#student",
+    }
+
+
+def test_turn_execution_critic_preserves_nested_jira_search_fields(monkeypatch) -> None:
+    request = WorkflowActionRequest(
+        action_id="turn_execution.critic",
+        inputs={"emit_default_critic_verdict": False},
+        environment=WorkflowEnvironment(llm_client=MagicMock(), user_namespace="ns"),
+        data={
+            "turn_id": "req-critic-jira-search-evidence",
+            "conversation_session_id": "sess-critic-jira-search-evidence",
+            "user_concept_id": "#V#jira_user",
+            "prompt": "What is the newest Jira task?",
+            "final_response": "JVNAUTOSCI-1 is the newest task.",
+            "invocations": [
+                {
+                    "tool": "jira_search",
+                    "status": "ok",
+                    "payload": {
+                        "jql": "issuetype = Task ORDER BY created DESC",
+                    },
+                    "effective_payload": {
+                        "issues": [
+                            {
+                                "key": "JVNAUTOSCI-1",
+                                "fields": {
+                                    "summary": "Newest task",
+                                    "status": {"name": "To Do"},
+                                    "created": "2026-07-22T00:00:00.000+0000",
+                                },
+                            }
+                        ],
+                        "isLast": True,
+                    },
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._is_search_evidence_tool",
+        lambda tool_name: tool_name == "jira_search",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.is_tool_verification_read",
+        lambda tool_name: False,
+    )
+
+    result = run_turn_execution_critic(
+        request,
+        annotation_component="test",
+        annotation_function=(
+            "test_turn_execution_critic_preserves_nested_jira_search_fields"
+        ),
+    )
+
+    jira_result = result.outputs["turn_execution_critic_evidence_bundle"][
+        "search_evidence"
+    ][0]["result"]
+    assert jira_result["issues"][0]["fields"] == {
+        "summary": "Newest task",
+        "status": {"name": "To Do"},
+        "created": "2026-07-22T00:00:00.000+0000",
     }
 
 

@@ -2,7 +2,14 @@
   "family_id": "concept_search_instance_retrieval_workflow_seed_bundle",
   "managed_by": "concept_search_instance_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
+  "seed_version": "3",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#concept_search_instance_retrieval_workflow": {
+      "2": [
+        "a5887e22fb952dbdc92312f1e325e6044a0365d29d319f38379000395125357c"
+      ]
+    }
+  },
   "source_tag": "JVNAUTOSCI-2192",
   "supported_action_ids": [
     "llm.action"
@@ -40,7 +47,7 @@
         },
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"concept profile retrieval\",\"tell me about #V#concept\",\"describe represented concept\",\"who is #V#person\",\"what do we know about this concept\"],\"examples\":[\"Tell me about #V#kobe_knowles.\",\"Describe #V#michael_witbrock from represented evidence.\",\"What do we know about the concept #V#university_of_auckland_strong_ai_lab?\",\"Tell me about myself from represented facts.\"]}",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"concept profile retrieval\",\"tell me about #V#concept\",\"describe represented concept\",\"who is #V#person\",\"what do we know about this concept\"],\"examples\":[\"Tell me about #V#kobe_knowles.\",\"Describe #V#michael_witbrock from represented evidence.\",\"What do we know about the concept #V#university_of_auckland_strong_ai_lab?\",\"Tell me about myself from represented facts.\"],\"excluded_query_cues\":[\"do you have a represented vontology concept for\",\"is there a represented vontology concept for\",\"do you have a concept for\",\"do we have a concept for\",\"is this represented\",\"is that represented\"],\"routing_notes\":[\"Choose this workflow for a profile retrieval only when an exact #V# concept ID, an already resolved Vontology concept, or the authenticated first-person concept anchors the required fetch and relation reads.\",\"Do not choose this workflow for a yes/no concept-existence question keyed only by a Jira issue key, Gmail message ID, URL, DOI, filename, or another external handle. Use a bounded exact search_concepts read through the general tool-calling workflow; a successful zero-result exact search is sufficient evidence for a narrow no-match answer.\"]}",
           "lang": "en-NZ"
         },
         {

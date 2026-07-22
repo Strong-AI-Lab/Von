@@ -59,8 +59,10 @@ def test_shipped_bank_is_valid() -> None:
         "arxiv_ingest_followup_family",
         "gmail_review_followup_family",
         "jira_lookup_followup_family",
+        "jira_idempotent_label_write_readback",
         "generic_concept_followup_family",
         "arxiv_degraded_success_ingestion",
+        "lab_status_digest_obligation_watch",
     } <= case_ids
 
 
@@ -258,6 +260,67 @@ def test_visible_answer_prose_does_not_trigger_raw_payload_check() -> None:
     )
 
 
+def test_completed_transport_task_fails_when_completion_gate_rejects_success() -> None:
+    result = runner.evaluate_turn_expectations(
+        expectations={"require_completed": True},
+        visible_answer="The mail workflow timed out.",
+        terminal_status="completed",
+        selected_workflow_ids=[],
+        turn_record={
+            "completion_gate": {
+                "decision": "failed",
+                "decision_reason": "Mutation attempt failed or was blocked.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_failure_codes": ["child_workflow_failed"],
+            }
+        },
+    )
+
+    assert _verdict(result) == "fail"
+    assert _check(result, "require_completed")["outcome"] == "pass"
+    assert (
+        _check(result, "completion_gate_safe_to_claim_completion")["outcome"]
+        == "fail"
+    )
+
+
+def test_recovery_answer_cannot_hide_selected_workflow_action_failure() -> None:
+    result = runner.evaluate_turn_expectations(
+        expectations={"require_completed": True},
+        visible_answer="Here are three plausible-looking Gmail messages.",
+        terminal_status="completed",
+        selected_workflow_ids=["#V#general_mail_review_workflow"],
+        turn_record={
+            "completion_gate": {
+                "decision": "completed",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+            },
+            "execution": {
+                "selected_workflow_trace": {
+                    "workflow_execution_summary": {
+                        "workflow_id": "#V#general_mail_review_workflow",
+                        "action_failure_count": 2,
+                        "failed_action_ids": [
+                            "gmail_list_messages",
+                            "workflow_control.for_each",
+                        ],
+                        "first_failing_state_id": "list_recent_mail_messages",
+                        "first_failing_action_id": "gmail_list_messages",
+                    }
+                }
+            },
+        },
+    )
+
+    assert _verdict(result) == "fail"
+    assert (
+        _check(result, "selected_workflow_has_no_failed_actions")["outcome"]
+        == "fail"
+    )
+
+
 # --- continuation + workflow expectations -----------------------------------
 
 
@@ -289,6 +352,29 @@ def test_expected_workflow_check() -> None:
         turn_record={"decision": "completed"},
     )
     assert _verdict(result) == "fail"
+
+
+def test_nested_workflow_evidence_can_satisfy_expected_workflow_check() -> None:
+    selected_workflow_ids = ["#V#source_neutral_router_workflow"]
+    observed_workflow_ids = [
+        "#V#source_neutral_router_workflow",
+        "#V#arxiv_paper_representation_workflow",
+    ]
+    workflow_evidence_ids = list(
+        dict.fromkeys([*selected_workflow_ids, *observed_workflow_ids])
+    )
+
+    result = runner.evaluate_turn_expectations(
+        expectations={
+            "expected_workflow_id": "#V#arxiv_paper_representation_workflow"
+        },
+        visible_answer="Paper representation completed and read back.",
+        terminal_status="completed",
+        selected_workflow_ids=workflow_evidence_ids,
+        turn_record={"decision": "completed"},
+    )
+
+    assert _verdict(result) == "pass"
 
 
 def test_fetch_turn_record_falls_back_to_projected_request_record(monkeypatch) -> None:
