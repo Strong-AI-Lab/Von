@@ -26,6 +26,7 @@ from ..metadata_validation import (
 from ..action_registry import (
     ActionRegistry,
     WorkflowEnvironment,
+    WorkflowExecutionScope,
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..execution_contracts import (
@@ -480,6 +481,8 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         Returns:
             DurableWorkflowResult with execution outcome.
         """
+        execution_scope = WorkflowExecutionScope()
+
         def _retry_store_call(operation_name: str, operation):
             return run_with_transient_mongo_retry(
                 operation,
@@ -1141,6 +1144,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                     state_support=state_support,
                     context=context,
                     environment=environment,
+                    execution_scope=execution_scope,
                     trace=trace,
                 )
             except ValueError as exc:

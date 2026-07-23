@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any, Callable, Dict, Mapping, Sequence
 
 from ..security.access_control import override_current_actor
@@ -47,6 +48,65 @@ def normalise_action_outcome(status: str | None) -> str:
     return WORKFLOW_ACTION_OUTCOME_UNKNOWN
 
 
+@dataclass
+class WorkflowExecutionScope:
+    """Ephemeral state shared only by one top-level workflow execution."""
+
+    _nested_workflow_resolution_cache: Dict[
+        tuple[str, str | None, str | None, str | None],
+        Any,
+    ] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _nested_workflow_resolution_locks: Dict[
+        tuple[str, str | None, str | None, str | None],
+        RLock,
+    ] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _cache_lock: RLock = field(
+        default_factory=RLock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def get_nested_workflow_resolution(
+        self,
+        key: tuple[str, str | None, str | None, str | None],
+    ) -> Any | None:
+        with self._cache_lock:
+            return self._nested_workflow_resolution_cache.get(key)
+
+    def cache_nested_workflow_resolution(
+        self,
+        key: tuple[str, str | None, str | None, str | None],
+        resolution: Any,
+    ) -> None:
+        with self._cache_lock:
+            self._nested_workflow_resolution_cache[key] = resolution
+
+    def nested_workflow_resolution_lock(
+        self,
+        key: tuple[str, str | None, str | None, str | None],
+    ) -> RLock:
+        """Return the execution-local single-flight lock for one cache key."""
+
+        with self._cache_lock:
+            lock = self._nested_workflow_resolution_locks.get(key)
+            if lock is None:
+                lock = RLock()
+                self._nested_workflow_resolution_locks[key] = lock
+            return lock
+
+    def nested_workflow_resolution_cache_keys(
+        self,
+    ) -> tuple[tuple[str, str | None, str | None, str | None], ...]:
+        with self._cache_lock:
+            return tuple(self._nested_workflow_resolution_cache)
+
+    def close(self) -> None:
+        with self._cache_lock:
+            self._nested_workflow_resolution_cache.clear()
+            self._nested_workflow_resolution_locks.clear()
+
+
 @dataclass(frozen=True)
 class WorkflowEnvironment:
     """Runtime dependencies available to workflow actions."""
@@ -66,13 +126,6 @@ class WorkflowEnvironment:
     user_concept_id: str | None = None
     org_concept_id: str | None = None
     step_callback: Callable[[Mapping[str, Any]], None] | None = None
-    # Ephemeral execution-local support state. This is deliberately excluded
-    # from construction, representation and comparison, and must never be
-    # copied into workflow context/data or durable instance records.
-    _nested_workflow_resolution_cache: Dict[
-        tuple[str, str | None, str | None, str | None],
-        Any,
-    ] = field(default_factory=dict, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -91,6 +144,7 @@ class WorkflowActionRequest:
     workflow_id: str | None = None
     workflow_state_id: str | None = None
     workflow_state_metadata: Mapping[str, Any] | None = None
+    execution_scope: WorkflowExecutionScope | None = None
 
 
 @dataclass
@@ -335,6 +389,7 @@ class ActionRegistry:
         workflow_id: str | None = None,
         workflow_state_id: str | None = None,
         workflow_state_metadata: Mapping[str, Any] | None = None,
+        execution_scope: WorkflowExecutionScope | None = None,
     ) -> WorkflowActionResult:
         action_target_id = str(action_id or "").strip()
         spec = self.resolve_action_spec(action_target_id)
@@ -388,6 +443,7 @@ class ActionRegistry:
                     if isinstance(workflow_state_metadata, Mapping)
                     else None
                 ),
+                execution_scope=execution_scope,
             )
             # Durable execution carries the authenticated actor in the workflow
             # environment rather than a Flask request context. Bind that actor
