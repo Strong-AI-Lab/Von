@@ -2,7 +2,7 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "JVNAUTOSCI-2592-write-guard-v1",
+  "seed_version": "2",
   "source_tag": "JVNAUTOSCI-2271",
   "supported_action_ids": [
     "llm.action",
@@ -201,7 +201,6 @@
                   },
                   {
                     "key": "kr_concept_id",
-                    "skip_if_unresolved": true,
                     "value_from_context_options": [
                       "current_kr_concept_spec.existing_concept_id",
                       "current_kr_concept_spec.concept_id"
@@ -209,7 +208,6 @@
                   },
                   {
                     "key": "kr_concept_create_concepts",
-                    "skip_if_unresolved": true,
                     "value_from_context": "current_kr_concept_spec.concepts"
                   },
                   {
@@ -221,12 +219,10 @@
                   },
                   {
                     "key": "kr_concept_parent_rationale",
-                    "skip_if_unresolved": true,
                     "value_from_context": "current_kr_concept_spec.parent_rationale"
                   },
                   {
                     "key": "kr_concept_blocking_reason",
-                    "skip_if_unresolved": true,
                     "value_from_context": "current_kr_concept_spec.blocking_reason"
                   }
                 ]
@@ -1055,7 +1051,6 @@
                 [
                   {
                     "key": "kr_relationship_key",
-                    "skip_if_unresolved": true,
                     "value_from_context_options": [
                       "current_kr_relationship_spec.key",
                       "current_kr_relationship_spec.relationship_key"
@@ -1075,12 +1070,10 @@
                   },
                   {
                     "key": "kr_relationship_rationale",
-                    "skip_if_unresolved": true,
                     "value_from_context": "current_kr_relationship_spec.rationale"
                   },
                   {
                     "key": "kr_relationship_blocking_reason",
-                    "skip_if_unresolved": true,
                     "value_from_context": "current_kr_relationship_spec.blocking_reason"
                   }
                 ]
