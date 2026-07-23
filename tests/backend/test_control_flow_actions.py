@@ -322,6 +322,147 @@ def test_for_each_action_respects_partial_success_policy() -> None:
     ]
 
 
+def test_for_each_action_stops_after_first_error_when_requested() -> None:
+    registry = ActionRegistry()
+    seen_items: list[str] = []
+
+    def _conditionally_fail(request):
+        item = request.data.get("current_item")
+        seen_items.append(item)
+        if item == "bad":
+            return WorkflowActionResult(status="failed", error="child_failed")
+        return WorkflowActionResult(outputs={"item_value": item})
+
+    registry.register(
+        ActionSpec(action_id="child.maybe_fail", handler=_conditionally_fail)
+    )
+    definitions = {
+        "#V#child_each_fail_fast": _child_definition(
+            "#V#child_each_fail_fast",
+            "child.maybe_fail",
+        ),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each_fail_fast",
+            "items": ["good", "bad", "not-attempted"],
+            "max_concurrency": 1,
+            "success_policy": "all_must_succeed",
+            "stop_on_error": True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "failed"
+    assert result.error == "for_each_item_failed:#V#child_each_fail_fast"
+    assert seen_items == ["good", "bad"]
+    assert result.outputs.get("for_each_item_count") == 2
+    assert result.outputs.get("for_each_selected_item_count") == 3
+    assert result.outputs.get("for_each_unattempted_count") == 1
+    assert result.outputs.get("for_each_success_count") == 1
+    assert result.outputs.get("for_each_error_count") == 1
+    assert result.outputs.get("for_each_stop_on_error") is True
+    assert result.outputs.get("for_each_stopped_on_error") is True
+    assert result.outputs.get("for_each_stopped_early") is True
+    assert [item["index"] for item in result.outputs["iteration_results"]] == [0, 1]
+
+
+def test_for_each_action_default_continues_after_child_error() -> None:
+    registry = ActionRegistry()
+    seen_items: list[str] = []
+
+    def _conditionally_fail(request):
+        item = request.data.get("current_item")
+        seen_items.append(item)
+        if item == "bad":
+            return WorkflowActionResult(status="failed", error="child_failed")
+        return WorkflowActionResult(outputs={"item_value": item})
+
+    registry.register(
+        ActionSpec(action_id="child.maybe_fail", handler=_conditionally_fail)
+    )
+    definitions = {
+        "#V#child_each_default": _child_definition(
+            "#V#child_each_default",
+            "child.maybe_fail",
+        ),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each_default",
+            "items": ["good", "bad", "still-attempted"],
+            "max_concurrency": 1,
+            "success_policy": "all_must_succeed",
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "failed"
+    assert seen_items == ["good", "bad", "still-attempted"]
+    assert result.outputs.get("for_each_item_count") == 3
+    assert result.outputs.get("for_each_unattempted_count") == 0
+    assert result.outputs.get("for_each_stop_on_error") is False
+    assert result.outputs.get("for_each_stopped_on_error") is False
+    assert result.outputs.get("for_each_stopped_early") is False
+
+
+def test_for_each_action_rejects_fail_fast_with_concurrent_execution() -> None:
+    registry = ActionRegistry()
+    seen_items: list[str] = []
+
+    def _emit_item(request):
+        seen_items.append(request.data.get("current_item"))
+        return WorkflowActionResult(
+            outputs={"item_value": request.data.get("current_item")}
+        )
+
+    registry.register(ActionSpec(action_id="child.emit_item", handler=_emit_item))
+    definitions = {
+        "#V#child_each_concurrent": _child_definition(
+            "#V#child_each_concurrent",
+            "child.emit_item",
+        ),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each_concurrent",
+            "items": ["A", "B"],
+            "max_concurrency": 2,
+            "stop_on_error": True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "failed"
+    assert result.error == "for_each_stop_on_error_requires_sequential_execution"
+    assert seen_items == []
+    assert result.outputs.get("for_each_item_count") == 0
+    assert result.outputs.get("for_each_selected_item_count") == 2
+    assert result.outputs.get("for_each_unattempted_count") == 2
+    assert result.outputs.get("for_each_stopped_on_error") is False
+
+
 # ---------------------------------------------------------------------------
 # context.set action tests (JVNAUTOSCI-1440)
 # ---------------------------------------------------------------------------

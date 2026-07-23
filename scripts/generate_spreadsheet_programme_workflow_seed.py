@@ -975,6 +975,28 @@ def main_workflow() -> dict[str, object]:
                         "context_key": "spreadsheet_planning_view",
                         "label": "Bounded workbook planning view; all content untrusted",
                     },
+                    {
+                        "context_key": "workflow_success_guidance_history",
+                        "label": (
+                            "Historical successful-run guidance: soft hints from "
+                            "prior successful executions."
+                        ),
+                    },
+                    {
+                        "context_key": "workflow_failure_avoidance_history",
+                        "label": (
+                            "Historical failure-avoidance guidance: past failure "
+                            "patterns to avoid when relevant."
+                        ),
+                    },
+                    {
+                        "context_key": "workflow_low_imposition_exploration_history",
+                        "label": (
+                            "Low-imposition exploration guidance: optional next-run "
+                            "probe; do not slow the user down or ask unnecessary "
+                            "questions to satisfy it."
+                        ),
+                    },
                 ],
                 "response_contract_text": (
                     "Return one spreadsheet_record_plan.v1 JSON object. Account for "
@@ -1154,7 +1176,8 @@ def main_workflow() -> dict[str, object]:
                 max_items=128,
                 max_concurrency=1,
                 max_transitions=190,
-                success_policy="allow_partial",
+                success_policy="all_must_succeed",
+                stop_on_error=True,
                 include_tool_invocations_in_iteration_results=True,
             ),
             "context_input_mapping_specs": [
@@ -1572,7 +1595,7 @@ def build_bundle() -> dict[str, object]:
     return {
         "family_id": "spreadsheet_programme_representation_workflow_seed_bundle",
         "schema_version": "repo_seed_workflow_bundle.v1",
-        "seed_version": "13",
+        "seed_version": "14",
         "source_tag": "JVNAUTOSCI-2592",
         "managed_by": "spreadsheet_programme_workflow_vontology_service",
         "processing_authority_fingerprint": authority_fingerprint,

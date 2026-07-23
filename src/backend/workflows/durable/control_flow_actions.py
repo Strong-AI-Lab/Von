@@ -623,6 +623,10 @@ def _build_for_each_handler(
         success_policy = _normalise_for_each_success_policy(
             request.inputs.get("success_policy")
         )
+        stop_on_error = _coerce_bool_with_default(
+            request.inputs.get("stop_on_error"),
+            default=False,
+        )
         include_tool_invocations_in_iteration_results = _coerce_bool_with_default(
             request.inputs.get("include_tool_invocations_in_iteration_results"),
             default=True,
@@ -634,6 +638,36 @@ def _build_for_each_handler(
             _coerce_for_each_max_concurrency(request.inputs.get("max_concurrency")),
             len(selected_items) or 1,
         )
+        if stop_on_error and max_concurrency > 1:
+            return WorkflowActionResult(
+                status="failed",
+                error="for_each_stop_on_error_requires_sequential_execution",
+                outputs={
+                    "items_source": items_source or None,
+                    "for_each_item_count": 0,
+                    "for_each_selected_item_count": len(selected_items),
+                    "for_each_unattempted_count": len(selected_items),
+                    "for_each_item_limit": item_limit,
+                    "for_each_max_concurrency": max_concurrency,
+                    "for_each_success_policy": success_policy,
+                    "for_each_stop_on_error": True,
+                    "for_each_stopped_on_error": False,
+                    "for_each_stopped_early": False,
+                    "for_each_include_tool_invocations_in_iteration_results": (
+                        include_tool_invocations_in_iteration_results
+                    ),
+                    "for_each_success_count": 0,
+                    "for_each_error_count": 0,
+                    "for_each_partial_success": False,
+                    "for_each_authority_resolution": (
+                        authority_resolution.to_projection()
+                    ),
+                    "iteration_results": [],
+                    "iteration_errors": [],
+                    "successful_results": [],
+                    "invocations": [],
+                },
+            )
 
         def _execute_item(index: int, item: Any) -> dict[str, Any]:
             child_context = dict(request.data)
@@ -666,6 +700,7 @@ def _build_for_each_handler(
                     "index_context_key": index_context_key,
                     "item_index": index,
                     "success_policy": success_policy,
+                    "stop_on_error": stop_on_error,
                     "authority_resolution": authority_resolution.to_projection(),
                 },
             )
@@ -702,6 +737,8 @@ def _build_for_each_handler(
         if max_concurrency <= 1 or len(selected_items) <= 1:
             for index, item in enumerate(selected_items):
                 indexed_results[index] = _execute_item(index, item)
+                if stop_on_error and not indexed_results[index]["completed"]:
+                    break
         else:
             with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
                 future_to_index = {
@@ -748,6 +785,9 @@ def _build_for_each_handler(
 
         success_count = len([item for item in iteration_results if item["completed"]])
         error_count = len(iteration_results) - success_count
+        unattempted_count = len(selected_items) - len(iteration_results)
+        stopped_on_error = stop_on_error and error_count > 0
+        stopped_early = stopped_on_error and unattempted_count > 0
         successful_results = [
             dict(result_payload)
             for item in iteration_results
@@ -768,9 +808,14 @@ def _build_for_each_handler(
         outputs: Dict[str, Any] = {
             "items_source": items_source or None,
             "for_each_item_count": len(iteration_results),
+            "for_each_selected_item_count": len(selected_items),
+            "for_each_unattempted_count": unattempted_count,
             "for_each_item_limit": item_limit,
             "for_each_max_concurrency": max_concurrency,
             "for_each_success_policy": success_policy,
+            "for_each_stop_on_error": stop_on_error,
+            "for_each_stopped_on_error": stopped_on_error,
+            "for_each_stopped_early": stopped_early,
             "for_each_include_tool_invocations_in_iteration_results": (
                 include_tool_invocations_in_iteration_results
             ),
@@ -809,7 +854,11 @@ def _build_for_each_handler(
                 "max_concurrency": max_concurrency,
                 "success_count": success_count,
                 "error_count": error_count,
+                "unattempted_count": unattempted_count,
                 "success_policy": success_policy,
+                "stop_on_error": stop_on_error,
+                "stopped_on_error": stopped_on_error,
+                "stopped_early": stopped_early,
                 "include_tool_invocations_in_iteration_results": (
                     include_tool_invocations_in_iteration_results
                 ),
