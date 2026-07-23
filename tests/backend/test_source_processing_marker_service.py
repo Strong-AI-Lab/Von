@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 
 def test_find_existing_concept_ids_matches_canonicalised_ids(monkeypatch) -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
@@ -101,6 +103,22 @@ def test_find_existing_concept_ids_uses_repository_access_filter(monkeypatch) ->
             {"visibility_test": "allowed"},
         ]
     }
+
+
+def test_public_concept_existence_read_fails_closed_without_store(
+    monkeypatch,
+) -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services import source_processing_marker_service as service
+
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "collection",
+        staticmethod(lambda: None),
+    )
+
+    with pytest.raises(RuntimeError, match="concept_store_unavailable"):
+        service.find_existing_accessible_concept_ids(["#V#candidate"])
 
 
 def test_source_processing_marker_records_and_reads_represented_evidence(

@@ -1957,7 +1957,9 @@ def _compile_spreadsheet_record_plan(
 
 
 def build_spreadsheet_record_materialisation_request(
-    *, record: Mapping[str, Any]
+    *,
+    record: Mapping[str, Any],
+    reusable_existing_concept_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Serialise one validated record as a bounded KR materialisation request."""
 
@@ -1983,7 +1985,10 @@ def build_spreadsheet_record_materialisation_request(
             "success": False,
             "error_code": "spreadsheet_record_identity_missing",
         }
-    guard = build_spreadsheet_kr_materialisation_guard(record=record)
+    guard = build_spreadsheet_kr_materialisation_guard(
+        record=record,
+        reusable_existing_concept_ids=reusable_existing_concept_ids,
+    )
     if not guard.get("success"):
         return guard
     guard_contract = guard["materialisation_guard"]
@@ -2038,7 +2043,9 @@ def build_spreadsheet_record_materialisation_request(
         "The materialisation_guard is trusted workflow authority. Every concept "
         "spec must use exactly one declared slot key, stable_name, target_kind, "
         "and parent_id with a slot-declared create or reuse_existing decision; "
-        "reuse is limited to the slot's exact stable concept ID. Every "
+        "the allowed decision has already been bound to canonical concept "
+        "existence read-back, and reuse is limited to the slot's exact stable "
+        "concept ID. Every "
         "relationship spec must match "
         "one declared rule. Do not add concepts or relationships outside it. "
         "The runtime validates this contract before any write and again after "

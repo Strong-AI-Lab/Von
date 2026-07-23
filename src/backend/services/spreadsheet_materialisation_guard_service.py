@@ -120,6 +120,7 @@ def _slot(
     identity: Any,
     stable_name: str | None = None,
     identity_namespace: str | None = None,
+    reusable_existing_concept_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     namespace = identity_namespace or record_id
     token = _digest(
@@ -132,23 +133,51 @@ def _slot(
     )
     resolved_name = stable_name or f"{namespace}-{role}-{token[:16]}"
     stable_concept_id = canonicalise_vontology_concept_id(resolved_name)
+    if reusable_existing_concept_ids is None:
+        allowed_decisions = ["create", "reuse_existing"]
+        allowed_existing_concept_ids = (
+            [stable_concept_id] if stable_concept_id else []
+        )
+    elif stable_concept_id and stable_concept_id in reusable_existing_concept_ids:
+        allowed_decisions = ["reuse_existing"]
+        allowed_existing_concept_ids = [stable_concept_id]
+    else:
+        allowed_decisions = ["create"]
+        allowed_existing_concept_ids = []
     return {
         "key": f"slot_{token[:24]}",
         "stable_name": resolved_name,
         "target_kind": "instance",
         "parent_id": parent_id,
-        "allowed_decisions": ["create", "reuse_existing"],
-        "allowed_existing_concept_ids": (
-            [stable_concept_id] if stable_concept_id else []
-        ),
+        "allowed_decisions": allowed_decisions,
+        "allowed_existing_concept_ids": allowed_existing_concept_ids,
         "allow_unreferenced": False,
     }
 
 
 def build_spreadsheet_kr_materialisation_guard(
-    *, record: Mapping[str, Any]
+    *,
+    record: Mapping[str, Any],
+    reusable_existing_concept_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Derive the exact additive-write envelope for one compiled record."""
+    """Derive the exact additive-write envelope for one compiled record.
+
+    When ``reusable_existing_concept_ids`` is provided, each slot is bound to
+    exactly one current-state decision: create when its deterministic concept
+    ID is absent, or reuse when canonical read-back confirms that ID exists.
+    ``None`` preserves the unbound authority template used by planning and
+    guard-shape tests.
+    """
+
+    reusable_ids = (
+        {
+            _text(concept_id)
+            for concept_id in reusable_existing_concept_ids
+            if _text(concept_id)
+        }
+        if reusable_existing_concept_ids is not None
+        else None
+    )
 
     record_id = _text(record.get("source_record_id"))
     version_id = _text(record.get("source_record_version_id"))
@@ -205,6 +234,7 @@ def build_spreadsheet_kr_materialisation_guard(
             parent_id=source_record_parent,
             identity="source-record",
             stable_name=record_id,
+            reusable_existing_concept_ids=reusable_ids,
         ),
         _slot(
             record_id=record_id,
@@ -212,6 +242,7 @@ def build_spreadsheet_kr_materialisation_guard(
             parent_id=source_version_parent,
             identity=record.get("record_fingerprint"),
             stable_name=version_id,
+            reusable_existing_concept_ids=reusable_ids,
         ),
     ]
     stable_identity_slots = {
@@ -245,6 +276,7 @@ def build_spreadsheet_kr_materialisation_guard(
             parent_id=parent_id,
             identity=identity,
             identity_namespace=identity_namespace,
+            reusable_existing_concept_ids=reusable_ids,
         )
         existing = slots_by_key.get(str(created["key"]))
         if existing is not None:

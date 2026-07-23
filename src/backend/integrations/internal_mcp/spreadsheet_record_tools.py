@@ -49,6 +49,12 @@ def _build_spreadsheet_record_materialisation_request(**kwargs):
     from ...services.spreadsheet_record_ingestion_service import (
         build_spreadsheet_record_materialisation_request,
     )
+    from ...services.source_processing_marker_service import (
+        find_existing_accessible_concept_ids,
+    )
+    from ...services.spreadsheet_materialisation_guard_service import (
+        build_spreadsheet_kr_materialisation_guard,
+    )
 
     record = kwargs.get("record")
     if not isinstance(record, Mapping):
@@ -57,7 +63,36 @@ def _build_spreadsheet_record_materialisation_request(**kwargs):
             "Missing validated spreadsheet record evidence.",
             details={"missing": ["record"]},
         )
-    return build_spreadsheet_record_materialisation_request(record=record)
+    guard_preview = build_spreadsheet_kr_materialisation_guard(record=record)
+    if not guard_preview.get("success"):
+        return guard_preview
+    guard_contract = guard_preview.get("materialisation_guard")
+    slots = (
+        guard_contract.get("concept_slots")
+        if isinstance(guard_contract, Mapping)
+        else None
+    )
+    candidate_ids = sorted(
+        {
+            str(concept_id).strip()
+            for slot in (slots if isinstance(slots, list) else [])
+            if isinstance(slot, Mapping)
+            for concept_id in (slot.get("allowed_existing_concept_ids") or [])
+            if isinstance(concept_id, str) and concept_id.strip()
+        }
+    )
+    try:
+        reusable_ids = find_existing_accessible_concept_ids(candidate_ids)
+    except Exception:
+        return make_error_response(
+            "spreadsheet_reuse_authority_read_failed",
+            "Could not bind idempotent reuse authority from canonical read-back.",
+            details={"candidate_count": len(candidate_ids)},
+        )
+    return build_spreadsheet_record_materialisation_request(
+        record=record,
+        reusable_existing_concept_ids=sorted(reusable_ids),
+    )
 
 
 def _compare_spreadsheet_record_batch(**kwargs):

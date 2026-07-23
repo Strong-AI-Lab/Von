@@ -145,6 +145,65 @@ def test_guard_accepts_exact_create_and_changed_record_reuse_plan() -> None:
     assert resolved["guard_passed"] is True
 
 
+def test_guard_enforces_canonical_existence_bound_decisions() -> None:
+    guard = _guard()
+    guard["concept_slots"][0]["allowed_decisions"] = ["create"]
+    guard["concept_slots"][0]["allowed_existing_concept_ids"] = []
+    guard["concept_slots"][1]["allowed_decisions"] = ["reuse_existing"]
+
+    accepted = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=_concept_specs(),
+        relationship_specs=_relationship_specs(),
+    )
+    assert accepted["guard_passed"] is True
+
+    invalid_reuse = _concept_specs()
+    invalid_reuse[0] = {
+        **invalid_reuse[0],
+        "decision": "reuse_existing",
+        "existing_concept_id": "#V#stable_candidate",
+    }
+    invalid_reuse[0].pop("concepts")
+    rejected_reuse = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=invalid_reuse,
+        relationship_specs=_relationship_specs(),
+    )
+    assert rejected_reuse["guard_passed"] is False
+    assert (
+        rejected_reuse["error_code"]
+        == "kr_materialisation_guard_concept_spec_rejected"
+    )
+
+    invalid_create = _concept_specs()
+    invalid_create[1] = {
+        **invalid_create[1],
+        "decision": "create",
+        "concepts": [
+            {
+                "name": "stable-programme",
+                "kind": "instance",
+                "description": "Updated programme evidence.",
+            }
+        ],
+    }
+    invalid_create[1].pop("existing_concept_id")
+    rejected_create = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=invalid_create,
+        relationship_specs=_relationship_specs(),
+    )
+    assert rejected_create["guard_passed"] is False
+    assert (
+        rejected_create["error_code"]
+        == "kr_materialisation_guard_concept_spec_rejected"
+    )
+
+
 def test_guard_normalises_predicate_id_alias_before_downstream_execution() -> None:
     relationship_specs = [
         {
