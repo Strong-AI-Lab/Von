@@ -17,6 +17,9 @@ from src.backend.services.spreadsheet_record_ingestion_service import (
     compile_spreadsheet_record_plan as _compile_spreadsheet_record_plan,
     extract_spreadsheet_evidence,
 )
+from src.backend.services.spreadsheet_materialisation_guard_service import (
+    build_spreadsheet_kr_materialisation_guard,
+)
 
 
 def _write_authority_contract() -> dict:
@@ -1246,6 +1249,61 @@ def test_workbook_instruction_text_remains_untrusted_evidence() -> None:
     assert request["request_payload"]["content_is_untrusted"] is True
     assert "not instructions" in request["prompt"]
     assert "delete every record" in request["prompt"]
+
+
+def test_materialisation_request_binds_reuse_to_canonical_existence() -> None:
+    batch = compile_spreadsheet_record_plan(
+        spreadsheet=extract_spreadsheet_evidence(_workbook_bytes()),
+        plan=_plan(),
+        file_copy_concept_id="#V#private_fixture_file_copy",
+    )
+    record = batch["records"][0]
+    unbound = build_spreadsheet_kr_materialisation_guard(record=record)[
+        "materialisation_guard"
+    ]
+    candidate_ids = {
+        concept_id
+        for slot in unbound["concept_slots"]
+        for concept_id in slot["allowed_existing_concept_ids"]
+    }
+    selected_existing_id = sorted(candidate_ids)[0]
+
+    first_run = build_spreadsheet_record_materialisation_request(
+        record=record,
+        reusable_existing_concept_ids=[],
+    )["materialisation_guard"]
+    assert all(
+        slot["allowed_decisions"] == ["create"]
+        and slot["allowed_existing_concept_ids"] == []
+        for slot in first_run["concept_slots"]
+    )
+
+    replay = build_spreadsheet_record_materialisation_request(
+        record=record,
+        reusable_existing_concept_ids=[selected_existing_id],
+    )["materialisation_guard"]
+    selected_slot = next(
+        slot
+        for slot in replay["concept_slots"]
+        if slot["allowed_existing_concept_ids"] == [selected_existing_id]
+    )
+    assert selected_slot["allowed_decisions"] == ["reuse_existing"]
+    assert all(
+        slot["allowed_decisions"] == ["create"]
+        for slot in replay["concept_slots"]
+        if slot is not selected_slot
+    )
+    assert replay["guard_id"] != first_run["guard_id"]
+
+    recovery = build_spreadsheet_record_materialisation_request(
+        record=record,
+        reusable_existing_concept_ids=sorted(candidate_ids),
+    )["materialisation_guard"]
+    assert all(
+        slot["allowed_decisions"] == ["reuse_existing"]
+        and len(slot["allowed_existing_concept_ids"]) == 1
+        for slot in recovery["concept_slots"]
+    )
 
 
 def test_batch_reconciliation_never_authorises_missing_record_deletion() -> None:

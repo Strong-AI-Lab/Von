@@ -198,6 +198,18 @@ def _find_existing_concept_ids(concept_ids: Sequence[str]) -> set[str]:
     }
 
 
+def find_existing_accessible_concept_ids(
+    concept_ids: Sequence[str],
+) -> set[str]:
+    """Return exact accessible concept IDs using one bounded indexed read."""
+
+    from ..db.repositories.concepts_repository import ConceptsRepository
+
+    if ConceptsRepository.collection() is None:
+        raise RuntimeError("concept_store_unavailable")
+    return _find_existing_concept_ids(concept_ids)
+
+
 def _ensure_support_concepts(*, existing_ids: set[str] | None = None) -> list[str]:
     # These are global workflow-support concepts.  Resolve their exact IDs in
     # one bounded read instead of seven serial Atlas round trips on every
@@ -613,6 +625,7 @@ def record_source_processing_marker(
 __all__ = [
     "SOURCE_PROCESSING_EVIDENCE_PREDICATE_ID",
     "SOURCE_PROCESSING_MARKER_TYPE_ID",
+    "find_existing_accessible_concept_ids",
     "get_source_processing_marker",
     "record_source_processing_marker",
     "source_processing_marker_concept_id",
