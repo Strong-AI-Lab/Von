@@ -8,7 +8,7 @@ concepts, predicates, or naming policy.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
 
@@ -332,6 +332,29 @@ def _relationship_reference(
     return ("fixed", concept_id), None
 
 
+def _normalise_relationship_predicate(
+    spec: Mapping[str, Any],
+    *,
+    invalid_code: str,
+    apply_alias: bool = False,
+) -> tuple[str | None, str | None]:
+    """Canonicalise the model-facing ``predicate_id`` alias before execution."""
+
+    predicate = _text(spec.get("predicate"))
+    predicate_id = _text(spec.get("predicate_id"))
+    if predicate and predicate_id and predicate != predicate_id:
+        return None, invalid_code
+    if predicate:
+        return predicate, None
+    if not predicate_id:
+        return "", None
+    if not isinstance(spec, MutableMapping):
+        return None, invalid_code
+    if apply_alias:
+        spec["predicate"] = predicate_id
+    return predicate_id, None
+
+
 def _matching_rule_ids(
     *,
     contract: Mapping[str, Any],
@@ -384,7 +407,12 @@ def _validate_relationship_specs(
         )
         if source_error or target_error or source is None or target is None:
             return None, source_error or target_error
-        predicate = _text(raw_spec.get("predicate"))
+        predicate, predicate_error = _normalise_relationship_predicate(
+            raw_spec,
+            invalid_code="kr_materialisation_guard_relationship_spec_invalid",
+        )
+        if predicate_error is not None or predicate is None:
+            return None, predicate_error
         matches = _matching_rule_ids(
             contract=contract,
             predicate=predicate,
@@ -430,6 +458,14 @@ def _validate_relationship_specs(
         referenced_fixed_ids
     ):
         return None, "kr_materialisation_guard_fixed_endpoint_missing"
+    for raw_spec in raw_specs:
+        if not isinstance(raw_spec, Mapping):
+            continue
+        _normalise_relationship_predicate(
+            raw_spec,
+            invalid_code="kr_materialisation_guard_relationship_spec_invalid",
+            apply_alias=True,
+        )
     return normalised, None
 
 
@@ -558,7 +594,18 @@ def validate_kr_materialisation_guard(
                 phase=phase_text,
             )
         source_id = _text(raw_spec.get("source_id"))
-        predicate = _text(raw_spec.get("predicate"))
+        predicate, predicate_error = _normalise_relationship_predicate(
+            raw_spec,
+            invalid_code=(
+                "kr_materialisation_guard_resolved_relationship_invalid"
+            ),
+        )
+        if predicate_error is not None or predicate is None:
+            return _reject(
+                predicate_error
+                or "kr_materialisation_guard_resolved_relationship_invalid",
+                phase=phase_text,
+            )
         target_id = _text(raw_spec.get("target_id"))
         triple = (source_id, predicate, target_id)
         if (
@@ -575,6 +622,14 @@ def validate_kr_materialisation_guard(
         return _reject(
             "kr_materialisation_guard_resolved_relationship_rejected",
             phase=phase_text,
+        )
+    for raw_spec in raw_resolved:
+        if not isinstance(raw_spec, Mapping):
+            continue
+        _normalise_relationship_predicate(
+            raw_spec,
+            invalid_code="kr_materialisation_guard_resolved_relationship_invalid",
+            apply_alias=True,
         )
     return _pass(
         phase=phase_text,
