@@ -40,13 +40,14 @@ logger = logging.getLogger(__name__)
 
 WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID = "workflow_mcp.invoke_tool"
 
-_TOOL_NAME_INPUT_KEYS: tuple[str, ...] = (
+WORKFLOW_MCP_TOOL_NAME_INPUT_KEYS: tuple[str, ...] = (
     "tool_name",
     "method_name",
     "mcp_tool",
     "mcp_method",
     "tool",
 )
+_TOOL_NAME_INPUT_KEYS = WORKFLOW_MCP_TOOL_NAME_INPUT_KEYS
 _PAYLOAD_INPUT_KEYS: tuple[str, ...] = (
     "tool_arguments",
     "arguments",
@@ -90,7 +91,11 @@ def _normalise_string_list(value: Any) -> tuple[str, ...]:
     return tuple(items)
 
 
-def _extract_static_tool_name(inputs: Mapping[str, Any]) -> str | None:
+def extract_static_workflow_mcp_tool_name(
+    inputs: Mapping[str, Any],
+) -> str | None:
+    """Return the exact statically bound MCP method, if one is represented."""
+
     for key in _TOOL_NAME_INPUT_KEYS:
         value = inputs.get(key)
         if isinstance(value, str) and value.strip():
@@ -222,7 +227,7 @@ def validate_workflow_mcp_invocation_contract(
         return []
 
     issues: list[dict[str, Any]] = []
-    tool_name = _extract_static_tool_name(action_inputs)
+    tool_name = extract_static_workflow_mcp_tool_name(action_inputs)
     allowed_tools = _explicit_allowed_tool_names(
         inputs=action_inputs,
         state_metadata=state_metadata,
@@ -336,7 +341,7 @@ def _handle_workflow_mcp_invoke_tool(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
-    requested_tool_name = _extract_static_tool_name(inputs)
+    requested_tool_name = extract_static_workflow_mcp_tool_name(inputs)
     if not requested_tool_name:
         return WorkflowActionResult(
             status="failed",
@@ -578,6 +583,7 @@ def register_workflow_mcp_tool_actions(registry: ActionRegistry) -> None:
 
 __all__ = [
     "WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID",
+    "extract_static_workflow_mcp_tool_name",
     "register_workflow_mcp_tool_actions",
     "validate_workflow_mcp_invocation_contract",
 ]

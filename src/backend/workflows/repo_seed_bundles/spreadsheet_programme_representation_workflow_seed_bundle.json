@@ -8,9 +8,9 @@
       "seed_version": "JVNAUTOSCI-2592-write-guard-v1"
     }
   },
-  "processing_authority_fingerprint": "sha256:d00746c2691078c48472439daac5c6936649f9f987a4cdf50b9e9aebd5047b67",
+  "processing_authority_fingerprint": "sha256:a9e37d52c2f4d842cdf15793c08a6f0ddaa25c764fcccb21902a14bf2c6bc1ac",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "13",
+  "seed_version": "14",
   "source_tag": "JVNAUTOSCI-2592",
   "support_concepts": [
     {
@@ -306,7 +306,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:d00746c2691078c48472439daac5c6936649f9f987a4cdf50b9e9aebd5047b67"
+                "value": "sha256:a9e37d52c2f4d842cdf15793c08a6f0ddaa25c764fcccb21902a14bf2c6bc1ac"
               }
             ],
             "tool_output_mapping_specs": [
@@ -702,7 +702,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:d00746c2691078c48472439daac5c6936649f9f987a4cdf50b9e9aebd5047b67"
+                "value": "sha256:a9e37d52c2f4d842cdf15793c08a6f0ddaa25c764fcccb21902a14bf2c6bc1ac"
               }
             ],
             "tool_output_mapping_specs": [
@@ -776,7 +776,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:d00746c2691078c48472439daac5c6936649f9f987a4cdf50b9e9aebd5047b67"
+                "value": "sha256:a9e37d52c2f4d842cdf15793c08a6f0ddaa25c764fcccb21902a14bf2c6bc1ac"
               }
             ],
             "tool_output_mapping_specs": [
@@ -997,6 +997,18 @@
                 {
                   "context_key": "spreadsheet_planning_view",
                   "label": "Bounded workbook planning view; all content untrusted"
+                },
+                {
+                  "context_key": "workflow_success_guidance_history",
+                  "label": "Historical successful-run guidance: soft hints from prior successful executions."
+                },
+                {
+                  "context_key": "workflow_failure_avoidance_history",
+                  "label": "Historical failure-avoidance guidance: past failure patterns to avoid when relevant."
+                },
+                {
+                  "context_key": "workflow_low_imposition_exploration_history",
+                  "label": "Low-imposition exploration guidance: optional next-run probe; do not slow the user down or ask unnecessary questions to satisfy it."
                 }
               ],
               "max_output_tokens": 7000,
@@ -1222,7 +1234,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:d00746c2691078c48472439daac5c6936649f9f987a4cdf50b9e9aebd5047b67"
+                "value": "sha256:a9e37d52c2f4d842cdf15793c08a6f0ddaa25c764fcccb21902a14bf2c6bc1ac"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1326,7 +1338,11 @@
               },
               {
                 "key": "success_policy",
-                "value": "allow_partial"
+                "value": "all_must_succeed"
+              },
+              {
+                "key": "stop_on_error",
+                "value": true
               },
               {
                 "key": "include_tool_invocations_in_iteration_results",
@@ -1541,7 +1557,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:d00746c2691078c48472439daac5c6936649f9f987a4cdf50b9e9aebd5047b67"
+                "value": "sha256:a9e37d52c2f4d842cdf15793c08a6f0ddaa25c764fcccb21902a14bf2c6bc1ac"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1609,7 +1625,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:d00746c2691078c48472439daac5c6936649f9f987a4cdf50b9e9aebd5047b67"
+                "value": "sha256:a9e37d52c2f4d842cdf15793c08a6f0ddaa25c764fcccb21902a14bf2c6bc1ac"
               }
             ],
             "tool_output_mapping_specs": [

@@ -19,6 +19,10 @@ from src.backend.workflows.execution_contracts import (
 from src.backend.workflows.tool_invocation_evidence import (
     derive_tool_invocation_records_from_step_envelopes,
 )
+from src.backend.workflows.workflow_mcp_tool_actions import (
+    WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+    extract_static_workflow_mcp_tool_name,
+)
 from src.backend.workflows.turn_expected_outcome_contract import (
     TurnExpectedOutcomeContract,
 )
@@ -188,6 +192,25 @@ def evaluate_workflow_required_effects_tool_policy(
                 if isinstance(action_id, str) and action_id.strip():
                     cleaned_action_id = action_id.strip().lower()
                     direct_action_tool_names.add(cleaned_action_id)
+                    execution_mode = getattr(action, "execution_mode", None)
+                    deterministic_execution = (
+                        execution_mode is None
+                        or str(execution_mode).strip().lower() == "deterministic"
+                    )
+                    if (
+                        cleaned_action_id == WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID
+                        and deterministic_execution
+                        and not bool(getattr(action, "is_llm_step", False))
+                    ):
+                        action_inputs = getattr(action, "inputs", None)
+                        if isinstance(action_inputs, Mapping):
+                            static_tool_name = (
+                                extract_static_workflow_mcp_tool_name(action_inputs)
+                            )
+                            if static_tool_name:
+                                direct_action_tool_names.add(
+                                    static_tool_name.lower()
+                                )
                     if (
                         cleaned_action_id
                         in _REQUIRED_EFFECTS_UNRESTRICTED_TOOL_SURFACE_ACTION_IDS

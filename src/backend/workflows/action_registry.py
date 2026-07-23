@@ -66,6 +66,13 @@ class WorkflowEnvironment:
     user_concept_id: str | None = None
     org_concept_id: str | None = None
     step_callback: Callable[[Mapping[str, Any]], None] | None = None
+    # Ephemeral execution-local support state. This is deliberately excluded
+    # from construction, representation and comparison, and must never be
+    # copied into workflow context/data or durable instance records.
+    _nested_workflow_resolution_cache: Dict[
+        tuple[str, str | None, str | None, str | None],
+        Any,
+    ] = field(default_factory=dict, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

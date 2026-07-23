@@ -349,3 +349,137 @@ def test_nested_resolution_rejects_wrong_definition_identity_without_fallback(
     assert resolution.success is False
     assert resolution.error_code == NESTED_WORKFLOW_DEFINITION_IDENTITY_MISMATCH
     fallback_loader.assert_not_called()
+
+
+def test_nested_resolution_caches_success_for_same_environment_and_scope(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    definition = _definition("child.cohort")
+    authority_resolver = MagicMock(return_value=_resolution(definition))
+    fallback_loader = MagicMock(return_value=_definition("child.owner"))
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_definition_from_authority",
+        authority_resolver,
+    )
+    environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+
+    first = resolve_nested_workflow_definition(
+        workflow_id=WORKFLOW_ID,
+        environment=environment,
+        fallback_loader=fallback_loader,
+    )
+    second = resolve_nested_workflow_definition(
+        workflow_id=WORKFLOW_ID,
+        environment=environment,
+        fallback_loader=fallback_loader,
+    )
+
+    assert first.success is True
+    assert second is first
+    authority_resolver.assert_called_once_with(
+        WORKFLOW_ID,
+        use_current_shared_registry=True,
+        register_authoritative_fallback=True,
+        actor_user_id=COHORT_ID,
+        actor_org_id=TRUSTED_ORG_ID,
+    )
+    assert tuple(environment._nested_workflow_resolution_cache) == (
+        (
+            WORKFLOW_ID,
+            COHORT_ID,
+            TRUSTED_ORG_ID,
+            first.actor_context.namespace,
+        ),
+    )
+    fallback_loader.assert_not_called()
+
+
+def test_nested_resolution_cache_is_not_reused_across_actor_scopes(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    owner_definition = _definition("child.owner")
+    cohort_definition = _definition("child.cohort")
+    authority_calls: list[tuple[object, object]] = []
+
+    def _resolve(_workflow_id: str, **kwargs):
+        actor_scope = (
+            kwargs.get("actor_user_id"),
+            kwargs.get("actor_org_id"),
+        )
+        authority_calls.append(actor_scope)
+        if actor_scope == (OWNER_ID, TRUSTED_ORG_ID):
+            return _resolution(owner_definition)
+        if actor_scope == (COHORT_ID, TRUSTED_ORG_ID):
+            return _resolution(cohort_definition)
+        return _resolution(None, error_code="workflow_concept_not_accessible")
+
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_definition_from_authority",
+        _resolve,
+    )
+    owner_environment = _environment(OWNER_ID, TRUSTED_ORG_ID)
+    cohort_environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+
+    owner = resolve_nested_workflow_definition(
+        workflow_id=WORKFLOW_ID,
+        environment=owner_environment,
+        fallback_loader=None,
+    )
+    cohort = resolve_nested_workflow_definition(
+        workflow_id=WORKFLOW_ID,
+        environment=cohort_environment,
+        fallback_loader=None,
+    )
+
+    assert owner.definition is owner_definition
+    assert cohort.definition is cohort_definition
+    assert authority_calls == [
+        (OWNER_ID, TRUSTED_ORG_ID),
+        (COHORT_ID, TRUSTED_ORG_ID),
+    ]
+    assert owner_environment._nested_workflow_resolution_cache is not (
+        cohort_environment._nested_workflow_resolution_cache
+    )
+
+
+def test_nested_resolution_does_not_cache_authority_failure(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    definition = _definition("child.cohort")
+    authority_resolver = MagicMock(
+        side_effect=[
+            _resolution(None, error_code="workflow_concept_not_accessible"),
+            _resolution(definition),
+        ]
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_definition_from_authority",
+        authority_resolver,
+    )
+    environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+
+    denied = resolve_nested_workflow_definition(
+        workflow_id=WORKFLOW_ID,
+        environment=environment,
+        fallback_loader=None,
+    )
+    accepted = resolve_nested_workflow_definition(
+        workflow_id=WORKFLOW_ID,
+        environment=environment,
+        fallback_loader=None,
+    )
+
+    assert denied.success is False
+    assert denied.error_code == "workflow_concept_not_accessible"
+    assert accepted.success is True
+    assert accepted.definition is definition
+    assert authority_resolver.call_count == 2

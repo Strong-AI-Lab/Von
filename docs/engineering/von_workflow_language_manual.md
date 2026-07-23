@@ -1032,6 +1032,7 @@ Optional inputs:
 - `max_items`
 - `max_transitions`
 - `success_policy` (`all_must_succeed` or `allow_partial`)
+- `stop_on_error` (default `false`; requires sequential execution)
 
 Runtime semantics:
 
@@ -1040,6 +1041,8 @@ Runtime semantics:
 - the child context receives the bound item and index keys;
 - per-item results are returned in `iteration_results`;
 - aggregate counts are returned in `for_each_success_count`, `for_each_error_count`, and `for_each_partial_success`;
+- when `stop_on_error=true` in sequential mode, iteration stops after the first failed child and reports the attempted prefix plus the unattempted count;
+- `stop_on_error=true` with effective concurrency greater than one fails before child execution rather than silently weakening fail-fast semantics;
 - `all_must_succeed` returns failure when any child execution fails;
 - `allow_partial` returns success while preserving structured failure details.
 

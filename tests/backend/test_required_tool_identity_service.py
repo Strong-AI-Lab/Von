@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from src.backend.services.required_tool_identity_service import (
     canonical_required_tool_key,
     required_tool_names_match,
@@ -136,6 +138,79 @@ def test_selected_workflow_policy_matches_qualified_requirement_to_action() -> N
     assert policy["unavailable_required_tools"] == []
     assert policy["required_tool_identities"][0]["canonical_key"] == "fetch_concept"
     assert policy["direct_action_tool_canonical_keys"] == ["fetch_concept"]
+
+
+@pytest.mark.parametrize(
+    "input_key",
+    ("tool_name", "method_name", "mcp_tool", "mcp_method", "tool"),
+)
+def test_selected_workflow_policy_accepts_static_workflow_mcp_tool_binding(
+    input_key: str,
+) -> None:
+    action = SimpleNamespace(
+        action_id="workflow_mcp.invoke_tool",
+        inputs={input_key: "read_file_copy"},
+        is_llm_step=False,
+        llm_policy=None,
+    )
+    workflow_def = SimpleNamespace(
+        metadata={
+            "required_effects_contract": {
+                "required_effects": [
+                    {"required_tools": ["vontology:read_file_copy"]}
+                ]
+            }
+        },
+        states={"run": SimpleNamespace(actions=[action])},
+    )
+
+    policy = evaluate_workflow_required_effects_tool_policy(workflow_def)
+
+    assert policy["ok"] is True
+    assert policy["unavailable_required_tools"] == []
+    assert "read_file_copy" in policy["direct_action_tool_canonical_keys"]
+
+
+@pytest.mark.parametrize(
+    ("inputs", "execution_mode", "is_llm_step"),
+    (
+        ({"tool_name": "get_text_relations_summary"}, "deterministic", False),
+        ({}, "deterministic", False),
+        (
+            {"tool_name": {"$context_key": "selected_tool_name"}},
+            "deterministic",
+            False,
+        ),
+        ({"tool_name": "read_file_copy"}, "subworkflow", False),
+        ({"tool_name": "read_file_copy"}, "llm", True),
+    ),
+)
+def test_selected_workflow_policy_rejects_other_or_dynamic_workflow_mcp_tool(
+    inputs: dict[str, object],
+    execution_mode: str,
+    is_llm_step: bool,
+) -> None:
+    action = SimpleNamespace(
+        action_id="workflow_mcp.invoke_tool",
+        inputs=inputs,
+        execution_mode=execution_mode,
+        is_llm_step=is_llm_step,
+        llm_policy=None,
+    )
+    workflow_def = SimpleNamespace(
+        metadata={
+            "required_effects_contract": {
+                "required_effects": [{"required_tools": ["read_file_copy"]}]
+            }
+        },
+        states={"run": SimpleNamespace(actions=[action])},
+    )
+
+    policy = evaluate_workflow_required_effects_tool_policy(workflow_def)
+
+    assert policy["ok"] is False
+    assert policy["unavailable_required_tools"] == ["read_file_copy"]
+    assert policy["reason_code"] == "workflow_required_effect_tool_not_allowed"
 
 
 def test_runtime_and_step_evidence_use_the_shared_identity() -> None:

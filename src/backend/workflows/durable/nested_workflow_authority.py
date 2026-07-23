@@ -229,6 +229,21 @@ def resolve_nested_workflow_definition(
         )
 
     if actor_context.actor_scoped:
+        cache_key = (
+            workflow_id_text,
+            actor_context.user_id,
+            actor_context.org_id,
+            actor_context.namespace,
+        )
+        cached_resolution = environment._nested_workflow_resolution_cache.get(
+            cache_key
+        )
+        if (
+            isinstance(cached_resolution, NestedWorkflowDefinitionResolution)
+            and cached_resolution.success
+        ):
+            return cached_resolution
+
         try:
             from .registry_factory import resolve_workflow_definition_from_authority
 
@@ -276,13 +291,15 @@ def resolve_nested_workflow_definition(
                 ),
                 authority_diagnostics=authority_payload,
             )
-        return NestedWorkflowDefinitionResolution(
+        resolution = NestedWorkflowDefinitionResolution(
             workflow_id=workflow_id_text,
             definition=definition,
             actor_context=actor_context,
             authority_source="vontology_actor_authority",
             authority_diagnostics=authority_payload,
         )
+        environment._nested_workflow_resolution_cache[cache_key] = resolution
+        return resolution
 
     definition: WorkflowDefinition | None = None
     if fallback_loader is not None:

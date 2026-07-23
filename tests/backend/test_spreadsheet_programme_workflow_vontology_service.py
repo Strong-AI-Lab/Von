@@ -168,7 +168,8 @@ def test_bootstrap_materialises_model_led_spreadsheet_workflow_family(
     for_each = _state(main, "materialise_records").actions[0]
     assert for_each.action_id == "workflow_control.for_each"
     assert for_each.inputs["workflow_id"] == SPREADSHEET_RECORD_ITEM_WORKFLOW_ID
-    assert for_each.inputs["success_policy"] == "allow_partial"
+    assert for_each.inputs["success_policy"] == "all_must_succeed"
+    assert for_each.inputs["stop_on_error"] is True
     assert for_each.inputs["max_items"] == 128
     assert (
         "spreadsheet_records"
