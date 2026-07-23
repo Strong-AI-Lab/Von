@@ -420,6 +420,37 @@ def test_for_each_action_default_continues_after_child_error() -> None:
     assert result.outputs.get("for_each_stopped_early") is False
 
 
+def test_for_each_action_rejects_stop_on_error_with_partial_success() -> None:
+    registry = ActionRegistry()
+
+    def _unexpected_definition_load(_workflow_id):
+        raise AssertionError("invalid fail-fast policy must fail before child lookup")
+
+    register_control_flow_actions(
+        registry,
+        definition_loader=_unexpected_definition_load,
+    )
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each_invalid_policy",
+            "items": ["A", "B"],
+            "max_concurrency": 1,
+            "success_policy": "allow_partial",
+            "stop_on_error": True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "failed"
+    assert result.error == "for_each_stop_on_error_requires_all_must_succeed"
+    assert result.outputs.get("for_each_item_count") == 0
+    assert result.outputs.get("for_each_success_policy") == "allow_partial"
+    assert result.outputs.get("for_each_stop_on_error") is True
+
+
 def test_for_each_action_rejects_fail_fast_with_concurrent_execution() -> None:
     registry = ActionRegistry()
     seen_items: list[str] = []

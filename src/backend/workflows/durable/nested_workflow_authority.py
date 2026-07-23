@@ -12,6 +12,7 @@ and returns bounded diagnostics to the calling VWL primitive.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -19,7 +20,7 @@ from ...services.namespace_service import (
     derive_actor_context_from_namespace,
     resolve_canonical_namespace,
 )
-from ..action_registry import WorkflowEnvironment
+from ..action_registry import WorkflowEnvironment, WorkflowExecutionScope
 from ..engine import WorkflowDefinition
 
 
@@ -208,6 +209,7 @@ def resolve_nested_workflow_definition(
     workflow_id: str,
     environment: WorkflowEnvironment,
     fallback_loader: Callable[[str], WorkflowDefinition | None] | None,
+    execution_scope: WorkflowExecutionScope | None = None,
 ) -> NestedWorkflowDefinitionResolution:
     """Resolve a child definition under the parent request's actor authority.
 
@@ -235,71 +237,85 @@ def resolve_nested_workflow_definition(
             actor_context.org_id,
             actor_context.namespace,
         )
-        cached_resolution = environment._nested_workflow_resolution_cache.get(
-            cache_key
+        resolution_lock = (
+            execution_scope.nested_workflow_resolution_lock(cache_key)
+            if execution_scope is not None
+            else nullcontext()
         )
-        if (
-            isinstance(cached_resolution, NestedWorkflowDefinitionResolution)
-            and cached_resolution.success
-        ):
-            return cached_resolution
-
-        try:
-            from .registry_factory import resolve_workflow_definition_from_authority
-
-            authority_resolution = resolve_workflow_definition_from_authority(
-                workflow_id_text,
-                use_current_shared_registry=True,
-                register_authoritative_fallback=True,
-                actor_user_id=actor_context.user_id,
-                actor_org_id=actor_context.org_id,
+        with resolution_lock:
+            cached_resolution = (
+                execution_scope.get_nested_workflow_resolution(cache_key)
+                if execution_scope is not None
+                else None
             )
-        except Exception as exc:
-            return NestedWorkflowDefinitionResolution(
+            if (
+                isinstance(cached_resolution, NestedWorkflowDefinitionResolution)
+                and cached_resolution.success
+            ):
+                return cached_resolution
+
+            try:
+                from .registry_factory import (
+                    resolve_workflow_definition_from_authority,
+                )
+
+                authority_resolution = resolve_workflow_definition_from_authority(
+                    workflow_id_text,
+                    use_current_shared_registry=True,
+                    register_authoritative_fallback=True,
+                    actor_user_id=actor_context.user_id,
+                    actor_org_id=actor_context.org_id,
+                )
+            except Exception as exc:
+                return NestedWorkflowDefinitionResolution(
+                    workflow_id=workflow_id_text,
+                    definition=None,
+                    actor_context=actor_context,
+                    authority_source="vontology_actor_authority",
+                    error_code=NESTED_WORKFLOW_AUTHORITY_RESOLUTION_FAILED,
+                    authority_diagnostics={"exception_type": type(exc).__name__},
+                )
+
+            definition = authority_resolution.definition
+            authority_payload = authority_resolution.to_dict()
+            identity_error = _definition_identity_error(
+                requested_workflow_id=workflow_id_text,
+                definition=definition,
+            )
+            if identity_error:
+                return NestedWorkflowDefinitionResolution(
+                    workflow_id=workflow_id_text,
+                    definition=None,
+                    actor_context=actor_context,
+                    authority_source="vontology_actor_authority",
+                    error_code=identity_error,
+                    authority_diagnostics=authority_payload,
+                )
+            if definition is None:
+                return NestedWorkflowDefinitionResolution(
+                    workflow_id=workflow_id_text,
+                    definition=None,
+                    actor_context=actor_context,
+                    authority_source="vontology_actor_authority",
+                    error_code=(
+                        _normalise_text(authority_resolution.error_code)
+                        or NESTED_WORKFLOW_DEFINITION_NOT_FOUND
+                    ),
+                    authority_diagnostics=authority_payload,
+                )
+            resolution = NestedWorkflowDefinitionResolution(
                 workflow_id=workflow_id_text,
-                definition=None,
+                definition=definition,
                 actor_context=actor_context,
                 authority_source="vontology_actor_authority",
-                error_code=NESTED_WORKFLOW_AUTHORITY_RESOLUTION_FAILED,
-                authority_diagnostics={"exception_type": type(exc).__name__},
-            )
-
-        definition = authority_resolution.definition
-        authority_payload = authority_resolution.to_dict()
-        identity_error = _definition_identity_error(
-            requested_workflow_id=workflow_id_text,
-            definition=definition,
-        )
-        if identity_error:
-            return NestedWorkflowDefinitionResolution(
-                workflow_id=workflow_id_text,
-                definition=None,
-                actor_context=actor_context,
-                authority_source="vontology_actor_authority",
-                error_code=identity_error,
                 authority_diagnostics=authority_payload,
             )
-        if definition is None:
-            return NestedWorkflowDefinitionResolution(
-                workflow_id=workflow_id_text,
-                definition=None,
-                actor_context=actor_context,
-                authority_source="vontology_actor_authority",
-                error_code=(
-                    _normalise_text(authority_resolution.error_code)
-                    or NESTED_WORKFLOW_DEFINITION_NOT_FOUND
-                ),
-                authority_diagnostics=authority_payload,
-            )
-        resolution = NestedWorkflowDefinitionResolution(
-            workflow_id=workflow_id_text,
-            definition=definition,
-            actor_context=actor_context,
-            authority_source="vontology_actor_authority",
-            authority_diagnostics=authority_payload,
-        )
-        environment._nested_workflow_resolution_cache[cache_key] = resolution
-        return resolution
+            if execution_scope is not None:
+                execution_scope.cache_nested_workflow_resolution(
+                    cache_key,
+                    resolution,
+                )
+            return resolution
 
     definition: WorkflowDefinition | None = None
     if fallback_loader is not None:

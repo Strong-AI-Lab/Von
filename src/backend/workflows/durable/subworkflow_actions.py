@@ -1027,6 +1027,7 @@ def _build_subworkflow_handler(
             workflow_id=child_workflow_id,
             environment=request.environment,
             fallback_loader=definition_loader,
+            execution_scope=request.execution_scope,
         )
         definition = authority_resolution.definition
         if definition is None:
@@ -1099,6 +1100,7 @@ def _build_subworkflow_handler(
             environment=request.environment,
             data=child_inputs,
             trace=child_trace,
+            _execution_scope=request.execution_scope,
         )
 
         invocation_event: Dict[str, Any] = {

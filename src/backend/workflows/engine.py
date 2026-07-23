@@ -17,6 +17,7 @@ from .action_registry import (
     WORKFLOW_ACTION_OUTCOME_UNKNOWN,
     WorkflowActionResult,
     WorkflowEnvironment,
+    WorkflowExecutionScope,
     normalise_action_outcome,
 )
 from .metadata_validation import (
@@ -505,6 +506,7 @@ def execute_workflow_step_invocation(
     resolved_inputs: MutableMapping[str, Any],
     context: Dict[str, Any],
     env: WorkflowEnvironment,
+    execution_scope: WorkflowExecutionScope,
     trace: WorkflowExecutionTrace | None = None,
 ) -> WorkflowActionResult:
     if action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM:
@@ -542,6 +544,7 @@ def execute_workflow_step_invocation(
                 if isinstance(workflow_state_metadata, Mapping)
                 else None
             ),
+            execution_scope=execution_scope,
         )
         return execute_llm_step(request)
 
@@ -567,6 +570,7 @@ def execute_workflow_step_invocation(
         workflow_id=workflow_id,
         workflow_state_id=workflow_state_id,
         workflow_state_metadata=workflow_state_metadata,
+        execution_scope=execution_scope,
     )
 
 
@@ -1906,6 +1910,7 @@ class WorkflowExecutor:
         resolved_inputs: Dict[str, Any],
         context: Dict[str, Any],
         environment: WorkflowEnvironment,
+        execution_scope: WorkflowExecutionScope,
         trace: WorkflowExecutionTrace | None,
         approval_gate: Mapping[str, Any] | None,
         idempotency_policy: Mapping[str, Any] | None,
@@ -1960,6 +1965,7 @@ class WorkflowExecutor:
             resolved_inputs=resolved_inputs,
             context=context,
             env=environment,
+            execution_scope=execution_scope,
             trace=trace,
         )
         if trace is not None:
@@ -2142,6 +2148,7 @@ class WorkflowExecutor:
         state_support: _WorkflowStateRuntimeSupport,
         context: Dict[str, Any],
         environment: WorkflowEnvironment,
+        execution_scope: WorkflowExecutionScope,
         trace: WorkflowExecutionTrace | None,
     ) -> bool:
         approval_blocked = False
@@ -2188,6 +2195,7 @@ class WorkflowExecutor:
                         resolved_inputs=resolved_inputs,
                         context=context,
                         environment=environment,
+                        execution_scope=execution_scope,
                         trace=trace,
                         approval_gate=state_support.approval_gate,
                         idempotency_policy=state_support.idempotency_policy,
@@ -2306,6 +2314,30 @@ class WorkflowExecutor:
         environment: WorkflowEnvironment,
         data: Dict[str, Any] | None = None,
         trace: WorkflowExecutionTrace | None = None,
+        _execution_scope: WorkflowExecutionScope | None = None,
+    ) -> WorkflowResult:
+        owns_execution_scope = _execution_scope is None
+        execution_scope = _execution_scope or WorkflowExecutionScope()
+        try:
+            return self._run_in_execution_scope(
+                definition,
+                environment=environment,
+                data=data,
+                trace=trace,
+                execution_scope=execution_scope,
+            )
+        finally:
+            if owns_execution_scope:
+                execution_scope.close()
+
+    def _run_in_execution_scope(
+        self,
+        definition: WorkflowDefinition,
+        *,
+        environment: WorkflowEnvironment,
+        data: Dict[str, Any] | None,
+        trace: WorkflowExecutionTrace | None,
+        execution_scope: WorkflowExecutionScope,
     ) -> WorkflowResult:
         context: Dict[str, Any] = data or {}
         clear_control_signal_context(context)
@@ -2378,6 +2410,7 @@ class WorkflowExecutor:
                     state_support=state_support,
                     context=context,
                     environment=environment,
+                    execution_scope=execution_scope,
                     trace=trace,
                 )
             except ValueError as exc:

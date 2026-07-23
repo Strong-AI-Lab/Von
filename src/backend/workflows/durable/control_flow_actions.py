@@ -434,6 +434,7 @@ def _build_fork_handler(
                 workflow_id=child_workflow_id,
                 environment=request.environment,
                 fallback_loader=definition_loader,
+                execution_scope=request.execution_scope,
             )
             child_definition = authority_resolution.definition
             if child_definition is None:
@@ -486,6 +487,7 @@ def _build_fork_handler(
                 environment=request.environment,
                 data=child_context,
                 trace=child_trace,
+                _execution_scope=request.execution_scope,
             )
 
             branch_result = {
@@ -580,11 +582,36 @@ def _build_for_each_handler(
                 status="failed",
                 error="for_each_workflow_id_missing",
             )
+        success_policy = _normalise_for_each_success_policy(
+            request.inputs.get("success_policy")
+        )
+        stop_on_error = _coerce_bool_with_default(
+            request.inputs.get("stop_on_error"),
+            default=False,
+        )
+        if (
+            stop_on_error
+            and success_policy != WORKFLOW_FOR_EACH_SUCCESS_POLICY_ALL_MUST_SUCCEED
+        ):
+            return WorkflowActionResult(
+                status="failed",
+                error="for_each_stop_on_error_requires_all_must_succeed",
+                outputs={
+                    "for_each_success_policy": success_policy,
+                    "for_each_stop_on_error": True,
+                    "for_each_item_count": 0,
+                    "iteration_results": [],
+                    "iteration_errors": [],
+                    "successful_results": [],
+                    "invocations": [],
+                },
+            )
 
         authority_resolution = resolve_nested_workflow_definition(
             workflow_id=child_workflow_id,
             environment=request.environment,
             fallback_loader=definition_loader,
+            execution_scope=request.execution_scope,
         )
         child_definition = authority_resolution.definition
         if child_definition is None:
@@ -619,13 +646,6 @@ def _build_for_each_handler(
         )
         index_context_key = (
             _normalise_text(request.inputs.get("index_context_key")) or "index"
-        )
-        success_policy = _normalise_for_each_success_policy(
-            request.inputs.get("success_policy")
-        )
-        stop_on_error = _coerce_bool_with_default(
-            request.inputs.get("stop_on_error"),
-            default=False,
         )
         include_tool_invocations_in_iteration_results = _coerce_bool_with_default(
             request.inputs.get("include_tool_invocations_in_iteration_results"),
@@ -712,6 +732,7 @@ def _build_for_each_handler(
                 environment=request.environment,
                 data=child_context,
                 trace=child_trace,
+                _execution_scope=request.execution_scope,
             )
             child_invocations = _derive_child_step_invocations(
                 child_result,

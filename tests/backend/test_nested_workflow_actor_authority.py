@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from unittest.mock import MagicMock
 
 from src.backend.workflows.action_registry import (
@@ -7,6 +9,7 @@ from src.backend.workflows.action_registry import (
     ActionSpec,
     WorkflowActionResult,
     WorkflowEnvironment,
+    WorkflowExecutionScope,
 )
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
@@ -25,6 +28,7 @@ from src.backend.workflows.durable.subworkflow_actions import (
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
+    WorkflowExecutor,
     WorkflowStateSpec,
 )
 from src.backend.workflows.execution_contracts import (
@@ -365,16 +369,19 @@ def test_nested_resolution_caches_success_for_same_environment_and_scope(
         authority_resolver,
     )
     environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+    execution_scope = WorkflowExecutionScope()
 
     first = resolve_nested_workflow_definition(
         workflow_id=WORKFLOW_ID,
         environment=environment,
         fallback_loader=fallback_loader,
+        execution_scope=execution_scope,
     )
     second = resolve_nested_workflow_definition(
         workflow_id=WORKFLOW_ID,
         environment=environment,
         fallback_loader=fallback_loader,
+        execution_scope=execution_scope,
     )
 
     assert first.success is True
@@ -386,7 +393,7 @@ def test_nested_resolution_caches_success_for_same_environment_and_scope(
         actor_user_id=COHORT_ID,
         actor_org_id=TRUSTED_ORG_ID,
     )
-    assert tuple(environment._nested_workflow_resolution_cache) == (
+    assert execution_scope.nested_workflow_resolution_cache_keys() == (
         (
             WORKFLOW_ID,
             COHORT_ID,
@@ -425,16 +432,19 @@ def test_nested_resolution_cache_is_not_reused_across_actor_scopes(
     )
     owner_environment = _environment(OWNER_ID, TRUSTED_ORG_ID)
     cohort_environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+    execution_scope = WorkflowExecutionScope()
 
     owner = resolve_nested_workflow_definition(
         workflow_id=WORKFLOW_ID,
         environment=owner_environment,
         fallback_loader=None,
+        execution_scope=execution_scope,
     )
     cohort = resolve_nested_workflow_definition(
         workflow_id=WORKFLOW_ID,
         environment=cohort_environment,
         fallback_loader=None,
+        execution_scope=execution_scope,
     )
 
     assert owner.definition is owner_definition
@@ -443,9 +453,7 @@ def test_nested_resolution_cache_is_not_reused_across_actor_scopes(
         (OWNER_ID, TRUSTED_ORG_ID),
         (COHORT_ID, TRUSTED_ORG_ID),
     ]
-    assert owner_environment._nested_workflow_resolution_cache is not (
-        cohort_environment._nested_workflow_resolution_cache
-    )
+    assert len(execution_scope.nested_workflow_resolution_cache_keys()) == 2
 
 
 def test_nested_resolution_does_not_cache_authority_failure(
@@ -466,16 +474,19 @@ def test_nested_resolution_does_not_cache_authority_failure(
         authority_resolver,
     )
     environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+    execution_scope = WorkflowExecutionScope()
 
     denied = resolve_nested_workflow_definition(
         workflow_id=WORKFLOW_ID,
         environment=environment,
         fallback_loader=None,
+        execution_scope=execution_scope,
     )
     accepted = resolve_nested_workflow_definition(
         workflow_id=WORKFLOW_ID,
         environment=environment,
         fallback_loader=None,
+        execution_scope=execution_scope,
     )
 
     assert denied.success is False
@@ -483,3 +494,135 @@ def test_nested_resolution_does_not_cache_authority_failure(
     assert accepted.success is True
     assert accepted.definition is definition
     assert authority_resolver.call_count == 2
+
+
+def test_nested_resolution_single_flights_concurrent_same_key(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    definition = _definition("child.cohort")
+    authority_load_started = Event()
+    release_authority_load = Event()
+    second_lock_requested = Event()
+    authority_call_lock = Lock()
+    authority_call_count = 0
+
+    def _resolve(_workflow_id: str, **_kwargs):
+        nonlocal authority_call_count
+        with authority_call_lock:
+            authority_call_count += 1
+        authority_load_started.set()
+        assert release_authority_load.wait(timeout=2)
+        return _resolution(definition)
+
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_definition_from_authority",
+        _resolve,
+    )
+    environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+    execution_scope = WorkflowExecutionScope()
+    original_lock_resolver = execution_scope.nested_workflow_resolution_lock
+    lock_request_count = 0
+    lock_request_count_guard = Lock()
+
+    def _observe_lock_request(key):
+        nonlocal lock_request_count
+        with lock_request_count_guard:
+            lock_request_count += 1
+            if lock_request_count == 2:
+                second_lock_requested.set()
+        return original_lock_resolver(key)
+
+    monkeypatch.setattr(
+        execution_scope,
+        "nested_workflow_resolution_lock",
+        _observe_lock_request,
+    )
+
+    def _load():
+        return resolve_nested_workflow_definition(
+            workflow_id=WORKFLOW_ID,
+            environment=environment,
+            fallback_loader=None,
+            execution_scope=execution_scope,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(_load)
+        assert authority_load_started.wait(timeout=2)
+        second = executor.submit(_load)
+        assert second_lock_requested.wait(timeout=2)
+        release_authority_load.set()
+        resolutions = (first.result(timeout=2), second.result(timeout=2))
+
+    assert authority_call_count == 1
+    assert all(resolution.success for resolution in resolutions)
+    assert resolutions[0].definition is definition
+    assert resolutions[1].definition is definition
+
+
+def test_reused_environment_rechecks_authority_for_each_top_level_run(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="child.cohort",
+            handler=lambda _request: WorkflowActionResult(
+                outputs={"authority_probe": "cohort"}
+            ),
+        )
+    )
+    child_definition = _definition("child.cohort")
+    authority_resolver = MagicMock(
+        side_effect=[
+            _resolution(child_definition),
+            _resolution(None, error_code="workflow_concept_not_accessible"),
+        ]
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "resolve_workflow_definition_from_authority",
+        authority_resolver,
+    )
+    fallback_loader = MagicMock(return_value=child_definition)
+    register_subworkflow_actions(registry, definition_loader=fallback_loader)
+    child_invocation = WorkflowActionInvocation(
+        action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": WORKFLOW_ID,
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+    )
+    parent_definition = WorkflowDefinition(
+        workflow_id="#V#parent",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                # The first top-level run invokes the same child twice and must
+                # share one actor-authority resolution. The second top-level
+                # run reuses the environment but must create a fresh scope.
+                actions=(child_invocation, child_invocation),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+    )
+    environment = _environment(COHORT_ID, TRUSTED_ORG_ID)
+    executor = WorkflowExecutor(registry=registry)
+
+    first = executor.run(parent_definition, environment=environment, data={})
+    second = executor.run(parent_definition, environment=environment, data={})
+
+    assert first.completed is True
+    assert first.data["result"]["authority_probe"] == "cohort"
+    assert second.completed is False
+    assert "workflow_concept_not_accessible" in str(second.error)
+    assert authority_resolver.call_count == 2
+    fallback_loader.assert_not_called()
