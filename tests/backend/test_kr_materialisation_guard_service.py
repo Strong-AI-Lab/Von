@@ -145,6 +145,85 @@ def test_guard_accepts_exact_create_and_changed_record_reuse_plan() -> None:
     assert resolved["guard_passed"] is True
 
 
+def test_guard_normalises_predicate_id_alias_before_downstream_execution() -> None:
+    relationship_specs = [
+        {
+            "source_key": "candidate",
+            "predicate_id": "#V#has_doctoral_programme",
+            "target_key": "programme",
+        }
+    ]
+    resolved_relationship_specs = [
+        {
+            "source_id": "#V#stable_candidate",
+            "predicate_id": "#V#has_doctoral_programme",
+            "target_id": "#V#stable_programme",
+        }
+    ]
+
+    plan = validate_kr_materialisation_guard(
+        guard_contract=_guard(),
+        phase="plan",
+        concept_specs=_concept_specs(),
+        relationship_specs=relationship_specs,
+    )
+    resolved = validate_kr_materialisation_guard(
+        guard_contract=_guard(),
+        phase="resolved_relationships",
+        concept_specs=_concept_specs(),
+        relationship_specs=relationship_specs,
+        concept_iteration_results=_concept_results(),
+        resolved_relationship_specs=resolved_relationship_specs,
+    )
+
+    assert plan["guard_passed"] is True
+    assert resolved["guard_passed"] is True
+    assert relationship_specs[0]["predicate"] == "#V#has_doctoral_programme"
+    assert (
+        resolved_relationship_specs[0]["predicate"]
+        == "#V#has_doctoral_programme"
+    )
+
+
+def test_guard_rejects_conflicting_predicate_aliases() -> None:
+    conflicting_plan = _relationship_specs()
+    conflicting_plan[0]["predicate_id"] = "#V#has_administrator"
+    plan = validate_kr_materialisation_guard(
+        guard_contract=_guard(),
+        phase="plan",
+        concept_specs=_concept_specs(),
+        relationship_specs=conflicting_plan,
+    )
+
+    conflicting_resolved = [
+        {
+            "source_id": "#V#stable_candidate",
+            "predicate": "#V#has_doctoral_programme",
+            "predicate_id": "#V#has_administrator",
+            "target_id": "#V#stable_programme",
+        }
+    ]
+    resolved = validate_kr_materialisation_guard(
+        guard_contract=_guard(),
+        phase="resolved_relationships",
+        concept_specs=_concept_specs(),
+        relationship_specs=_relationship_specs(),
+        concept_iteration_results=_concept_results(),
+        resolved_relationship_specs=conflicting_resolved,
+    )
+
+    assert plan["guard_passed"] is False
+    assert (
+        plan["error_code"]
+        == "kr_materialisation_guard_relationship_spec_invalid"
+    )
+    assert resolved["guard_passed"] is False
+    assert (
+        resolved["error_code"]
+        == "kr_materialisation_guard_resolved_relationship_invalid"
+    )
+
+
 def test_guard_rejects_injected_unrelated_concept_before_any_write() -> None:
     injected = _concept_specs() + [
         {
