@@ -1212,11 +1212,17 @@ def validate_workflow_definition_contract(
                         }
                     )
                 explicit_items = action_inputs.get("items")
+                mapped_items_context_key = (
+                    str(explicit_items.get("$context_key") or "").strip()
+                    if isinstance(explicit_items, Mapping)
+                    else ""
+                )
                 if not (
                     (
                         _is_sequence_like(explicit_items)
                         and not isinstance(explicit_items, (str, bytes, bytearray))
                     )
+                    or mapped_items_context_key
                     or str(
                         action_inputs.get("items_context_key")
                         or action_inputs.get("items_path")

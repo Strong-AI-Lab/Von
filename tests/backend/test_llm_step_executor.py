@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 from typing import Any
@@ -103,6 +105,69 @@ def test_active_only_no_tool_policy_bypasses_gateway_registry_setup(
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["selection_policy"] == "active_only"
     assert envelope["selected_model"] == "gpt-5.6-luna"
+
+
+def test_represented_llm_policy_suppresses_raw_io_sentinel_across_timeout_thread(
+    monkeypatch,
+    caplog,
+) -> None:
+    from src.backend.languagemodels import llm_interface
+
+    raw_prompt_sentinel = "RAW-LLM-PROMPT-MUST-NOT-BE-LOGGED"
+    raw_response_sentinel = "RAW-LLM-RESPONSE-MUST-NOT-BE-LOGGED"
+    raw_io_decisions: list[bool] = []
+    worker_thread_names: list[str] = []
+    llm_client = MagicMock()
+
+    def generate(prompt, **_kwargs):
+        worker_thread_names.append(threading.current_thread().name)
+        should_log = llm_interface._should_log_llm_io()
+        raw_io_decisions.append(should_log)
+        if should_log:
+            logging.getLogger(llm_interface.__name__).debug(
+                "prompt=%s response=%s",
+                prompt,
+                raw_response_sentinel,
+            )
+        return json.dumps({"status": raw_response_sentinel})
+
+    llm_client.generate.side_effect = generate
+    monkeypatch.setenv("VON_DEBUG_LLM_IO", "1")
+    monkeypatch.setattr(
+        lse,
+        "record_workflow_llm_step_duration_observation",
+        lambda **_kwargs: {},
+    )
+    caplog.set_level(logging.DEBUG, logger=llm_interface.__name__)
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=llm_client,
+            model="gpt-5.6-luna",
+        ),
+        data={"conversation_turn_llm_timeout_override_sec": 1.0},
+        workflow_id="#V#represented_policy_workflow",
+        workflow_state_id="#V#represented_policy_step",
+        prompt_contract={"prompt_text": raw_prompt_sentinel},
+        llm_policy={
+            "policy_stage": "represented_policy_step",
+            "selection_policy": "active_only",
+            "suppress_raw_io_logging": True,
+            "tool_mode": "none",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success", result.outputs
+    assert raw_io_decisions == [False]
+    assert worker_thread_names == [
+        "workflow-llm-step-call-represented_policy_step"
+    ]
+    assert raw_prompt_sentinel not in caplog.text
+    assert raw_response_sentinel not in caplog.text
 
 
 def test_compose_llm_prompt_includes_workflow_experience_guidance_labels() -> None:

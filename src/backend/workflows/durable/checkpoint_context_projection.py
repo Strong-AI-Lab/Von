@@ -251,6 +251,7 @@ def project_workflow_context_for_checkpoint(
     max_value_bson_bytes: int = _DEFAULT_MAX_VALUE_BSON_BYTES,
     max_total_bson_bytes: int = _DEFAULT_MAX_TOTAL_BSON_BYTES,
     max_text_preview_chars: int = _DEFAULT_TEXT_PREVIEW_CHARS,
+    lossless_keys: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Return a bounded persisted projection of workflow runtime context.
 
@@ -263,6 +264,9 @@ def project_workflow_context_for_checkpoint(
     if not isinstance(context, Mapping):
         return {}
 
+    declared_lossless_keys = {
+        str(item).strip() for item in lossless_keys if str(item).strip()
+    }
     projected: dict[str, Any] = {}
     projected_key_records: list[dict[str, Any]] = []
     already_projected_keys: set[str] = set()
@@ -275,11 +279,15 @@ def project_workflow_context_for_checkpoint(
 
         original_size = _measure_bson_size(value)
         reason: str | None = None
-        if key in _LOSSLESS_OFFLOAD_KEYS:
+        if key in _LOSSLESS_OFFLOAD_KEYS or (
+            key in declared_lossless_keys
+            and not _key_contains(key, _SECRET_KEY_PARTS)
+        ):
             # The instance manager immediately replaces this provider state
-            # with a namespace-scoped blob reference.  Preserve it byte-for-
-            # byte until that offload boundary; truncation/redaction here would
-            # make a resumed stateless Responses loop invalid.
+            # or the containing workflow data with a namespace-scoped blob
+            # reference. Preserve execution-required values byte-for-byte until
+            # that offload boundary; truncation here would make a durable resume
+            # semantically different from the uninterrupted run.
             projected[key] = _safe_copy_value(value)
             continue
         if key in _ALWAYS_COMPACT_KEYS:
@@ -318,6 +326,7 @@ def project_workflow_context_for_checkpoint(
                 for key, value in projected.items()
                 if key not in already_projected_keys
                 and key not in _LOSSLESS_OFFLOAD_KEYS
+                and key not in declared_lossless_keys
             ),
             reverse=True,
         )

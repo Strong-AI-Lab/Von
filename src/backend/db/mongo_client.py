@@ -1139,6 +1139,14 @@ def _ensure_text_relations_indexes(coll: Collection) -> None:
     coll.create_index([("predicate", ASCENDING)], name="predicate_1")
     coll.create_index([("object_text_id", ASCENDING)], name="object_text_id_1")
     coll.create_index(
+        [
+            ("object_text_id", ASCENDING),
+            ("predicate", ASCENDING),
+            ("subject_concept_id", ASCENDING),
+        ],
+        name="object_predicate_subject_lookup",
+    )
+    coll.create_index(
         [("predicate", ASCENDING), ("created_at", DESCENDING)],
         name="predicate_created_at_desc",
     )

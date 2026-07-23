@@ -49,6 +49,7 @@ from src.backend.workflows.execution_contracts import (
     WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY,
     WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY,
     WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY,
+    WORKFLOW_RESULT_ENVELOPE_KEY,
 )
 
 
@@ -75,6 +76,53 @@ def _build_instance(workflow_id: str) -> WorkflowInstance:
         created_at=datetime.now(timezone.utc),
         inputs={},
     )
+
+
+def test_durable_executor_reports_explicit_failed_terminal_as_failure() -> None:
+    failed_state = "#V#workflow_step_example_workflow_failed"
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_failed_terminal_probe",
+        initial_state=failed_state,
+        states={
+            failed_state: WorkflowStateSpec(
+                state_id=failed_state,
+                terminal=True,
+            )
+        },
+        termination_states=(failed_state,),
+    )
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(
+        registry=ActionRegistry(),
+        instance_manager=manager,
+    )
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is False
+    assert result.final_state == failed_state
+    assert result.error == "workflow_failed_terminal_state"
+    assert result.data[WORKFLOW_RESULT_ENVELOPE_KEY]["terminal_status"] == "failed"
+    terminal_checkpoint = manager.checkpoint.call_args_list[-1].kwargs
+    assert terminal_checkpoint["error"] == "workflow_failed_terminal_state"
 
 
 def test_durable_executor_atomically_pauses_at_successor_checkpoint() -> None:
@@ -306,6 +354,33 @@ def test_checkpoint_context_projection_bounds_diagnostic_payloads() -> None:
     assert "secret-token-value" not in serialised
     assert projected["last_action_outputs"]["api_token"] == "[redacted]"
     assert projected["result"]["raw_body"]["truncated"] is True
+
+
+def test_checkpoint_context_projection_preserves_declared_execution_input() -> None:
+    records = [
+        {
+            "source_item_id": f"student:{index}",
+            "evidence": "e" * 40_000,
+        }
+        for index in range(12)
+    ]
+
+    projected = project_workflow_context_for_checkpoint(
+        {"spreadsheet_records": records},
+        lossless_keys=("spreadsheet_records",),
+    )
+
+    assert projected["spreadsheet_records"] == records
+    assert not any(
+        item.get("truncated") is True
+        for item in projected["spreadsheet_records"]
+        if isinstance(item, dict)
+    )
+    projection = projected[CHECKPOINT_CONTEXT_PROJECTION_KEY]
+    assert not any(
+        item.get("key") == "spreadsheet_records"
+        for item in projection["projected_keys"]
+    )
 
 
 def test_durable_executor_checkpoints_bounded_context_and_preserves_mapped_fields() -> None:

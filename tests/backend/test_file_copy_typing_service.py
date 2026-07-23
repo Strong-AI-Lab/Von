@@ -57,6 +57,19 @@ def test_infer_file_copy_typing_extracts_arxiv_identifier_from_filename() -> Non
     assert result["semantic_type_concept_id"] == "#V#scholarly_paper_file_copy"
 
 
+def test_infer_file_copy_typing_routes_spreadsheets_by_format() -> None:
+    result = infer_file_copy_typing(
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        original_filename="programme.xlsx",
+    )
+
+    assert result["route_hint"] is None
+    assert result["route_scores"]["spreadsheet"] == 0.55
+    assert result["route_confidence"] == 0.55
+    assert result["format_type_concept_id"] == "#V#spreadsheet_xlsx_computer_file_copy"
+    assert result["primary_type_concept_id"] == "#V#spreadsheet_xlsx_computer_file_copy"
+
+
 def test_ensure_file_copy_typing_types_exist_creates_dynamic_blueprints(monkeypatch) -> None:
     ensured_calls: list[dict[str, object]] = []
 

@@ -885,6 +885,70 @@ def test_selected_workflow_outputs_derives_missing_tools_from_workflow_contract(
     ]
 
 
+def test_spreadsheet_unchanged_replay_requires_branch_invariant_receipt_tools() -> None:
+    contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "spreadsheet_programme_representation_readback",
+        "required_effects": [
+            {
+                "effect_id": "record_reconciliation_and_marker_readback",
+                "effect_type": "grounded_evidence",
+                "required_tools": [
+                    "get_source_processing_marker",
+                    "build_spreadsheet_batch_completion_evidence",
+                    "record_source_processing_marker",
+                ],
+                "required_tools_match": "all",
+            }
+        ],
+    }
+    unchanged_invocations = [
+        {"tool": "get_source_processing_marker", "status": "ok"},
+        {"tool": "build_spreadsheet_batch_completion_evidence", "status": "ok"},
+        {"tool": "record_source_processing_marker", "status": "ok"},
+    ]
+
+    complete = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#spreadsheet_phd_programme_representation_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "All records were unchanged and read back.",
+            "invocations": unchanged_invocations,
+            "workflow_required_effects_contract": contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+    )
+
+    assert complete["missing_prompt_tools"] == []
+    assert complete.get("missing_tool_call_retry_reason_override") is None
+    assert "build_spreadsheet_record_materialisation_request" not in (
+        complete["required_prompt_tools"]
+    )
+
+    missing_receipt = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#spreadsheet_phd_programme_representation_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "No receipt was built.",
+            "invocations": [
+                item
+                for item in unchanged_invocations
+                if item["tool"] != "build_spreadsheet_batch_completion_evidence"
+            ],
+            "workflow_required_effects_contract": contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+    )
+
+    assert missing_receipt["missing_prompt_tools"] == [
+        "build_spreadsheet_batch_completion_evidence"
+    ]
+
+
 def test_selected_workflow_outputs_exposes_required_step_envelope_as_invocation() -> (
     None
 ):

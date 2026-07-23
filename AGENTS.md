@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Governing instructions for work in this repository, subordinate
   to current explicit user direction and higher-level safety rules
-- **Last reviewed:** 18 July 2026
+- **Last reviewed:** 23 July 2026
 - **Review trigger:** A material change to Von's product focus, authority model,
   security posture, or acceptance doctrine
 
@@ -243,6 +243,15 @@ fix.
   macOS and Linux, except when deliberately invoking or testing another shell.
 - Search before adding helpers, tools, concepts, predicates, workflows, or
   parallel pathways.
+- Treat Atlas efficiency as a standing engineering priority. Take every
+  practical opportunity exposed by telemetry, profiling, explains, tests, or
+  real-path replays to remove wasteful query shapes, scans, index choices,
+  retries, timeouts, topology churn, and avoidable reads. Complete safe,
+  task-relevant improvements while the evidence is fresh, add proportional
+  regression coverage and observability, and create follow-up work only when
+  the improvement cannot safely be completed in the current task. Do not
+  normalise Atlas inefficiency as incidental slowness: it is a material
+  reliability and development-cost defect.
 - Preserve user-authored text unless change is requested.
 - Preserve unrelated worktree changes. Do not use `git stash` or destructive
   checkout/reset operations as a routine baseline technique; use a clean

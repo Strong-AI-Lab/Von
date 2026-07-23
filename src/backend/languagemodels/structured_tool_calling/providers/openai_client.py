@@ -45,6 +45,30 @@ from ....services.model_parameter_service import (
 logger = logging.getLogger(__name__)
 
 
+def _split_request_timeout_from_llm_params(
+    raw_params: Any,
+) -> tuple[dict[str, Any], float | None]:
+    """Separate the caller-owned request deadline from model parameters.
+
+    ``request_timeout_seconds`` is a transport boundary, not a model
+    capability.  Keeping it out of the represented parameter projection
+    prevents it from being silently discarded by model-parameter filtering
+    while still allowing the OpenAI SDK to cancel the underlying request.
+    """
+
+    params = dict(raw_params) if isinstance(raw_params, Mapping) else {}
+    raw_timeout = params.pop("request_timeout_seconds", None)
+    if raw_timeout is None:
+        raw_timeout = params.pop("timeout_seconds", None)
+    try:
+        timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+    except (TypeError, ValueError):
+        timeout_seconds = None
+    if timeout_seconds is not None:
+        timeout_seconds = max(1.0, min(600.0, timeout_seconds))
+    return params, timeout_seconds
+
+
 def _value(item: Any, key: str, default: Any = None) -> Any:
     if isinstance(item, Mapping):
         return item.get(key, default)
@@ -86,7 +110,21 @@ class OpenAIClient(LLMClient):
 
         request_kwargs = dict(kwargs)
         request_model = request_kwargs.pop("model", None) or self.config.model
-        llm_params = request_kwargs.pop("llm_params", None)
+        raw_llm_params = request_kwargs.pop("llm_params", None)
+        llm_params, request_timeout_seconds = _split_request_timeout_from_llm_params(
+            raw_llm_params
+        )
+        request_client = self._client
+        if request_timeout_seconds is not None:
+            # The SDK's default retry policy would turn a represented
+            # per-record deadline into as many as three attempts.  A caller-
+            # owned workflow budget is a total transport boundary, so bind it
+            # to a no-retry request client rather than merely passing a
+            # per-attempt ``timeout`` keyword.
+            request_client = self._client.with_options(
+                timeout=request_timeout_seconds,
+                max_retries=0,
+            )
         raw_continuation = request_kwargs.pop("continuation", None)
         continuation = LLMContinuation.from_value(raw_continuation)
         if raw_continuation is not None and continuation is None:
@@ -144,6 +182,7 @@ class OpenAIClient(LLMClient):
                     tool_results=tool_results,
                     request_kwargs=selected_request_kwargs,
                     decision=selected_decision,
+                    request_client=request_client,
                 )
             return await self._generate_chat_completions(
                 prompt=prompt,
@@ -156,6 +195,7 @@ class OpenAIClient(LLMClient):
                 tool_results=tool_results,
                 request_kwargs=selected_request_kwargs,
                 decision=selected_decision,
+                request_client=request_client,
             )
 
         try:
@@ -357,6 +397,7 @@ class OpenAIClient(LLMClient):
         tool_results: list[ToolResult],
         request_kwargs: dict[str, Any],
         decision: StructuredToolTransportDecision,
+        request_client: Any,
     ) -> LLMResponse:
         messages = self._build_chat_messages(
             prompt,
@@ -397,7 +438,7 @@ class OpenAIClient(LLMClient):
         if safe_temperature is not None:
             request_kwargs["temperature"] = safe_temperature
 
-        response = await self._client.chat.completions.create(
+        response = await request_client.chat.completions.create(
             model=request_model,
             messages=messages,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
@@ -447,6 +488,7 @@ class OpenAIClient(LLMClient):
         tool_results: list[ToolResult],
         request_kwargs: dict[str, Any],
         decision: StructuredToolTransportDecision,
+        request_client: Any,
     ) -> LLMResponse:
         tools = [
             self._tool_definition_to_responses_dict(tool) for tool in available_tools
@@ -498,7 +540,7 @@ class OpenAIClient(LLMClient):
         ):
             request_kwargs["previous_response_id"] = continuation.response_id
 
-        response = await self._client.responses.create(
+        response = await request_client.responses.create(
             model=request_model,
             input=input_items,  # type: ignore[arg-type]
             instructions=system_message,

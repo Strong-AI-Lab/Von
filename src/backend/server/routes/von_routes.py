@@ -10779,6 +10779,74 @@ def _normalise_generate_workflow_launch_inputs(raw_value: Any) -> dict[str, Any]
     return normalised
 
 
+def _authorise_generate_file_copy_launch_input(
+    workflow_launch_inputs: Mapping[str, Any],
+    *,
+    user_concept_id: str | None,
+) -> dict[str, Any]:
+    """Bind an uploaded file-copy identity only when the actor owns that artefact."""
+
+    normalised = dict(workflow_launch_inputs)
+    input_key = "file_copy_concept_id"
+    if input_key not in normalised:
+        return normalised
+
+    raw_concept_id = normalised.get(input_key)
+    if not isinstance(raw_concept_id, str):
+        raise ValueError("file_copy_concept_id must be a concept-id string.")
+    concept_id = raw_concept_id.strip()
+    if (
+        not concept_id.startswith("#V#")
+        or len(concept_id) <= len("#V#")
+        or len(concept_id) > 512
+        or any(char.isspace() for char in concept_id)
+    ):
+        raise ValueError("file_copy_concept_id must be a valid Vontology concept id.")
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        raise PermissionError("authenticated attachment access is required")
+
+    actor_concept_id = user_concept_id.strip()
+    concept_doc = _load_authorised_file_copy_concept_doc(
+        concept_id=concept_id,
+        user_concept_id=actor_concept_id,
+        log_prefix="generate/file-copy-input",
+    )
+    if not isinstance(concept_doc, Mapping):
+        raise PermissionError("attachment access is not authorised")
+
+    relationships = concept_doc.get("relationships")
+    if not isinstance(relationships, Mapping):
+        raise PermissionError("attachment access is not authorised")
+
+    from ...security.visibility_predicates import get_specific_to_user_values
+
+    owner_ids = {
+        value.strip()
+        for value in get_specific_to_user_values(dict(relationships))
+        if isinstance(value, str) and value.strip()
+    }
+    instance_of = relationships.get("is_an_instance_of")
+    if isinstance(instance_of, str):
+        instance_type_ids = {instance_of.strip()}
+    elif isinstance(instance_of, list):
+        instance_type_ids = {
+            value.strip()
+            for value in instance_of
+            if isinstance(value, str) and value.strip()
+        }
+    else:
+        instance_type_ids = set()
+
+    if (
+        actor_concept_id not in owner_ids
+        or "#V#computer_file_copy" not in instance_type_ids
+    ):
+        raise PermissionError("attachment access is not authorised")
+
+    normalised[input_key] = concept_id
+    return normalised
+
+
 @von_bp.route("/generate", methods=["POST"])
 def generate():  # pyright: ignore[reportGeneralTypeIssues]
     """Handle text generation requests."""
@@ -11151,6 +11219,39 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         effective = {}
 
     _check_background_cancellation("authentication context")
+
+    try:
+        request_workflow_launch_inputs = (
+            _authorise_generate_file_copy_launch_input(
+                request_workflow_launch_inputs,
+                user_concept_id=user_concept_id,
+            )
+        )
+    except ValueError as exc:
+        return (
+            jsonify(
+                {
+                    "error": "invalid_workflow_inputs",
+                    "detail": str(exc),
+                }
+            ),
+            400,
+        )
+    except PermissionError:
+        current_app.logger.warning(
+            "[generate] Rejected an unauthorised file-copy workflow input "
+            "for request_id=%s.",
+            request_id,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "workflow_input_not_authorised",
+                    "detail": "The requested attachment is not available to this actor.",
+                }
+            ),
+            403,
+        )
 
     if project_live_progress:
         _register_tool_progress_scope_aliases(

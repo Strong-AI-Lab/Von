@@ -47,6 +47,7 @@ ROUTE_KEY_SCHOLARLY = "scholarly"
 ROUTE_KEY_CV = "cv"
 ROUTE_KEY_BUSINESS_CARD = "business_card"
 ROUTE_KEY_MEETING = "meeting"
+ROUTE_KEY_SPREADSHEET = "spreadsheet"
 ROUTE_KEY_INTERPRET = "interpret"
 ROUTE_KEY_NOOP = "noop"
 
@@ -121,6 +122,7 @@ def _extract_route_from_force_override(value: Any) -> str | None:
         ROUTE_KEY_CV,
         ROUTE_KEY_BUSINESS_CARD,
         ROUTE_KEY_MEETING,
+        ROUTE_KEY_SPREADSHEET,
         ROUTE_KEY_INTERPRET,
         ROUTE_KEY_NOOP,
     }:

@@ -281,6 +281,7 @@ _ROUTE_HINT_TO_TYPE_ID: dict[str, str] = {
     "cv": "#V#curriculum_vitae_file_copy",
     "business_card": "#V#business_card_file_copy",
     "meeting": "#V#meeting_transcript_file_copy",
+    "spreadsheet": "#V#spreadsheet_xlsx_computer_file_copy",
 }
 
 
@@ -541,6 +542,10 @@ def _score_route_hints(
     is_pdf = format_type_concept_id == "#V#pdf_computer_file_copy"
     is_image = format_type_concept_id == "#V#image_computer_file_copy"
     is_docx = format_type_concept_id == "#V#msword_docx_computer_file_copy"
+    is_spreadsheet = format_type_concept_id in {
+        "#V#spreadsheet_xlsx_computer_file_copy",
+        "#V#csv_computer_file_copy",
+    }
 
     arxiv_score = 0.0
     if _ARXIV_FILENAME_RE.search(filename):
@@ -580,12 +585,20 @@ def _score_route_hints(
     if isinstance(content_type_token, str) and content_type_token in {"text/plain", "text/markdown"}:
         meeting_score += 0.08
 
+    # XLSX/CSV is strong evidence of a file format, but no evidence that the
+    # workbook is a doctoral-programme dataset (or any other mutating semantic
+    # route). Keep the score below automatic route selection; an explicit user
+    # request or later semantic adjudication can still select a specialised
+    # spreadsheet workflow.
+    spreadsheet_score = 0.55 if is_spreadsheet else 0.0
+
     return {
         "arxiv": round(min(0.99, arxiv_score), 4),
         "scholarly": round(min(0.99, scholarly_score), 4),
         "cv": round(min(0.99, cv_score), 4),
         "business_card": round(min(0.99, business_card_score), 4),
         "meeting": round(min(0.99, meeting_score), 4),
+        "spreadsheet": round(min(0.99, spreadsheet_score), 4),
     }
 
 

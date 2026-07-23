@@ -247,7 +247,7 @@
       "default_workflow_description": "Executable PhD-student representation workflow created from text intent.",
       "template_profile": {
         "schema_version": "workflow_template_profile.v1",
-        "selection_mode": "automatic",
+        "selection_mode": "explicit_only",
         "priority": 45,
         "keywords": [
           "phd student",

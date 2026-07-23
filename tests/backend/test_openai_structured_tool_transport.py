@@ -123,7 +123,10 @@ def _install_fake_openai(
 
     response_queue = list(responses)
     chat_response_queue = list(chat_responses)
-    captured: dict[str, list[dict[str, Any]]] = {"responses": [], "chat": []}
+    captured: dict[str, list[dict[str, Any]]] = {
+        "responses": [],
+        "chat": [],
+    }
 
     async def responses_create(**kwargs: Any) -> Any:
         captured["responses"].append(dict(kwargs))
@@ -151,15 +154,20 @@ def _install_fake_openai(
             "usage": None,
         }
 
+    async_client = types.SimpleNamespace(
+        responses=types.SimpleNamespace(create=responses_create),
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=chat_create)),
+    )
+
+    def with_options(**kwargs: Any) -> Any:
+        captured.setdefault("client_options", []).append(dict(kwargs))
+        return async_client
+
+    async_client.with_options = with_options
     monkeypatch.setattr(
         provider_module.openai,
         "AsyncOpenAI",
-        lambda **_kwargs: types.SimpleNamespace(
-            responses=types.SimpleNamespace(create=responses_create),
-            chat=types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=chat_create)
-            ),
-        ),
+        lambda **_kwargs: async_client,
     )
     monkeypatch.setattr(
         provider_module.openai,
@@ -1134,7 +1142,12 @@ def test_responses_mixed_unreplayable_call_fails_before_tool_dispatch(
         ],
     )
     client = OpenAIClient(
-        LLMClientConfig(model=model, provider="openai", api_key="test-key")
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
     )
 
     with pytest.raises(
@@ -2277,6 +2290,42 @@ def test_no_tool_request_preserves_chat_surface_even_with_responses_profile(
     assert captured["responses"] == []
     assert result.transport_metadata["effective_api_surface"] == ("chat_completions")
     assert result.transport_metadata["reason"] == "no_structured_tools_in_request"
+
+
+def test_responses_request_timeout_is_transport_option_not_model_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "responses-timeout-model"
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[_text_response(model=model)],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    asyncio.run(
+        client.generate_with_tools(
+            prompt="Use the tool if needed.",
+            available_tools=[_tool()],
+            llm_params={
+                "reasoning_effort": "none",
+                "request_timeout_seconds": 17,
+            },
+        )
+    )
+
+    request = captured["responses"][0]
+    assert "timeout" not in request
+    assert "request_timeout_seconds" not in request
+    assert "timeout_seconds" not in request
+    assert captured["client_options"] == [{"timeout": 17.0, "max_retries": 0}]
 
 
 def test_explicitly_unsupported_profile_raises_typed_error_before_request(

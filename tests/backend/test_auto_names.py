@@ -1,3 +1,4 @@
+import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -124,6 +125,41 @@ class TestAutoNames(unittest.TestCase):
             and c.kwargs.get("context", {}).get("name_type") == "CODE"
         ]
         self.assertTrue(guid_call, "GUID not registered as CODE name in import")
+
+
+@patch("src.backend.services.concept_service.ConceptsRepository")
+@patch("src.backend.services.text_value_service.upsert_text_for_concept")
+def test_create_concept_does_not_log_display_name(
+    mock_upsert, mock_repo, caplog
+):
+    mock_collection = MagicMock()
+    mock_repo.collection.return_value = mock_collection
+
+    def side_effect_insert(doc):
+        doc["_id"] = "mock_guid"
+        result = MagicMock()
+        result.inserted_id = "mock_guid"
+        return result
+
+    mock_collection.insert_one.side_effect = side_effect_insert
+    mock_collection.find_one.return_value = {
+        "_id": "mock_guid",
+        "concept_id": "#V#private_person",
+        "relationships": {},
+    }
+
+    private_display_name = "Private Person Display Name"
+    with caplog.at_level(
+        logging.INFO,
+        logger="src.backend.services.concept_service",
+    ):
+        create_concept(
+            name=private_display_name,
+            concept_id="#V#private_person",
+            create_as_instance=False,
+        )
+
+    assert private_display_name not in caplog.text
 
 
 if __name__ == "__main__":

@@ -1029,6 +1029,35 @@ def test_validate_contract_rejects_for_each_without_required_inputs() -> None:
     )
 
 
+def test_validate_contract_accepts_for_each_items_context_mapping() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#for_each_mapped_items_workflow",
+        initial_state="fan_out",
+        states={
+            "fan_out": WorkflowStateSpec(
+                state_id="fan_out",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+                        inputs={
+                            "workflow_id": "#V#child_workflow",
+                            "items": {"$context_key": "candidate_records"},
+                            "success_policy": "allow_partial",
+                        },
+                    ),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("fan_out",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert "workflow_iterator_invalid" not in (validation.get("errors") or [])
+    assert validation.get("iterator_issues") == []
+
+
 def test_validate_contract_rejects_approval_gate_without_route() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#approval_invalid_workflow",

@@ -32,6 +32,7 @@ from difflib import SequenceMatcher
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from bson import ObjectId
+from pymongo import timeout
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import (
@@ -65,6 +66,8 @@ DESCRIPTION_TEXT_PREDICATE_PRECEDENCE = (
 )
 TEXT_RELATION_DEFAULT_TEXT_VALUE_LIMIT = 500
 TEXT_RELATION_DEFAULT_RELATION_LIMIT = 1000
+CONCEPT_SEARCH_QUERY_MAX_TIME_MS = 5_000
+CONCEPT_SEARCH_OPERATION_TIMEOUT_SECONDS = 5.0
 TEXT_VALUE_ID_PROJECTION: Dict[str, int] = {"_id": 1}
 
 
@@ -78,6 +81,19 @@ class InvalidSearchParameters(ConceptSearchError):
     """Raised when search parameters are invalid."""
 
     pass
+
+
+def _consume_search_cursor(cursor) -> list[dict[str, Any]]:
+    """Materialise one bounded Mongo cursor under a total client deadline.
+
+    ``maxTimeMS`` bounds server execution but does not include topology
+    selection, connection acquisition, or network reads. PyMongo CSOT covers
+    that complete operation while the existing server deadline remains useful
+    to Atlas for early cancellation.
+    """
+
+    with timeout(CONCEPT_SEARCH_OPERATION_TIMEOUT_SECONDS):
+        return list(cursor)
 
 
 def _determine_concept_kind(concept_doc: Dict[str, Any]) -> str:
@@ -275,8 +291,9 @@ def _fetch_text_relation_concept_docs(
         query,
         projection=SEARCH_RESULT_PROJECTION,
         limit=max(limit * 2, len(ordered_ids)),
+        max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
     )
-    return list(cursor)
+    return _consume_search_cursor(cursor)
 
 
 def _normalize_text_for_match(text: str) -> str:
@@ -301,7 +318,7 @@ def _find_text_values_by_fingerprint(
         return []
 
     escaped_query = re.escape(normalized_query)
-    return list(
+    return _consume_search_cursor(
         TextValuesRepository.find(
             {
                 "fingerprint": {
@@ -311,6 +328,7 @@ def _find_text_values_by_fingerprint(
             },
             projection=TEXT_VALUE_ID_PROJECTION,
             limit=limit,
+            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
 
@@ -347,11 +365,12 @@ def _scan_text_values_for_match(
     if not normalized_query:
         return []
 
-    relations = list(
+    relations = _consume_search_cursor(
         TextRelationsRepository.find(
             {"predicate": {"$in": predicates}},
             projection={"object_text_id": 1},
             limit=limit,
+            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
 
@@ -370,8 +389,12 @@ def _scan_text_values_for_match(
     if not candidate_ids:
         return []
 
-    text_values = list(
-        TextValuesRepository.find({"_id": {"$in": candidate_ids}}, limit=limit)
+    text_values = _consume_search_cursor(
+        TextValuesRepository.find(
+            {"_id": {"$in": candidate_ids}},
+            limit=limit,
+            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
+        )
     )
 
     matches: list[dict] = []
@@ -437,21 +460,23 @@ def _search_text_relations(
     if not matching_texts and prefix:
         flexible_pattern = re.escape(collapsed_query).replace(" ", r"\s+")
         text_query = {"text": {"$regex": f"^{flexible_pattern}", "$options": "i"}}
-        matching_texts = list(
+        matching_texts = _consume_search_cursor(
             TextValuesRepository.find(
                 text_query,
                 projection=TEXT_VALUE_ID_PROJECTION,
                 limit=text_value_limit,
+                max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
             )
         )
     elif not matching_texts and not exact:
         try:
             text_search_query = {"$text": {"$search": collapsed_query}}
-            matching_texts = list(
+            matching_texts = _consume_search_cursor(
                 TextValuesRepository.find(
                     text_search_query,
                     projection=TEXT_VALUE_ID_PROJECTION,
                     limit=text_value_limit,
+                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
             )
         except Exception as e:
@@ -459,11 +484,12 @@ def _search_text_relations(
             substring_query = {
                 "text": {"$regex": re.escape(collapsed_query), "$options": "i"}
             }
-            matching_texts = list(
+            matching_texts = _consume_search_cursor(
                 TextValuesRepository.find(
                     substring_query,
                     projection=TEXT_VALUE_ID_PROJECTION,
                     limit=text_value_limit,
+                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
             )
 
@@ -489,7 +515,7 @@ def _search_text_relations(
         text_value_ids.append(str(raw_id))
 
     # Step 2: Find text_relations linking these text_values to concepts
-    relations = list(
+    relations = _consume_search_cursor(
         TextRelationsRepository.find(
             {
                 "object_text_id": {"$in": text_value_ids},
@@ -497,6 +523,7 @@ def _search_text_relations(
             },
             projection={"subject_concept_id": 1},
             limit=relation_limit,
+            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
 
@@ -667,10 +694,11 @@ def _semantic_search(
         concepts_cursor = ConceptsRepository.find(
             {"concept_id": {"$in": concept_ids}},
             projection=SEARCH_RESULT_PROJECTION,
+            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
 
         # Post-filter and build results
-        for concept_doc in concepts_cursor:
+        for concept_doc in _consume_search_cursor(concepts_cursor):
             concept_id = concept_doc.get("concept_id")
             if not concept_id:
                 continue
@@ -875,9 +903,10 @@ def search_concepts(
                 base_query,
                 projection=SEARCH_RESULT_PROJECTION,
                 limit=limit,
+                max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
             )
 
-            for concept_doc in all_instances_cursor:
+            for concept_doc in _consume_search_cursor(all_instances_cursor):
                 concept_id = concept_doc.get("concept_id")
                 if concept_id and concept_id not in seen_ids:
                     results.append(concept_doc)
@@ -937,9 +966,10 @@ def search_concepts(
                 base_query,
                 projection=SEARCH_RESULT_PROJECTION,
                 limit=1000,  # Broader fetch for similarity scoring
+                max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
             )
 
-            candidates = list(candidates_cursor)
+            candidates = _consume_search_cursor(candidates_cursor)
             description_lookup = (
                 _build_preferred_description_lookup(candidates)
                 if include_description
@@ -978,10 +1008,11 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=fetch_limit,
+                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
                 substring_added = False
-                for concept_doc in substring_cursor:
+                for concept_doc in _consume_search_cursor(substring_cursor):
                     concept_id = concept_doc.get("concept_id")
                     if concept_id and concept_id not in seen_ids:
                         results.append(concept_doc)
@@ -1030,9 +1061,10 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
+                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
-                for concept_doc in prefix_cursor:
+                for concept_doc in _consume_search_cursor(prefix_cursor):
                     concept_id = concept_doc.get("concept_id")
                     if concept_id and concept_id not in seen_ids:
                         results.append(concept_doc)
@@ -1058,9 +1090,10 @@ def search_concepts(
                         combined_query,
                         projection=SEARCH_RESULT_PROJECTION,
                         limit=max(remaining, fetch_limit),
+                        max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                     )
 
-                    for concept_doc in substring_cursor:
+                    for concept_doc in _consume_search_cursor(substring_cursor):
                         concept_id = concept_doc.get("concept_id")
                         if concept_id and concept_id not in seen_ids:
                             results.append(concept_doc)
@@ -1081,9 +1114,10 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
+                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
-                for concept_doc in substring_cursor:
+                for concept_doc in _consume_search_cursor(substring_cursor):
                     concept_id = concept_doc.get("concept_id")
                     if concept_id and concept_id not in seen_ids:
                         results.append(concept_doc)
@@ -1104,9 +1138,10 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
+                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
-                for concept_doc in concepts_cursor:
+                for concept_doc in _consume_search_cursor(concepts_cursor):
                     concept_id = concept_doc.get("concept_id")
                     if concept_id and concept_id not in seen_ids:
                         results.append(concept_doc)
@@ -1185,13 +1220,14 @@ def search_concepts(
 
         if concept_ids:
             try:
-                relations = list(
+                relations = _consume_search_cursor(
                     TextRelationsRepository.find(
                         {
                             "subject_concept_id": {"$in": concept_ids},
                             "predicate": "hasName",
                         },
                         limit=1000,
+                        max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                     )
                 )
 
@@ -1209,7 +1245,7 @@ def search_concepts(
                 )
 
                 if text_value_ids:
-                    text_values = list(
+                    text_values = _consume_search_cursor(
                         TextValuesRepository.find(
                             {
                                 "_id": {
@@ -1221,6 +1257,7 @@ def search_concepts(
                                 }
                             },
                             limit=1000,
+                            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                         )
                     )
 

@@ -3291,6 +3291,53 @@ class TestDiscoverWorkflowIds:
             for query in captured_queries
         )
 
+    def test_skips_typed_family_scan_when_direct_property_discovery_succeeds(self):
+        captured_queries: list[dict[str, Any]] = []
+
+        def _fake_find(query, *_args, **_kwargs):
+            if isinstance(query, dict):
+                captured_queries.append(query)
+
+            if isinstance(query, dict) and isinstance(query.get("$or"), list):
+                if any(
+                    isinstance(item, dict)
+                    and "relationships.#V#hasInitialStep" in item
+                    for item in query["$or"]
+                ):
+                    return [{"concept_id": "#V#wf_direct"}]
+            if isinstance(query, dict) and isinstance(query.get("concept_id"), dict):
+                return [
+                    {
+                        "concept_id": "#V#wf_direct",
+                        "concept_data": {},
+                    }
+                ]
+            return []
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_fake_find,
+        ), patch(
+            "src.backend.workflows.vontology_loader._discover_workflow_type_family_ids",
+            return_value={"#V#workflow_variant"},
+        ) as discover_type_family_ids:
+            workflow_ids = discover_workflow_ids()
+
+        assert workflow_ids == ["#V#wf_direct"]
+        discover_type_family_ids.assert_not_called()
+        assert not any(
+            isinstance(query.get("$or"), list)
+            and any(
+                isinstance(item, dict)
+                and (
+                    "relationships.is_an_instance_of" in item
+                    or "relationships.is_a_type_of" in item
+                )
+                for item in query["$or"]
+            )
+            for query in captured_queries
+        )
+
     def test_discovers_instance_typed_workflows_with_canonical_graph_predicates(self):
         def _fake_find(query, *_args, **_kwargs):
             if isinstance(query, dict) and isinstance(query.get("$or"), list):
@@ -3383,6 +3430,125 @@ class TestDiscoverWorkflowIds:
             workflow_ids = discover_workflow_ids()
 
         assert workflow_ids == ["#V#wf_published"]
+
+    def test_prefetches_publication_lifecycle_text_once_for_all_candidates(self):
+        def _fake_find(query, *_args, **_kwargs):
+            if isinstance(query, dict) and isinstance(query.get("$or"), list):
+                if any(
+                    isinstance(item, dict)
+                    and "relationships.#V#hasInitialStep" in item
+                    for item in query["$or"]
+                ):
+                    return [
+                        {"concept_id": "#V#wf_published"},
+                        {"concept_id": "#V#wf_draft"},
+                    ]
+            if isinstance(query, dict) and isinstance(query.get("concept_id"), dict):
+                return [
+                    {"concept_id": "#V#wf_published", "concept_data": {}},
+                    {"concept_id": "#V#wf_draft", "concept_data": {}},
+                ]
+            return []
+
+        prefetched_rows = {
+            "#V#wf_published": [
+                {
+                    "predicate": "#V#hasWorkflowLifecycleJson",
+                    "text": json.dumps(
+                        {"phase": "published", "published": True}
+                    ),
+                }
+            ],
+            "#V#wf_draft": [
+                {
+                    "predicate": "#V#hasWorkflowLifecycleJson",
+                    "text": json.dumps(
+                        {"phase": "validated", "published": False}
+                    ),
+                }
+            ],
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_fake_find,
+        ), patch(
+            "src.backend.workflows.vontology_loader._discover_workflow_type_family_ids",
+            return_value=set(),
+        ), patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concepts",
+            return_value=prefetched_rows,
+        ) as batch_get_texts, patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            side_effect=AssertionError("per-candidate text lookup must not run"),
+        ):
+            workflow_ids = discover_workflow_ids()
+
+        assert workflow_ids == ["#V#wf_published"]
+        batch_get_texts.assert_called_once()
+        assert batch_get_texts.call_args.args[0] == [
+            "#V#wf_draft",
+            "#V#wf_published",
+        ]
+
+    def test_publication_lifecycle_prefetch_failure_falls_back_per_concept(self):
+        def _fake_find(query, *_args, **_kwargs):
+            if isinstance(query, dict) and isinstance(query.get("$or"), list):
+                if any(
+                    isinstance(item, dict)
+                    and "relationships.#V#hasInitialStep" in item
+                    for item in query["$or"]
+                ):
+                    return [
+                        {"concept_id": "#V#wf_published"},
+                        {"concept_id": "#V#wf_draft"},
+                    ]
+            if isinstance(query, dict) and isinstance(query.get("concept_id"), dict):
+                return [
+                    {"concept_id": "#V#wf_published", "concept_data": {}},
+                    {"concept_id": "#V#wf_draft", "concept_data": {}},
+                ]
+            return []
+
+        lifecycle_rows = {
+            "#V#wf_published": [
+                {
+                    "predicate": "#V#hasWorkflowLifecycleJson",
+                    "text": json.dumps(
+                        {"phase": "published", "published": True}
+                    ),
+                }
+            ],
+            "#V#wf_draft": [
+                {
+                    "predicate": "#V#hasWorkflowLifecycleJson",
+                    "text": json.dumps(
+                        {"phase": "validated", "published": False}
+                    ),
+                }
+            ],
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_fake_find,
+        ), patch(
+            "src.backend.workflows.vontology_loader._discover_workflow_type_family_ids",
+            return_value=set(),
+        ), patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concepts",
+            side_effect=TimeoutError("batch lifecycle lookup timed out"),
+        ), patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            side_effect=lambda concept_id, **_kwargs: lifecycle_rows[concept_id],
+        ) as per_concept_get_texts:
+            workflow_ids = discover_workflow_ids()
+
+        assert workflow_ids == ["#V#wf_published"]
+        assert {call.args[0] for call in per_concept_get_texts.call_args_list} == {
+            "#V#wf_draft",
+            "#V#wf_published",
+        }
 
 
 # ---------------------------------------------------------------------------

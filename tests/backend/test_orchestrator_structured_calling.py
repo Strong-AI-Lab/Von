@@ -1037,6 +1037,9 @@ def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
     """Structured planning should use the same per-turn timeout as legacy LLM calls."""
 
     class _CapturingLLM:
+        def __init__(self) -> None:
+            self.llm_params: Mapping[str, Any] | None = None
+
         def _should_use_structured_calling(self) -> bool:
             return True
 
@@ -1049,6 +1052,7 @@ def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
             system_message: Optional[str] = None,
             **kwargs: Any,
         ) -> LLMResponse:
+            self.llm_params = kwargs.get("llm_params")
             return LLMResponse(
                 text_response="",
                 tool_calls=[
@@ -1140,6 +1144,7 @@ def test_structured_tool_calling_threads_timeout_override_to_heartbeat():
     assert llm_response.tool_calls[0].tool_name == "search_knowledge_base"
     assert captured["timeout_override_sec"] == 120.0
     assert captured["attempt_meta"]["timeout_override_sec"] == 120.0
+    assert llm_client.llm_params == {"request_timeout_seconds": 120.0}
 
 
 def test_structured_calling_forces_single_required_openai_tool():

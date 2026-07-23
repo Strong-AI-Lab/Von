@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import inspect
+from contextlib import contextmanager
 from typing import Any
 
 from src.backend.services import concept_search_service as svc
@@ -11,6 +14,82 @@ def _concept(concept_id: str, name: str | None = None) -> dict[str, Any]:
         "name": name or concept_id.rsplit("#", 1)[-1],
         "relationships": {},
     }
+
+
+def test_all_direct_concept_search_repository_reads_have_deadlines() -> None:
+    tree = ast.parse(inspect.getsource(svc))
+    repositories = {
+        "ConceptsRepository",
+        "TextRelationsRepository",
+        "TextValuesRepository",
+    }
+    calls_by_repository: dict[str, list[ast.Call]] = {
+        repository: [] for repository in repositories
+    }
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        owner = node.func.value
+        if (
+            node.func.attr != "find"
+            or not isinstance(owner, ast.Name)
+            or owner.id not in repositories
+        ):
+            continue
+        calls_by_repository[owner.id].append(node)
+
+    for repository, calls in calls_by_repository.items():
+        assert calls, f"expected at least one {repository}.find call"
+        for call in calls:
+            deadline = next(
+                (keyword.value for keyword in call.keywords if keyword.arg == "max_time_ms"),
+                None,
+            )
+            assert isinstance(deadline, ast.Name), (
+                f"{repository}.find at line {call.lineno} has no named deadline"
+            )
+            assert deadline.id == "CONCEPT_SEARCH_QUERY_MAX_TIME_MS"
+
+
+def test_fingerprint_search_consumes_cursor_under_total_client_deadline(
+    monkeypatch,
+) -> None:
+    deadline_active = False
+    observed_timeouts: list[float] = []
+
+    @contextmanager
+    def fake_timeout(seconds: float):
+        nonlocal deadline_active
+        observed_timeouts.append(seconds)
+        deadline_active = True
+        try:
+            yield
+        finally:
+            deadline_active = False
+
+    class DeadlineAwareCursor:
+        def __init__(self):
+            self._rows = iter([{"_id": "507f1f77bcf86cd799439011"}])
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            assert deadline_active is True
+            return next(self._rows)
+
+    monkeypatch.setattr(svc, "timeout", fake_timeout)
+    monkeypatch.setattr(
+        svc.TextValuesRepository,
+        "find",
+        lambda *_args, **_kwargs: DeadlineAwareCursor(),
+    )
+
+    result = svc._find_text_values_by_fingerprint("bounded")
+
+    assert result == [{"_id": "507f1f77bcf86cd799439011"}]
+    assert observed_timeouts == [svc.CONCEPT_SEARCH_OPERATION_TIMEOUT_SECONDS]
 
 
 def test_modern_text_relation_hits_skip_legacy_regex_scan(monkeypatch) -> None:
@@ -127,8 +206,12 @@ def test_text_relations_substring_uses_bounded_id_only_text_search(
     assert text_queries[1] == {"$text": {"$search": "workflow"}}
     assert text_value_calls[1]["projection"] == {"_id": 1}
     assert text_value_calls[1]["limit"] == 200
+    assert (
+        text_value_calls[1]["max_time_ms"] == svc.CONCEPT_SEARCH_QUERY_MAX_TIME_MS
+    )
     assert relation_calls[0]["projection"] == {"subject_concept_id": 1}
     assert relation_calls[0]["limit"] == 800
+    assert relation_calls[0]["max_time_ms"] == svc.CONCEPT_SEARCH_QUERY_MAX_TIME_MS
     assert result["match_types_used"] == ["text_relations"]
 
 
@@ -154,5 +237,6 @@ def test_text_value_fingerprint_search_uses_partial_index_shape(monkeypatch) -> 
             },
             "projection": {"_id": 1},
             "limit": 7,
+            "max_time_ms": svc.CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         }
     ]

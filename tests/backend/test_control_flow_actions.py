@@ -16,6 +16,7 @@ from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
+    WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
     WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID,
     WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
     WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
@@ -57,6 +58,22 @@ def test_break_action_emits_control_signal() -> None:
     assert result.status == "success"
     assert result.outputs.get("control_signal") == "break"
     assert result.outputs.get("control_scope") == "main"
+
+
+def test_optional_kr_materialisation_guard_is_registered_and_noop_when_absent() -> None:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _workflow_id: None)
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
+        inputs={"phase": "plan"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["guard_applied"] is False
+    assert result.outputs["guard_passed"] is True
 
 
 def test_fork_join_actions_execute_and_merge_branch_results() -> None:
@@ -234,6 +251,27 @@ def test_for_each_action_executes_child_workflow_per_item() -> None:
         "item_value": "A",
         "item_index": 0,
     }
+
+
+def test_for_each_action_emits_empty_invocations_for_empty_input() -> None:
+    registry = ActionRegistry()
+    definitions = {
+        "#V#child_each": _child_definition("#V#child_each", "child.emit_item"),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={"workflow_id": "#V#child_each", "items": []},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["invocations"] == []
 
 
 def test_for_each_action_respects_partial_success_policy() -> None:

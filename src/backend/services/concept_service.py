@@ -661,7 +661,8 @@ def create_concept(
                         context={"name_type": "NL"},
                     )
                     logger.info(
-                        f"[create_concept] Created hasName text_relation for {concept_identifier}: {name}"
+                        "[create_concept] Created hasName text_relation for %s",
+                        concept_identifier,
                     )
 
                 # 2. Register vonID as CODE name (JVNAUTOSCI-316)

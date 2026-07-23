@@ -29,6 +29,7 @@ from ..execution_contracts import (
     WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID,
     WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID,
+    WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
@@ -58,6 +59,9 @@ from ..vontology_loader import load_workflow_definition_from_vontology
 from .nested_workflow_authority import (
     NESTED_WORKFLOW_DEFINITION_NOT_FOUND,
     resolve_nested_workflow_definition,
+)
+from ...services.kr_materialisation_guard_service import (
+    validate_kr_materialisation_guard,
 )
 
 
@@ -777,6 +781,7 @@ def _build_for_each_handler(
             "iteration_results": iteration_results,
             "iteration_errors": iteration_errors,
             "successful_results": successful_results,
+            "invocations": [],
         }
         existing_invocations = request.data.get("invocations")
         if isinstance(existing_invocations, list) or child_step_invocations:
@@ -1014,6 +1019,39 @@ def _handle_context_set(request: WorkflowActionRequest) -> WorkflowActionResult:
         applied.append(key)
 
     outputs["_context_set_applied_keys"] = applied
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
+def _handle_kr_materialisation_guard(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    """Apply an optional represented KR write-boundary contract."""
+
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+
+    def _input_or_context(name: str, default_path: str) -> Any:
+        if name in inputs:
+            return inputs.get(name)
+        path = _normalise_text(inputs.get(f"{name}_context_key")) or default_path
+        found, value = resolve_context_path(context=request.data, path=path)
+        return value if found else None
+
+    outputs = validate_kr_materialisation_guard(
+        guard_contract=_input_or_context(
+            "guard_contract", "kr_materialisation_guard"
+        ),
+        phase=_normalise_text(inputs.get("phase")) or "plan",
+        concept_specs=_input_or_context("concept_specs", "kr_concept_specs"),
+        relationship_specs=_input_or_context(
+            "relationship_specs", "kr_relationship_specs"
+        ),
+        concept_iteration_results=_input_or_context(
+            "concept_iteration_results", "kr_concept_iteration_results"
+        ),
+        resolved_relationship_specs=_input_or_context(
+            "resolved_relationship_specs", "kr_resolved_relationship_specs"
+        ),
+    )
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
@@ -1470,6 +1508,17 @@ def register_control_flow_actions(
                 "Project candidate context fields into a compact payload using "
                 "a workflow-supplied item-output requirement, aliases, "
                 "exclusions, and size bounds."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID,
+            handler=_handle_kr_materialisation_guard,
+            description=(
+                "Validate an optional caller-supplied KR materialisation "
+                "contract before concept writes and resolved relationship "
+                "assertions. The action enforces only the generic guard schema."
             ),
         )
     )

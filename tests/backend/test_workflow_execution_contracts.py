@@ -157,6 +157,65 @@ def test_workflow_executor_fails_break_without_explicit_on_break_route() -> None
     assert result.result_envelope.get("terminal_status") == "failed"
 
 
+def test_workflow_executor_does_not_complete_explicit_failed_concept_state() -> None:
+    failed_state = "#V#workflow_step_example_workflow_failed"
+    definition = WorkflowDefinition(
+        workflow_id="#V#example_workflow",
+        initial_state=failed_state,
+        states={
+            failed_state: WorkflowStateSpec(state_id=failed_state, terminal=True),
+        },
+        termination_states=(failed_state,),
+    )
+
+    result = WorkflowExecutor(registry=ActionRegistry(), max_transitions=3).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.final_state == failed_state
+    assert result.error == "workflow_failed_terminal_state"
+    assert result.result_envelope is not None
+    assert result.result_envelope["terminal_status"] == "failed"
+
+
+def test_failed_terminal_state_takes_precedence_over_return_signal() -> None:
+    failed_state = "#V#workflow_step_returning_workflow_failed"
+    definition = WorkflowDefinition(
+        workflow_id="#V#returning_workflow",
+        initial_state=failed_state,
+        states={
+            failed_state: WorkflowStateSpec(
+                state_id=failed_state,
+                terminal=True,
+                actions=(WorkflowActionInvocation(action_id="emit.return"),),
+            )
+        },
+        termination_states=(failed_state,),
+    )
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="emit.return",
+            handler=lambda _request: WorkflowActionResult(
+                outputs={"control_signal": "return", "return_payload": {"ok": True}}
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=3).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.final_state == failed_state
+    assert result.error == "workflow_failed_terminal_state"
+
+
 def test_step_result_envelope_snapshots_are_detached_from_live_context() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#snapshot_detach_workflow",

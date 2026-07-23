@@ -130,12 +130,15 @@ class ConceptsRepository:
         sort: Optional[List] = None,
         skip: int = 0,
         limit: int = 0,
+        max_time_ms: Optional[int] = None,
     ):
         coll = ConceptsRepository.collection()
         if coll is None:
             return []
         query = apply_concept_query_filter(filter or {})
         cursor = coll.find(query, projection)
+        if max_time_ms and max_time_ms > 0:
+            cursor = cursor.max_time_ms(max_time_ms)
         if sort:
             cursor = cursor.sort(sort)
         if skip:

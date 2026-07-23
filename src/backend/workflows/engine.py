@@ -7,6 +7,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Sequence
 
+from ..services.relationship_extent_index_service import (
+    defer_relationship_extent_index_sync,
+)
 from .action_registry import (
     ActionRegistry,
     WORKFLOW_ACTION_OUTCOME_SUCCESS,
@@ -44,6 +47,7 @@ from .execution_contracts import (
     set_workflow_result_envelope,
     snapshot_workflow_mapping,
     stamp_control_signal_context,
+    workflow_final_state_is_failure_like,
 )
 from .plan_state_runtime import (
     apply_workflow_step_checkpoint,
@@ -2294,6 +2298,7 @@ class WorkflowExecutor:
                 continue
         return _WorkflowTransitionDecision()
 
+    @defer_relationship_extent_index_sync()
     def run(
         self,
         definition: WorkflowDefinition,
@@ -2447,6 +2452,15 @@ class WorkflowExecutor:
             )
 
             control_signal = get_last_control_signal(context)
+            if workflow_final_state_is_failure_like(current_state):
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
+                    final_state=current_state,
+                    error="workflow_failed_terminal_state",
+                )
             if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
                 return self._complete_with_gate(
                     definition=definition,

@@ -23,7 +23,10 @@ from ..models.text_value_models import (
     TextRelationModel,
 )
 from .feature_flags import get_event_workflow_integration_enabled
-from ..security.access_control import can_access_concept
+from ..security.access_control import (
+    can_access_concept,
+    filter_accessible_concept_ids,
+)
 
 _EVENT_TYPE_TEXT_RELATION_UPSERTED = "text_relation.upserted"
 _EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
@@ -422,7 +425,7 @@ def get_texts_for_concepts(
     Vontology-heavy paths such as workflow publication/read-back, where many
     step concepts need their policy text relations at once.
     """
-    ordered_subject_ids: List[str] = []
+    candidate_subject_ids: List[str] = []
     seen_subject_ids: set[str] = set()
     for raw_id in subject_concept_ids:
         if not isinstance(raw_id, str):
@@ -431,11 +434,17 @@ def get_texts_for_concepts(
         if (
             not subject_concept_id
             or subject_concept_id in seen_subject_ids
-            or not can_access_concept(subject_concept_id)
         ):
             continue
         seen_subject_ids.add(subject_concept_id)
-        ordered_subject_ids.append(subject_concept_id)
+        candidate_subject_ids.append(subject_concept_id)
+
+    accessible_subject_ids = filter_accessible_concept_ids(candidate_subject_ids)
+    ordered_subject_ids = [
+        subject_id
+        for subject_id in candidate_subject_ids
+        if subject_id in accessible_subject_ids
+    ]
 
     if not ordered_subject_ids:
         return {}
