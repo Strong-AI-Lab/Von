@@ -7,6 +7,19 @@ from typing import Any
 
 from scripts import publish_kr_materialisation_workflows as publish_cli
 from src.backend.services import kr_materialisation_workflow_vontology_service as mod
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    WorkflowEnvironment,
+)
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
+from src.backend.workflows.execution_contracts import (
+    WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+)
+from src.backend.workflows.metadata_validation import (
+    validate_state_metadata_post_action,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEED_BUNDLE_PATH = (
@@ -45,6 +58,58 @@ def _iter_publication_steps(bundle: Mapping[str, Any]) -> Iterator[Mapping[str, 
         for step in publication_spec.get("steps") or []:
             if isinstance(step, Mapping):
                 yield step
+
+
+def _publication_step(
+    bundle: Mapping[str, Any],
+    *,
+    workflow_id: str,
+    state_id: str,
+) -> Mapping[str, Any]:
+    workflow = next(
+        row
+        for row in bundle.get("workflows") or []
+        if isinstance(row, Mapping) and row.get("workflow_id") == workflow_id
+    )
+    publication_spec = workflow.get("publication_spec")
+    assert isinstance(publication_spec, Mapping)
+    return next(
+        row
+        for row in publication_spec.get("steps") or []
+        if isinstance(row, Mapping) and row.get("state_id") == state_id
+    )
+
+
+def _validate_context_set_writes(
+    *,
+    step: Mapping[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    bindings = dict(step.get("static_input_bindings") or [])
+    assignments = bindings.get("assignments")
+    assert isinstance(assignments, list)
+    registry = ActionRegistry()
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda _workflow_id: None,
+    )
+    context_before = dict(context)
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={"assignments": assignments},
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+    assert result.status == "success"
+    context.update(result.outputs)
+    validation = validate_state_metadata_post_action(
+        state_id=str(step.get("state_id") or ""),
+        metadata={"writes_context_keys": step.get("writes_context_keys") or []},
+        context_before=context_before,
+        context_after=context,
+    )
+    assert validation.ok is True
+    return context
 
 
 def test_kr_seed_bundle_uses_prompt_concepts_not_inline_prompt_text() -> None:
@@ -143,6 +208,74 @@ def test_kr_seed_bundle_validates_as_workflow_contracts() -> None:
     assert report["invalid_workflow_ids"] == []
     for validation in report["validation_by_workflow_id"].values():
         assert validation["valid"] is True
+
+
+def test_kr_optional_initialiser_fields_satisfy_enforced_write_metadata() -> None:
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    concept_step = _publication_step(
+        bundle,
+        workflow_id=mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID,
+        state_id="initialise_from_concept_spec",
+    )
+    relationship_step = _publication_step(
+        bundle,
+        workflow_id=mod.KR_DESIGN_RELATIONSHIP_ASSERTION_ITEM_WORKFLOW_ID,
+        state_id="initialise_from_relationship_spec",
+    )
+
+    reuse_context = _validate_context_set_writes(
+        step=concept_step,
+        context={
+            "current_kr_concept_spec": {
+                "key": "candidate",
+                "decision": "reuse_existing",
+                "target_name": "Stable candidate",
+                "target_kind": "instance",
+                "parent_id": "#V#doctoral_candidate",
+                "existing_concept_id": "#V#stable_candidate",
+                "description_text": "Bounded provenance-bearing candidate.",
+            }
+        },
+    )
+    assert reuse_context["kr_concept_create_concepts"] is None
+    assert reuse_context["kr_concept_parent_rationale"] is None
+    assert reuse_context["kr_concept_blocking_reason"] is None
+
+    create_context = _validate_context_set_writes(
+        step=concept_step,
+        context={
+            "current_kr_concept_spec": {
+                "key": "candidate",
+                "decision": "create",
+                "target_name": "Stable candidate",
+                "target_kind": "instance",
+                "parent_id": "#V#doctoral_candidate",
+                "concepts": [
+                    {
+                        "name": "Stable candidate",
+                        "kind": "instance",
+                        "description": "Bounded provenance-bearing candidate.",
+                    }
+                ],
+                "description_text": "Bounded provenance-bearing candidate.",
+            }
+        },
+    )
+    assert create_context["kr_concept_id"] is None
+
+    relationship_context = _validate_context_set_writes(
+        step=relationship_step,
+        context={
+            "current_kr_relationship_spec": {
+                "source_id": "#V#stable_candidate",
+                "predicate": "#V#has_doctoral_programme",
+                "target_id": "#V#stable_programme",
+            }
+        },
+    )
+    assert relationship_context["kr_relationship_key"] is None
+    assert relationship_context["kr_relationship_rationale"] is None
+    assert relationship_context["kr_relationship_blocking_reason"] is None
 
 
 def test_publish_script_validate_all_uses_seed_bundle(capsys) -> None:
