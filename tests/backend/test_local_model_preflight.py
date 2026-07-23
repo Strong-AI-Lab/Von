@@ -344,6 +344,40 @@ def test_generate_proceeds_when_model_fits(monkeypatch):
     assert fake.chat_calls == ["gemma4:e4b"]
 
 
+def test_sensitive_model_call_bypasses_raw_response_cache(monkeypatch):
+    from src.backend.languagemodels.llm_interface import (
+        suppress_raw_llm_io_logging,
+    )
+    from src.backend.services import llm_response_cache_service as response_cache
+
+    monkeypatch.setenv("VON_LLM_RESPONSE_CACHE", "on")
+    monkeypatch.setattr(response_cache, "_persistent_collection", lambda: None)
+    monkeypatch.setattr(
+        preflight,
+        "enforce_local_model_preflight",
+        lambda *_args, **_kwargs: None,
+    )
+    response_cache.clear_llm_response_cache()
+    fake = _FakeOllamaClient(
+        chat_response={"message": {"content": "private model response"}}
+    )
+    client = _make_ollama_client(fake)
+
+    with suppress_raw_llm_io_logging():
+        result = client.generate(
+            "unique private spreadsheet evidence for cache bypass",
+            model="private-test-model",
+        )
+
+    assert result == "private model response"
+    assert fake.chat_calls == ["private-test-model"]
+    stats = response_cache.get_llm_response_cache_stats()
+    assert stats["hits"] == 0
+    assert stats["misses"] == 0
+    assert stats["stores"] == 0
+    assert stats["entries_in_memory"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Host capacity detection + user message
 # ---------------------------------------------------------------------------

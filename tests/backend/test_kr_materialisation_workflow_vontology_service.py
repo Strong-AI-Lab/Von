@@ -64,11 +64,19 @@ def test_kr_seed_bundle_uses_prompt_concepts_not_inline_prompt_text() -> None:
         step.get("state_id"): tuple(step.get("prompt_concept_ids") or ())
         for step in llm_steps
     }
+    llm_policy_by_state = {
+        step.get("state_id"): step.get("llm_policy") or {}
+        for step in llm_steps
+    }
     assert prompt_ids_by_state["extract_kr_materialisation_plan"] == (
         mod.PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID,
     )
     assert prompt_ids_by_state["resolve_relationship_specs"] == (
         mod.PROMPT_KR_RELATIONSHIP_ENDPOINT_RESOLUTION_ID,
+    )
+    assert all(
+        policy.get("suppress_raw_io_logging") is True
+        for policy in llm_policy_by_state.values()
     )
 
 
@@ -86,6 +94,45 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
         "Return JSON only with keys: decision ('assert', 'skip', or 'block')"
         in relationship_prompt
     )
+
+
+def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        row
+        for row in bundle["workflows"]
+        if row["workflow_id"] == mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID
+    )
+    states = {
+        row["state_id"]: row for row in workflow["publication_spec"]["steps"]
+    }
+
+    assert workflow["launch_input_contract"]["excluded_ambient_input_keys"] == [
+        "invocations"
+    ]
+    assert any(
+        row["target_context_key"] == "kr_materialisation_guard"
+        and row["required"] is False
+        for row in workflow["launch_input_contract"]["input_mappings"]
+    )
+    assert states["extract_kr_materialisation_plan"]["conditional_transitions"][
+        0
+    ]["to_state"] == "validate_materialisation_plan"
+    assert states["validate_materialisation_plan"]["action_id"] == (
+        "workflow_control.kr_materialisation_guard"
+    )
+    assert states["validate_materialisation_plan"]["static_input_bindings"] == [
+        ["phase", "plan"]
+    ]
+    assert states["resolve_relationship_specs"]["conditional_transitions"][0][
+        "to_state"
+    ] == "validate_resolved_relationships"
+    assert states["validate_resolved_relationships"]["action_id"] == (
+        "workflow_control.kr_materialisation_guard"
+    )
+    assert states["validate_resolved_relationships"]["static_input_bindings"] == [
+        ["phase", "resolved_relationships"]
+    ]
 
 
 def test_kr_seed_bundle_validates_as_workflow_contracts() -> None:

@@ -33,6 +33,9 @@ WORKFLOW_CONTROL_ACTION_FOR_EACH_ID = "workflow_control.for_each"
 WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID = "workflow_control.context_set"
 WORKFLOW_CONTROL_ACTION_CONTEXT_TEMPLATE_ID = "workflow_control.context_template"
 WORKFLOW_CONTROL_ACTION_CONTEXT_PROJECT_ID = "workflow_control.context_project"
+WORKFLOW_CONTROL_ACTION_KR_MATERIALISATION_GUARD_ID = (
+    "workflow_control.kr_materialisation_guard"
+)
 WORKFLOW_CONTROL_ACTION_PAUSE_AT_CHECKPOINT_ID = (
     "workflow_control.pause_at_checkpoint"
 )
@@ -390,11 +393,39 @@ def derive_workflow_terminal_status(
     final_state_text = str(final_state or "").strip().lower()
     if error_text == "cancelled":
         return "cancelled"
+    if workflow_final_state_is_failure_like(final_state_text):
+        return "failed"
     if completed:
         return "completed"
-    if error_text or final_state_text in {"failed", "error", "cancelled"}:
+    if error_text:
         return "failed"
     return "terminated"
+
+
+def workflow_final_state_is_failure_like(final_state: Any) -> bool:
+    """Return whether a terminal state explicitly denotes non-success.
+
+    Represented workflow state IDs are commonly expanded to concept IDs such
+    as ``#V#workflow_step_<workflow>_failed``.  Treating every declared
+    termination state as success made these explicit failure terminals report
+    ``completed=True``.  Match only an exact terminal failure token so neutral
+    outcomes such as ``blocked`` or ``completed_with_errors`` keep their
+    represented semantics.
+    """
+
+    text = str(final_state or "").strip().lower()
+    if not text:
+        return False
+    return text in {"failed", "failure", "error", "cancelled", "canceled"} or any(
+        text.endswith(suffix)
+        for suffix in (
+            "_failed",
+            "_failure",
+            "_error",
+            "_cancelled",
+            "_canceled",
+        )
+    )
 
 
 def build_arxiv_ingestion_completion_report(

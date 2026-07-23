@@ -17906,6 +17906,79 @@ let uploadUiState = {
     defaultButtonLabel: null
 };
 
+const PENDING_FILE_COPY_SESSION_FALLBACK_KEY = '__pending_chat_session__';
+const pendingFileCopyConceptIdsBySession = new Map();
+
+function normaliseTrustedUploadedFileCopyConceptId(value) {
+    if (typeof value !== 'string') return null;
+    const conceptId = value.trim();
+    if (
+        !conceptId.startsWith('#V#')
+        || conceptId.length <= '#V#'.length
+        || conceptId.length > 512
+        || /\s/.test(conceptId)
+    ) return null;
+    return conceptId;
+}
+
+function getPendingFileCopySessionKey(sessionId = activeChatSessionId) {
+    return normaliseHistorySessionId(sessionId) || PENDING_FILE_COPY_SESSION_FALLBACK_KEY;
+}
+
+function rememberPendingUploadedFileCopyConceptId(conceptId, sessionId = activeChatSessionId) {
+    const normalisedConceptId = normaliseTrustedUploadedFileCopyConceptId(conceptId);
+    if (!normalisedConceptId) return;
+    pendingFileCopyConceptIdsBySession.set(
+        getPendingFileCopySessionKey(sessionId),
+        normalisedConceptId
+    );
+}
+
+function takePendingUploadedFileCopyConceptId(sessionId) {
+    const targetKey = getPendingFileCopySessionKey(sessionId);
+    const targetConceptId = pendingFileCopyConceptIdsBySession.get(targetKey) || null;
+    if (targetConceptId) {
+        pendingFileCopyConceptIdsBySession.delete(targetKey);
+        return targetConceptId;
+    }
+    return null;
+}
+
+function restorePendingUploadedFileCopyConceptId(
+    conceptId,
+    sessionId,
+    options = {}
+) {
+    const normalisedConceptId = normaliseTrustedUploadedFileCopyConceptId(conceptId);
+    if (!normalisedConceptId) return false;
+    const targetKey = getPendingFileCopySessionKey(sessionId);
+    if (
+        options.preserveNewerBinding !== false
+        && pendingFileCopyConceptIdsBySession.has(targetKey)
+    ) {
+        return false;
+    }
+    pendingFileCopyConceptIdsBySession.set(targetKey, normalisedConceptId);
+    return true;
+}
+
+function releaseRequestFileCopyBinding(request) {
+    if (
+        !request
+        || request.attachmentBindingAccepted
+        || request.attachmentBindingTransferred
+        || request.attachmentBindingReleased
+        || !request.pendingFileCopyConceptId
+    ) {
+        return false;
+    }
+    request.attachmentBindingReleased = restorePendingUploadedFileCopyConceptId(
+        request.pendingFileCopyConceptId,
+        request.sessionId
+    );
+    return request.attachmentBindingReleased;
+}
+
 function setUploadStatus(message, type = 'info') {
     const el = uploadUiState.statusEl;
     if (!el) return;
@@ -18158,6 +18231,25 @@ function buildTurnDiagnosticDebugPayload(errorMessage, diagnosticPayload) {
 async function uploadFilesToVon(files) {
     const list = Array.from(files || []).filter(Boolean);
     if (!list.length) return;
+    let uploadTargetSessionId = normaliseHistorySessionId(activeChatSessionId);
+    if (!uploadTargetSessionId) {
+        try {
+            const ensuredTarget = await ensurePromptTargetChatSession();
+            uploadTargetSessionId = normaliseHistorySessionId(
+                ensuredTarget?.sessionId
+            );
+        } catch (error) {
+            console.error('[chatTab] Unable to prepare an upload conversation:', error);
+            setUploadStatus('Unable to prepare a conversation for this upload.', 'error');
+            clearUploadStatusAfterDelay();
+            return;
+        }
+        if (!uploadTargetSessionId) {
+            setUploadStatus('Unable to prepare a conversation for this upload.', 'error');
+            clearUploadStatusAfterDelay();
+            return;
+        }
+    }
 
     uploadUiState.inFlight += 1;
     if (uploadUiState.inFlight === 1) {
@@ -18202,7 +18294,11 @@ async function uploadFilesToVon(files) {
             successCount += 1;
 
             if (conceptId) {
-                insertTextIntoChatPrompt(`Attached file concept: ${conceptId}`);
+                rememberPendingUploadedFileCopyConceptId(
+                    conceptId,
+                    uploadTargetSessionId
+                );
+                insertTextIntoChatPrompt('Attached file uploaded.');
             }
         } catch (error) {
             console.error('[chatTab] file upload error', error);
@@ -29082,6 +29178,7 @@ function abortActiveChatRequest(options = {}) {
 
     const request = activeChatRequest;
     request.aborted = true;
+    releaseRequestFileCopyBinding(request);
 
     stopToolUseProgressPolling(request);
     stopThinkingTooltipTicker(request);
@@ -29409,13 +29506,22 @@ function retryActiveChatRequest() {
 
     const request = activeChatRequest;
     const prompt = typeof request.promptRaw === 'string' ? request.promptRaw : '';
+    const fileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
+        request.pendingFileCopyConceptId
+    );
+    request.attachmentBindingTransferred = !!fileCopyConceptId;
     abortActiveChatRequest();
     if (!prompt.trim()) {
         return;
     }
     setPromptComposerValue(prompt, { focus: true });
     setTimeout(() => {
-        void handleSendPrompt();
+        void handleSendPrompt({
+            promptOverride: prompt,
+            sessionId: request.sessionId || null,
+            sessionName: request.sessionName || null,
+            fileCopyConceptId
+        });
     }, 0);
 }
 
@@ -29606,6 +29712,12 @@ function normaliseChatPromptQueueEntry(rawEntry, fallback = {}) {
     const sessionName = (typeof sessionNameRaw === 'string' && sessionNameRaw.trim())
         ? sessionNameRaw.trim()
         : null;
+    const fileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
+        rawEntry.file_copy_concept_id
+        ?? rawEntry.fileCopyConceptId
+        ?? fallback.fileCopyConceptId
+        ?? null
+    );
     return {
         id,
         queueId,
@@ -29614,6 +29726,7 @@ function normaliseChatPromptQueueEntry(rawEntry, fallback = {}) {
         sessionId,
         sessionKey: getChatRequestSessionKey(sessionId),
         sessionName,
+        fileCopyConceptId,
         localOnly: queueId ? false : rawEntry.localOnly === true,
         syncError: rawEntry.syncError || null,
         lastError: rawEntry.last_error || rawEntry.lastError || null,
@@ -29841,15 +29954,26 @@ function mergePersistedChatPromptQueueEntry(entry) {
 async function refreshChatPromptQueueFromServer(options = {}) {
     try {
         const data = await fetchChatPromptQueueJson('');
+        const existingByQueueId = new Map(
+            queuedChatPrompts
+                .filter((entry) => entry?.queueId)
+                .map((entry) => [entry.queueId, entry])
+        );
         const persistedEntries = Array.isArray(data.items)
             ? data.items
-                .map((item) => normaliseChatPromptQueueEntry(item))
+                .map((item) => normaliseChatPromptQueueEntry(
+                    item,
+                    existingByQueueId.get(item?.queue_id) || {}
+                ))
                 .filter(Boolean)
                 .filter(isDisplayedChatPromptQueueEntry)
             : [];
         const recentFailedEntries = Array.isArray(data.recent_failed_items)
             ? data.recent_failed_items
-                .map((item) => normaliseChatPromptQueueEntry(item))
+                .map((item) => normaliseChatPromptQueueEntry(
+                    item,
+                    existingByQueueId.get(item?.queue_id) || {}
+                ))
                 .filter(Boolean)
                 .filter(isDisplayedChatPromptQueueEntry)
             : [];
@@ -30272,6 +30396,9 @@ async function queuePromptForLater(promptRaw, options = {}) {
         sessionKey: getChatRequestSessionKey(sessionId),
         sessionName,
         session_name: sessionName,
+        fileCopyConceptId: normaliseTrustedUploadedFileCopyConceptId(
+            options.fileCopyConceptId
+        ),
         status: CHAT_PROMPT_QUEUE_STATUS_QUEUED,
         localOnly: true
     });
@@ -30389,7 +30516,8 @@ async function sendQueuedChatPromptEntryAtIndex(nextIndex) {
         fromQueue: true,
         sessionId: nextEntry.sessionId || null,
         sessionName: nextEntry.sessionName || null,
-        promptQueueRecordId: nextEntry.queueId || null
+        promptQueueRecordId: nextEntry.queueId || null,
+        fileCopyConceptId: nextEntry.fileCopyConceptId || null
     });
 }
 
@@ -30469,9 +30597,13 @@ async function handleSendPrompt(options = {}) {
         if (!promptText) {
             return;
         }
+        const queuedFileCopyConceptId = takePendingUploadedFileCopyConceptId(
+            targetSessionId
+        );
         await queuePromptForLater(promptRaw, {
             sessionId: targetSessionId,
-            sessionName: targetSessionName
+            sessionName: targetSessionName,
+            fileCopyConceptId: queuedFileCopyConceptId
         });
         if (selectedQueueEntry) {
             hideChatPromptQueueEntryLocally(selectedQueueEntry);
@@ -30533,6 +30665,14 @@ async function handleSendPrompt(options = {}) {
 
     const clientRequestId = createClientRequestId();
     const executionContextBinding = synchroniseLlmExecutionContext();
+    const explicitFileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
+        options?.fileCopyConceptId
+    );
+    const pendingFileCopyConceptId = explicitFileCopyConceptId || (
+        fromQueue
+            ? null
+            : takePendingUploadedFileCopyConceptId(targetSessionId)
+    );
     const request = {
         abortController: new AbortController(),
         sessionId: targetSessionId,
@@ -30542,6 +30682,10 @@ async function handleSendPrompt(options = {}) {
         promptQueueRecordId,
         selectionStart,
         selectionEnd,
+        pendingFileCopyConceptId,
+        attachmentBindingAccepted: false,
+        attachmentBindingTransferred: false,
+        attachmentBindingReleased: false,
         aborted: false,
         clientRequestId,
         executionContextBinding,
@@ -30794,6 +30938,11 @@ async function handleSendPrompt(options = {}) {
                 gmail_profile: userContext.gmail_profile,
                 ...(localRequestedLlm?.requestModel ? { model: localRequestedLlm.requestModel } : {}),
                 ...(localRequestedLlm?.model_parameters ? { model_parameters: localRequestedLlm.model_parameters } : {}),
+                ...(request.pendingFileCopyConceptId ? {
+                    workflow_inputs: {
+                        file_copy_concept_id: request.pendingFileCopyConceptId
+                    }
+                } : {}),
                 presenter_mode: presenterMode,
                 thinking_card_mode: getThinkingCardMode()
             })
@@ -30801,6 +30950,7 @@ async function handleSendPrompt(options = {}) {
         startToolUseProgressPolling(request);
         startForegroundTaskResultPolling(request, {
             onCompleted: async (generateBody) => {
+                request.attachmentBindingAccepted = true;
                 const delivered = deliverSuccessfulResponseData(generateBody, 'task_result');
                 if (delivered) {
                     try {
@@ -30829,6 +30979,9 @@ async function handleSendPrompt(options = {}) {
         await Promise.resolve();
         await Promise.resolve();
         const response = await responsePromise;
+        if (response?.ok) {
+            request.attachmentBindingAccepted = true;
+        }
 
         // Defensive: some tests or environments may provide a non-standard fetch
         // mock that doesn't return a Response-like object. Guard before calling
@@ -30885,6 +31038,7 @@ async function handleSendPrompt(options = {}) {
             appendMessage('Error', failureSummary, request.resultTurnId);
         }
     } finally {
+        releaseRequestFileCopyBinding(request);
         stopForegroundTaskResultPolling(request);
         if (!request?.promptQueueRecordId && request?.promptQueueRecordPromise) {
             try {
@@ -33712,6 +33866,7 @@ export async function __testOnly_refreshChatPromptQueueFromServer() {
 export function __testOnly_resetChatRequestState() {
     liveChatRequestsBySession.clear();
     finishedThinkingCardsBySession.clear();
+    pendingFileCopyConceptIdsBySession.clear();
     queuedChatPrompts = [];
     if (queuedChatPromptDrainTimer !== null) {
         clearTimeout(queuedChatPromptDrainTimer);
@@ -33850,5 +34005,8 @@ export function __testOnly_setTranscriptTurns(turns = []) {
 }
 export function __testOnly_extractImageFilesFromClipboardEvent(event) {
     return extractImageFilesFromClipboardEvent(event);
+}
+export async function __testOnly_uploadFilesToVon(files) {
+    return uploadFilesToVon(files);
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };

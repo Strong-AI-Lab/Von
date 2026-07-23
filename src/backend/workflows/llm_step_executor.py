@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import time
+from contextvars import copy_context
 from typing import (
     Any,
     Callable,
@@ -48,7 +49,10 @@ from ..services.tool_target_contract_validation import (
 from ..services.workflow_llm_duration_stats_service import (
     record_workflow_llm_step_duration_observation,
 )
-from ..languagemodels.llm_interface import infer_llm_client_provider
+from ..languagemodels.llm_interface import (
+    infer_llm_client_provider,
+    suppress_raw_llm_io_logging,
+)
 from ..languagemodels.structured_tool_calling import StructuredToolTransportError
 from .llm_call_telemetry import stamp_llm_call_timestamps
 from .prompt_metadata_resolution import resolve_model_prompt_variant
@@ -2070,11 +2074,12 @@ def _run_gateway_runtime_setup_step(
 
     result_event = threading.Event()
     result_holder: dict[str, Any] = {}
+    worker_context = copy_context()
 
     def _worker() -> None:
         try:
             result_holder["kind"] = "result"
-            result_holder["payload"] = operation()
+            result_holder["payload"] = worker_context.run(operation)
         except Exception as exc:
             result_holder["kind"] = "exception"
             result_holder["payload"] = exc
@@ -2305,11 +2310,12 @@ def _run_llm_call_with_timeout(
 
     result_event = threading.Event()
     result_holder: dict[str, Any] = {}
+    worker_context = copy_context()
 
     def _worker() -> None:
         try:
             result_holder["kind"] = "result"
-            result_holder["payload"] = operation()
+            result_holder["payload"] = worker_context.run(operation)
         except Exception as exc:
             result_holder["kind"] = "exception"
             result_holder["payload"] = exc
@@ -4254,16 +4260,18 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
     llm_policy_map = (
         dict(request.llm_policy) if isinstance(request.llm_policy, Mapping) else {}
     )
-    stage = _llm_stage(llm_policy_map, request)
-    timeout_seconds = _conversation_turn_llm_timeout_override_sec(request)
-    if timeout_seconds is None:
-        return _execute_llm_step_inner(request)
-    return _run_llm_step_with_timeout(
-        request,
-        stage=stage,
-        llm_policy_map=llm_policy_map,
-        timeout_seconds=timeout_seconds,
-    )
+    suppress_raw_io = bool(llm_policy_map.get("suppress_raw_io_logging"))
+    with suppress_raw_llm_io_logging(suppress_raw_io):
+        stage = _llm_stage(llm_policy_map, request)
+        timeout_seconds = _conversation_turn_llm_timeout_override_sec(request)
+        if timeout_seconds is None:
+            return _execute_llm_step_inner(request)
+        return _run_llm_step_with_timeout(
+            request,
+            stage=stage,
+            llm_policy_map=llm_policy_map,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 __all__ = ["compute_llm_context_fields_sha256", "execute_llm_step"]

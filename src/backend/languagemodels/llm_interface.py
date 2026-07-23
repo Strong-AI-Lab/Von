@@ -7,6 +7,8 @@ import subprocess
 import threading
 import time
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import (
     Optional,
     List,
@@ -77,10 +79,36 @@ if genai is not None:
 # Configure logging
 logger = logging.getLogger(__name__)
 
+_RAW_LLM_IO_LOGGING_SUPPRESSED: ContextVar[bool] = ContextVar(
+    "raw_llm_io_logging_suppressed",
+    default=False,
+)
+
+
+@contextmanager
+def suppress_raw_llm_io_logging(enabled: bool = True):
+    """Suppress raw prompt/response persistence within a sensitive model call.
+
+    This covers both debug logging and the exact-response replay cache.  The
+    cache stores complete model output, so treating it as safe merely because
+    logging is disabled would leak private document-derived content into a
+    global test/replay collection.
+    """
+
+    token = _RAW_LLM_IO_LOGGING_SUPPRESSED.set(
+        _RAW_LLM_IO_LOGGING_SUPPRESSED.get() or bool(enabled)
+    )
+    try:
+        yield
+    finally:
+        _RAW_LLM_IO_LOGGING_SUPPRESSED.reset(token)
+
 
 def _should_log_llm_io() -> bool:
     """Return True if LLM prompt/response debug logging is enabled."""
 
+    if _RAW_LLM_IO_LOGGING_SUPPRESSED.get():
+        return False
     value = os.environ.get("VON_DEBUG_LLM_IO", "").strip().lower()
     return value in {"1", "true", "yes", "on"}
 
@@ -1025,7 +1053,10 @@ class OllamaClient(LLMInterface):
 
         response_cache_key: Optional[str] = None
         response_prompt_key: Optional[str] = None
-        if is_llm_response_cache_enabled():
+        if (
+            is_llm_response_cache_enabled()
+            and not _RAW_LLM_IO_LOGGING_SUPPRESSED.get()
+        ):
             _cache_conv = build_conversation(prompt, context)
             _cache_messages = to_ollama_messages(_cache_conv)
             response_cache_key = build_llm_response_cache_key(
@@ -1136,7 +1167,8 @@ class OllamaClient(LLMInterface):
                         ollama_options if ollama_options else None
                     ),  # Pass options if any
                 )
-                logger.debug(f"Ollama raw response: {response}")
+                if _should_log_llm_io():
+                    logger.debug("Ollama raw response: %s", response)
                 content = response["message"]["content"]
                 if _should_log_llm_io():
                     logger.debug(
@@ -1876,7 +1908,8 @@ class OpenAIClient(LLMInterface):
                     input=messages,  # type: ignore[arg-type]
                     **responses_params,
                 )
-                logger.debug(f"OpenAI Responses raw response: {response}")
+                if _should_log_llm_io():
+                    logger.debug("OpenAI Responses raw response: %s", response)
                 actual_model = getattr(response, "model", None) or target_model
                 content = _extract_openai_responses_text(response)
                 if not content:
@@ -1918,7 +1951,8 @@ class OpenAIClient(LLMInterface):
                 messages=messages,  # type: ignore[arg-type]
                 **openai_params,
             )
-            logger.debug(f"OpenAI raw response: {response}")
+            if _should_log_llm_io():
+                logger.debug("OpenAI raw response: %s", response)
 
             # Track which model actually processed the request
             actual_model = getattr(response, "model", None) or target_model
@@ -2201,7 +2235,8 @@ class GeminiClient(LLMInterface):
             else:
                 response = model_instance.generate_content(prompt, **send_kwargs)
 
-            logger.debug(f"Gemini raw response: {response}")
+            if _should_log_llm_io():
+                logger.debug("Gemini raw response: %s", response)
             # Handle potential safety blocks or empty responses
             if response.parts:
                 content = response.text

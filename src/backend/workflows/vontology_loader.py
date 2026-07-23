@@ -2549,8 +2549,10 @@ def _prefetch_policy_text_rows(
             max_time_ms=_workflow_policy_text_max_time_ms(),
         )
     except Exception as exc:
-        for concept_id in missing_ids:
-            text_cache.setdefault(concept_id, [])
+        # Leave missing IDs uncached so callers can fall back to the bounded
+        # per-concept reader.  Caching an empty result here would turn a batch
+        # transport failure into an authoritative "no policy" answer, which is
+        # unsafe for publication lifecycle metadata such as published=false.
         return f"workflow_policy_text_prefetch_failed:{type(exc).__name__}"
 
     for concept_id in missing_ids:
@@ -4155,7 +4157,8 @@ def discover_workflow_ids() -> List[str]:
 
     Heuristic:
     1. Concepts that define a workflow structure (have hasInitialStep aliases).
-    2. Concepts typed under known workflow roots (instance or subtype paths)
+    2. When direct property discovery yields no candidates, fall back to
+       concepts typed under known workflow roots (instance or subtype paths)
        that define an initial step.
     """
     candidates = set()
@@ -4177,35 +4180,46 @@ def discover_workflow_ids() -> List[str]:
     except Exception as e:
         logger.warning(f"Error querying workflows by property: {e}")
 
-    # 2. Type-based discovery over workflow type families. This catches
-    # instance-typed workflow concepts that use canonical #V# graph predicates.
-    workflow_type_ids = sorted(_discover_workflow_type_family_ids())
-    if workflow_type_ids:
-        try:
-            typed_cursor = ConceptsRepository.find(
-                {
-                    "$or": [
-                        {"relationships.is_an_instance_of": {"$in": workflow_type_ids}},
-                        {"relationships.is_a_type_of": {"$in": workflow_type_ids}},
-                    ]
-                },
-                {"concept_id": 1, "relationships": 1},
-            )
-            for doc in typed_cursor:
-                concept_id = doc.get("concept_id")
-                if not isinstance(concept_id, str) or not concept_id.strip():
-                    continue
-                rels = doc.get("relationships") or {}
-                if not isinstance(rels, dict):
-                    continue
-                initial_step = _first_relationship_target(
-                    rels,
-                    WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"],
+    # 2. Compatibility fallback over workflow type families. Every workflow
+    # returned here must also define one of the same hasInitialStep aliases used
+    # by the direct query above, so scanning the full typed family cannot add a
+    # valid candidate once direct property discovery has succeeded.
+    if not candidates:
+        workflow_type_ids = sorted(_discover_workflow_type_family_ids())
+        if workflow_type_ids:
+            try:
+                typed_cursor = ConceptsRepository.find(
+                    {
+                        "$or": [
+                            {
+                                "relationships.is_an_instance_of": {
+                                    "$in": workflow_type_ids
+                                }
+                            },
+                            {
+                                "relationships.is_a_type_of": {
+                                    "$in": workflow_type_ids
+                                }
+                            },
+                        ]
+                    },
+                    {"concept_id": 1, "relationships": 1},
                 )
-                if initial_step:
-                    candidates.add(concept_id.strip())
-        except Exception as e:
-            logger.warning(f"Error querying workflows by type: {e}")
+                for doc in typed_cursor:
+                    concept_id = doc.get("concept_id")
+                    if not isinstance(concept_id, str) or not concept_id.strip():
+                        continue
+                    rels = doc.get("relationships") or {}
+                    if not isinstance(rels, dict):
+                        continue
+                    initial_step = _first_relationship_target(
+                        rels,
+                        WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"],
+                    )
+                    if initial_step:
+                        candidates.add(concept_id.strip())
+            except Exception as e:
+                logger.warning(f"Error querying workflows by type: {e}")
 
     if not candidates:
         return []
@@ -4223,11 +4237,23 @@ def discover_workflow_ids() -> List[str]:
     except Exception as e:
         logger.warning(f"Error querying workflow publication lifecycle: {e}")
 
+    lifecycle_text_cache: Dict[str, List[Mapping[str, Any]]] = {}
+    lifecycle_prefetch_warning = _prefetch_policy_text_rows(
+        sorted(candidates),
+        text_cache=lifecycle_text_cache,
+    )
+    if lifecycle_prefetch_warning:
+        logger.warning(
+            "Workflow publication lifecycle text prefetch failed: %s",
+            lifecycle_prefetch_warning,
+        )
+
     discoverable_candidates: set[str] = set()
     for concept_id in candidates:
         lifecycle, _source = resolve_workflow_publication_lifecycle(
             concept_id,
             lifecycle_docs.get(concept_id),
+            text_cache=lifecycle_text_cache,
         )
         if isinstance(lifecycle, Mapping) and lifecycle.get("published") is False:
             continue

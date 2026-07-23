@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ...db.transient_errors import run_with_transient_mongo_retry
+from ...services.relationship_extent_index_service import (
+    defer_relationship_extent_index_sync,
+)
 from ..engine import (
     WorkflowDefinition,
     materialise_terminal_effect_context,
@@ -38,6 +41,7 @@ from ..execution_contracts import (
     clear_control_signal_context,
     get_last_control_signal,
     set_workflow_result_envelope,
+    workflow_final_state_is_failure_like,
 )
 from ..plan_state_runtime import (
     apply_workflow_step_checkpoint,
@@ -77,6 +81,40 @@ _DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_FIELDS = (
     "state_count",
     "action_count",
 )
+
+
+def _execution_required_checkpoint_context_keys(
+    definition: WorkflowDefinition,
+) -> tuple[str, ...]:
+    """Return top-level context roots declared as workflow reads.
+
+    Durable checkpoints may compact diagnostic data, but represented values
+    that a state can read must survive a worker restart without truncation.
+    Dotted reads retain their top-level container; the instance payload store
+    then offloads large private values to the namespace-scoped blob store.
+    """
+
+    required: set[str] = set()
+    for state in definition.states.values():
+        metadata = state.metadata if isinstance(state.metadata, Mapping) else {}
+        for metadata_key in (
+            "preconditions",
+            "reads_variables",
+            "reads_context_keys",
+        ):
+            values = metadata.get(metadata_key)
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, (list, tuple, set, frozenset)):
+                continue
+            for value in values:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                root = text.split(".", 1)[0].strip()
+                if root:
+                    required.add(root)
+    return tuple(sorted(required))
 
 
 def _definition_has_state_cycle(definition: WorkflowDefinition) -> bool:
@@ -416,6 +454,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         self._instance_manager = instance_manager
         self._max_transitions = max(5, int(max_transitions))
 
+    @defer_relationship_extent_index_sync()
     def run_durable(
         self,
         instance_id: str,
@@ -820,7 +859,10 @@ class DurableWorkflowExecutor(WorkflowExecutor):
                         exact_snapshot_ineligibility_reasons.add(
                             "authority_producer_prompt_lineage_missing"
                         )
-            projected = project_workflow_context_for_checkpoint(context)
+            projected = project_workflow_context_for_checkpoint(
+                context,
+                lossless_keys=_execution_required_checkpoint_context_keys(definition),
+            )
             projection = projected.get(CHECKPOINT_CONTEXT_PROJECTION_KEY)
             projected_key_records = (
                 projection.get("projected_keys")
@@ -1173,6 +1215,15 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             )
 
             control_signal = get_last_control_signal(context)
+            if workflow_final_state_is_failure_like(current_state):
+                error = "workflow_failed_terminal_state"
+                trace.finish_failed(error)
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                    checkpoint=True,
+                )
             if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
                 return _complete_with_gate(current_state)
 

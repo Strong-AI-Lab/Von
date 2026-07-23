@@ -20281,8 +20281,15 @@ class InternalMCPChatOrchestrator:
             structured_call_kwargs: dict[str, Any] = {}
             if provider == "openai":
                 structured_call_kwargs["parallel_tool_calls"] = False
-                if model_parameters:
-                    structured_call_kwargs["llm_params"] = model_parameters
+                provider_llm_params = dict(model_parameters or {})
+                if isinstance(timeout_override_sec, (int, float)) and float(
+                    timeout_override_sec
+                ) > 0:
+                    provider_llm_params["request_timeout_seconds"] = float(
+                        timeout_override_sec
+                    )
+                if provider_llm_params:
+                    structured_call_kwargs["llm_params"] = provider_llm_params
                 if tool_choice_override is not None:
                     structured_call_kwargs["tool_choice"] = tool_choice_override
                 elif len(required_available_tool_names) == 1:

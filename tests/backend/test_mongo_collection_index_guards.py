@@ -168,7 +168,7 @@ def test_invalidate_connection_clears_collection_index_cache(monkeypatch):
     assert len(coll.create_index_calls) == initial_calls * 2
 
 
-def test_text_relation_indexes_include_atlas_name_lookup(monkeypatch):
+def test_text_relation_indexes_cover_concept_search_and_atlas_name_lookup(monkeypatch):
     _reset_collection_index_state(monkeypatch)
     db = _FakeDb("test_von_db", client=object())
     monkeypatch.setattr(mc, "get_db", lambda: db)
@@ -176,9 +176,19 @@ def test_text_relation_indexes_include_atlas_name_lookup(monkeypatch):
     coll = cast(_FakeCollection, mc.get_text_relations_collection())
 
     assert coll is not None
-    assert {
-        str(call["kwargs"].get("name") or "") for call in coll.create_index_calls
-    } >= {"context_name_type_predicate_text"}
+    calls_by_name = {
+        str(call["kwargs"].get("name") or ""): call
+        for call in coll.create_index_calls
+    }
+    assert calls_by_name.keys() >= {
+        "context_name_type_predicate_text",
+        "object_predicate_subject_lookup",
+    }
+    assert calls_by_name["object_predicate_subject_lookup"]["keys"] == [
+        ("object_text_id", mc.ASCENDING),
+        ("predicate", mc.ASCENDING),
+        ("subject_concept_id", mc.ASCENDING),
+    ]
 
 
 def test_workflow_instance_indexes_include_atlas_claim_and_lookup_indexes(monkeypatch):

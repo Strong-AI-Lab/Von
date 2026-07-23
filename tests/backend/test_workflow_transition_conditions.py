@@ -124,6 +124,47 @@ def test_executor_routes_failure_and_unknown_via_condition_spec(
     assert result.data.get(context_key) is True
 
 
+def test_executor_defers_extent_index_sync_until_run_finishes(monkeypatch) -> None:
+    from src.backend.services import relationship_extent_index_service as extent_service
+
+    synced_batches: list[list[str]] = []
+    monkeypatch.setattr(
+        extent_service,
+        "_sync_relationship_extent_index_for_concept_ids_now",
+        lambda source_ids: synced_batches.append(list(source_ids))
+        or {"success": True},
+    )
+
+    def mutate(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        extent_service.sync_relationship_extent_index_for_concept_id("#V#source_b")
+        extent_service.sync_relationship_extent_index_for_concept_id("#V#source_a")
+        assert synced_batches == []
+        return WorkflowActionResult(status="success")
+
+    registry = ActionRegistry()
+    registry.register(ActionSpec(action_id="mutate.action", handler=mutate))
+    definition = WorkflowDefinition(
+        workflow_id="#V#extent_sync_workflow",
+        initial_state="mutate",
+        states={
+            "mutate": WorkflowStateSpec(
+                state_id="mutate",
+                actions=(WorkflowActionInvocation(action_id="mutate.action"),),
+                terminal=True,
+            )
+        },
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert synced_batches == [["#V#source_a", "#V#source_b"]]
+
+
 def test_executor_can_route_from_structured_failed_action_outputs() -> None:
     condition_spec, condition_fn = build_transition_condition(
         {

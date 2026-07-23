@@ -39,6 +39,7 @@ from pymongo import DESCENDING
 from .dynamic_tool_loader import load_dynamic_method_definitions
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
+from .spreadsheet_record_tools import build_spreadsheet_record_tool_definitions
 from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
@@ -3537,10 +3538,17 @@ def _normalise_acquisition_result_contract(
 
 # Blob/file-copy retrieval
 def _read_file_copy(**kwargs):
+    import hashlib
     import os
-    from flask import has_request_context, session as flask_session
-    from ...security.access_control import get_effective_user_concept_id
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
     from ...services.computer_file_copy_service import fetch_file_copy_bytes
+    from ...services.namespace_service import (
+        coerce_namespace,
+        derive_namespace_for_actor,
+    )
 
     concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
     if not isinstance(concept_id, str) or not concept_id.strip():
@@ -3577,6 +3585,7 @@ def _read_file_copy(**kwargs):
         as_text = True
     encoding = kwargs.get("encoding") or "utf-8"
     allow_large = bool(kwargs.get("allow_large", False))
+    structured_spreadsheet = bool(kwargs.get("structured_spreadsheet", False))
 
     if allow_large:
         try:
@@ -3591,34 +3600,40 @@ def _read_file_copy(**kwargs):
             max_bytes = max_override
 
     namespace = _normalise_namespace_override(kwargs.get("namespace"))
+    trusted_user_concept_id = get_effective_user_concept_id()
+    trusted_organisation_concept_id = get_effective_organisation_concept_id()
+    if not trusted_user_concept_id:
+        return make_error_response(
+            "authentication_required",
+            "User authentication required to read file copies",
+            suggestions=["Ensure user context is set before calling this tool"],
+        )
+    if namespace is not None:
+        canonical_requested_namespace = coerce_namespace(namespace)
+        trusted_namespace = derive_namespace_for_actor(
+            trusted_user_concept_id,
+            trusted_organisation_concept_id,
+        )
+        if (
+            canonical_requested_namespace is None
+            or trusted_namespace is None
+            or canonical_requested_namespace != trusted_namespace
+        ):
+            return make_error_response(
+                "namespace_mismatch",
+                "Requested file-copy namespace does not match the authenticated actor.",
+                suggestions=[
+                    "Omit namespace and use the authenticated actor scope",
+                    "Use the namespace supplied by the trusted workflow runtime",
+                ],
+            )
+        namespace = canonical_requested_namespace
 
     def _run_read():
-        user_concept_id = get_effective_user_concept_id()
-        if not user_concept_id:
-            return make_error_response(
-                "authentication_required",
-                "User authentication required to read file copies",
-                suggestions=["Ensure user context is set before calling this tool"],
-            )
-
-        organisation_concept_id = None
-        try:
-            if has_request_context():
-                org_raw = flask_session.get("organisation_concept_id")
-                if isinstance(org_raw, str) and org_raw.strip():
-                    organisation_concept_id = org_raw.strip()
-        except Exception:
-            organisation_concept_id = None
-        _namespace_user, namespace_org = _namespace_actor_overrides_from_namespace(
-            namespace
-        )
-        if namespace_org:
-            organisation_concept_id = namespace_org
-
         result = fetch_file_copy_bytes(
             file_copy_concept_id=concept_id,
-            user_concept_id=user_concept_id,
-            organisation_concept_id=organisation_concept_id,
+            user_concept_id=trusted_user_concept_id,
+            organisation_concept_id=trusted_organisation_concept_id,
             namespace=namespace,
             max_bytes=max_bytes,
             allow_large=allow_large,
@@ -3645,12 +3660,51 @@ def _read_file_copy(**kwargs):
             "content_type": getattr(info, "content_type", None),
             "size_bytes": getattr(info, "size_bytes", None),
             "byte_length": len(data_bytes),
+            "sha256": hashlib.sha256(bytes(data_bytes)).hexdigest(),
             "blob": {
                 "backend": getattr(info, "blob_backend", None),
                 "key": getattr(info, "blob_key", None),
                 "uri": getattr(info, "blob_uri", None),
             },
         }
+
+        if structured_spreadsheet:
+            try:
+                from ...services.spreadsheet_record_ingestion_service import (
+                    SpreadsheetPlanError,
+                    extract_spreadsheet_evidence,
+                )
+
+                payload["spreadsheet"] = extract_spreadsheet_evidence(
+                    bytes(data_bytes),
+                    max_sheets=kwargs.get("max_sheets") or 32,
+                    max_rows_per_sheet=kwargs.get("max_rows_per_sheet") or 2_000,
+                    max_cells=kwargs.get("max_cells") or 40_000,
+                )
+                payload["spreadsheet_extraction"] = "openpyxl_structured_v1"
+            except ModuleNotFoundError as exc:
+                return make_error_response(
+                    "spreadsheet_reader_unavailable",
+                    "Structured spreadsheet extraction requires openpyxl.",
+                    details={"exception_type": type(exc).__name__},
+                )
+            except SpreadsheetPlanError as exc:
+                return make_error_response(
+                    exc.code,
+                    "Structured spreadsheet extraction was rejected by its safety contract.",
+                    details=dict(exc.details),
+                )
+            except Exception as exc:
+                return make_error_response(
+                    "spreadsheet_extraction_failed",
+                    "Structured spreadsheet extraction failed.",
+                    details={"exception_type": type(exc).__name__},
+                )
+
+            # The structured evidence is the bounded output contract. Returning
+            # the workbook again as decoded text or base64 would duplicate
+            # private source bytes into workflow context and execution traces.
+            return payload
 
         if as_text:
             is_pdf = False
@@ -4463,8 +4517,7 @@ def _read_file_copy(**kwargs):
 
         return payload
 
-    with _with_namespace_actor_override(namespace):
-        return _run_read()
+    return _run_read()
 
 
 def _interpret_file_copy(**kwargs):
@@ -7262,6 +7315,8 @@ def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema
         "namespace": (str, type(None)),
         "created_by_concept_id": (str, type(None)),
         "organisation_concept_id": (str, type(None)),
+        "source_fingerprint": (str, type(None)),
+        "processing_authority_fingerprint": (str, type(None)),
     }
     if not read_only:
         optional.update(
@@ -7273,6 +7328,7 @@ def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema
                 "file_copy_concept_ids": (list, type(None)),
                 "arxiv_ids": (list, type(None)),
                 "represented_outputs": (dict, list, str, type(None)),
+                "processing_evidence": (dict, type(None)),
             }
         )
     return Schema(
@@ -7320,6 +7376,14 @@ def _source_processing_marker_output_schema() -> Schema:
             "source_processing_evidence_text_relation": (dict, type(None)),
             "error": (str, type(None)),
             "error_code": (str, type(None)),
+            "stored_source_fingerprint": (str, type(None)),
+            "expected_source_fingerprint": (str, type(None)),
+            "source_fingerprint_matches": (bool, type(None)),
+            "source_processing_current": (bool, type(None)),
+            "stored_processing_authority_fingerprint": (str, type(None)),
+            "expected_processing_authority_fingerprint": (str, type(None)),
+            "processing_authority_matches": (bool, type(None)),
+            "represented_artifacts_exist": (bool, type(None)),
         },
         allow_unknown=True,
         description=(
@@ -8514,6 +8578,10 @@ def _read_file_copy_input_schema() -> Schema:
             "encoding": (str, type(None)),
             "as_text": (bool, type(None)),
             "allow_large": (bool, type(None)),
+            "structured_spreadsheet": (bool, type(None)),
+            "max_sheets": (int, type(None)),
+            "max_rows_per_sheet": (int, type(None)),
+            "max_cells": (int, type(None)),
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
@@ -8522,7 +8590,9 @@ def _read_file_copy_input_schema() -> Schema:
             "max_bytes (int, optional default 5000000), encoding (str, default utf-8), "
             "as_text (bool, default true; if false returns base64), allow_large (bool, default false; "
             "when true, max_bytes may be raised up to VON_READ_FILE_COPY_MAX_BYTES_OVERRIDE, default 20000000), "
-            "namespace (optional user@org override)."
+            "structured_spreadsheet (bool) returns bounded coordinate-bearing XLSX evidence; "
+            "max_sheets/max_rows_per_sheet/max_cells bound that evidence; namespace is an "
+            "optional asserted scope that must exactly match the authenticated actor."
         ),
     )
 
@@ -8538,6 +8608,7 @@ def _read_file_copy_output_schema() -> Schema:
             "content_type": (str, type(None)),
             "size_bytes": (int, type(None)),
             "byte_length": (int, type(None)),
+            "sha256": (str, type(None)),
             "blob": (dict, type(None)),
             "text": (str, type(None)),
             "encoding": (str, type(None)),
@@ -8546,6 +8617,8 @@ def _read_file_copy_output_schema() -> Schema:
             "max_bytes": (int, type(None)),
             "text_extraction": (str, type(None)),
             "text_extraction_error": (str, type(None)),
+            "spreadsheet": (dict, type(None)),
+            "spreadsheet_extraction": (str, type(None)),
         },
         allow_unknown=True,
         description=(
@@ -8553,6 +8626,7 @@ def _read_file_copy_output_schema() -> Schema:
             "content_type (str), size_bytes (int), byte_length (int), blob (dict), "
             "text (str, when as_text=true) or bytes_base64 (str, when as_text=false), "
             "encoding (str, when as_text=true), text_extraction (str, optional), "
+            "spreadsheet (dict, when structured_spreadsheet=true), "
             "or error (str) if failed."
         ),
     )
@@ -30378,6 +30452,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "workflow has verified processing success."
             ),
         ),
+        *build_spreadsheet_record_tool_definitions(),
         MethodDefinition(
             name="extract_annotations",
             handler=_extract_annotations,

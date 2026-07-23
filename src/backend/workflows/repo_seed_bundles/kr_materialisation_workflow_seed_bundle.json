@@ -2,12 +2,13 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "JVNAUTOSCI-2271",
+  "seed_version": "JVNAUTOSCI-2592-write-guard-v1",
   "source_tag": "JVNAUTOSCI-2271",
   "supported_action_ids": [
     "llm.action",
     "workflow_control.context_set",
     "workflow_control.context_template",
+    "workflow_control.kr_materialisation_guard",
     "workflow_control.for_each",
     "workflow_mcp.invoke_tool"
   ],
@@ -24,7 +25,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"contract_id\": \"kr_concept_materialisation_mutation_readback\", \"required_effects\": [{\"activation_required_tools\": [], \"activation_required_tools_match\": \"any\", \"description\": \"Each concept item must create or reuse a concept, assert the resolved type/instance parent relation, attach a description, and read back concept plus text relation evidence before success.\", \"effect_id\": \"kr_concept_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"kr_concept_mutation_readback_failed\", \"missing_failure_code\": \"kr_concept_mutation_readback_missing\", \"not_executed_reason\": \"Concept materialisation or read-back did not run.\", \"not_satisfied_reason\": \"Concept materialisation was not verified from Vontology read-back.\", \"required_tools\": [\"create_concepts\", \"add_relationship\", \"upsert_singleton_text_relation\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "text": "{\"contract_id\": \"kr_concept_materialisation_mutation_readback\", \"required_effects\": [{\"activation_required_tools\": [], \"activation_required_tools_match\": \"any\", \"description\": \"Each concept item must create or reuse a concept, assert the resolved type/instance parent relation, attach a description, and read back concept plus exact text relation evidence before success.\", \"effect_id\": \"kr_concept_mutation_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"kr_concept_mutation_readback_failed\", \"missing_failure_code\": \"kr_concept_mutation_readback_missing\", \"not_executed_reason\": \"Concept materialisation or read-back did not run.\", \"not_satisfied_reason\": \"Concept materialisation was not verified from Vontology read-back.\", \"required_tools\": [\"create_concepts\", \"add_relationship\", \"upsert_singleton_text_relation\", \"fetch_concept\", \"get_text_relations\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -777,41 +778,37 @@
             "state_id": "read_back_text_relations",
             "static_input_bindings": [
               [
-                "languages",
-                [
-                  "en-NZ"
-                ]
+                "language",
+                "en-NZ"
               ],
               [
-                "max_relation_ids_per_group",
+                "limit",
                 10
               ],
               [
-                "predicates",
-                [
-                  "hasDescription"
-                ]
+                "predicate",
+                "hasDescription"
               ],
               [
                 "tool_name",
-                "get_text_relations_summary"
+                "get_text_relations"
               ]
             ],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_text_relations_groups_to_kr_text_relation_groups",
-                "context_key": "kr_text_relation_groups",
-                "tool_output_field": "groups"
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_text_relations_concept_id_to_kr_text_relation_readback_concept_id",
+                "context_key": "kr_text_relation_readback_concept_id",
+                "tool_output_field": "concept_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_text_relations_groups_found_to_kr_text_relation_groups_found",
-                "context_key": "kr_text_relation_groups_found",
-                "tool_output_field": "groups_found"
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_read_back_text_relations_relations_to_kr_text_relation_readback_relations",
+                "context_key": "kr_text_relation_readback_relations",
+                "tool_output_field": "relations"
               }
             ],
             "writes_context_keys": [
-              "kr_text_relation_groups",
-              "kr_text_relation_groups_found"
+              "kr_text_relation_readback_concept_id",
+              "kr_text_relation_readback_relations"
             ]
           },
           {
@@ -855,6 +852,14 @@
                   {
                     "key": "kr_readback_concept_id",
                     "value_from_context": "kr_readback_concept_id"
+                  },
+                  {
+                    "key": "kr_text_relation_readback_concept_id",
+                    "value_from_context": "kr_text_relation_readback_concept_id"
+                  },
+                  {
+                    "key": "kr_text_relation_readback_relations",
+                    "value_from_context": "kr_text_relation_readback_relations"
                   }
                 ]
               ]
@@ -867,7 +872,9 @@
               "kr_concept_parent_id",
               "kr_parent_relationship_predicate",
               "kr_description_relation_id",
-              "kr_readback_concept_id"
+              "kr_readback_concept_id",
+              "kr_text_relation_readback_concept_id",
+              "kr_text_relation_readback_relations"
             ]
           },
           {
@@ -1371,7 +1378,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"contract_id\": \"kr_design_materialisation_mutation_readback\", \"required_effects\": [{\"activation_required_tools\": [], \"activation_required_tools_match\": \"any\", \"description\": \"The workflow must materialise KR concepts through create_concepts, assert type/instance and requested relationship edges, attach descriptions, and carry read-back evidence before it may claim success.\", \"effect_id\": \"kr_design_concept_and_relationship_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"kr_design_materialisation_evidence_failed\", \"missing_failure_code\": \"kr_design_materialisation_evidence_missing\", \"not_executed_reason\": \"KR concept/relationship mutation or read-back did not run.\", \"not_satisfied_reason\": \"KR materialisation was not verified from Vontology read-back.\", \"required_tools\": [\"create_concepts\", \"add_relationship\", \"upsert_singleton_text_relation\", \"fetch_concept\", \"get_text_relations_summary\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
+          "text": "{\"contract_id\": \"kr_design_materialisation_mutation_readback\", \"required_effects\": [{\"activation_required_tools\": [], \"activation_required_tools_match\": \"any\", \"description\": \"The workflow must materialise KR concepts through create_concepts, assert type/instance and requested relationship edges, attach descriptions, and carry exact read-back evidence before it may claim success.\", \"effect_id\": \"kr_design_concept_and_relationship_readback\", \"effect_type\": \"grounded_evidence\", \"failed_failure_code\": \"kr_design_materialisation_evidence_failed\", \"missing_failure_code\": \"kr_design_materialisation_evidence_missing\", \"not_executed_reason\": \"KR concept/relationship mutation or read-back did not run.\", \"not_satisfied_reason\": \"KR materialisation was not verified from Vontology read-back.\", \"required_tools\": [\"create_concepts\", \"add_relationship\", \"upsert_singleton_text_relation\", \"fetch_concept\", \"get_text_relations\"], \"required_tools_match\": \"all\"}], \"schema_version\": \"workflow_required_effects_contract.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -1386,6 +1393,9 @@
         }
       ],
       "launch_input_contract": {
+        "excluded_ambient_input_keys": [
+          "invocations"
+        ],
         "input_mappings": [
           {
             "description": "KR design text or instruction to materialise.",
@@ -1400,6 +1410,13 @@
             "required": false,
             "source_expression": "inputs.prompt",
             "target_context_key": "user_prompt"
+          },
+          {
+            "description": "Optional caller-authored deterministic materialisation boundary.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.materialisation_guard",
+            "target_context_key": "kr_materialisation_guard"
           }
         ],
         "required_inputs": [
@@ -1441,7 +1458,7 @@
                   "kind": "all"
                 },
                 "reason": "materialisation_plan_ready",
-                "to_state": "materialise_concepts"
+                "to_state": "validate_materialisation_plan"
               },
               {
                 "condition_spec": {
@@ -1501,6 +1518,7 @@
                 "search_concepts"
               ],
               "selection_policy": "adaptive",
+              "suppress_raw_io_logging": true,
               "tool_argument_defaults": {
                 "fetch_concept": {
                   "include_relations_any_arg": true,
@@ -1560,6 +1578,52 @@
             ]
           },
           {
+            "action_id": "workflow_control.kr_materialisation_guard",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "kr_materialisation_guard_passed",
+                  "kind": "context_flag",
+                  "expected": true
+                },
+                "reason": "materialisation_plan_within_optional_guard",
+                "to_state": "materialise_concepts"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "materialisation_plan_rejected_by_guard",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "validate_materialisation_plan",
+            "static_input_bindings": [
+              [
+                "phase",
+                "plan"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_guard_passed_to_kr_materialisation_guard_passed",
+                "context_key": "kr_materialisation_guard_passed",
+                "tool_output_field": "guard_passed"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_blocking_reason_to_kr_materialisation_blocking_reason",
+                "context_key": "kr_materialisation_blocking_reason",
+                "tool_output_field": "blocking_reason"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_materialisation_guard_passed",
+              "kr_materialisation_blocking_reason"
+            ]
+          },
+          {
             "action_id": "workflow_control.for_each",
             "conditional_transitions": [
               {
@@ -1605,6 +1669,10 @@
             "on_failure_state": "summarise_blocker",
             "state_id": "materialise_concepts",
             "static_input_bindings": [
+              [
+                "include_tool_invocations_in_iteration_results",
+                true
+              ],
               [
                 "index_context_key",
                 "kr_concept_index"
@@ -1694,7 +1762,7 @@
                   "kind": "all"
                 },
                 "reason": "relationships_resolved",
-                "to_state": "assert_relationships"
+                "to_state": "validate_resolved_relationships"
               },
               {
                 "condition_spec": {
@@ -1752,6 +1820,7 @@
               "max_tool_invocations": 12,
               "policy_stage": "kr_relationship_endpoint_resolution",
               "selection_policy": "adaptive",
+              "suppress_raw_io_logging": true,
               "tool_argument_defaults": {
                 "fetch_concept": {
                   "include_relations_any_arg": true,
@@ -1799,6 +1868,52 @@
             ]
           },
           {
+            "action_id": "workflow_control.kr_materialisation_guard",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "kr_materialisation_guard_passed",
+                  "kind": "context_flag",
+                  "expected": true
+                },
+                "reason": "resolved_relationships_within_optional_guard",
+                "to_state": "assert_relationships"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "resolved_relationships_rejected_by_guard",
+                "to_state": "summarise_blocker"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "summarise_blocker",
+            "state_id": "validate_resolved_relationships",
+            "static_input_bindings": [
+              [
+                "phase",
+                "resolved_relationships"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_resolved_relationships_guard_passed_to_kr_materialisation_guard_passed",
+                "context_key": "kr_materialisation_guard_passed",
+                "tool_output_field": "guard_passed"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_resolved_relationships_blocking_reason_to_kr_relationship_resolution_blocking_reason",
+                "context_key": "kr_relationship_resolution_blocking_reason",
+                "tool_output_field": "blocking_reason"
+              }
+            ],
+            "writes_context_keys": [
+              "kr_materialisation_guard_passed",
+              "kr_relationship_resolution_blocking_reason"
+            ]
+          },
+          {
             "action_id": "workflow_control.for_each",
             "conditional_transitions": [
               {
@@ -1823,6 +1938,10 @@
             "on_failure_state": "summarise_blocker",
             "state_id": "assert_relationships",
             "static_input_bindings": [
+              [
+                "include_tool_invocations_in_iteration_results",
+                true
+              ],
               [
                 "index_context_key",
                 "kr_relationship_index"
@@ -1903,7 +2022,7 @@
                 [
                   {
                     "key": "response_text",
-                    "template": "KR design materialisation verified. Concepts: {concept_count}; relationships: {relationship_count}. Evidence tools included create_concepts, add_relationship, upsert_singleton_text_relation, fetch_concept, and get_text_relations_summary.",
+                    "template": "KR design materialisation verified. Concepts: {concept_count}; relationships: {relationship_count}. Evidence tools included create_concepts, add_relationship, upsert_singleton_text_relation, fetch_concept, and get_text_relations.",
                     "variables": {
                       "concept_count": {
                         "default": 0,

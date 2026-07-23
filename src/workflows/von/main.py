@@ -54,7 +54,22 @@ root_logger.setLevel(logging.DEBUG)  # Set the root logger to the lowest level
 
 # Suppress noisy third-party DEBUG loggers that flood the log file (pymongo alone
 # can produce tens of MB per minute at DEBUG, slowing startup and I/O).
-for _noisy_logger_name in ("pymongo", "urllib3", "httpcore", "httpx"):
+for _noisy_logger_name in (
+    # AWS SDK DEBUG records can include SigV4 Authorization headers.  Those
+    # credentials are short-lived, but they must never be persisted in the
+    # application log.
+    "boto3",
+    "botocore",
+    "s3transfer",
+    "pymongo",
+    "urllib3",
+    "httpcore",
+    "httpx",
+    # The OpenAI SDK logs complete request bodies at DEBUG, including private
+    # document evidence embedded in model prompts.  Keep transport failures
+    # visible without persisting those request bodies in local server logs.
+    "openai",
+):
     logging.getLogger(_noisy_logger_name).setLevel(logging.WARNING)
 
 # File Handler - for detailed logging to a file

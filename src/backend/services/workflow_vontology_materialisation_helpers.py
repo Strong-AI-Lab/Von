@@ -138,7 +138,12 @@ def suspend_event_workflow_integration() -> Iterator[None]:
     os.environ["VON_EVENT_WORKFLOW_INTEGRATION_ENABLE"] = "0"
     os.environ["VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"] = "0"
     try:
-        yield
+        from .relationship_extent_index_service import (
+            defer_relationship_extent_index_sync,
+        )
+
+        with defer_relationship_extent_index_sync():
+            yield
     finally:
         if prior_event is None:
             os.environ.pop("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", None)

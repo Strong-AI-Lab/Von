@@ -22,6 +22,7 @@ from .workflow_vontology_materialisation_helpers import (
 
 SOURCE_PROCESSING_MARKER_TYPE_ID = "#V#source_processing_marker"
 SOURCE_PROCESSING_EVIDENCE_PREDICATE_ID = "#V#hasSourceProcessingEvidenceJson"
+SOURCE_PROCESSING_MARKER_EXISTENCE_LOOKUP_MAX_TIME_MS = 3_000
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _ARXIV_ID_RE = re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b")
@@ -84,6 +85,8 @@ _CONCEPT_ID_KEYS = {
     "represented_artefact_concept_id",
     "artefact_concept_id",
     "artifact_concept_id",
+    "kr_concept_id",
+    "kr_readback_concept_id",
 }
 _CONCEPT_ID_LIST_KEYS = {
     "paper_concept_ids",
@@ -91,6 +94,8 @@ _CONCEPT_ID_LIST_KEYS = {
     "represented_artefact_concept_ids",
     "artefact_concept_ids",
     "artifact_concept_ids",
+    "kr_concept_ids",
+    "kr_readback_concept_ids",
 }
 _FILE_COPY_KEYS = {"file_copy_concept_id"}
 _FILE_COPY_LIST_KEYS = {"file_copy_concept_ids"}
@@ -158,12 +163,58 @@ def _concept_exists(concept_id: str) -> bool:
         return False
 
 
-def _ensure_support_concepts() -> list[str]:
+def _find_existing_concept_ids(concept_ids: Sequence[str]) -> set[str]:
+    from ..db.repositories.concepts_repository import ConceptsRepository
+    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+    requested_ids = _ordered_unique(list(concept_ids))
+    if not requested_ids:
+        return set()
+    lookup_ids = _ordered_unique(
+        [
+            candidate
+            for concept_id in requested_ids
+            for candidate in (
+                concept_id,
+                canonicalise_vontology_concept_id(concept_id),
+            )
+        ]
+    )
+    stored_ids = {
+        _clean_text(row.get("concept_id"))
+        for row in ConceptsRepository.find(
+            {"concept_id": {"$in": lookup_ids}},
+            {"_id": 0, "concept_id": 1},
+            limit=len(lookup_ids),
+            max_time_ms=SOURCE_PROCESSING_MARKER_EXISTENCE_LOOKUP_MAX_TIME_MS,
+        )
+        if isinstance(row, Mapping) and _clean_text(row.get("concept_id"))
+    }
+    return {
+        concept_id
+        for concept_id in requested_ids
+        if concept_id in stored_ids
+        or canonicalise_vontology_concept_id(concept_id) in stored_ids
+    }
+
+
+def _ensure_support_concepts(*, existing_ids: set[str] | None = None) -> list[str]:
+    # These are global workflow-support concepts.  Resolve their exact IDs in
+    # one bounded read instead of seven serial Atlas round trips on every
+    # source-marker write; the latter can consume the entire MCP write deadline
+    # before the marker evidence itself is persisted.
+    support_ids = [str(spec["concept_id"]) for spec in _SUPPORT_TYPE_SPECS]
+    known_existing_ids = (
+        set(existing_ids)
+        if existing_ids is not None
+        else _find_existing_concept_ids(support_ids)
+    )
+
     created: list[str] = []
     with suspend_event_workflow_integration():
         for spec in _SUPPORT_TYPE_SPECS:
             concept_id = str(spec["concept_id"])
-            if _concept_exists(concept_id):
+            if concept_id in known_existing_ids:
                 continue
             concept_service.create_concept(
                 name=str(spec["name"]),
@@ -254,6 +305,8 @@ def _marker_response_from_payload(
     evidence_payload: Mapping[str, Any] | None = None,
     support_concepts_created: Sequence[str] = (),
     text_relation_result: Mapping[str, Any] | None = None,
+    expected_source_fingerprint: str | None = None,
+    expected_processing_authority_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     payload = dict(evidence_payload or {})
     represented_ids = _ordered_unique(
@@ -263,6 +316,41 @@ def _marker_response_from_payload(
     )
     file_copy_ids = _ordered_unique(_as_sequence(payload.get("file_copy_concept_ids")))
     arxiv_ids = _ordered_unique(_as_sequence(payload.get("arxiv_ids")))
+    stored_source_fingerprint = _clean_text(payload.get("source_fingerprint"))
+    stored_processing_status = _clean_text(payload.get("processing_status")).lower()
+    expected_fingerprint = _clean_text(expected_source_fingerprint)
+    stored_authority_fingerprint = _clean_text(
+        payload.get("processing_authority_fingerprint")
+    )
+    expected_authority_fingerprint = _clean_text(
+        expected_processing_authority_fingerprint
+    )
+    source_fingerprint_matches = bool(
+        marker_exists
+        and expected_fingerprint
+        and stored_source_fingerprint == expected_fingerprint
+    )
+    source_system = _clean_text(payload.get("source_system")).lower()
+    represented_outputs_required = source_system in {
+        "spreadsheet_dataset",
+        "spreadsheet_record",
+    }
+    represented_ids_exist = True
+    if represented_outputs_required and represented_ids:
+        represented_ids_exist = set(represented_ids).issubset(
+            _find_existing_concept_ids(represented_ids)
+        )
+    processing_authority_matches = bool(
+        not expected_authority_fingerprint
+        or stored_authority_fingerprint == expected_authority_fingerprint
+    )
+    source_processing_current = bool(
+        source_fingerprint_matches
+        and stored_processing_status in {"complete", "completed", "processed"}
+        and (not represented_outputs_required or bool(represented_ids))
+        and represented_ids_exist
+        and processing_authority_matches
+    )
     response: dict[str, Any] = {
         "success": True,
         "schema_version": "source_processing_marker.result.v1",
@@ -286,13 +374,29 @@ def _marker_response_from_payload(
         "arxiv_ids": arxiv_ids,
         "arxiv_id": _first_or_none(arxiv_ids),
         "support_concepts_created": list(support_concepts_created),
+        "stored_source_fingerprint": stored_source_fingerprint or None,
+        "expected_source_fingerprint": expected_fingerprint or None,
+        "source_fingerprint_matches": source_fingerprint_matches,
+        "processing_status": stored_processing_status or None,
+        "stored_processing_authority_fingerprint": (
+            stored_authority_fingerprint or None
+        ),
+        "expected_processing_authority_fingerprint": (
+            expected_authority_fingerprint or None
+        ),
+        "processing_authority_matches": processing_authority_matches,
+        "represented_artifacts_exist": represented_ids_exist,
+        "source_processing_current": source_processing_current,
+        # Keep the output contract stable when the marker has not been written
+        # yet. Represented workflows can map the empty evidence object and
+        # decide that the source is new without weakening writes-context
+        # validation or inventing prior state.
+        "source_processing_evidence": payload,
     }
     if text_relation_result is not None:
         response["source_processing_evidence_text_relation"] = dict(
             text_relation_result
         )
-    if payload:
-        response["source_processing_evidence"] = payload
     return response
 
 
@@ -322,6 +426,8 @@ def get_source_processing_marker(
     source_system: str,
     source_item_id: str,
     source_profile: str | None = None,
+    source_fingerprint: str | None = None,
+    processing_authority_fingerprint: str | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     source_system_clean = _clean_text(source_system)
@@ -344,6 +450,10 @@ def get_source_processing_marker(
         source_item_id=source_item_clean,
         marker_exists=marker_exists,
         evidence_payload=payload,
+        expected_source_fingerprint=source_fingerprint,
+        expected_processing_authority_fingerprint=(
+            processing_authority_fingerprint
+        ),
     )
 
 
@@ -363,6 +473,9 @@ def record_source_processing_marker(
     namespace: str | None = None,
     created_by_concept_id: str | None = None,
     organisation_concept_id: str | None = None,
+    source_fingerprint: str | None = None,
+    processing_authority_fingerprint: str | None = None,
+    processing_evidence: Mapping[str, Any] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     source_system_clean = _clean_text(source_system)
@@ -375,13 +488,16 @@ def record_source_processing_marker(
             "error": "source_system and source_item_id are required.",
         }
 
-    support_created = _ensure_support_concepts()
     marker_concept_id = source_processing_marker_concept_id(
         source_system=source_system_clean,
         source_profile=source_profile_clean,
         source_item_id=source_item_clean,
     )
-    marker_exists = _concept_exists(marker_concept_id)
+    support_ids = [str(spec["concept_id"]) for spec in _SUPPORT_TYPE_SPECS]
+    existing_ids = _find_existing_concept_ids([*support_ids, marker_concept_id])
+    support_created = _ensure_support_concepts(existing_ids=existing_ids)
+    marker_exists = marker_concept_id in existing_ids
+    previous_payload = _load_marker_payload(marker_concept_id) if marker_exists else None
     marker_created = False
     if not marker_exists:
         with suspend_event_workflow_integration():
@@ -420,6 +536,20 @@ def record_source_processing_marker(
     )
     arxiv_id_values = _ordered_unique(_as_sequence(arxiv_ids) + extracted_arxiv_ids)
     status = _clean_text(processing_status) or "processed"
+    fingerprint = _clean_text(source_fingerprint)
+    previous_fingerprint = _clean_text(
+        previous_payload.get("source_fingerprint")
+        if isinstance(previous_payload, Mapping)
+        else None
+    )
+    prior_history = (
+        _as_sequence(previous_payload.get("source_fingerprint_history"))
+        if isinstance(previous_payload, Mapping)
+        else []
+    )
+    fingerprint_history = _ordered_unique(
+        [*prior_history, previous_fingerprint, fingerprint]
+    )[-20:]
     evidence_payload: dict[str, Any] = {
         "schema_version": "source_processing_marker.v1",
         "source_system": source_system_clean,
@@ -441,6 +571,21 @@ def record_source_processing_marker(
         "arxiv_ids": arxiv_id_values,
         "arxiv_id": _first_or_none(arxiv_id_values),
         "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_fingerprint": fingerprint or None,
+        "processing_authority_fingerprint": (
+            _clean_text(processing_authority_fingerprint) or None
+        ),
+        "previous_source_fingerprint": (
+            previous_fingerprint
+            if previous_fingerprint and previous_fingerprint != fingerprint
+            else None
+        ),
+        "source_fingerprint_history": fingerprint_history,
+        "processing_evidence": (
+            dict(processing_evidence)
+            if isinstance(processing_evidence, Mapping)
+            else {}
+        ),
     }
     text_relation = upsert_singleton_text_relation(
         subject_concept_id=marker_concept_id,
@@ -458,6 +603,10 @@ def record_source_processing_marker(
         evidence_payload=evidence_payload,
         support_concepts_created=support_created,
         text_relation_result=text_relation,
+        expected_source_fingerprint=fingerprint or None,
+        expected_processing_authority_fingerprint=(
+            processing_authority_fingerprint
+        ),
     )
 
 

@@ -571,6 +571,32 @@ def test_source_processing_marker_tools_registered_as_vontology_surfaces():
     )
 
 
+def test_spreadsheet_record_plan_tools_are_bounded_internal_surfaces():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    snapshot = build_default_catalogue().snapshot()
+
+    assert snapshot["compile_spreadsheet_record_plan"]["category"] == "read"
+    assert snapshot["compile_spreadsheet_record_plan"]["input_schema"]["required"] == [
+        "plan",
+        "spreadsheet",
+        "write_authority_contract",
+    ]
+    assert {
+        "user_concept_id",
+        "organisation_concept_id",
+    } <= set(snapshot["compile_spreadsheet_record_plan"]["input_schema"]["optional"])
+    assert (
+        snapshot["build_spreadsheet_record_materialisation_request"]["category"]
+        == "read"
+    )
+    assert snapshot["compare_spreadsheet_record_batch"]["category"] == "read"
+    assert (
+        snapshot["build_spreadsheet_record_completion_evidence"]["category"] == "read"
+    )
+    assert snapshot["build_spreadsheet_batch_completion_evidence"]["category"] == "read"
+
+
 def test_gmail_send_message_registered_and_gateway_invokes(monkeypatch):
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,

@@ -231,6 +231,7 @@ def _build_durable_workflow_bootstrap_summary(
         "entity_information_retrieval_workflow_bootstrap",
         "concept_search_instance_retrieval_workflow_bootstrap",
         "lab_status_digest_workflow_bootstrap",
+        "spreadsheet_programme_workflow_bootstrap",
         "represented_artefact_creation_workflow_bootstrap",
         "multilingual_concept_enrichment_workflow_bootstrap",
         "conversation_turn_workflow_bootstrap",
@@ -493,6 +494,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.lab_status_digest_workflow_vontology_service import (
             bootstrap_canonical_lab_status_digest_workflow,
         )
+        from ..services.spreadsheet_programme_workflow_vontology_service import (
+            bootstrap_canonical_spreadsheet_programme_workflows,
+        )
         from ..services.represented_artefact_creation_workflow_vontology_service import (
             bootstrap_canonical_represented_artefact_creation_workflow,
         )
@@ -630,6 +634,12 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="lab and project status digest workflow",
             bootstrap_fn=bootstrap_canonical_lab_status_digest_workflow,
         )
+        spreadsheet_programme_workflow_bootstrap_report = (
+            _run_workflow_family_bootstrap(
+                label="spreadsheet programme representation workflow",
+                bootstrap_fn=bootstrap_canonical_spreadsheet_programme_workflows,
+            )
+        )
         represented_artefact_creation_workflow_bootstrap_report = (
             _run_workflow_family_bootstrap(
                 label="represented-artefact creation workflow",
@@ -740,6 +750,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["lab_status_digest_workflow_bootstrap"] = (
             lab_status_digest_workflow_bootstrap_report
         )
+        result["spreadsheet_programme_workflow_bootstrap"] = (
+            spreadsheet_programme_workflow_bootstrap_report
+        )
         result["represented_artefact_creation_workflow_bootstrap"] = (
             represented_artefact_creation_workflow_bootstrap_report
         )
@@ -822,6 +835,13 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] lab status digest workflow bootstrap failed: %s",
                 lab_status_digest_workflow_bootstrap_report,
+            )
+        if not bool(
+            spreadsheet_programme_workflow_bootstrap_report.get("success", False)
+        ):
+            app_logger.warning(
+                "[durable_workflows] spreadsheet programme workflow bootstrap failed: %s",
+                spreadsheet_programme_workflow_bootstrap_report,
             )
         if not bool(
             represented_artefact_creation_workflow_bootstrap_report.get(

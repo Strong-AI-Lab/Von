@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, MutableMapping, Sequence, Tuple
 
+from .context_paths import resolve_context_path
+
 REASON_PRECONDITION_UNSATISFIED = "metadata_precondition_unsatisfied"
 REASON_READ_VARIABLE_MISSING = "metadata_read_variable_missing"
 REASON_READ_CONTEXT_KEY_MISSING = "metadata_read_context_key_missing"
@@ -204,6 +206,15 @@ def _lookup_symbol(
     for key in candidates:
         if key in context:
             return True, context[key], key, "context"
+
+    # Runtime input mappings and transition conditions both support dotted
+    # context paths. Metadata reads describe the same values, so enforcing
+    # them as literal top-level keys would reject an otherwise resolvable
+    # represented step (for example ``current_item.record_fingerprint``).
+    for key in candidates:
+        found, value = resolve_context_path(context=context, path=key)
+        if found:
+            return True, value, key, "context_path"
 
     for nested_key in _NESTED_CONTEXT_KEYS:
         container = context.get(nested_key)
@@ -564,4 +575,3 @@ def format_metadata_validation_error(result: MetadataValidationResult) -> str:
         "metadata_validation_failed:"
         f"{result.failure.reason_code}:{result.state_id}"
     )
-

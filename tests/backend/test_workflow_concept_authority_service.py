@@ -381,7 +381,9 @@ def test_ensure_context_input_mapping_concept_persists_required_flag(monkeypatch
     monkeypatch.setattr(
         authority_service.concept_service,
         "update_concept",
-        lambda concept_id, payload: update_calls.append((concept_id, payload))
+        lambda concept_id, payload, **_kwargs: update_calls.append(
+            (concept_id, payload)
+        )
         or {"updated": True},
     )
 

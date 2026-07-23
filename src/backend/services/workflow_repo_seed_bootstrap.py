@@ -2780,12 +2780,13 @@ def bootstrap_repo_seed_workflow_bundle(
                     for workflow_id in support_candidate_workflow_ids
                 },
             )
-        support_concept_report = _materialise_support_concepts(
-            support_concept_specs,
-            source_tag=source_tag,
-            managed_by=managed_by,
-            update_existing=False,
-        )
+        with suspend_event_workflow_integration():
+            support_concept_report = _materialise_support_concepts(
+                support_concept_specs,
+                source_tag=source_tag,
+                managed_by=managed_by,
+                update_existing=False,
+            )
         support_concept_report["skipped"] = False
         support_concept_report["skip_reason"] = None
         support_errors = list(support_concept_report.get("errors") or ())

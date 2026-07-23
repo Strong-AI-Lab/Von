@@ -11,10 +11,13 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
-from pymongo import ReplaceOne
+from pymongo import DeleteMany, ReplaceOne, timeout
 from pymongo.collection import Collection
 
 from ..db.mongo_client import (
@@ -40,6 +43,39 @@ RELATIONSHIP_EXTENT_PAGE_MAX_INDEX_SCAN = int(
 )
 RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS = int(
     os.environ.get("VON_RELATIONSHIP_EXTENT_PAGE_TIME_BUDGET_MS", "1200")
+)
+RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.environ.get("VON_RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS", "5")),
+)
+RELATIONSHIP_EXTENT_SYNC_SLOW_MS = max(
+    1.0,
+    float(os.environ.get("VON_RELATIONSHIP_EXTENT_SYNC_SLOW_MS", "1000")),
+)
+RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS = max(
+    0.1,
+    float(
+        os.environ.get(
+            "VON_RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS",
+            "1",
+        )
+    ),
+)
+RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.environ.get("VON_RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS", "2")),
+)
+RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.environ.get("VON_RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS", "1")),
+)
+_DEFERRED_SYNC_DEPTH: ContextVar[int] = ContextVar(
+    "relationship_extent_deferred_sync_depth",
+    default=0,
+)
+_DEFERRED_SYNC_SOURCE_IDS: ContextVar[set[str] | None] = ContextVar(
+    "relationship_extent_deferred_sync_source_ids",
+    default=None,
 )
 
 
@@ -98,6 +134,96 @@ def _index_docs_for_concept(concept_doc: Mapping[str, Any]) -> list[dict[str, An
     return docs
 
 
+def _replace_relationship_extent_rows(
+    *,
+    collection: Collection,
+    source_id: str,
+    docs: Sequence[Mapping[str, Any]],
+) -> tuple[int, int]:
+    """Refresh one source without deleting its old rows before replacements exist."""
+
+    _upsert_relationship_extent_rows(collection=collection, docs=docs)
+    relation_ids = [
+        relation_id
+        for doc in docs
+        if isinstance(relation_id := doc.get("relation_id"), str) and relation_id
+    ]
+    stale_filter: dict[str, Any] = {"source_concept_id": source_id}
+    if relation_ids:
+        stale_filter["relation_id"] = {"$nin": relation_ids}
+    deleted = collection.delete_many(stale_filter).deleted_count
+    return deleted, len(docs)
+
+
+def _upsert_relationship_extent_rows(
+    *,
+    collection: Collection,
+    docs: Sequence[Mapping[str, Any]],
+) -> None:
+    """Upsert new rows before stale-row removal.
+
+    MongoDB cannot atomically replace a variable-sized per-source row set
+    without a transaction. Updating each deterministic relation id first means
+    a failed refresh leaves the previous rows available; the caller also marks
+    the whole derived index degraded so reads fall back to canonical concepts.
+    The narrow fallback supports mongomock and older PyMongo-compatible test
+    backends whose bulk-write adapters do not yet accept PyMongo's ``sort``
+    argument for ``ReplaceOne``.
+    """
+
+    rows = [dict(doc) for doc in docs]
+    if not rows:
+        return
+    operations = [
+        ReplaceOne({"relation_id": row["relation_id"]}, row, upsert=True)
+        for row in rows
+    ]
+    try:
+        collection.bulk_write(operations, ordered=False)
+    except TypeError as exc:
+        if "unexpected keyword argument 'sort'" not in str(exc):
+            raise
+        for row in rows:
+            collection.replace_one(
+                {"relation_id": row["relation_id"]},
+                row,
+                upsert=True,
+            )
+
+
+def _mark_relationship_extent_index_degraded(
+    *,
+    reason: str,
+    source_count: int,
+    error_type: str,
+) -> None:
+    """Fail the derived index closed after an incomplete refresh."""
+
+    now = _utc_now()
+    _READINESS_CACHE["ready"] = False
+    _READINESS_CACHE["checked_at"] = time.monotonic()
+    try:
+        with timeout(RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS):
+            _record_rebuild_state(
+                {
+                    "status": "degraded",
+                    "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+                    "reason": reason,
+                    "degraded_at": now.isoformat(),
+                    "source_count": max(0, int(source_count)),
+                    "error_type": error_type,
+                }
+            )
+    except Exception:
+        logger.warning(
+            "[relationship_extent_index] unable_to_record_degraded_state "
+            "source_count=%s error_type=%s",
+            max(0, int(source_count)),
+            error_type,
+            exc_info=True,
+        )
+
+
 def sync_relationship_extent_index_for_concept_doc(
     concept_doc: Mapping[str, Any],
     *,
@@ -110,49 +236,272 @@ def sync_relationship_extent_index_for_concept_doc(
         return {"success": False, "reason": "missing_source_concept_id"}
     source_id = source_id.strip()
 
-    coll = collection or get_relationship_extent_index_collection()
+    coll = (
+        collection
+        if collection is not None
+        else get_relationship_extent_index_collection()
+    )
     if coll is None:
         return {"success": False, "reason": "collection_unavailable"}
 
     docs = _index_docs_for_concept(concept_doc)
-    deleted = coll.delete_many({"source_concept_id": source_id}).deleted_count
-    inserted = 0
-    if docs:
-        result = coll.insert_many(docs, ordered=False)
-        inserted = len(result.inserted_ids)
+    started = time.perf_counter()
+    try:
+        with timeout(RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS):
+            deleted, inserted = _replace_relationship_extent_rows(
+                collection=coll,
+                source_id=source_id,
+                docs=docs,
+            )
+    except Exception as exc:
+        _mark_relationship_extent_index_degraded(
+            reason="source_refresh_failed",
+            source_count=1,
+            error_type=type(exc).__name__,
+        )
+        raise
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    if duration_ms >= RELATIONSHIP_EXTENT_SYNC_SLOW_MS:
+        logger.warning(
+            "[relationship_extent_index] sync_slow duration_ms=%.1f "
+            "deleted=%s inserted=%s",
+            duration_ms,
+            deleted,
+            inserted,
+        )
     return {
         "success": True,
         "source_concept_id": source_id,
         "deleted": deleted,
         "inserted": inserted,
+        "duration_ms": round(duration_ms, 3),
+    }
+
+
+def _sync_relationship_extent_index_for_concept_id_now(
+    source_id: str,
+) -> dict[str, Any]:
+    if not isinstance(source_id, str) or not source_id.strip():
+        return {"success": False, "reason": "missing_source_concept_id"}
+    source_id = source_id.strip()
+    coll = get_relationship_extent_index_collection()
+    if coll is None:
+        return {"success": False, "reason": "collection_unavailable"}
+
+    started = time.perf_counter()
+    try:
+        with timeout(RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS):
+            with bypass_access_control():
+                concept_doc = ConceptsRepository.find_one(
+                    {"concept_id": source_id},
+                    {"concept_id": 1, "relationships": 1, "updated_at": 1},
+                )
+            if not concept_doc:
+                deleted = coll.delete_many(
+                    {"source_concept_id": source_id}
+                ).deleted_count
+                inserted = 0
+            else:
+                deleted, inserted = _replace_relationship_extent_rows(
+                    collection=coll,
+                    source_id=source_id,
+                    docs=_index_docs_for_concept(concept_doc),
+                )
+    except Exception as exc:
+        _mark_relationship_extent_index_degraded(
+            reason="source_refresh_failed",
+            source_count=1,
+            error_type=type(exc).__name__,
+        )
+        raise
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    if duration_ms >= RELATIONSHIP_EXTENT_SYNC_SLOW_MS:
+        logger.warning(
+            "[relationship_extent_index] sync_slow duration_ms=%.1f "
+            "deleted=%s inserted=%s",
+            duration_ms,
+            deleted,
+            inserted,
+        )
+    result: dict[str, Any] = {
+        "success": True,
+        "source_concept_id": source_id,
+        "deleted": deleted,
+        "inserted": inserted,
+        "duration_ms": round(duration_ms, 3),
+    }
+    if not concept_doc:
+        result["source_missing"] = True
+    return result
+
+
+def _sync_relationship_extent_index_for_concept_ids_now(
+    source_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Replace derived rows for a bounded set of source concepts in one batch."""
+
+    normalised_ids = sorted(
+        {
+            source_id.strip()
+            for source_id in source_ids
+            if isinstance(source_id, str) and source_id.strip()
+        }
+    )
+    if not normalised_ids:
+        return {
+            "success": True,
+            "source_count": 0,
+            "deleted": 0,
+            "inserted": 0,
+        }
+
+    coll = get_relationship_extent_index_collection()
+    if coll is None:
+        return {"success": False, "reason": "collection_unavailable"}
+
+    started = time.perf_counter()
+    try:
+        with timeout(RELATIONSHIP_EXTENT_SYNC_TIMEOUT_SECONDS):
+            with bypass_access_control():
+                concept_docs = list(
+                    ConceptsRepository.find(
+                        {"concept_id": {"$in": normalised_ids}},
+                        {"concept_id": 1, "relationships": 1, "updated_at": 1},
+                    )
+                )
+
+            docs_by_source_id: dict[str, Mapping[str, Any]] = {}
+            for concept_doc in concept_docs:
+                source_id = concept_doc.get("concept_id")
+                if not isinstance(source_id, str) or not source_id.strip():
+                    continue
+                docs_by_source_id[source_id.strip()] = concept_doc
+
+            docs_by_source: dict[str, list[dict[str, Any]]] = {
+                source_id: (
+                    _index_docs_for_concept(docs_by_source_id[source_id])
+                    if source_id in docs_by_source_id
+                    else []
+                )
+                for source_id in normalised_ids
+            }
+            index_docs = [
+                doc
+                for source_id in normalised_ids
+                for doc in docs_by_source[source_id]
+            ]
+            _upsert_relationship_extent_rows(collection=coll, docs=index_docs)
+
+            stale_delete_operations = []
+            for source_id in normalised_ids:
+                relation_ids = [
+                    str(doc["relation_id"])
+                    for doc in docs_by_source[source_id]
+                    if doc.get("relation_id")
+                ]
+                stale_filter: dict[str, Any] = {"source_concept_id": source_id}
+                if relation_ids:
+                    stale_filter["relation_id"] = {"$nin": relation_ids}
+                stale_delete_operations.append(DeleteMany(stale_filter))
+            delete_result = coll.bulk_write(
+                stale_delete_operations,
+                ordered=False,
+            )
+            deleted = delete_result.deleted_count
+            inserted = len(index_docs)
+    except Exception as exc:
+        _mark_relationship_extent_index_degraded(
+            reason="batch_refresh_failed",
+            source_count=len(normalised_ids),
+            error_type=type(exc).__name__,
+        )
+        raise
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    if duration_ms >= RELATIONSHIP_EXTENT_SYNC_SLOW_MS:
+        logger.warning(
+            "[relationship_extent_index] batch_sync_slow duration_ms=%.1f "
+            "source_count=%s deleted=%s inserted=%s",
+            duration_ms,
+            len(normalised_ids),
+            deleted,
+            inserted,
+        )
+    return {
+        "success": True,
+        "source_count": len(normalised_ids),
+        "source_missing_count": len(normalised_ids) - len(docs_by_source_id),
+        "deleted": deleted,
+        "inserted": inserted,
+        "duration_ms": round(duration_ms, 3),
     }
 
 
 def sync_relationship_extent_index_for_concept_id(source_id: str) -> dict[str, Any]:
-    """Refresh derived extent-index rows for a source concept id."""
+    """Refresh derived extent rows, or coalesce the refresh inside a bulk scope."""
 
     if not isinstance(source_id, str) or not source_id.strip():
         return {"success": False, "reason": "missing_source_concept_id"}
-    with bypass_access_control():
-        concept_doc = ConceptsRepository.find_one(
-            {"concept_id": source_id.strip()},
-            {"concept_id": 1, "relationships": 1, "updated_at": 1},
-        )
-    if not concept_doc:
-        coll = get_relationship_extent_index_collection()
-        if coll is not None:
-            deleted = coll.delete_many(
-                {"source_concept_id": source_id.strip()}
-            ).deleted_count
-            return {
-                "success": True,
-                "source_concept_id": source_id.strip(),
-                "deleted": deleted,
-                "inserted": 0,
-                "source_missing": True,
-            }
-        return {"success": False, "reason": "collection_unavailable"}
-    return sync_relationship_extent_index_for_concept_doc(concept_doc)
+    source_id = source_id.strip()
+    if _DEFERRED_SYNC_DEPTH.get() > 0:
+        pending = _DEFERRED_SYNC_SOURCE_IDS.get()
+        if pending is not None:
+            pending.add(source_id)
+        return {
+            "success": True,
+            "source_concept_id": source_id,
+            "deferred": True,
+        }
+    return _sync_relationship_extent_index_for_concept_id_now(source_id)
+
+
+@contextmanager
+def defer_relationship_extent_index_sync() -> Iterator[None]:
+    """Coalesce repeated best-effort extent refreshes within a bulk mutation."""
+
+    depth = _DEFERRED_SYNC_DEPTH.get()
+    pending = _DEFERRED_SYNC_SOURCE_IDS.get()
+    pending_token = None
+    if depth == 0 or pending is None:
+        pending = set()
+        pending_token = _DEFERRED_SYNC_SOURCE_IDS.set(pending)
+    depth_token = _DEFERRED_SYNC_DEPTH.set(depth + 1)
+    try:
+        yield
+    finally:
+        _DEFERRED_SYNC_DEPTH.reset(depth_token)
+        if depth == 0:
+            source_ids = sorted(pending or ())
+            if pending_token is not None:
+                _DEFERRED_SYNC_SOURCE_IDS.reset(pending_token)
+            started = time.perf_counter()
+            failures = 0
+            try:
+                result = _sync_relationship_extent_index_for_concept_ids_now(
+                    source_ids
+                )
+                if result.get("success") is not True:
+                    failures = len(source_ids)
+                    logger.warning(
+                        "[relationship_extent_index] deferred_sync_failed "
+                        "source_count=%s reason=%s",
+                        len(source_ids),
+                        result.get("reason") or "unknown",
+                    )
+            except Exception:
+                failures = len(source_ids)
+                logger.warning(
+                    "[relationship_extent_index] deferred_sync_failed "
+                    "source_count=%s",
+                    len(source_ids),
+                    exc_info=True,
+                )
+            logger.info(
+                "[relationship_extent_index] deferred_sync_complete "
+                "source_count=%s failure_count=%s duration_ms=%.1f",
+                len(source_ids),
+                failures,
+                (time.perf_counter() - started) * 1000.0,
+            )
 
 
 def _record_rebuild_state(payload: Mapping[str, Any]) -> None:
@@ -183,24 +532,40 @@ def relationship_extent_index_ready() -> bool:
         return cached_ready
 
     ready = False
-    settings = get_application_settings_collection()
-    if settings is not None:
-        state = settings.find_one(
-            {"setting_name": RELATIONSHIP_EXTENT_INDEX_STATE_SETTING},
-            {"value": 1},
-        )
-        value = state.get("value") if isinstance(state, Mapping) else None
-        if isinstance(value, Mapping) and value.get("status") == "ready":
-            if value.get("schema_version") == RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION:
-                ready = True
+    explicit_unready_state = False
+    try:
+        with timeout(RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS):
+            settings = get_application_settings_collection()
+            if settings is not None:
+                state = settings.find_one(
+                    {"setting_name": RELATIONSHIP_EXTENT_INDEX_STATE_SETTING},
+                    {"value": 1},
+                )
+                value = state.get("value") if isinstance(state, Mapping) else None
+                if isinstance(value, Mapping):
+                    state_is_current = (
+                        value.get("schema_version")
+                        == RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION
+                    )
+                    if value.get("status") == "ready" and state_is_current:
+                        ready = True
+                    elif value.get("status") in {
+                        "degraded",
+                        "failed",
+                        "rebuilding",
+                    }:
+                        explicit_unready_state = state_is_current
 
-    if not ready:
-        coll = get_relationship_extent_index_collection()
-        if coll is not None:
-            try:
-                ready = coll.find_one({}, {"_id": 1}) is not None
-            except Exception:
-                ready = False
+            if not ready and not explicit_unready_state:
+                coll = get_relationship_extent_index_collection()
+                if coll is not None:
+                    ready = coll.find_one({}, {"_id": 1}) is not None
+    except Exception as exc:
+        logger.warning(
+            "[relationship_extent_index] readiness_query_failed error_type=%s",
+            type(exc).__name__,
+        )
+        ready = False
 
     _READINESS_CACHE["ready"] = ready
     _READINESS_CACHE["checked_at"] = now_monotonic
@@ -219,6 +584,8 @@ def rebuild_relationship_extent_index(
         return {"success": False, "status": "unavailable"}
 
     started_at = _utc_now()
+    _READINESS_CACHE["ready"] = False
+    _READINESS_CACHE["checked_at"] = time.monotonic()
     _record_rebuild_state(
         {
             "status": "rebuilding",
@@ -301,6 +668,8 @@ def rebuild_relationship_extent_index(
         logger.error(
             "Failed rebuilding relationship extent index: %s", exc, exc_info=True
         )
+        _READINESS_CACHE["ready"] = False
+        _READINESS_CACHE["checked_at"] = time.monotonic()
         _record_rebuild_state(
             {
                 "status": "failed",
@@ -382,16 +751,24 @@ def query_relationship_extent_index(
     if not should_query:
         return [], 0
 
-    cursor = coll.find(query)
-    if sort:
-        cursor = cursor.sort(sort)
-    if offset:
-        cursor = cursor.skip(max(0, int(offset)))
-    if limit:
-        cursor = cursor.limit(max(0, int(limit)))
-    docs = list(cursor)
-    total = coll.count_documents(query) if count_total else len(docs)
-    return docs, total
+    try:
+        with timeout(RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS):
+            cursor = coll.find(query)
+            if sort:
+                cursor = cursor.sort(sort)
+            if offset:
+                cursor = cursor.skip(max(0, int(offset)))
+            if limit:
+                cursor = cursor.limit(max(0, int(limit)))
+            docs = list(cursor)
+            total = coll.count_documents(query) if count_total else len(docs)
+            return docs, total
+    except Exception as exc:
+        logger.warning(
+            "[relationship_extent_index] extent_query_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return [], -1
 
 
 def _incoming_row_from_index_doc(
@@ -596,30 +973,40 @@ def incoming_dynamic_extent_rows_page_for_target(
         pending_docs.clear()
 
     try:
-        for item in cursor:
-            pending_docs.append(item)
-            scanned += 1
-            if len(pending_docs) < clean_batch_size and scanned < clean_max_scan:
-                continue
-            _process_pending_batch()
-            elapsed_ms = int((time.monotonic() - started_at) * 1000)
-            if len(rows) >= wanted_visible:
-                stop_reason = "visible_page_filled"
-                break
-            if scanned >= clean_max_scan:
-                stop_reason = "scan_cap_exhausted"
-                break
-            if elapsed_ms >= clean_time_budget_ms:
-                stop_reason = "time_budget_exhausted"
-                break
-        else:
-            source_exhausted = True
-        if pending_docs and len(rows) < wanted_visible:
-            _process_pending_batch()
-    except Exception:
-        logger.exception(
-            "Failed reading relationship extent index page for target=%s",
-            target_concept_id,
+        elapsed_before_cursor_ms = int((time.monotonic() - started_at) * 1000)
+        remaining_budget_seconds = max(
+            0.001,
+            (clean_time_budget_ms - elapsed_before_cursor_ms) / 1000.0,
+        )
+        cursor_timeout_seconds = min(
+            RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS,
+            remaining_budget_seconds,
+        )
+        with timeout(cursor_timeout_seconds):
+            for item in cursor:
+                pending_docs.append(item)
+                scanned += 1
+                if len(pending_docs) < clean_batch_size and scanned < clean_max_scan:
+                    continue
+                _process_pending_batch()
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                if len(rows) >= wanted_visible:
+                    stop_reason = "visible_page_filled"
+                    break
+                if scanned >= clean_max_scan:
+                    stop_reason = "scan_cap_exhausted"
+                    break
+                if elapsed_ms >= clean_time_budget_ms:
+                    stop_reason = "time_budget_exhausted"
+                    break
+            else:
+                source_exhausted = True
+            if pending_docs and len(rows) < wanted_visible:
+                _process_pending_batch()
+    except Exception as exc:
+        logger.warning(
+            "[relationship_extent_index] extent_page_query_failed error_type=%s",
+            type(exc).__name__,
         )
         return (
             [],

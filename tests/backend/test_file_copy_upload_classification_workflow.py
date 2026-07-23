@@ -69,6 +69,17 @@ def _seed_route_map() -> dict[str, object]:
                 "unsupported_reason": "specialised_workflow_unavailable",
             },
             {
+                "route_key": "spreadsheet",
+                "selected_route_mode": "specialised",
+                "mutation_route": True,
+                "candidate_workflow_ids": [
+                    "#V#spreadsheet_phd_programme_representation_workflow"
+                ],
+                "on_workflow_unavailable": "interpret_if_allowed_else_noop",
+                "on_low_confidence": "fail_closed",
+                "unsupported_reason": "specialised_workflow_unavailable",
+            },
+            {
                 "route_key": "interpret",
                 "selected_route_mode": "interpret",
                 "mutation_route": False,
@@ -159,6 +170,67 @@ def test_classification_selects_specialised_route_when_confident(monkeypatch) ->
     assert "#V#scholarly_paper_file_copy" in result.outputs[
         "typing_asserted_type_concept_ids"
     ]
+
+
+def test_classification_does_not_mutate_from_xlsx_format_alone(
+    monkeypatch,
+) -> None:
+    _patch_route_map(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
+        lambda _payload: ("#V#spreadsheet_phd_programme_representation_workflow",),
+    )
+    registry = ActionRegistry()
+    register_file_copy_upload_classification_actions(registry)
+
+    result = registry.execute(
+        "file_copy_upload.classify",
+        inputs={},
+        context={
+            "file_copy_concept_id": "#V#file_copy_sheet",
+            "original_filename": "programme.xlsx",
+            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["route_key"] == "interpret"
+    assert result.outputs["route_mode"] == "interpret"
+    assert result.outputs["mutation_route"] is False
+    assert result.outputs["target_workflow_id"] is None
+
+
+def test_explicit_spreadsheet_route_can_select_programme_workflow(
+    monkeypatch,
+) -> None:
+    _patch_route_map(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
+        lambda _payload: ("#V#spreadsheet_phd_programme_representation_workflow",),
+    )
+    registry = ActionRegistry()
+    register_file_copy_upload_classification_actions(registry)
+
+    result = registry.execute(
+        "file_copy_upload.classify",
+        inputs={},
+        context={
+            "file_copy_concept_id": "#V#file_copy_sheet",
+            "original_filename": "programme.xlsx",
+            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "force_route_key": "spreadsheet",
+        },
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.outputs["route_key"] == "spreadsheet"
+    assert result.outputs["route_mode"] == "specialised"
+    assert result.outputs["mutation_route"] is True
+    assert (
+        result.outputs["target_workflow_id"]
+        == "#V#spreadsheet_phd_programme_representation_workflow"
+    )
 
 
 def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -> None:

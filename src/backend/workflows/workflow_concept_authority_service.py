@@ -424,6 +424,7 @@ class _CanonicalStepPublicationSpec:
         | _CanonicalToolOutputMappingSpec,
         ...,
     ] = ()
+    reads_context_keys: tuple[str, ...] = ()
     writes_context_keys: tuple[str, ...] = ()
     next_state: str | None = None
     on_true_state: str | None = None
@@ -707,6 +708,9 @@ def _parse_publication_step_payload(
         ),
         tool_output_mapping_specs=_parse_tool_output_mapping_specs_payload(
             raw_payload.get("tool_output_mapping_specs")
+        ),
+        reads_context_keys=_normalise_seed_bundle_string_tuple(
+            raw_payload.get("reads_context_keys")
         ),
         writes_context_keys=_normalise_seed_bundle_string_tuple(
             raw_payload.get("writes_context_keys")
@@ -1649,6 +1653,11 @@ def _build_publication_spec_from_definition(
                         context_key=context_key,
                     )
                 )
+        reads_context_keys = tuple(
+            str(item or "").strip()
+            for item in (state_metadata.get("reads_context_keys") or [])
+            if isinstance(item, str) and str(item or "").strip()
+        )
         writes_context_keys = tuple(
             str(item or "").strip()
             for item in (state_metadata.get("writes_context_keys") or [])
@@ -1770,6 +1779,7 @@ def _build_publication_spec_from_definition(
                         for item in tool_output_mapping_specs
                     }.values()
                 ),
+                reads_context_keys=reads_context_keys,
                 writes_context_keys=writes_context_keys,
                 next_state=next_state,
                 on_true_state=on_true_state,
@@ -2047,16 +2057,18 @@ def _build_definition_from_publication_spec(
         )
         if subworkflow_contract is not None:
             state_metadata["subworkflow_contract"] = subworkflow_contract
+        reads_context_keys = list(step.reads_context_keys)
         if context_input_mapping_specs:
-            reads_context_keys = [
+            reads_context_keys.extend(
                 mapping_spec.context_key.strip()
                 for mapping_spec in context_input_mapping_specs
                 if isinstance(mapping_spec.context_key, str)
                 and mapping_spec.context_key.strip()
                 and bool(mapping_spec.required)
-            ]
-            if reads_context_keys:
-                state_metadata["reads_context_keys"] = reads_context_keys
+            )
+        reads_context_keys = list(dict.fromkeys(reads_context_keys))
+        if reads_context_keys:
+            state_metadata["reads_context_keys"] = reads_context_keys
         tool_output_mapping_specs = (
             step.tool_output_mapping_specs
             if step.tool_output_mapping_specs

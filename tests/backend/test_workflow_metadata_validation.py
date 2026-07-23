@@ -339,6 +339,57 @@ def test_engine_resolves_dynamic_action_inputs_from_context() -> None:
     assert result.data["fixed"] == "literal"
 
 
+def test_metadata_validation_accepts_dotted_read_context_key() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#dotted_metadata_read_workflow",
+        initial_state="resolve",
+        states={
+            "resolve": WorkflowStateSpec(
+                state_id="resolve",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="tool.fetch",
+                        inputs={
+                            "source_item_id": {
+                                "$context_key": "current_item.source_item_id"
+                            }
+                        },
+                    ),
+                ),
+                terminal=True,
+                metadata={
+                    "reads_context_keys": ["current_item.source_item_id"]
+                },
+            )
+        },
+    )
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="tool.fetch",
+            handler=lambda request: WorkflowActionResult(
+                outputs={"resolved_source_item_id": request.inputs["source_item_id"]}
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={"current_item": {"source_item_id": "student:17"}},
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data["resolved_source_item_id"] == "student:17"
+    event = result.data["workflow_metadata_validation_events"][0]
+    read_check = next(
+        check for check in event["checks"] if check["type"] == "read_context_key"
+    )
+    assert read_check["status"] == "available"
+    assert read_check["source"] == "context_path"
+
+
 def test_engine_resolves_nested_dynamic_action_inputs_from_context() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#nested_dynamic_input_resolution_workflow",
