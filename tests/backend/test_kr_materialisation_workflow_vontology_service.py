@@ -161,7 +161,7 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
 def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
-    assert bundle["seed_version"] == "5"
+    assert bundle["seed_version"] == "6"
     workflow = next(
         row
         for row in bundle["workflows"]
@@ -239,6 +239,21 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     }
     assert description_outputs["kr_description_relation_id"] == "kept_relation_id"
     assert description_outputs["kr_description_text_value_id"] == "text_value_id"
+    expected_readback_retry = {
+        "backoff_policy": "fixed",
+        "delay_ms": 1000,
+        "max_attempts": 2,
+        "retry_on_outcomes": ["failure"],
+        "schema_version": "workflow_step_retry_policy.v1",
+    }
+    assert (
+        concept_item_states["read_back_concept"]["retry_policy"]
+        == expected_readback_retry
+    )
+    assert (
+        concept_item_states["read_back_text_relations"]["retry_policy"]
+        == expected_readback_retry
+    )
     concept_iteration_bindings = dict(
         states["materialise_concepts"]["static_input_bindings"]
     )

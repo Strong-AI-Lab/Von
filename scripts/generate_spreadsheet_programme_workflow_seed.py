@@ -1594,7 +1594,7 @@ def build_bundle() -> dict[str, object]:
     return {
         "family_id": "spreadsheet_programme_representation_workflow_seed_bundle",
         "schema_version": "repo_seed_workflow_bundle.v1",
-        "seed_version": "18",
+        "seed_version": "19",
         "source_tag": "JVNAUTOSCI-2592",
         "managed_by": "spreadsheet_programme_workflow_vontology_service",
         "processing_authority_fingerprint": authority_fingerprint,

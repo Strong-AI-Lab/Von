@@ -2,7 +2,7 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "5",
+  "seed_version": "6",
   "source_tag": "JVNAUTOSCI-2271",
   "supported_action_ids": [
     "llm.action",
@@ -744,6 +744,15 @@
             "execution_mode": "deterministic",
             "next_state": "read_back_text_relations",
             "on_failure_state": "summarise_blocker",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "delay_ms": 1000,
+              "max_attempts": 2,
+              "retry_on_outcomes": [
+                "failure"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "read_back_concept",
             "static_input_bindings": [
               [
@@ -793,6 +802,15 @@
             "execution_mode": "deterministic",
             "next_state": "emit_concept_payload",
             "on_failure_state": "summarise_blocker",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "delay_ms": 1000,
+              "max_attempts": 2,
+              "retry_on_outcomes": [
+                "failure"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "read_back_text_relations",
             "static_input_bindings": [
               [
