@@ -152,6 +152,144 @@ def test_guard_accepts_exact_create_and_changed_record_reuse_plan() -> None:
     )
 
 
+def test_guard_enforces_exact_slot_description_fragment_assignment() -> None:
+    guard = _guard()
+    guard["concept_slots"][0]["required_description_fragments"] = [
+        "candidate-evidence-fragment"
+    ]
+    guard["concept_slots"][1]["required_description_fragments"] = [
+        "programme-evidence-fragment"
+    ]
+    accepted_specs = _concept_specs()
+    accepted_specs[0]["description_text"] = (
+        "Candidate evidence: candidate-evidence-fragment"
+    )
+    accepted_specs[0]["concepts"][0]["description"] = accepted_specs[0][
+        "description_text"
+    ]
+    accepted_specs[1]["description_text"] = (
+        "Programme evidence: programme-evidence-fragment"
+    )
+
+    accepted = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=accepted_specs,
+        relationship_specs=_relationship_specs(),
+    )
+    assert accepted["guard_passed"] is True
+
+    invalid_specs: list[list[dict]] = []
+    missing = deepcopy(accepted_specs)
+    missing[0]["description_text"] = "Candidate evidence is missing."
+    invalid_specs.append(missing)
+
+    duplicated = deepcopy(accepted_specs)
+    duplicated[0]["description_text"] = (
+        "candidate-evidence-fragment and candidate-evidence-fragment"
+    )
+    invalid_specs.append(duplicated)
+
+    misplaced = deepcopy(accepted_specs)
+    misplaced[0]["description_text"] = "Candidate evidence is missing."
+    misplaced[1]["description_text"] += " candidate-evidence-fragment"
+    invalid_specs.append(misplaced)
+
+    copied_into_other_slot = deepcopy(accepted_specs)
+    copied_into_other_slot[0]["description_text"] += " programme-evidence-fragment"
+    invalid_specs.append(copied_into_other_slot)
+
+    for concept_specs in invalid_specs:
+        rejected = validate_kr_materialisation_guard(
+            guard_contract=guard,
+            phase="plan",
+            concept_specs=concept_specs,
+            relationship_specs=_relationship_specs(),
+        )
+        assert rejected["guard_passed"] is False
+        assert rejected["error_code"] == (
+            "kr_materialisation_guard_description_fragment_rejected"
+        )
+
+
+def test_guard_rejects_duplicate_description_fragment_ownership() -> None:
+    guard = _guard()
+    for slot in guard["concept_slots"]:
+        slot["required_description_fragments"] = ["shared-fragment"]
+
+    rejected = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=_concept_specs(),
+        relationship_specs=_relationship_specs(),
+    )
+
+    assert rejected["guard_passed"] is False
+    assert rejected["error_code"] == "kr_materialisation_guard_concept_slot_invalid"
+
+
+def test_guard_rejects_overlapping_description_fragment_ownership() -> None:
+    guard = _guard()
+    guard["concept_slots"][0]["required_description_fragments"] = [
+        "source-evidence"
+    ]
+    guard["concept_slots"][1]["required_description_fragments"] = [
+        "source-evidence-detail"
+    ]
+
+    rejected = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=_concept_specs(),
+        relationship_specs=_relationship_specs(),
+    )
+
+    assert rejected["guard_passed"] is False
+    assert rejected["error_code"] == "kr_materialisation_guard_concept_slot_invalid"
+
+
+def test_guard_detects_cross_fragment_partial_overlap_in_wrong_slot() -> None:
+    guard = _guard()
+    guard["concept_slots"][0]["required_description_fragments"] = ["abc"]
+    guard["concept_slots"][1]["required_description_fragments"] = ["bcd"]
+    concept_specs = _concept_specs()
+    concept_specs[0]["description_text"] = "abcd"
+    concept_specs[0]["concepts"][0]["description"] = "abcd"
+    concept_specs[1]["description_text"] = "bcd"
+
+    rejected = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=concept_specs,
+        relationship_specs=_relationship_specs(),
+    )
+
+    assert rejected["guard_passed"] is False
+    assert rejected["error_code"] == (
+        "kr_materialisation_guard_description_fragment_rejected"
+    )
+
+
+def test_guard_detects_self_overlapping_duplicate_fragment_occurrence() -> None:
+    guard = _guard()
+    guard["concept_slots"][0]["required_description_fragments"] = ["aba"]
+    concept_specs = _concept_specs()
+    concept_specs[0]["description_text"] = "ababa"
+    concept_specs[0]["concepts"][0]["description"] = "ababa"
+
+    rejected = validate_kr_materialisation_guard(
+        guard_contract=guard,
+        phase="plan",
+        concept_specs=concept_specs,
+        relationship_specs=_relationship_specs(),
+    )
+
+    assert rejected["guard_passed"] is False
+    assert rejected["error_code"] == (
+        "kr_materialisation_guard_description_fragment_rejected"
+    )
+
+
 def test_guard_enforces_canonical_existence_bound_decisions() -> None:
     guard = _guard()
     guard["concept_slots"][0]["allowed_decisions"] = ["create"]

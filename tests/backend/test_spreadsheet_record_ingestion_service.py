@@ -8,6 +8,9 @@ import pytest
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
+from src.backend.services import (
+    spreadsheet_materialisation_guard_service as guard_mod,
+)
 from src.backend.services.spreadsheet_record_ingestion_service import (
     SpreadsheetPlanError,
     build_spreadsheet_batch_completion_evidence,
@@ -1304,6 +1307,88 @@ def test_materialisation_request_binds_reuse_to_canonical_existence() -> None:
         and len(slot["allowed_existing_concept_ids"]) == 1
         for slot in recovery["concept_slots"]
     )
+
+
+def test_materialisation_guard_assigns_source_row_evidence_to_exact_artefact_slot(
+) -> None:
+    batch = compile_spreadsheet_record_plan(
+        spreadsheet=extract_spreadsheet_evidence(_workbook_bytes()),
+        plan=_plan(),
+        file_copy_concept_id="#V#private_fixture_file_copy",
+    )
+    record = batch["records"][0]
+    guard = build_spreadsheet_kr_materialisation_guard(record=record)[
+        "materialisation_guard"
+    ]
+    source_group_contracts = {
+        row["source_group_key"]: row
+        for row in record["representation_readback_contract"][
+            "source_group_contracts"
+        ]
+    }
+
+    expected_fragments_by_slot_key: dict[str, set[str]] = {}
+    for group_key, rows in record["source_groups"].items():
+        group_contract = source_group_contracts[group_key]
+        artefact_type = group_contract["required_concept_type_id"]
+        identity_columns = group_contract["identity_columns"]
+        occurrences: dict[str, int] = {}
+        for row in rows:
+            row_identity = (
+                {
+                    "group": "root",
+                    "source_record_id": record["source_record_id"],
+                }
+                if group_key == "root"
+                else guard_mod._row_identity(
+                    row,
+                    identity_columns=identity_columns,
+                )
+            )
+            row_token = guard_mod._digest(row_identity)
+            occurrence = occurrences.get(row_token, 0)
+            occurrences[row_token] = occurrence + 1
+            expected_slot = guard_mod._slot(
+                record_id=record["source_record_id"],
+                role=f"{group_key}-artefact",
+                parent_id=artefact_type,
+                identity={
+                    "group": group_key,
+                    "row": row_identity,
+                    "occurrence": occurrence,
+                },
+            )
+            expected_fragments = {
+                field["representation_evidence_statement"]
+                for field in row["fields"]
+                if field.get("representation_evidence_statement")
+            }
+            expected_fragments_by_slot_key[expected_slot["key"]] = (
+                expected_fragments
+            )
+            observed_slot = next(
+                slot
+                for slot in guard["concept_slots"]
+                if slot["key"] == expected_slot["key"]
+            )
+            assert observed_slot["stable_name"] == expected_slot["stable_name"]
+            assert observed_slot["parent_id"] == artefact_type
+            assert set(
+                observed_slot.get("required_description_fragments") or []
+            ) == expected_fragments
+
+    observed_fragments_by_slot_key = {
+        slot["key"]: set(slot.get("required_description_fragments") or [])
+        for slot in guard["concept_slots"]
+        if slot.get("required_description_fragments")
+    }
+    assert observed_fragments_by_slot_key == expected_fragments_by_slot_key
+    all_assigned_fragments = [
+        fragment
+        for fragments in observed_fragments_by_slot_key.values()
+        for fragment in fragments
+    ]
+    assert len(all_assigned_fragments) == len(set(all_assigned_fragments))
 
 
 def test_batch_reconciliation_never_authorises_missing_record_deletion() -> None:

@@ -37,6 +37,18 @@ PROMPT = "#V#spreadsheet_programme_plan_prompt"
 AUTHORITY_FINGERPRINT_PLACEHOLDER = (
     "__SPREADSHEET_PROGRAMME_PROCESSING_AUTHORITY_FINGERPRINT__"
 )
+REVIEWED_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION = {
+    ITEM: {
+        "20": [
+            "57fc306fbaeaba2fd5cee655feb69c3cc4f1dbc3f84906781eb10ce23a8d3d07"
+        ]
+    },
+    MAIN: {
+        "20": [
+            "c9652b254172cf5c751fc4d98489610c6012f2ee8d4a50cda6b5b12a13507ed4"
+        ]
+    },
+}
 
 
 def support_concepts() -> list[dict[str, object]]:
@@ -1594,9 +1606,12 @@ def build_bundle() -> dict[str, object]:
     return {
         "family_id": "spreadsheet_programme_representation_workflow_seed_bundle",
         "schema_version": "repo_seed_workflow_bundle.v1",
-        "seed_version": "20",
+        "seed_version": "21",
         "source_tag": "JVNAUTOSCI-2592",
         "managed_by": "spreadsheet_programme_workflow_vontology_service",
+        "known_legacy_authority_payload_sha256_by_seed_version": (
+            REVIEWED_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION
+        ),
         "processing_authority_fingerprint": authority_fingerprint,
         "processing_authority_dependencies": authority_dependencies,
         "supported_action_ids": [

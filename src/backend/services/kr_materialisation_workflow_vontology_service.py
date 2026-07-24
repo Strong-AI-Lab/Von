@@ -8,17 +8,18 @@ through the shared repo-seed bootstrap pathway.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import concept_service
-from .text_value_service import upsert_singleton_text_relation
+from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
 from .workflow_prompt_authority_service import (
+    DEFAULT_PROMPT_CONTENT_PREDICATES,
     DEFAULT_PROMPT_TYPE_ID,
     WorkflowPromptConceptSpec,
     ensure_prompt_concept_support,
-    prompt_concept_has_content,
 )
 from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 from ..workflows import workflow_concept_authority_service as authority_service
@@ -76,6 +77,20 @@ _PROMPT_SEED_ASSET_PATHS = {
         / "prompt_kr_relationship_endpoint_resolution_seed.md"
     ),
 }
+_REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION = {
+    "8": {
+        PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID: {
+            "7": (
+                "cfadd26376e176bbd87bffce74cab180edcd12b03d1e10ca9ba2bfb7501ed8a2",
+            )
+        },
+        PROMPT_KR_RELATIONSHIP_ENDPOINT_RESOLUTION_ID: {
+            "7": (
+                "1600a90774e9a39d13d88809e581c631ac99f1e62b5dc16d2743027b692db6e5",
+            )
+        }
+    }
+}
 
 
 def _coerce_relationship_values(raw_value: Any) -> tuple[str, ...]:
@@ -125,6 +140,60 @@ def _load_prompt_seed_text(asset_path: Path, *, error_code: str) -> str:
     return prompt_text
 
 
+def _load_repo_seed_version() -> str:
+    payload = json.loads(_REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("kr_materialisation_seed_bundle_invalid")
+    seed_version = str(payload.get("seed_version") or "").strip()
+    if not seed_version:
+        raise ValueError("kr_materialisation_seed_version_missing")
+    return seed_version
+
+
+def _prompt_content_sha256(text: str) -> str:
+    return hashlib.sha256(str(text).strip().encode("utf-8")).hexdigest()
+
+
+def _load_prompt_content_values(prompt_id: str) -> tuple[str, ...]:
+    rows = get_texts_for_concept(
+        subject_concept_id=prompt_id,
+        limit=16,
+    )
+    values: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        predicate = str(row.get("predicate") or "").strip()
+        if predicate not in DEFAULT_PROMPT_CONTENT_PREDICATES:
+            continue
+        lang = str(row.get("lang") or "en-NZ").strip() or "en-NZ"
+        if lang != "en-NZ":
+            continue
+        text = str(row.get("text") or "").strip()
+        if text:
+            values.add(text)
+    return tuple(sorted(values))
+
+
+def _reviewed_prompt_source_seed_version(
+    *,
+    target_seed_version: str,
+    prompt_id: str,
+    live_content_sha256: str,
+) -> str | None:
+    target_migrations = (
+        _REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION.get(
+            target_seed_version
+        )
+        or {}
+    )
+    source_versions = target_migrations.get(prompt_id) or {}
+    for source_seed_version, digests in source_versions.items():
+        if live_content_sha256 in digests:
+            return source_seed_version
+    return None
+
+
 def _ensure_kr_materialisation_prompt_support(
     *,
     force_prompt_seed: bool = False,
@@ -155,37 +224,127 @@ def _ensure_kr_materialisation_prompt_support(
         provenance_source=_MANAGED_BY,
     )
 
-    seeded_prompt_ids: list[str] = []
-    for prompt_id, asset_path in _PROMPT_SEED_ASSET_PATHS.items():
-        if force_prompt_seed or not prompt_concept_has_content(prompt_id):
-            upsert_singleton_text_relation(
-                subject_concept_id=prompt_id,
-                predicate="hasContent",
-                text=_load_prompt_seed_text(
-                    asset_path,
-                    error_code=f"kr_materialisation_prompt_seed_missing:{prompt_id}",
-                ),
-                lang="en-NZ",
-                context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
-                garbage_collect=True,
-            )
-            seeded_prompt_ids.append(prompt_id)
-
+    target_seed_version = _load_repo_seed_version()
+    desired_content_by_prompt_id = {
+        prompt_id: _load_prompt_seed_text(
+            asset_path,
+            error_code=f"kr_materialisation_prompt_seed_missing:{prompt_id}",
+        )
+        for prompt_id, asset_path in _PROMPT_SEED_ASSET_PATHS.items()
+    }
     report = dict(report)
     errors_by_target = dict(report.get("errors_by_target") or {})
-    missing_content_prompt_ids = list(report.get("missing_content_prompt_ids") or [])
-    validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-    for prompt_id in _PROMPT_SEED_ASSET_PATHS:
-        if not prompt_concept_has_content(prompt_id):
+    planned_refresh_reason_by_prompt_id: dict[str, str] = {}
+    migration_source_seed_version_by_prompt_id: dict[str, str] = {}
+    preserved_drift_prompt_ids: list[str] = []
+    observed_content_sha256_by_prompt_id: dict[str, str | None] = {}
+    target_content_sha256_by_prompt_id = {
+        prompt_id: _prompt_content_sha256(text)
+        for prompt_id, text in desired_content_by_prompt_id.items()
+    }
+
+    for prompt_id, desired_content in desired_content_by_prompt_id.items():
+        support_error = str(errors_by_target.get(prompt_id) or "")
+        if support_error and support_error != "prompt_content_missing":
             continue
+        try:
+            live_values = _load_prompt_content_values(prompt_id)
+        except Exception as exc:
+            errors_by_target[prompt_id] = (
+                f"kr_materialisation_prompt_authority_read_failed:{exc}"
+            )
+            observed_content_sha256_by_prompt_id[prompt_id] = None
+            continue
+
+        live_sha256 = (
+            _prompt_content_sha256(live_values[0])
+            if len(live_values) == 1
+            else None
+        )
+        observed_content_sha256_by_prompt_id[prompt_id] = live_sha256
         errors_by_target.pop(prompt_id, None)
-        missing_content_prompt_ids = [
-            missing_prompt_id
-            for missing_prompt_id in missing_content_prompt_ids
-            if missing_prompt_id != prompt_id
-        ]
-        if prompt_id not in validated_prompt_ids:
+        if force_prompt_seed:
+            planned_refresh_reason_by_prompt_id[prompt_id] = "forced_refresh"
+            continue
+        if not live_values:
+            planned_refresh_reason_by_prompt_id[prompt_id] = "missing_content"
+            continue
+        if live_values == (desired_content,):
+            continue
+        source_seed_version = (
+            _reviewed_prompt_source_seed_version(
+                target_seed_version=target_seed_version,
+                prompt_id=prompt_id,
+                live_content_sha256=live_sha256,
+            )
+            if live_sha256
+            else None
+        )
+        if source_seed_version:
+            planned_refresh_reason_by_prompt_id[prompt_id] = (
+                "exact_reviewed_legacy_migration"
+            )
+            migration_source_seed_version_by_prompt_id[prompt_id] = (
+                source_seed_version
+            )
+            continue
+        errors_by_target[prompt_id] = (
+            "kr_materialisation_prompt_authority_requires_explicit_migration"
+        )
+        preserved_drift_prompt_ids.append(prompt_id)
+
+    seeded_prompt_ids: list[str] = []
+    migrated_prompt_ids: list[str] = []
+    if not errors_by_target:
+        for prompt_id, refresh_reason in planned_refresh_reason_by_prompt_id.items():
+            try:
+                upsert_singleton_text_relation(
+                    subject_concept_id=prompt_id,
+                    predicate="hasContent",
+                    text=desired_content_by_prompt_id[prompt_id],
+                    lang="en-NZ",
+                    context={
+                        "jira": _SOURCE_TAG,
+                        "source": _MANAGED_BY,
+                        "prompt_seed_version": target_seed_version,
+                        "refresh_reason": refresh_reason,
+                    },
+                    garbage_collect=True,
+                )
+            except Exception as exc:
+                errors_by_target[prompt_id] = (
+                    f"kr_materialisation_prompt_authority_write_failed:{exc}"
+                )
+                continue
+            seeded_prompt_ids.append(prompt_id)
+            if refresh_reason == "exact_reviewed_legacy_migration":
+                migrated_prompt_ids.append(prompt_id)
+
+    validated_prompt_ids: list[str] = []
+    missing_content_prompt_ids: list[str] = []
+    for prompt_id, desired_content in desired_content_by_prompt_id.items():
+        try:
+            live_values = _load_prompt_content_values(prompt_id)
+        except Exception as exc:
+            errors_by_target[prompt_id] = (
+                f"kr_materialisation_prompt_authority_readback_failed:{exc}"
+            )
+            continue
+        observed_content_sha256_by_prompt_id[prompt_id] = (
+            _prompt_content_sha256(live_values[0])
+            if len(live_values) == 1
+            else None
+        )
+        if live_values == (desired_content,):
             validated_prompt_ids.append(prompt_id)
+            errors_by_target.pop(prompt_id, None)
+            continue
+        if not live_values:
+            missing_content_prompt_ids.append(prompt_id)
+        errors_by_target.setdefault(
+            prompt_id,
+            "kr_materialisation_prompt_authority_readback_mismatch",
+        )
 
     report["validated_prompt_ids"] = validated_prompt_ids
     report["errors_by_target"] = errors_by_target
@@ -199,8 +358,18 @@ def _ensure_kr_materialisation_prompt_support(
     }
     report["source"] = _SOURCE_TAG
     report["managed_by"] = _MANAGED_BY
+    report["prompt_seed_version"] = target_seed_version
     report["seeded_prompt_ids"] = seeded_prompt_ids
     report["seeded_prompt_count"] = len(seeded_prompt_ids)
+    report["migrated_prompt_ids"] = migrated_prompt_ids
+    report["migration_source_seed_version_by_prompt_id"] = (
+        migration_source_seed_version_by_prompt_id
+    )
+    report["preserved_drift_prompt_ids"] = preserved_drift_prompt_ids
+    report["observed_content_sha256_by_prompt_id"] = (
+        observed_content_sha256_by_prompt_id
+    )
+    report["target_content_sha256_by_prompt_id"] = target_content_sha256_by_prompt_id
     report["success"] = not errors_by_target and not missing_content_prompt_ids
     return report
 
@@ -286,6 +455,21 @@ def bootstrap_canonical_kr_materialisation_workflows(
     prompt_support = _ensure_kr_materialisation_prompt_support(
         force_prompt_seed=bool(force_republish)
     )
+    if not bool(prompt_support.get("success")):
+        return {
+            "success": False,
+            "workflow_ids": list(requested_ids),
+            "prompt_support": prompt_support,
+            "publication": {
+                "skipped": True,
+                "skip_reason": "kr_materialisation_prompt_authority_blocked",
+                "counts": {
+                    "workflows_targeted": len(requested_ids),
+                    "workflows_published": 0,
+                    "errors": 1,
+                },
+            },
+        }
     report = dict(
         bootstrap_repo_seed_workflow_bundle(
             asset_path=_REPO_SEED_ASSET_PATH,
