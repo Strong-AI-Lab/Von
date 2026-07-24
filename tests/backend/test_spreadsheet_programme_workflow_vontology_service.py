@@ -343,7 +343,7 @@ def test_processing_authority_fingerprint_tracks_exact_kr_dependency(
     from scripts import generate_spreadsheet_programme_workflow_seed as generator
 
     baseline = generator.build_bundle()
-    assert baseline["seed_version"] == "17"
+    assert baseline["seed_version"] == "18"
     baseline_dependency = baseline["processing_authority_dependencies"][
         "kr_materialisation_workflow_seed_bundle"
     ]
@@ -352,7 +352,7 @@ def test_processing_authority_fingerprint_tracks_exact_kr_dependency(
     )
     assert baseline_dependency["family_id"] == source_payload["family_id"]
     assert baseline_dependency["seed_version"] == source_payload["seed_version"]
-    assert baseline_dependency["seed_version"] == "4"
+    assert baseline_dependency["seed_version"] == "5"
     assert baseline_dependency["canonical_payload_sha256"].startswith("sha256:")
 
     changed_payload = dict(source_payload)

@@ -161,7 +161,7 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
 def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
-    assert bundle["seed_version"] == "4"
+    assert bundle["seed_version"] == "5"
     workflow = next(
         row
         for row in bundle["workflows"]
@@ -231,6 +231,14 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
         )
         for binding in concept_item_states["create_concept"]["static_input_bindings"]
     )
+    description_outputs = {
+        row["context_key"]: row["tool_output_field"]
+        for row in concept_item_states["attach_description"][
+            "tool_output_mapping_specs"
+        ]
+    }
+    assert description_outputs["kr_description_relation_id"] == "kept_relation_id"
+    assert description_outputs["kr_description_text_value_id"] == "text_value_id"
     concept_iteration_bindings = dict(
         states["materialise_concepts"]["static_input_bindings"]
     )
