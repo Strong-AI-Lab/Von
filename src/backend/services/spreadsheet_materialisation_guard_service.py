@@ -112,6 +112,25 @@ def _entity_identity(
     return [(column, values_by_column[column]) for column in identity_columns]
 
 
+def _required_description_fragments(row: Mapping[str, Any]) -> list[str]:
+    raw_fields = row.get("fields")
+    if not isinstance(raw_fields, Sequence) or isinstance(
+        raw_fields, (str, bytes, bytearray)
+    ):
+        return []
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for raw_field in raw_fields:
+        if not isinstance(raw_field, Mapping):
+            continue
+        fragment = _text(raw_field.get("representation_evidence_statement"))
+        if not fragment or fragment in seen:
+            continue
+        seen.add(fragment)
+        fragments.append(fragment)
+    return fragments
+
+
 def _slot(
     *,
     record_id: str,
@@ -121,6 +140,7 @@ def _slot(
     stable_name: str | None = None,
     identity_namespace: str | None = None,
     reusable_existing_concept_ids: set[str] | None = None,
+    required_description_fragments: Sequence[str] = (),
 ) -> dict[str, Any]:
     namespace = identity_namespace or record_id
     token = _digest(
@@ -144,7 +164,7 @@ def _slot(
     else:
         allowed_decisions = ["create"]
         allowed_existing_concept_ids = []
-    return {
+    slot = {
         "key": f"slot_{token[:24]}",
         "stable_name": resolved_name,
         "target_kind": "instance",
@@ -153,6 +173,14 @@ def _slot(
         "allowed_existing_concept_ids": allowed_existing_concept_ids,
         "allow_unreferenced": False,
     }
+    fragments = [
+        _text(fragment)
+        for fragment in required_description_fragments
+        if _text(fragment)
+    ]
+    if fragments:
+        slot["required_description_fragments"] = fragments
+    return slot
 
 
 def build_spreadsheet_kr_materialisation_guard(
@@ -267,6 +295,7 @@ def build_spreadsheet_kr_materialisation_guard(
         parent_id: str,
         identity: Any,
         identity_namespace: str | None = None,
+        required_description_fragments: Sequence[str] = (),
     ) -> dict[str, Any]:
         if parent_id not in allowed_parent_ids:
             raise ValueError("spreadsheet_materialisation_guard_parent_not_authorised")
@@ -277,9 +306,16 @@ def build_spreadsheet_kr_materialisation_guard(
             identity=identity,
             identity_namespace=identity_namespace,
             reusable_existing_concept_ids=reusable_ids,
+            required_description_fragments=required_description_fragments,
         )
         existing = slots_by_key.get(str(created["key"]))
         if existing is not None:
+            if existing.get("required_description_fragments") != created.get(
+                "required_description_fragments"
+            ):
+                raise ValueError(
+                    "spreadsheet_materialisation_guard_description_authority_conflict"
+                )
             return existing
         slots.append(created)
         slots_by_key[str(created["key"])] = created
@@ -376,6 +412,16 @@ def build_spreadsheet_kr_materialisation_guard(
                 row_token = _digest(row_identity)
                 occurrence = occurrences[row_token]
                 occurrences[row_token] += 1
+                required_description_fragments = (
+                    _required_description_fragments(raw_row)
+                )
+                if not required_description_fragments:
+                    return {
+                        "success": False,
+                        "error_code": (
+                            "spreadsheet_materialisation_guard_evidence_missing"
+                        ),
+                    }
                 artefact = add_slot(
                     role=f"{group_key}-artefact",
                     parent_id=artefact_type,
@@ -384,6 +430,9 @@ def build_spreadsheet_kr_materialisation_guard(
                         "row": row_identity,
                         "occurrence": occurrence,
                     },
+                    required_description_fragments=(
+                        required_description_fragments
+                    ),
                 )
                 other = endpoint_for_type(
                     concept_type_id=other_type,

@@ -2,11 +2,16 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "7",
+  "seed_version": "8",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#kr_design_concept_materialisation_item_workflow": {
       "6": [
         "c027e848fe7860016bdc91fd1efa5809c3cfb57e667eb021bc638d1cfb34d8d8"
+      ]
+    },
+    "#V#kr_design_materialisation_workflow": {
+      "7": [
+        "217607c88af869b891bba73bd4f776bec1297df91445c71ebff8aa84cbd41f1e"
       ]
     }
   },
@@ -1530,6 +1535,10 @@
                   "label": "Authenticated organisation concept"
                 },
                 {
+                  "context_key": "kr_materialisation_guard",
+                  "label": "Caller-authored materialisation guard"
+                },
+                {
                   "context_key": "turn_expected_outcome_contract_state",
                   "label": "Expected outcome contract"
                 },
@@ -1832,7 +1841,7 @@
             "execution_mode": "llm",
             "llm_policy": {
               "allowed_tools": [
-                "search_concepts",
+                "concept_exists",
                 "fetch_concept"
               ],
               "context_fields": [
@@ -1847,6 +1856,14 @@
                 {
                   "context_key": "kr_materialisation_plan_summary",
                   "label": "Materialisation plan summary"
+                },
+                {
+                  "context_key": "kr_materialisation_guard",
+                  "label": "Caller-authored materialisation guard"
+                },
+                {
+                  "context_key": "kr_materialisation_guard_passed",
+                  "label": "Materialisation guard validation result"
                 },
                 {
                   "context_key": "prompt",
@@ -1871,15 +1888,10 @@
               "suppress_raw_io_logging": true,
               "tool_argument_defaults": {
                 "fetch_concept": {
-                  "include_relations_any_arg": true,
-                  "include_text_relations_arg1": true,
-                  "limit": 50
-                },
-                "search_concepts": {
-                  "include_description": true,
-                  "include_hierarchy_path": true,
-                  "limit": 10,
-                  "match_type": "substring"
+                  "include_concept_preview": false,
+                  "include_relations_any_arg": false,
+                  "include_text_relations_arg1": false,
+                  "limit": 1
                 }
               },
               "tool_mode": "allowed"

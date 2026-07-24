@@ -18,6 +18,9 @@ from src.backend.services.spreadsheet_record_ingestion_service import (
 
 
 def _source_row(**values: str) -> dict:
+    row_identity = "|".join(
+        f"{column}={value}" for column, value in values.items()
+    )
     return {
         "sheet": "Synthetic assignments",
         "fields": [
@@ -26,6 +29,9 @@ def _source_row(**values: str) -> dict:
                 "value": value,
                 "value_type": "s",
                 "content_is_untrusted": True,
+                "representation_evidence_statement": (
+                    f"Synthetic row {row_identity}; {column}={value}."
+                ),
             }
             for column, value in values.items()
         ],
@@ -182,6 +188,11 @@ def _relationship_specs_for_guard(guard: dict) -> list[dict]:
             spec["target_id"] = target_fixed_ids[0]
         specs.append(spec)
     return specs
+
+
+def _description_for_slot(slot: dict) -> str:
+    fragments = list(slot.get("required_description_fragments") or ())
+    return " ".join(["Synthetic evidence.", *fragments])
 
 
 def _compiled_workbook_bytes() -> bytes:
@@ -387,12 +398,12 @@ def test_declared_dataset_entity_identity_reuses_only_generated_stable_person() 
             "target_name": slot["stable_name"],
             "target_kind": slot["target_kind"],
             "parent_id": slot["parent_id"],
-            "description_text": "Synthetic evidence.",
+            "description_text": _description_for_slot(slot),
             "concepts": [
                 {
                     "name": slot["stable_name"],
                     "kind": "instance",
-                    "description": "Synthetic evidence.",
+                    "description": _description_for_slot(slot),
                 }
             ],
         }

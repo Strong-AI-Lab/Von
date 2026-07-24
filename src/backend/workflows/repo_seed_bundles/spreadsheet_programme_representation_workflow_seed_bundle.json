@@ -1,16 +1,28 @@
 {
   "family_id": "spreadsheet_programme_representation_workflow_seed_bundle",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#spreadsheet_phd_programme_representation_workflow": {
+      "20": [
+        "c9652b254172cf5c751fc4d98489610c6012f2ee8d4a50cda6b5b12a13507ed4"
+      ]
+    },
+    "#V#spreadsheet_record_representation_item_workflow": {
+      "20": [
+        "57fc306fbaeaba2fd5cee655feb69c3cc4f1dbc3f84906781eb10ce23a8d3d07"
+      ]
+    }
+  },
   "managed_by": "spreadsheet_programme_workflow_vontology_service",
   "processing_authority_dependencies": {
     "kr_materialisation_workflow_seed_bundle": {
-      "canonical_payload_sha256": "sha256:9b476fe39cd6595890adb83ab80480ada00329bbd2461b693b453cdf10e90536",
+      "canonical_payload_sha256": "sha256:aa415f44b6188f052d6dc51d1b14a6bed0e0c1729d3e9773235c15c2228cf706",
       "family_id": "#V#kr_design_materialisation_workflow_family",
-      "seed_version": "7"
+      "seed_version": "8"
     }
   },
-  "processing_authority_fingerprint": "sha256:3f7d250eec0d520b2658d63493285776c21c123ccec3676e4eb561217a1c4f60",
+  "processing_authority_fingerprint": "sha256:f41004704a701bd2104e127562053df9b7a901bb64bcf3e1174a540ece209061",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "20",
+  "seed_version": "21",
   "source_tag": "JVNAUTOSCI-2592",
   "support_concepts": [
     {
@@ -306,7 +318,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:3f7d250eec0d520b2658d63493285776c21c123ccec3676e4eb561217a1c4f60"
+                "value": "sha256:f41004704a701bd2104e127562053df9b7a901bb64bcf3e1174a540ece209061"
               }
             ],
             "tool_output_mapping_specs": [
@@ -702,7 +714,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:3f7d250eec0d520b2658d63493285776c21c123ccec3676e4eb561217a1c4f60"
+                "value": "sha256:f41004704a701bd2104e127562053df9b7a901bb64bcf3e1174a540ece209061"
               }
             ],
             "tool_output_mapping_specs": [
@@ -776,7 +788,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:3f7d250eec0d520b2658d63493285776c21c123ccec3676e4eb561217a1c4f60"
+                "value": "sha256:f41004704a701bd2104e127562053df9b7a901bb64bcf3e1174a540ece209061"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1234,7 +1246,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:3f7d250eec0d520b2658d63493285776c21c123ccec3676e4eb561217a1c4f60"
+                "value": "sha256:f41004704a701bd2104e127562053df9b7a901bb64bcf3e1174a540ece209061"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1557,7 +1569,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:3f7d250eec0d520b2658d63493285776c21c123ccec3676e4eb561217a1c4f60"
+                "value": "sha256:f41004704a701bd2104e127562053df9b7a901bb64bcf3e1174a540ece209061"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1625,7 +1637,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:3f7d250eec0d520b2658d63493285776c21c123ccec3676e4eb561217a1c4f60"
+                "value": "sha256:f41004704a701bd2104e127562053df9b7a901bb64bcf3e1174a540ece209061"
               }
             ],
             "tool_output_mapping_specs": [

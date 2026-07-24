@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, MutableMapping, Sequence
+import re
 from typing import Any
 
 
@@ -17,6 +18,9 @@ GUARDED_CREATE_DUPLICATE_RESOLUTION_MODE = "canonical_id_only"
 _MAX_GUARD_CONCEPT_SLOTS = 256
 _MAX_GUARD_RELATIONSHIP_RULES = 512
 _MAX_DESCRIPTION_CHARS = 100_000
+_MAX_REQUIRED_DESCRIPTION_FRAGMENTS = 512
+_MAX_REQUIRED_DESCRIPTION_FRAGMENT_CHARS = 20_000
+_MAX_REQUIRED_DESCRIPTION_FRAGMENT_TOTAL_CHARS = 1_000_000
 
 
 def _text(value: Any) -> str:
@@ -81,6 +85,8 @@ def _normalise_contract(
         return None, "kr_materialisation_guard_contract_bounds_invalid"
 
     slots: dict[str, dict[str, Any]] = {}
+    description_fragment_owner_by_value: dict[str, str] = {}
+    description_fragment_total_chars = 0
     for raw_slot in raw_slots:
         if not isinstance(raw_slot, Mapping):
             return None, "kr_materialisation_guard_concept_slot_invalid"
@@ -98,6 +104,47 @@ def _normalise_contract(
             for item in _sequence(raw_slot.get("allowed_existing_concept_ids"))
             if _text(item)
         }
+        raw_required_description_fragments = raw_slot.get(
+            "required_description_fragments"
+        )
+        if (
+            raw_required_description_fragments is not None
+            and (
+                not isinstance(raw_required_description_fragments, Sequence)
+                or isinstance(
+                    raw_required_description_fragments,
+                    (str, bytes, bytearray),
+                )
+            )
+        ):
+            return None, "kr_materialisation_guard_concept_slot_invalid"
+        required_description_fragments: list[str] = []
+        seen_description_fragments: set[str] = set()
+        for raw_fragment in _sequence(raw_required_description_fragments):
+            fragment = _text(raw_fragment) if isinstance(raw_fragment, str) else ""
+            if (
+                not fragment
+                or len(fragment) > _MAX_REQUIRED_DESCRIPTION_FRAGMENT_CHARS
+                or fragment in seen_description_fragments
+                or fragment in description_fragment_owner_by_value
+                or any(
+                    fragment in existing_fragment
+                    or existing_fragment in fragment
+                    for existing_fragment in description_fragment_owner_by_value
+                )
+            ):
+                return None, "kr_materialisation_guard_concept_slot_invalid"
+            seen_description_fragments.add(fragment)
+            required_description_fragments.append(fragment)
+            description_fragment_owner_by_value[fragment] = key
+            description_fragment_total_chars += len(fragment)
+        if (
+            len(description_fragment_owner_by_value)
+            > _MAX_REQUIRED_DESCRIPTION_FRAGMENTS
+            or description_fragment_total_chars
+            > _MAX_REQUIRED_DESCRIPTION_FRAGMENT_TOTAL_CHARS
+        ):
+            return None, "kr_materialisation_guard_contract_bounds_invalid"
         if (
             not key
             or key in slots
@@ -115,6 +162,9 @@ def _normalise_contract(
             "allowed_decisions": allowed_decisions,
             "allowed_existing_concept_ids": allowed_existing_ids,
             "allow_unreferenced": bool(raw_slot.get("allow_unreferenced")),
+            "required_description_fragments": tuple(
+                required_description_fragments
+            ),
         }
 
     fixed_ids = {
@@ -216,6 +266,9 @@ def _normalise_contract(
             for item in _sequence(guard_contract.get("require_fixed_ids_referenced"))
             if _text(item)
         },
+        "description_fragment_owner_by_value": (
+            description_fragment_owner_by_value
+        ),
     }, None
 
 
@@ -241,6 +294,7 @@ def _validate_concept_specs(
         return None, "kr_materialisation_guard_concept_count_rejected"
 
     specs: dict[str, Mapping[str, Any]] = {}
+    description_by_key: dict[str, str] = {}
     for raw_spec in raw_specs:
         if not isinstance(raw_spec, Mapping):
             return None, "kr_materialisation_guard_concept_spec_invalid"
@@ -294,9 +348,36 @@ def _validate_concept_specs(
             ):
                 return None, "kr_materialisation_guard_reuse_payload_rejected"
         specs[key] = raw_spec
+        description_by_key[key] = description
 
     if bool(contract["require_all_slots"]) and set(specs) != set(slots):
         return None, "kr_materialisation_guard_concept_slots_incomplete"
+    fragment_owner_by_value = contract.get("description_fragment_owner_by_value")
+    if isinstance(fragment_owner_by_value, Mapping) and fragment_owner_by_value:
+        ordered_fragments = sorted(
+            (
+                str(fragment)
+                for fragment in fragment_owner_by_value
+                if isinstance(fragment, str) and fragment
+            ),
+            key=lambda fragment: (-len(fragment), fragment),
+        )
+        fragment_pattern = re.compile(
+            "(?=("
+            + "|".join(re.escape(fragment) for fragment in ordered_fragments)
+            + "))"
+        )
+        observed_counts: Counter[str] = Counter()
+        for key, description in description_by_key.items():
+            for match in fragment_pattern.finditer(description):
+                fragment = match.group(1)
+                if fragment_owner_by_value.get(fragment) != key:
+                    return None, (
+                        "kr_materialisation_guard_description_fragment_rejected"
+                    )
+                observed_counts[fragment] += 1
+        if any(observed_counts[fragment] != 1 for fragment in ordered_fragments):
+            return None, "kr_materialisation_guard_description_fragment_rejected"
     return specs, None
 
 

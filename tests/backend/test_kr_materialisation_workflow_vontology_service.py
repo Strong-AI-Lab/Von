@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from scripts import publish_kr_materialisation_workflows as publish_cli
 from src.backend.services import kr_materialisation_workflow_vontology_service as mod
+from src.backend.services import workflow_repo_seed_bootstrap as seed_bootstrap
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     WorkflowEnvironment,
@@ -117,6 +119,28 @@ def _validate_context_set_writes(
     return context
 
 
+def _prompt_seed_text_by_id() -> dict[str, str]:
+    return {
+        mod.PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID: (
+            _PLAN_PROMPT_SEED_PATH.read_text(encoding="utf-8").strip()
+        ),
+        mod.PROMPT_KR_RELATIONSHIP_ENDPOINT_RESOLUTION_ID: (
+            _RELATIONSHIP_PROMPT_SEED_PATH.read_text(encoding="utf-8").strip()
+        ),
+    }
+
+
+def _base_prompt_support_report() -> dict[str, Any]:
+    return {
+        "success": True,
+        "created_prompt_ids": [],
+        "linked_workflow_ids": [],
+        "validated_prompt_ids": [],
+        "missing_content_prompt_ids": [],
+        "errors_by_target": {},
+    }
+
+
 def test_kr_seed_bundle_uses_prompt_concepts_not_inline_prompt_text() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
     rendered_bundle = json.dumps(bundle, sort_keys=True)
@@ -157,7 +181,19 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
     assert (
         "Return JSON only with keys: decision ('materialise' or 'block')" in plan_prompt
     )
+    assert "`required_description_fragments` verbatim exactly once" in plan_prompt
+    assert "copy it into no other slot" in plan_prompt
     assert "Resolve KR relationship endpoint references" in relationship_prompt
+    assert "use concept_exists for the bounded existence and access check" in (
+        relationship_prompt
+    )
+    assert "request no incoming structural relations, text relations, or concept previews" in (
+        relationship_prompt
+    )
+    assert "Do not use broad lexical search in this stage" in relationship_prompt
+    assert "Block and report that exact-ID lookup failure instead" in (
+        relationship_prompt
+    )
     assert (
         "Return JSON only with keys: decision ('assert', 'skip', or 'block')"
         in relationship_prompt
@@ -166,14 +202,36 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
 def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
-    assert bundle["seed_version"] == "7"
+    assert bundle["seed_version"] == "8"
     assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
         mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID: {
             "6": [
                 "c027e848fe7860016bdc91fd1efa5809c3cfb57e667eb021bc638d1cfb34d8d8"
             ]
+        },
+        mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID: {
+            "7": [
+                "217607c88af869b891bba73bd4f776bec1297df91445c71ebff8aa84cbd41f1e"
+            ]
         }
     }
+    assert (
+        mod._REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION
+        == {
+            "8": {
+                mod.PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID: {
+                    "7": (
+                        "cfadd26376e176bbd87bffce74cab180edcd12b03d1e10ca9ba2bfb7501ed8a2",
+                    )
+                },
+                mod.PROMPT_KR_RELATIONSHIP_ENDPOINT_RESOLUTION_ID: {
+                    "7": (
+                        "1600a90774e9a39d13d88809e581c631ac99f1e62b5dc16d2743027b692db6e5",
+                    )
+                }
+            }
+        }
+    )
     workflow = next(
         row
         for row in bundle["workflows"]
@@ -301,6 +359,103 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     ]
 
 
+def test_kr_relationship_resolution_uses_bounded_exact_endpoint_checks() -> None:
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    plan_step = _publication_step(
+        bundle,
+        workflow_id=mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID,
+        state_id="extract_kr_materialisation_plan",
+    )
+    resolution_step = _publication_step(
+        bundle,
+        workflow_id=mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID,
+        state_id="resolve_relationship_specs",
+    )
+
+    plan_policy = plan_step["llm_policy"]
+    assert plan_policy["allowed_tools"] == ["search_concepts", "fetch_concept"]
+    assert plan_policy["required_tools"] == ["search_concepts"]
+    assert plan_policy["tool_argument_defaults"]["fetch_concept"] == {
+        "include_relations_any_arg": True,
+        "include_text_relations_arg1": True,
+        "limit": 50,
+    }
+    plan_context_fields = {
+        row["context_key"] for row in plan_policy["context_fields"]
+    }
+    assert "kr_materialisation_guard" in plan_context_fields
+
+    resolution_policy = resolution_step["llm_policy"]
+    assert resolution_policy["allowed_tools"] == ["concept_exists", "fetch_concept"]
+    assert resolution_policy["tool_argument_defaults"]["fetch_concept"] == {
+        "include_concept_preview": False,
+        "include_relations_any_arg": False,
+        "include_text_relations_arg1": False,
+        "limit": 1,
+    }
+    assert "search_concepts" not in resolution_policy["tool_argument_defaults"]
+    context_fields = {
+        row["context_key"] for row in resolution_policy["context_fields"]
+    }
+    assert {
+        "kr_materialisation_guard",
+        "kr_materialisation_guard_passed",
+    }.issubset(context_fields)
+
+
+def test_kr_relationship_resolution_policy_round_trips_and_detects_v7_drift() -> None:
+    raw_bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    bundle = authority_service.load_repo_seed_workflow_bundle(_SEED_BUNDLE_PATH)
+    workflow_id = mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID
+    expected_spec = bundle["publication_specs"][workflow_id]
+    definition = authority_service._build_definition_from_publication_spec(
+        workflow_id=workflow_id,
+        spec=expected_spec,
+    )
+    exported = export_service._build_publication_spec_payload_from_definition(
+        workflow_id=workflow_id,
+        definition=definition,
+    )
+    exported_steps = {step["state_id"]: step for step in exported["steps"]}
+    raw_policy = _publication_step(
+        raw_bundle,
+        workflow_id=workflow_id,
+        state_id="resolve_relationship_specs",
+    )["llm_policy"]
+
+    assert exported_steps["resolve_relationship_specs"]["llm_policy"] == raw_policy
+
+    legacy_policy = json.loads(json.dumps(raw_policy))
+    legacy_policy["allowed_tools"] = ["search_concepts", "fetch_concept"]
+    legacy_policy["context_fields"] = [
+        row
+        for row in legacy_policy["context_fields"]
+        if row["context_key"]
+        not in {"kr_materialisation_guard", "kr_materialisation_guard_passed"}
+    ]
+    legacy_policy["tool_argument_defaults"]["fetch_concept"] = {
+        "include_relations_any_arg": True,
+        "include_text_relations_arg1": True,
+        "limit": 50,
+    }
+    legacy_steps = tuple(
+        replace(step, llm_policy=legacy_policy)
+        if step.state_id == "resolve_relationship_specs"
+        else step
+        for step in expected_spec.steps
+    )
+    legacy_definition = authority_service._build_definition_from_publication_spec(
+        workflow_id=workflow_id,
+        spec=replace(expected_spec, steps=legacy_steps),
+    )
+
+    assert not seed_bootstrap._materialisation_matches_publication_spec(
+        loaded_definition=legacy_definition,
+        workflow_id=workflow_id,
+        publication_spec=expected_spec,
+    )
+
+
 def test_kr_seed_suppresses_event_fan_out_only_for_owned_mutations() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
     suppression_states: set[tuple[str, str]] = set()
@@ -426,6 +581,205 @@ def test_kr_seed_bundle_validates_as_workflow_contracts() -> None:
     assert report["invalid_workflow_ids"] == []
     for validation in report["validation_by_workflow_id"].values():
         assert validation["valid"] is True
+
+
+def test_normal_bootstrap_migrates_exact_reviewed_v7_prompt_content(
+    monkeypatch,
+) -> None:
+    desired_by_id = _prompt_seed_text_by_id()
+    legacy_by_id = {
+        prompt_id: f"reviewed v7 content for {prompt_id}"
+        for prompt_id in desired_by_id
+    }
+    live_by_id = {
+        prompt_id: (legacy_content,)
+        for prompt_id, legacy_content in legacy_by_id.items()
+    }
+    writes: list[dict[str, Any]] = []
+    publication_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "ensure_prompt_concept_support",
+        lambda **_kwargs: _base_prompt_support_report(),
+    )
+    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "8")
+    monkeypatch.setattr(
+        mod,
+        "_REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION",
+        {
+            "8": {
+                prompt_id: {
+                    "7": (mod._prompt_content_sha256(legacy_content),)
+                }
+                for prompt_id, legacy_content in legacy_by_id.items()
+            }
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_prompt_content_values",
+        lambda prompt_id: live_by_id.get(prompt_id, ()),
+    )
+
+    def fake_upsert(**kwargs: Any) -> None:
+        writes.append(dict(kwargs))
+        live_by_id[str(kwargs["subject_concept_id"])] = (
+            str(kwargs["text"]).strip(),
+        )
+
+    def fake_bootstrap(**kwargs: Any) -> dict[str, Any]:
+        publication_calls.append(dict(kwargs))
+        return {
+            "publication": {
+                "counts": {
+                    "errors": 0,
+                    "workflows_published": len(
+                        kwargs.get("target_workflow_ids") or ()
+                    ),
+                }
+            }
+        }
+
+    monkeypatch.setattr(mod, "upsert_singleton_text_relation", fake_upsert)
+    monkeypatch.setattr(
+        mod,
+        "bootstrap_repo_seed_workflow_bundle",
+        fake_bootstrap,
+    )
+
+    report = mod.bootstrap_canonical_kr_materialisation_workflows()
+
+    assert report["success"] is True
+    assert len(publication_calls) == 1
+    assert publication_calls[0]["force_republish"] is False
+    assert {
+        write["subject_concept_id"] for write in writes
+    } == set(desired_by_id)
+    assert all(
+        write["context"]["refresh_reason"]
+        == "exact_reviewed_legacy_migration"
+        for write in writes
+    )
+    prompt_support = report["prompt_support"]
+    assert set(prompt_support["migrated_prompt_ids"]) == set(desired_by_id)
+    assert prompt_support["migration_source_seed_version_by_prompt_id"] == {
+        prompt_id: "7" for prompt_id in desired_by_id
+    }
+    assert live_by_id == {
+        prompt_id: (desired_content,)
+        for prompt_id, desired_content in desired_by_id.items()
+    }
+
+
+def test_arbitrary_prompt_edit_is_preserved_and_blocks_workflow_publication(
+    monkeypatch,
+) -> None:
+    desired_by_id = _prompt_seed_text_by_id()
+    edited_prompt_id = mod.PROMPT_KR_RELATIONSHIP_ENDPOINT_RESOLUTION_ID
+    live_by_id = {
+        prompt_id: (desired_content,)
+        for prompt_id, desired_content in desired_by_id.items()
+    }
+    live_by_id[edited_prompt_id] = ("human-authored live endpoint policy",)
+    writes: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "ensure_prompt_concept_support",
+        lambda **_kwargs: _base_prompt_support_report(),
+    )
+    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "8")
+    monkeypatch.setattr(
+        mod,
+        "_load_prompt_content_values",
+        lambda prompt_id: live_by_id.get(prompt_id, ()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "upsert_singleton_text_relation",
+        lambda **kwargs: writes.append(dict(kwargs)),
+    )
+
+    def unexpected_publication(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("workflow publication must remain blocked")
+
+    monkeypatch.setattr(
+        mod,
+        "bootstrap_repo_seed_workflow_bundle",
+        unexpected_publication,
+    )
+
+    report = mod.bootstrap_canonical_kr_materialisation_workflows()
+
+    assert report["success"] is False
+    assert writes == []
+    assert live_by_id[edited_prompt_id] == (
+        "human-authored live endpoint policy",
+    )
+    assert report["publication"]["skipped"] is True
+    assert report["publication"]["skip_reason"] == (
+        "kr_materialisation_prompt_authority_blocked"
+    )
+    prompt_support = report["prompt_support"]
+    assert prompt_support["preserved_drift_prompt_ids"] == [edited_prompt_id]
+    assert prompt_support["errors_by_target"][edited_prompt_id] == (
+        "kr_materialisation_prompt_authority_requires_explicit_migration"
+    )
+
+
+def test_prompt_migration_fails_when_canonical_readback_does_not_match(
+    monkeypatch,
+) -> None:
+    desired_by_id = _prompt_seed_text_by_id()
+    legacy_by_id = {
+        prompt_id: f"reviewed v7 content for {prompt_id}"
+        for prompt_id in desired_by_id
+    }
+    live_by_id = {
+        prompt_id: (legacy_content,)
+        for prompt_id, legacy_content in legacy_by_id.items()
+    }
+
+    monkeypatch.setattr(
+        mod,
+        "ensure_prompt_concept_support",
+        lambda **_kwargs: _base_prompt_support_report(),
+    )
+    monkeypatch.setattr(mod, "_load_repo_seed_version", lambda: "8")
+    monkeypatch.setattr(
+        mod,
+        "_REVIEWED_LEGACY_PROMPT_CONTENT_SHA256_BY_TARGET_SEED_VERSION",
+        {
+            "8": {
+                prompt_id: {
+                    "7": (mod._prompt_content_sha256(legacy_content),)
+                }
+                for prompt_id, legacy_content in legacy_by_id.items()
+            }
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_prompt_content_values",
+        lambda prompt_id: live_by_id.get(prompt_id, ()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: None,
+    )
+
+    report = mod._ensure_kr_materialisation_prompt_support()
+
+    assert report["success"] is False
+    assert set(report["seeded_prompt_ids"]) == set(desired_by_id)
+    assert set(report["migrated_prompt_ids"]) == set(desired_by_id)
+    assert report["validated_prompt_ids"] == []
+    assert report["errors_by_target"] == {
+        prompt_id: "kr_materialisation_prompt_authority_readback_mismatch"
+        for prompt_id in desired_by_id
+    }
 
 
 def test_kr_optional_initialiser_fields_satisfy_enforced_write_metadata() -> None:
