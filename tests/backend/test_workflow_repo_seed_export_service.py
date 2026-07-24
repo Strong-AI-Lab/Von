@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.backend.workflows import workflow_repo_seed_export_service as export_service
 
@@ -83,3 +84,40 @@ def test_build_repo_seed_workflow_bundle_from_authority_uses_raw_bundle_scaffold
             }
         ],
     }
+
+
+def test_publication_spec_export_preserves_step_retry_policy() -> None:
+    retry_policy = {
+        "schema_version": "workflow_step_retry_policy.v1",
+        "max_attempts": 2,
+        "backoff_policy": "fixed",
+        "initial_delay_ms": 1000,
+        "max_delay_ms": 1000,
+        "retry_on_outcomes": ["failure"],
+    }
+    definition = SimpleNamespace(
+        initial_state="read_back",
+        states={
+            "read_back": SimpleNamespace(
+                actions=(
+                    SimpleNamespace(
+                        action_id="workflow_mcp.invoke_tool",
+                        contract_concept_id=None,
+                        execution_mode="deterministic",
+                        llm_policy=None,
+                        validation_policy=None,
+                        inputs={"tool_name": "fetch_concept"},
+                    ),
+                ),
+                transitions=(),
+                metadata={"retry_policy": retry_policy},
+            )
+        },
+    )
+
+    payload = export_service._build_publication_spec_payload_from_definition(
+        workflow_id="#V#retry_export_workflow",
+        definition=definition,
+    )
+
+    assert payload["steps"][0]["retry_policy"] == retry_policy

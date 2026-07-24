@@ -2,7 +2,14 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "6",
+  "seed_version": "7",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#kr_design_concept_materialisation_item_workflow": {
+      "6": [
+        "c027e848fe7860016bdc91fd1efa5809c3cfb57e667eb021bc638d1cfb34d8d8"
+      ]
+    }
+  },
   "source_tag": "JVNAUTOSCI-2271",
   "supported_action_ids": [
     "llm.action",
@@ -746,8 +753,9 @@
             "on_failure_state": "summarise_blocker",
             "retry_policy": {
               "backoff_policy": "fixed",
-              "delay_ms": 1000,
+              "initial_delay_ms": 1000,
               "max_attempts": 2,
+              "max_delay_ms": 1000,
               "retry_on_outcomes": [
                 "failure"
               ],
@@ -755,18 +763,6 @@
             },
             "state_id": "read_back_concept",
             "static_input_bindings": [
-              [
-                "include_relations_any_arg",
-                true
-              ],
-              [
-                "include_text_relations_arg1",
-                true
-              ],
-              [
-                "limit",
-                40
-              ],
               [
                 "tool_name",
                 "fetch_concept"
@@ -804,8 +800,9 @@
             "on_failure_state": "summarise_blocker",
             "retry_policy": {
               "backoff_policy": "fixed",
-              "delay_ms": 1000,
+              "initial_delay_ms": 1000,
               "max_attempts": 2,
+              "max_delay_ms": 1000,
               "retry_on_outcomes": [
                 "failure"
               ],
@@ -1211,16 +1208,18 @@
             "execution_mode": "deterministic",
             "next_state": "read_back_target",
             "on_failure_state": "summarise_blocker",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 1000,
+              "retry_on_outcomes": [
+                "failure"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "read_back_source",
             "static_input_bindings": [
-              [
-                "include_relations_any_arg",
-                true
-              ],
-              [
-                "limit",
-                40
-              ],
               [
                 "tool_name",
                 "fetch_concept"
@@ -1256,16 +1255,18 @@
             "execution_mode": "deterministic",
             "next_state": "emit_relationship_payload",
             "on_failure_state": "summarise_blocker",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 1000,
+              "retry_on_outcomes": [
+                "failure"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "read_back_target",
             "static_input_bindings": [
-              [
-                "include_relations_any_arg",
-                true
-              ],
-              [
-                "limit",
-                40
-              ],
               [
                 "tool_name",
                 "fetch_concept"

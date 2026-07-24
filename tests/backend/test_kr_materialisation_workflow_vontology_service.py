@@ -14,12 +14,17 @@ from src.backend.workflows.action_registry import (
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
 )
+from src.backend.workflows.engine import _normalise_retry_policy_spec
 from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
 )
 from src.backend.workflows.metadata_validation import (
     validate_state_metadata_post_action,
 )
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
+from src.backend.workflows import workflow_repo_seed_export_service as export_service
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEED_BUNDLE_PATH = (
@@ -161,7 +166,14 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
 def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
-    assert bundle["seed_version"] == "6"
+    assert bundle["seed_version"] == "7"
+    assert bundle["known_legacy_authority_payload_sha256_by_seed_version"] == {
+        mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID: {
+            "6": [
+                "c027e848fe7860016bdc91fd1efa5809c3cfb57e667eb021bc638d1cfb34d8d8"
+            ]
+        }
+    }
     workflow = next(
         row
         for row in bundle["workflows"]
@@ -241,8 +253,9 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     assert description_outputs["kr_description_text_value_id"] == "text_value_id"
     expected_readback_retry = {
         "backoff_policy": "fixed",
-        "delay_ms": 1000,
+        "initial_delay_ms": 1000,
         "max_attempts": 2,
+        "max_delay_ms": 1000,
         "retry_on_outcomes": ["failure"],
         "schema_version": "workflow_step_retry_policy.v1",
     }
@@ -252,6 +265,23 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     )
     assert (
         concept_item_states["read_back_text_relations"]["retry_policy"]
+        == expected_readback_retry
+    )
+    relationship_item = next(
+        row
+        for row in bundle["workflows"]
+        if row["workflow_id"] == mod.KR_DESIGN_RELATIONSHIP_ASSERTION_ITEM_WORKFLOW_ID
+    )
+    relationship_item_states = {
+        row["state_id"]: row
+        for row in relationship_item["publication_spec"]["steps"]
+    }
+    assert (
+        relationship_item_states["read_back_source"]["retry_policy"]
+        == expected_readback_retry
+    )
+    assert (
+        relationship_item_states["read_back_target"]["retry_policy"]
         == expected_readback_retry
     )
     concept_iteration_bindings = dict(
@@ -305,6 +335,87 @@ def test_kr_seed_suppresses_event_fan_out_only_for_owned_mutations() -> None:
             "assert_relationship",
         ),
     }
+
+
+def test_kr_readbacks_avoid_expensive_relation_expansion() -> None:
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    concept_readback = _publication_step(
+        bundle,
+        workflow_id=mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID,
+        state_id="read_back_concept",
+    )
+    text_readback = _publication_step(
+        bundle,
+        workflow_id=mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID,
+        state_id="read_back_text_relations",
+    )
+
+    assert dict(concept_readback["static_input_bindings"]) == {
+        "tool_name": "fetch_concept"
+    }
+    assert {
+        mapping["tool_output_field"]
+        for mapping in concept_readback["tool_output_mapping_specs"]
+    } == {"concept_id", "relationships"}
+    assert concept_readback["next_state"] == "read_back_text_relations"
+    assert dict(text_readback["static_input_bindings"]) == {
+        "language": "en-NZ",
+        "limit": 10,
+        "predicate": "hasDescription",
+        "tool_name": "get_text_relations",
+    }
+    for state_id in ("read_back_source", "read_back_target"):
+        relationship_readback = _publication_step(
+            bundle,
+            workflow_id=mod.KR_DESIGN_RELATIONSHIP_ASSERTION_ITEM_WORKFLOW_ID,
+            state_id=state_id,
+        )
+        assert dict(relationship_readback["static_input_bindings"]) == {
+            "tool_name": "fetch_concept"
+        }
+        assert {
+            mapping["tool_output_field"]
+            for mapping in relationship_readback["tool_output_mapping_specs"]
+        } == {"concept_id", "relationships"}
+
+
+def test_kr_retry_policy_round_trips_in_canonical_loader_shape() -> None:
+    raw_bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    bundle = authority_service.load_repo_seed_workflow_bundle(_SEED_BUNDLE_PATH)
+    readback_states_by_workflow = {
+        mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID: (
+            "read_back_concept",
+            "read_back_text_relations",
+        ),
+        mod.KR_DESIGN_RELATIONSHIP_ASSERTION_ITEM_WORKFLOW_ID: (
+            "read_back_source",
+            "read_back_target",
+        ),
+    }
+
+    for workflow_id, state_ids in readback_states_by_workflow.items():
+        publication_spec = bundle["publication_specs"][workflow_id]
+        definition = authority_service._build_definition_from_publication_spec(
+            workflow_id=workflow_id,
+            spec=publication_spec,
+        )
+        exported = export_service._build_publication_spec_payload_from_definition(
+            workflow_id=workflow_id,
+            definition=definition,
+        )
+        exported_steps = {step["state_id"]: step for step in exported["steps"]}
+
+        for state_id in state_ids:
+            raw_policy = _publication_step(
+                raw_bundle,
+                workflow_id=workflow_id,
+                state_id=state_id,
+            )["retry_policy"]
+            parsed_policy = definition.states[state_id].metadata["retry_policy"]
+            canonical_policy = _normalise_retry_policy_spec(parsed_policy)
+            assert raw_policy == canonical_policy
+            assert parsed_policy == canonical_policy
+            assert exported_steps[state_id]["retry_policy"] == canonical_policy
 
 
 def test_kr_seed_bundle_validates_as_workflow_contracts() -> None:

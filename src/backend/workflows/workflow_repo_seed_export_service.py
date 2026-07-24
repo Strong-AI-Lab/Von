@@ -493,6 +493,9 @@ def _build_publication_spec_payload_from_definition(
                     "on_true_state": on_true_state,
                     "on_unknown_state": on_unknown_state,
                     "prompt_concept_ids": prompt_concept_ids,
+                    "retry_policy": _stable_json_like(
+                        runtime_details.retry_policy
+                    ),
                     "state_id": state_id,
                     "static_input_bindings": static_input_bindings,
                     "tool_output_context_mappings": [],
