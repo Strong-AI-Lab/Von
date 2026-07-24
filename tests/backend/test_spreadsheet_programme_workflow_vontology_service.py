@@ -162,8 +162,9 @@ def test_bootstrap_materialises_model_led_spreadsheet_workflow_family(
         "spreadsheet_write_authority_contract.v1"
     )
     assert "#V#person" in write_authority["allowed_concept_parent_ids"]
-    assert "#V#has_doctoral_supervisor" in (
-        write_authority["allowed_relationship_predicate_ids"]
+    assert (
+        "#V#has_doctoral_supervisor"
+        in (write_authority["allowed_relationship_predicate_ids"])
     )
     for_each = _state(main, "materialise_records").actions[0]
     assert for_each.action_id == "workflow_control.for_each"
@@ -181,9 +182,7 @@ def test_bootstrap_materialises_model_led_spreadsheet_workflow_family(
     assert child_materialise.inputs["workflow_id"] == (
         "#V#kr_design_materialisation_workflow"
     )
-    assert child_materialise.inputs[
-        "conversation_turn_llm_timeout_override_sec"
-    ] == 180
+    assert child_materialise.inputs["conversation_turn_llm_timeout_override_sec"] == 180
     assert child_materialise.inputs["materialisation_guard"]["$context_key"] == (
         "spreadsheet_record_materialisation_guard"
     )
@@ -218,24 +217,26 @@ def test_bootstrap_materialises_model_led_spreadsheet_workflow_family(
             "previous_spreadsheet_record_marker_id",
         )
     }
-    unchanged_assignments = _state(item, "emit_unchanged_skip").actions[0].inputs[
-        "assignments"
-    ]
+    unchanged_assignments = (
+        _state(item, "emit_unchanged_skip").actions[0].inputs["assignments"]
+    )
     unchanged_marker_assignment = next(
         row for row in unchanged_assignments if row.get("key") == "record_marker_id"
     )
     assert unchanged_marker_assignment["value_from_context"] == (
         "previous_spreadsheet_record_marker_id"
     )
-    marker_fingerprint = _state(item, "read_record_marker").actions[0].inputs[
-        "processing_authority_fingerprint"
-    ]
+    marker_fingerprint = (
+        _state(item, "read_record_marker")
+        .actions[0]
+        .inputs["processing_authority_fingerprint"]
+    )
     assert marker_fingerprint.startswith("sha256:")
     assert len(marker_fingerprint) == 71
 
-    required_effects = (
-        main.metadata.get("required_effects_contract") or {}
-    ).get("required_effects") or []
+    required_effects = (main.metadata.get("required_effects_contract") or {}).get(
+        "required_effects"
+    ) or []
     reconciliation = next(
         effect
         for effect in required_effects
@@ -246,8 +247,9 @@ def test_bootstrap_materialises_model_led_spreadsheet_workflow_family(
         "build_spreadsheet_batch_completion_evidence",
         "record_source_processing_marker",
     ]
-    assert "build_spreadsheet_record_materialisation_request" not in (
-        reconciliation["required_tools"]
+    assert (
+        "build_spreadsheet_record_materialisation_request"
+        not in (reconciliation["required_tools"])
     )
 
 
@@ -267,9 +269,7 @@ def test_bootstrap_fails_closed_when_support_parent_is_missing(
     assert report["support_parent_concepts"]["missing_concept_ids"] == [
         "#V#binary_predicate"
     ]
-    assert (
-        db.concepts.find_one({"concept_id": "#V#has_doctoral_supervisor"}) is None
-    )
+    assert db.concepts.find_one({"concept_id": "#V#has_doctoral_supervisor"}) is None
 
 
 def test_spreadsheet_planner_prompt_pins_untrusted_data_and_versioning(
@@ -343,6 +343,7 @@ def test_processing_authority_fingerprint_tracks_exact_kr_dependency(
     from scripts import generate_spreadsheet_programme_workflow_seed as generator
 
     baseline = generator.build_bundle()
+    assert baseline["seed_version"] == "17"
     baseline_dependency = baseline["processing_authority_dependencies"][
         "kr_materialisation_workflow_seed_bundle"
     ]
@@ -351,6 +352,7 @@ def test_processing_authority_fingerprint_tracks_exact_kr_dependency(
     )
     assert baseline_dependency["family_id"] == source_payload["family_id"]
     assert baseline_dependency["seed_version"] == source_payload["seed_version"]
+    assert baseline_dependency["seed_version"] == "4"
     assert baseline_dependency["canonical_payload_sha256"].startswith("sha256:")
 
     changed_payload = dict(source_payload)

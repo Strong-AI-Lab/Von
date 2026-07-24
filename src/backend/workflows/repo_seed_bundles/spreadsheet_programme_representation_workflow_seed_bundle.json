@@ -3,14 +3,14 @@
   "managed_by": "spreadsheet_programme_workflow_vontology_service",
   "processing_authority_dependencies": {
     "kr_materialisation_workflow_seed_bundle": {
-      "canonical_payload_sha256": "sha256:ce53d8c2ba252fb1b251f778444a797cb4c436fc2bbb94fa50391b5c7a1307f6",
+      "canonical_payload_sha256": "sha256:d01ea4c91f61802ebd4c8935d5e6d8c817f2f2559db495da965c38add43a0b33",
       "family_id": "#V#kr_design_materialisation_workflow_family",
-      "seed_version": "2"
+      "seed_version": "4"
     }
   },
-  "processing_authority_fingerprint": "sha256:62aaed4941a0e0dbb16d5c4bd6c2fc8b09ff34f1e905c561c40004c04d840c87",
+  "processing_authority_fingerprint": "sha256:4a23437988d6e745aac1a2515ed8b1231b8b3fb0f63abe078c107d176b74f79f",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "15",
+  "seed_version": "17",
   "source_tag": "JVNAUTOSCI-2592",
   "support_concepts": [
     {
@@ -306,7 +306,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:62aaed4941a0e0dbb16d5c4bd6c2fc8b09ff34f1e905c561c40004c04d840c87"
+                "value": "sha256:4a23437988d6e745aac1a2515ed8b1231b8b3fb0f63abe078c107d176b74f79f"
               }
             ],
             "tool_output_mapping_specs": [
@@ -702,7 +702,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:62aaed4941a0e0dbb16d5c4bd6c2fc8b09ff34f1e905c561c40004c04d840c87"
+                "value": "sha256:4a23437988d6e745aac1a2515ed8b1231b8b3fb0f63abe078c107d176b74f79f"
               }
             ],
             "tool_output_mapping_specs": [
@@ -776,7 +776,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:62aaed4941a0e0dbb16d5c4bd6c2fc8b09ff34f1e905c561c40004c04d840c87"
+                "value": "sha256:4a23437988d6e745aac1a2515ed8b1231b8b3fb0f63abe078c107d176b74f79f"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1234,7 +1234,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:62aaed4941a0e0dbb16d5c4bd6c2fc8b09ff34f1e905c561c40004c04d840c87"
+                "value": "sha256:4a23437988d6e745aac1a2515ed8b1231b8b3fb0f63abe078c107d176b74f79f"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1557,7 +1557,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:62aaed4941a0e0dbb16d5c4bd6c2fc8b09ff34f1e905c561c40004c04d840c87"
+                "value": "sha256:4a23437988d6e745aac1a2515ed8b1231b8b3fb0f63abe078c107d176b74f79f"
               }
             ],
             "tool_output_mapping_specs": [
@@ -1625,7 +1625,7 @@
               },
               {
                 "key": "processing_authority_fingerprint",
-                "value": "sha256:62aaed4941a0e0dbb16d5c4bd6c2fc8b09ff34f1e905c561c40004c04d840c87"
+                "value": "sha256:4a23437988d6e745aac1a2515ed8b1231b8b3fb0f63abe078c107d176b74f79f"
               }
             ],
             "tool_output_mapping_specs": [

@@ -130,8 +130,7 @@ def test_kr_seed_bundle_uses_prompt_concepts_not_inline_prompt_text() -> None:
         for step in llm_steps
     }
     llm_policy_by_state = {
-        step.get("state_id"): step.get("llm_policy") or {}
-        for step in llm_steps
+        step.get("state_id"): step.get("llm_policy") or {} for step in llm_steps
     }
     assert prompt_ids_by_state["extract_kr_materialisation_plan"] == (
         mod.PROMPT_KR_DESIGN_MATERIALISATION_PLAN_ID,
@@ -151,8 +150,7 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
     assert "materialise bounded knowledge representation designs" in plan_prompt
     assert (
-        "Return JSON only with keys: decision ('materialise' or 'block')"
-        in plan_prompt
+        "Return JSON only with keys: decision ('materialise' or 'block')" in plan_prompt
     )
     assert "Resolve KR relationship endpoint references" in relationship_prompt
     assert (
@@ -163,14 +161,13 @@ def test_kr_prompt_seed_assets_hold_operational_prompt_content() -> None:
 
 def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
     bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    assert bundle["seed_version"] == "4"
     workflow = next(
         row
         for row in bundle["workflows"]
         if row["workflow_id"] == mod.KR_DESIGN_MATERIALISATION_WORKFLOW_ID
     )
-    states = {
-        row["state_id"]: row for row in workflow["publication_spec"]["steps"]
-    }
+    states = {row["state_id"]: row for row in workflow["publication_spec"]["steps"]}
 
     assert workflow["launch_input_contract"]["excluded_ambient_input_keys"] == [
         "invocations"
@@ -180,24 +177,111 @@ def test_kr_seed_applies_optional_guard_before_each_write_phase() -> None:
         and row["required"] is False
         for row in workflow["launch_input_contract"]["input_mappings"]
     )
-    assert states["extract_kr_materialisation_plan"]["conditional_transitions"][
-        0
-    ]["to_state"] == "validate_materialisation_plan"
+    assert (
+        states["extract_kr_materialisation_plan"]["conditional_transitions"][0][
+            "to_state"
+        ]
+        == "validate_materialisation_plan"
+    )
     assert states["validate_materialisation_plan"]["action_id"] == (
         "workflow_control.kr_materialisation_guard"
     )
     assert states["validate_materialisation_plan"]["static_input_bindings"] == [
         ["phase", "plan"]
     ]
-    assert states["resolve_relationship_specs"]["conditional_transitions"][0][
-        "to_state"
-    ] == "validate_resolved_relationships"
+    guard_outputs = {
+        row["tool_output_field"]: row["context_key"]
+        for row in states["validate_materialisation_plan"]["tool_output_mapping_specs"]
+    }
+    assert guard_outputs["duplicate_resolution_mode"] == (
+        "kr_concept_duplicate_resolution_mode"
+    )
+    assert (
+        "kr_concept_duplicate_resolution_mode"
+        in states["validate_materialisation_plan"]["writes_context_keys"]
+    )
+    concept_item = next(
+        row
+        for row in bundle["workflows"]
+        if row["workflow_id"] == mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID
+    )
+    concept_item_states = {
+        row["state_id"]: row for row in concept_item["publication_spec"]["steps"]
+    }
+    duplicate_resolution_mapping = next(
+        row
+        for row in concept_item_states["create_concept"]["context_input_mapping_specs"]
+        if row["tool_param"] == "duplicate_resolution_mode"
+    )
+    assert duplicate_resolution_mapping == {
+        "concept_id": (
+            "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_"
+            "create_concept_kr_concept_duplicate_resolution_mode_to_"
+            "duplicate_resolution_mode_parameter"
+        ),
+        "context_key": "kr_concept_duplicate_resolution_mode",
+        "required": False,
+        "tool_param": "duplicate_resolution_mode",
+    }
+    assert not any(
+        (
+            isinstance(binding, list)
+            and len(binding) == 2
+            and binding[0] == "duplicate_resolution_mode"
+        )
+        for binding in concept_item_states["create_concept"]["static_input_bindings"]
+    )
+    concept_iteration_bindings = dict(
+        states["materialise_concepts"]["static_input_bindings"]
+    )
+    assert concept_iteration_bindings["max_concurrency"] == 1
+    assert concept_iteration_bindings["stop_on_error"] is True
+    assert (
+        states["resolve_relationship_specs"]["conditional_transitions"][0]["to_state"]
+        == "validate_resolved_relationships"
+    )
     assert states["validate_resolved_relationships"]["action_id"] == (
         "workflow_control.kr_materialisation_guard"
     )
     assert states["validate_resolved_relationships"]["static_input_bindings"] == [
         ["phase", "resolved_relationships"]
     ]
+
+
+def test_kr_seed_suppresses_event_fan_out_only_for_owned_mutations() -> None:
+    bundle = json.loads(_SEED_BUNDLE_PATH.read_text(encoding="utf-8"))
+    suppression_states: set[tuple[str, str]] = set()
+
+    for workflow in bundle["workflows"]:
+        for step in workflow["publication_spec"]["steps"]:
+            bindings = dict(step.get("static_input_bindings") or [])
+            if "suppress_event_workflow_launches" not in bindings:
+                continue
+            assert bindings["suppress_event_workflow_launches"] is True
+            suppression_states.add((workflow["workflow_id"], step["state_id"]))
+
+    assert suppression_states == {
+        (
+            mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID,
+            "create_concept",
+        ),
+        (
+            mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID,
+            "assert_type_parent_relationship",
+        ),
+        (
+            mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID,
+            "assert_instance_parent_relationship",
+        ),
+        (
+            mod.KR_DESIGN_CONCEPT_MATERIALISATION_ITEM_WORKFLOW_ID,
+            "attach_description",
+        ),
+        (
+            mod.KR_DESIGN_RELATIONSHIP_ASSERTION_ITEM_WORKFLOW_ID,
+            "assert_relationship",
+        ),
+    }
 
 
 def test_kr_seed_bundle_validates_as_workflow_contracts() -> None:

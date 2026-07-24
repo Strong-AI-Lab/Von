@@ -22,7 +22,10 @@ from ..models.text_value_models import (
     TextValueModel,
     TextRelationModel,
 )
-from .feature_flags import get_event_workflow_integration_enabled
+from .feature_flags import (
+    get_event_workflow_integration_enabled,
+    get_workflow_discovery_cache_invalidation_enabled,
+)
 from ..security.access_control import (
     can_access_concept,
     filter_accessible_concept_ids,
@@ -69,6 +72,9 @@ def _invalidate_workflow_routing_projection_for_text_relation_change(
     predicate: str | None,
 ) -> None:
     """Best-effort invalidation for workflow-routing support projections."""
+
+    if not get_workflow_discovery_cache_invalidation_enabled(default=True):
+        return
 
     predicate_text = str(predicate or "").strip()
     if not predicate_text:
@@ -431,10 +437,7 @@ def get_texts_for_concepts(
         if not isinstance(raw_id, str):
             continue
         subject_concept_id = raw_id.strip()
-        if (
-            not subject_concept_id
-            or subject_concept_id in seen_subject_ids
-        ):
+        if not subject_concept_id or subject_concept_id in seen_subject_ids:
             continue
         seen_subject_ids.add(subject_concept_id)
         candidate_subject_ids.append(subject_concept_id)
@@ -702,7 +705,9 @@ def get_preferred_texts_for_concepts(
         relation_filter["predicate"] = {"$in": allowed_predicates}
 
     relation_limit = max(len(ordered_subject_ids) * max(limit_per_concept, 1), 1)
-    relations = list(TextRelationsRepository.find(relation_filter, limit=relation_limit))
+    relations = list(
+        TextRelationsRepository.find(relation_filter, limit=relation_limit)
+    )
     if not relations:
         return {}
 
@@ -982,7 +987,9 @@ def delete_text_relation(
     tv_id = rel.get("object_text_id")
     predicate = rel.get("predicate")
     TextRelationsRepository.delete_one({"_id": ObjectId(relation_id)})
-    _invalidate_stats_for_predicate_change(predicate if isinstance(predicate, str) else None)
+    _invalidate_stats_for_predicate_change(
+        predicate if isinstance(predicate, str) else None
+    )
     _invalidate_workflow_routing_projection_for_text_relation_change(
         subject_concept_id=subject_concept_id,
         predicate=predicate if isinstance(predicate, str) else None,

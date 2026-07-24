@@ -11,6 +11,9 @@ from src.backend.integrations.internal_mcp.gateway import (
 )
 from src.backend.integrations.internal_mcp.schemas import Schema
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+from src.backend.services.workflow_event_integration_service import (
+    current_event_workflow_launch_suppression_reason,
+)
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -21,6 +24,8 @@ from src.backend.workflows.durable.subworkflow_actions import (
     register_subworkflow_actions,
 )
 from src.backend.workflows.workflow_mcp_tool_actions import (
+    EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT,
+    SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT,
     WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
     register_workflow_mcp_tool_actions,
 )
@@ -150,6 +155,84 @@ def test_workflow_mcp_action_invokes_read_tool_and_maps_structured_output():
     assert gateway.invocations == [
         ("demo_echo", {"message": "hello", "namespace": "#V#tester"})
     ]
+
+
+def test_workflow_mcp_event_launch_control_propagates_without_payload_forwarding(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow_mcp_mod,
+        "validate_tool_target_contract",
+        lambda **_kwargs: SimpleNamespace(ok=True),
+    )
+    observations: list[tuple[str, str | None]] = []
+
+    def _handler(*, message: str) -> dict[str, object]:
+        observations.append(
+            (message, current_event_workflow_launch_suppression_reason())
+        )
+        return {"success": True, "message": message}
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="synthetic_event_suppression_probe",
+            handler=_handler,
+            input_schema=Schema(
+                required={"message": str},
+                optional={},
+                allow_unknown=False,
+            ),
+            output_schema=None,
+            category="read",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    registry = ActionRegistry()
+    register_workflow_mcp_tool_actions(registry)
+
+    default_result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "synthetic_event_suppression_probe",
+            "tool_arguments": {"message": "default"},
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None, gateway=gateway),
+    )
+    suppressed_result = registry.execute(
+        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
+        inputs={
+            "tool_name": "synthetic_event_suppression_probe",
+            "tool_arguments": {
+                "message": "suppressed",
+                SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT: True,
+            },
+            SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT: True,
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None, gateway=gateway),
+    )
+
+    assert default_result.status == "success"
+    assert (
+        default_result.outputs[EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT]
+        is False
+    )
+    assert suppressed_result.status == "success"
+    assert (
+        suppressed_result.outputs[EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT]
+        is True
+    )
+    assert observations == [
+        ("default", None),
+        ("suppressed", "workflow_mcp.invoke_tool_owned_mutation"),
+    ]
+    assert current_event_workflow_launch_suppression_reason() is None
 
 
 def test_workflow_mcp_action_preserves_typed_gateway_schema_failure() -> None:

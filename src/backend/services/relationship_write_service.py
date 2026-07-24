@@ -31,7 +31,10 @@ from .concept_predicate_metadata_service import (
     get_structural_predicate_aliases,
     get_structural_inverse_map,
 )
-from .feature_flags import get_event_workflow_integration_enabled
+from .feature_flags import (
+    get_event_workflow_integration_enabled,
+    get_workflow_discovery_cache_invalidation_enabled,
+)
 from ..vontology.utils_vontology import is_predicate, is_type
 from ..vontology.code_concepts_registry import (
     build_virtual_concept_doc,
@@ -127,6 +130,9 @@ def _invalidate_workflow_routing_projection_for_relationship_change(
     target_id: str,
 ) -> None:
     """Best-effort invalidation for workflow graph/type routing projections."""
+
+    if not get_workflow_discovery_cache_invalidation_enabled(default=True):
+        return
 
     predicate_text = str(predicate or "").strip()
     if not predicate_text:
@@ -564,7 +570,9 @@ def add_structural_relationship(
             sync_sources.append(target_id)
         _sync_relationship_extent_index_for_sources(sync_sources)
         try:
-            from .workflow_event_integration_service import EVENT_TYPE_RELATIONSHIP_ADDED
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_RELATIONSHIP_ADDED,
+            )
 
             _emit_relationship_mutation_event(
                 event_type=EVENT_TYPE_RELATIONSHIP_ADDED,
@@ -655,7 +663,9 @@ def add_dynamic_relationship(
     if bool(result.get("modified")):
         _sync_relationship_extent_index_for_sources([source_id])
         try:
-            from .workflow_event_integration_service import EVENT_TYPE_RELATIONSHIP_ADDED
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_RELATIONSHIP_ADDED,
+            )
 
             _emit_relationship_mutation_event(
                 event_type=EVENT_TYPE_RELATIONSHIP_ADDED,
@@ -703,9 +713,11 @@ def add_relationship(
         predicate_for_invalidation = predicate
 
     if isinstance(result, Mapping) and bool(result.get("success")):
-        modified = bool(result.get("forward_modified")) or bool(
-            result.get("modified")
-        ) or bool(result.get("created"))
+        modified = (
+            bool(result.get("forward_modified"))
+            or bool(result.get("modified"))
+            or bool(result.get("created"))
+        )
         if modified:
             _invalidate_workflow_routing_projection_for_relationship_change(
                 source_id=source_id,

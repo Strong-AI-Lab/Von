@@ -10,6 +10,9 @@ Policy:
   a lookup was skipped.
 - Callers can explicitly opt-in to legacy duplicate-instance behaviour via
   ``allow_duplicate_instances=True`` when true homonyms are intended.
+- Callers with deterministic stable identities can select
+  ``duplicate_resolution_mode="canonical_id_only"`` to retain exact identity
+  reuse while skipping semantic name resolution after an exact miss.
 """
 
 from __future__ import annotations
@@ -63,7 +66,11 @@ def _extract_str_list(value: Any) -> list[str]:
         cleaned = value.strip()
         return [cleaned] if cleaned else []
     if isinstance(value, list):
-        return [str(item).strip() for item in value if isinstance(item, str) and item.strip()]
+        return [
+            str(item).strip()
+            for item in value
+            if isinstance(item, str) and item.strip()
+        ]
     return []
 
 
@@ -159,8 +166,13 @@ def find_existing_concept_for_create_concepts(
     parent_id_for_concept: str | None,
     preferred_language: str | None = None,
     allow_duplicate_instances: bool = False,
+    duplicate_resolution_mode: str | None = None,
 ) -> CreateConceptDuplicateGuardMatch | None:
-    """Return an existing concept match when duplicate creation should be blocked."""
+    """Return an existing concept match when duplicate creation should be blocked.
+
+    ``canonical_id_only`` retains the normal exact match and scope checks, but
+    deliberately returns after an exact miss instead of searching text values.
+    """
 
     normalised_kind = _normalise_kind(kind)
     scope = _guard_scope_for_request(
@@ -184,6 +196,9 @@ def find_existing_concept_for_create_concepts(
                 match_source="canonical_concept_id",
                 guard_scope=scope,
             )
+
+    if duplicate_resolution_mode == "canonical_id_only":
+        return None
 
     # Secondary bounded lookup: deterministic resolver over hasName/code aliases.
     try:
@@ -222,7 +237,9 @@ def find_existing_concept_for_create_concepts(
     if not isinstance(resolved_id, str) or not resolved_id.strip():
         return None
 
-    canonical_resolved = canonicalise_vontology_concept_id(resolved_id) or resolved_id.strip()
+    canonical_resolved = (
+        canonicalise_vontology_concept_id(resolved_id) or resolved_id.strip()
+    )
     if canonical_requested_id and canonical_resolved == canonical_requested_id:
         return None
 

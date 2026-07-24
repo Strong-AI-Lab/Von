@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.backend.services import (
     workflow_event_integration_service as workflow_event_service,
+)
+from src.backend.services.feature_flags import (
+    get_workflow_discovery_cache_invalidation_enabled,
 )
 from src.backend.workflows.durable.models import EventWorkflowBinding
 from src.backend.workflows.durable.workflow_instance_submission_service import (
@@ -21,6 +25,7 @@ from src.backend.services.workflow_event_integration_service import (
     EVENT_TYPE_TYPE_CREATED,
     EVENT_TYPE_VONTOLOGY_MUTATED,
     EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
+    current_event_workflow_launch_suppression_reason,
     launch_event_workflow,
     maybe_launch_episode_evaluation_for_turn_completion_gate,
     maybe_launch_episode_evaluation_for_workflow_terminal,
@@ -29,6 +34,7 @@ from src.backend.services.workflow_event_integration_service import (
     maybe_launch_type_created_workflow,
     maybe_launch_vontology_mutation_workflow,
     maybe_launch_task_status_workflow,
+    suppress_event_workflow_launches,
 )
 
 
@@ -50,6 +56,72 @@ def _submission_result(
         },
         created_new=created_new,
     )
+
+
+def test_event_workflow_launch_suppression_is_nested_and_thread_local() -> None:
+    assert current_event_workflow_launch_suppression_reason() is None
+
+    with suppress_event_workflow_launches("outer"):
+        assert current_event_workflow_launch_suppression_reason() == "outer"
+        with suppress_event_workflow_launches("inner"):
+            assert current_event_workflow_launch_suppression_reason() == "inner"
+        assert current_event_workflow_launch_suppression_reason() == "outer"
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            isolated_reason = executor.submit(
+                current_event_workflow_launch_suppression_reason
+            ).result()
+        assert isolated_reason is None
+
+    assert current_event_workflow_launch_suppression_reason() is None
+
+
+def test_suppressed_event_launch_returns_before_binding_reads(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    binding_lookup = MagicMock(side_effect=AssertionError("binding read attempted"))
+    monkeypatch.setattr(
+        workflow_event_service,
+        "_resolve_bindings_for_event",
+        binding_lookup,
+    )
+
+    with suppress_event_workflow_launches("owned_materialisation_mutation"):
+        result = launch_event_workflow(
+            event_type=EVENT_TYPE_TASK_CREATED,
+            event_id="task-1",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+        )
+
+    assert result == {
+        "success": True,
+        "triggered": False,
+        "outcome": "suppressed",
+        "event_type": EVENT_TYPE_TASK_CREATED,
+        "event_id": "task-1",
+        "reason": "event_workflow_launch_suppressed",
+        "suppression_reason": "owned_materialisation_mutation",
+        "event_workflow_launch_suppressed": True,
+    }
+    binding_lookup.assert_not_called()
+
+
+def test_event_launch_suppression_disables_discovery_cache_invalidation_locally(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv(
+        "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE",
+        raising=False,
+    )
+    assert get_workflow_discovery_cache_invalidation_enabled(default=True) is True
+
+    with suppress_event_workflow_launches("owned_materialisation_mutation"):
+        assert get_workflow_discovery_cache_invalidation_enabled(default=True) is False
+
+    assert get_workflow_discovery_cache_invalidation_enabled(default=True) is True
 
 
 def test_launch_event_workflow_integration_flag_disables_trigger(monkeypatch) -> None:

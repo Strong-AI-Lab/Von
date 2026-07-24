@@ -36,9 +36,14 @@ from .write_tool_policy import (
     normalise_workflow_execution_side_effect_policy,
     normalise_workflow_step_mutation_authority_spec,
 )
+
 logger = logging.getLogger(__name__)
 
 WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID = "workflow_mcp.invoke_tool"
+SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT = "suppress_event_workflow_launches"
+EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT = (
+    "event_workflow_launch_suppression_requested"
+)
 
 WORKFLOW_MCP_TOOL_NAME_INPUT_KEYS: tuple[str, ...] = (
     "tool_name",
@@ -56,7 +61,11 @@ _PAYLOAD_INPUT_KEYS: tuple[str, ...] = (
     "mcp_payload",
 )
 _CONTROL_INPUT_KEYS: frozenset[str] = frozenset(
-    (*_TOOL_NAME_INPUT_KEYS, *_PAYLOAD_INPUT_KEYS)
+    (
+        *_TOOL_NAME_INPUT_KEYS,
+        *_PAYLOAD_INPUT_KEYS,
+        SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT,
+    )
 )
 _WRITE_POLICY_METADATA_KEYS: tuple[str, ...] = (
     "workflow_execution_side_effect_policy",
@@ -138,7 +147,9 @@ def _normalise_tool_payload(inputs: Mapping[str, Any]) -> dict[str, Any]:
             return {
                 str(payload_key): payload_value
                 for payload_key, payload_value in value.items()
-                if isinstance(payload_key, str) and str(payload_key).strip()
+                if isinstance(payload_key, str)
+                and str(payload_key).strip()
+                and str(payload_key).strip() != SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT
             }
 
     return {
@@ -150,14 +161,33 @@ def _normalise_tool_payload(inputs: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _event_launch_suppression_requested(inputs: Mapping[str, Any]) -> bool:
+    return inputs.get(SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT) is True
+
+
+def _with_event_launch_suppression_telemetry(
+    result: WorkflowActionResult,
+    *,
+    requested: bool,
+) -> WorkflowActionResult:
+    result.outputs[EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT] = bool(requested)
+    return result
+
+
 def _has_explicit_write_policy(metadata: Mapping[str, Any]) -> bool:
     if metadata.get("mutation_authority") is not None:
-        return normalise_workflow_step_mutation_authority_spec(
-            metadata.get("mutation_authority")
-        ) is not None
+        return (
+            normalise_workflow_step_mutation_authority_spec(
+                metadata.get("mutation_authority")
+            )
+            is not None
+        )
 
     for key in _WRITE_POLICY_METADATA_KEYS:
-        if normalise_workflow_execution_side_effect_policy(metadata.get(key)) is not None:
+        if (
+            normalise_workflow_execution_side_effect_policy(metadata.get(key))
+            is not None
+        ):
             return True
     return False
 
@@ -341,14 +371,19 @@ def _handle_workflow_mcp_invoke_tool(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     inputs = dict(request.inputs or {})
+    event_launch_suppression_requested = _event_launch_suppression_requested(inputs)
     requested_tool_name = extract_static_workflow_mcp_tool_name(inputs)
     if not requested_tool_name:
-        return WorkflowActionResult(
-            status="failed",
-            error="workflow_mcp_tool_name_missing",
+        return _with_event_launch_suppression_telemetry(
+            WorkflowActionResult(
+                status="failed",
+                error="workflow_mcp_tool_name_missing",
+            ),
+            requested=event_launch_suppression_requested,
         )
 
     payload = _normalise_tool_payload(inputs)
+    payload.pop(SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT, None)
     resolved_tool_name = requested_tool_name
 
     try:
@@ -363,13 +398,16 @@ def _handle_workflow_mcp_invoke_tool(
         )
         method_definition = gateway.get_method_definition(resolved_tool_name)
         if method_definition is None:
-            return WorkflowActionResult(
-                status="failed",
-                error=f"workflow_mcp_tool_not_registered:{requested_tool_name}",
-                outputs={
-                    "mcp_tool": requested_tool_name,
-                    "mcp_requested_tool": requested_tool_name,
-                },
+            return _with_event_launch_suppression_telemetry(
+                WorkflowActionResult(
+                    status="failed",
+                    error=f"workflow_mcp_tool_not_registered:{requested_tool_name}",
+                    outputs={
+                        "mcp_tool": requested_tool_name,
+                        "mcp_requested_tool": requested_tool_name,
+                    },
+                ),
+                requested=event_launch_suppression_requested,
             )
 
         apply_runtime_defaults_to_mcp_payload(
@@ -425,16 +463,19 @@ def _handle_workflow_mcp_invoke_tool(
             request=request,
             method_definition=method_definition,
         ):
-            return WorkflowActionResult(
-                status="failed",
-                error=f"workflow_mcp_write_policy_missing:{resolved_tool_name}",
-                outputs={
-                    "mcp_tool": resolved_tool_name,
-                    "mcp_requested_tool": requested_tool_name,
-                    "mcp_resolved_tool": resolved_tool_name,
-                    "mutation_guardrail_blocked": True,
-                    "write_policy_reason": "workflow_mcp_write_policy_missing",
-                },
+            return _with_event_launch_suppression_telemetry(
+                WorkflowActionResult(
+                    status="failed",
+                    error=f"workflow_mcp_write_policy_missing:{resolved_tool_name}",
+                    outputs={
+                        "mcp_tool": resolved_tool_name,
+                        "mcp_requested_tool": requested_tool_name,
+                        "mcp_resolved_tool": resolved_tool_name,
+                        "mutation_guardrail_blocked": True,
+                        "write_policy_reason": "workflow_mcp_write_policy_missing",
+                    },
+                ),
+                requested=event_launch_suppression_requested,
             )
 
         blocked_result = enforce_workflow_mcp_write_guardrails(
@@ -443,7 +484,10 @@ def _handle_workflow_mcp_invoke_tool(
             method_definition=method_definition,
         )
         if blocked_result is not None:
-            return blocked_result
+            return _with_event_launch_suppression_telemetry(
+                blocked_result,
+                requested=event_launch_suppression_requested,
+            )
 
         target_validation = validate_tool_target_contract(
             tool_name=resolved_tool_name,
@@ -460,22 +504,25 @@ def _handle_workflow_mcp_invoke_tool(
         )
         if not target_validation.ok:
             error_code = target_validation.first_error_code()
-            return WorkflowActionResult(
-                status="failed",
-                error=(
-                    f"workflow_mcp_target_contract_validation_failed:"
-                    f"{resolved_tool_name}:{error_code or 'invalid_target'}"
-                ),
-                outputs={
-                    "mcp_tool": resolved_tool_name,
-                    "mcp_requested_tool": requested_tool_name,
-                    "mcp_resolved_tool": resolved_tool_name,
-                    "target_contract_validation_failed": True,
-                    "target_contract_validation_error_code": error_code,
-                    "tool_call_validation_diagnostics": list(
-                        target_validation.diagnostics
+            return _with_event_launch_suppression_telemetry(
+                WorkflowActionResult(
+                    status="failed",
+                    error=(
+                        f"workflow_mcp_target_contract_validation_failed:"
+                        f"{resolved_tool_name}:{error_code or 'invalid_target'}"
                     ),
-                },
+                    outputs={
+                        "mcp_tool": resolved_tool_name,
+                        "mcp_requested_tool": requested_tool_name,
+                        "mcp_resolved_tool": resolved_tool_name,
+                        "target_contract_validation_failed": True,
+                        "target_contract_validation_error_code": error_code,
+                        "tool_call_validation_diagnostics": list(
+                            target_validation.diagnostics
+                        ),
+                    },
+                ),
+                requested=event_launch_suppression_requested,
             )
 
         from ..security.access_control import override_current_actor
@@ -484,7 +531,17 @@ def _handle_workflow_mcp_invoke_tool(
             getattr(request.environment, "user_concept_id", None),
             getattr(request.environment, "org_concept_id", None),
         ):
-            result = gateway.invoke(resolved_tool_name, payload)
+            if event_launch_suppression_requested:
+                from ..services.workflow_event_integration_service import (
+                    suppress_event_workflow_launches,
+                )
+
+                with suppress_event_workflow_launches(
+                    "workflow_mcp.invoke_tool_owned_mutation"
+                ):
+                    result = gateway.invoke(resolved_tool_name, payload)
+            else:
+                result = gateway.invoke(resolved_tool_name, payload)
         action_result = workflow_action_result_from_mcp_payload(
             tool_name=resolved_tool_name,
             payload=result.payload,
@@ -498,7 +555,10 @@ def _handle_workflow_mcp_invoke_tool(
         action_result.outputs["mcp_requested_tool"] = requested_tool_name
         action_result.outputs["mcp_resolved_tool"] = resolved_tool_name
         action_result.outputs["workflow_actor_scope_enforced"] = True
-        return action_result
+        return _with_event_launch_suppression_telemetry(
+            action_result,
+            requested=event_launch_suppression_requested,
+        )
     except SchemaValidationError as exc:
         # Schema validation is a hard interface boundary, but workflows still
         # need a typed, inspectable failure in order to choose a represented
@@ -533,16 +593,22 @@ def _handle_workflow_mcp_invoke_tool(
         action_result.outputs["mcp_requested_tool"] = requested_tool_name
         action_result.outputs["mcp_resolved_tool"] = resolved_tool_name
         action_result.outputs["workflow_actor_scope_enforced"] = True
-        return action_result
+        return _with_event_launch_suppression_telemetry(
+            action_result,
+            requested=event_launch_suppression_requested,
+        )
     except Exception as exc:
         logger.warning(
             "[workflow_mcp] invoke failed for %s: %s",
             requested_tool_name,
             exc,
         )
-        return WorkflowActionResult(
-            status="failed",
-            error=f"workflow_mcp_invoke_failed:{requested_tool_name}:{exc}",
+        return _with_event_launch_suppression_telemetry(
+            WorkflowActionResult(
+                status="failed",
+                error=f"workflow_mcp_invoke_failed:{requested_tool_name}:{exc}",
+            ),
+            requested=event_launch_suppression_requested,
         )
 
 
@@ -563,6 +629,7 @@ def register_workflow_mcp_tool_actions(registry: ActionRegistry) -> None:
                 "properties": {
                     "tool_name": {"type": "string"},
                     "tool_arguments": {"type": "object"},
+                    SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT: {"type": "boolean"},
                 },
             },
             output_schema={
@@ -574,6 +641,9 @@ def register_workflow_mcp_tool_actions(registry: ActionRegistry) -> None:
                     "mcp_duration_ms": {"type": "number"},
                     "mcp_result": {"type": "object"},
                     "result": {"type": "object"},
+                    EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT: {
+                        "type": "boolean"
+                    },
                 },
             },
             side_effects="read_or_guarded_write",
@@ -582,6 +652,8 @@ def register_workflow_mcp_tool_actions(registry: ActionRegistry) -> None:
 
 
 __all__ = [
+    "EVENT_WORKFLOW_LAUNCH_SUPPRESSION_REQUESTED_OUTPUT",
+    "SUPPRESS_EVENT_WORKFLOW_LAUNCHES_INPUT",
     "WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID",
     "extract_static_workflow_mcp_tool_name",
     "register_workflow_mcp_tool_actions",

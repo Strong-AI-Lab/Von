@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from src.backend.services.kr_materialisation_guard_service import (
+    GUARDED_CREATE_DUPLICATE_RESOLUTION_MODE,
     validate_kr_materialisation_guard,
 )
 
@@ -117,6 +118,7 @@ def test_optional_guard_preserves_unguarded_generic_kr_behaviour() -> None:
 
     assert result["guard_applied"] is False
     assert result["guard_passed"] is True
+    assert result["duplicate_resolution_mode"] is None
 
 
 def test_guard_accepts_exact_create_and_changed_record_reuse_plan() -> None:
@@ -143,6 +145,11 @@ def test_guard_accepts_exact_create_and_changed_record_reuse_plan() -> None:
 
     assert plan["guard_passed"] is True
     assert resolved["guard_passed"] is True
+    assert plan["duplicate_resolution_mode"] == GUARDED_CREATE_DUPLICATE_RESOLUTION_MODE
+    assert (
+        resolved["duplicate_resolution_mode"]
+        == GUARDED_CREATE_DUPLICATE_RESOLUTION_MODE
+    )
 
 
 def test_guard_enforces_canonical_existence_bound_decisions() -> None:
@@ -173,9 +180,9 @@ def test_guard_enforces_canonical_existence_bound_decisions() -> None:
         relationship_specs=_relationship_specs(),
     )
     assert rejected_reuse["guard_passed"] is False
+    assert rejected_reuse["duplicate_resolution_mode"] is None
     assert (
-        rejected_reuse["error_code"]
-        == "kr_materialisation_guard_concept_spec_rejected"
+        rejected_reuse["error_code"] == "kr_materialisation_guard_concept_spec_rejected"
     )
 
     invalid_create = _concept_specs()
@@ -238,10 +245,7 @@ def test_guard_normalises_predicate_id_alias_before_downstream_execution() -> No
     assert plan["guard_passed"] is True
     assert resolved["guard_passed"] is True
     assert relationship_specs[0]["predicate"] == "#V#has_doctoral_programme"
-    assert (
-        resolved_relationship_specs[0]["predicate"]
-        == "#V#has_doctoral_programme"
-    )
+    assert resolved_relationship_specs[0]["predicate"] == "#V#has_doctoral_programme"
 
 
 def test_guard_rejects_conflicting_predicate_aliases() -> None:
@@ -272,10 +276,7 @@ def test_guard_rejects_conflicting_predicate_aliases() -> None:
     )
 
     assert plan["guard_passed"] is False
-    assert (
-        plan["error_code"]
-        == "kr_materialisation_guard_relationship_spec_invalid"
-    )
+    assert plan["error_code"] == "kr_materialisation_guard_relationship_spec_invalid"
     assert resolved["guard_passed"] is False
     assert (
         resolved["error_code"]
@@ -325,8 +326,7 @@ def test_guard_rejects_injected_unrelated_concept_before_any_write() -> None:
     )
     assert reuse_result["guard_passed"] is False
     assert (
-        reuse_result["error_code"]
-        == "kr_materialisation_guard_reuse_payload_rejected"
+        reuse_result["error_code"] == "kr_materialisation_guard_reuse_payload_rejected"
     )
 
 
@@ -358,6 +358,5 @@ def test_guard_rejects_injected_edge_and_ungrounded_resolved_endpoint() -> None:
     assert plan["error_code"] == "kr_materialisation_guard_relationship_rejected"
     assert resolved["guard_passed"] is False
     assert (
-        resolved["error_code"]
-        == "kr_materialisation_guard_resolved_endpoint_rejected"
+        resolved["error_code"] == "kr_materialisation_guard_resolved_endpoint_rejected"
     )
