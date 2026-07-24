@@ -2,7 +2,7 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "4",
+  "seed_version": "5",
   "source_tag": "JVNAUTOSCI-2271",
   "supported_action_ids": [
     "llm.action",
@@ -718,7 +718,7 @@
               {
                 "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_attach_description_relation_id_to_kr_description_relation_id",
                 "context_key": "kr_description_relation_id",
-                "tool_output_field": "relation_id"
+                "tool_output_field": "kept_relation_id"
               },
               {
                 "concept_id": "#V#workflow_mapping_tool_field_kr_design_concept_materialisation_item_workflow_attach_description_text_value_id_to_kr_description_text_value_id",
