@@ -50,6 +50,44 @@ def test_repo_workflow_seed_bundles_declare_seed_version() -> None:
     assert missing == []
 
 
+def test_materialisation_comparison_detects_missing_step_retry_policy() -> None:
+    retry_policy = {
+        "schema_version": "workflow_step_retry_policy.v1",
+        "max_attempts": 2,
+        "backoff_policy": "fixed",
+        "initial_delay_ms": 1000,
+        "max_delay_ms": 1000,
+        "retry_on_outcomes": ["failure"],
+    }
+    expected_step = authority_service._CanonicalStepPublicationSpec(
+        state_id="read_back",
+        action_id="workflow_mcp.invoke_tool",
+        retry_policy=retry_policy,
+    )
+    expected_spec = authority_service._CanonicalWorkflowPublicationSpec(
+        initial_state="read_back",
+        steps=(expected_step,),
+    )
+    live_without_retry = authority_service._build_definition_from_publication_spec(
+        workflow_id="#V#retry_drift_workflow",
+        spec=authority_service._CanonicalWorkflowPublicationSpec(
+            initial_state="read_back",
+            steps=(
+                authority_service._CanonicalStepPublicationSpec(
+                    state_id="read_back",
+                    action_id="workflow_mcp.invoke_tool",
+                ),
+            ),
+        ),
+    )
+
+    assert not seed_bootstrap._materialisation_matches_publication_spec(
+        loaded_definition=live_without_retry,
+        workflow_id="#V#retry_drift_workflow",
+        publication_spec=expected_spec,
+    )
+
+
 def test_support_concepts_materialise_relationships_and_text_relations(
     monkeypatch,
 ) -> None:
@@ -721,7 +759,7 @@ def test_equal_repo_seed_version_preserves_altered_live_authority(
     assert invalidations == []
 
 
-def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
+def test_repo_seed_newer_version_accepts_known_legacy_digest_with_stale_marker_sha(
     monkeypatch,
 ) -> None:
     bundle = {
@@ -746,9 +784,14 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
     }
     legacy_payload = {"authority": "reviewed-v1"}
     target_payload = {"authority": "target-v2"}
+    legacy_payload_sha256 = seed_bootstrap._stable_payload_sha256(legacy_payload)
+    stale_marker_sha256 = seed_bootstrap._stable_payload_sha256(
+        {"authority": "old-exporter-projection-of-reviewed-v1"}
+    )
+    assert stale_marker_sha256 != legacy_payload_sha256
     bundle["known_legacy_authority_payload_sha256_by_seed_version"] = {
         "#V#test_workflow": {
-            "1": [seed_bootstrap._stable_payload_sha256(legacy_payload)]
+            "1": [legacy_payload_sha256]
         }
     }
     live_state = {"payload": legacy_payload}
@@ -765,7 +808,10 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
     monkeypatch.setattr(
         seed_bootstrap,
         "_load_workflow_repo_seed_version_marker",
-        lambda _workflow_id: {"seed_version": "1"},
+        lambda _workflow_id: {
+            "seed_version": "1",
+            "authority_payload_sha256": stale_marker_sha256,
+        },
     )
     monkeypatch.setattr(
         seed_bootstrap,
@@ -888,6 +934,13 @@ def test_repo_seed_newer_version_refreshes_current_materialisation_metadata(
     assert result["repo_seed_version_gate"]["refresh_workflow_ids"] == [
         "#V#test_workflow"
     ]
+    adjudication = result["repo_seed_version_gate"][
+        "authority_adjudication_by_workflow"
+    ]["#V#test_workflow"]
+    assert adjudication["reason"] == "exact_reviewed_legacy_migration"
+    assert adjudication["publication_authorised"] is True
+    assert adjudication["exact_reviewed_source"] is True
+    assert adjudication["observed_authority_payload_sha256"] == legacy_payload_sha256
     assert publications
     assert publications[0]["validate_after_publish"] is False
     assert publications[0]["event_workflow_integration"] == "0"

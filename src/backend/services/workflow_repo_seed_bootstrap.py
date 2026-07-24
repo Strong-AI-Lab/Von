@@ -685,6 +685,7 @@ def _stable_state_metadata_subset(state: Any) -> dict[str, Any]:
         "writes_context_keys",
         "tool_output_context_mappings",
         "subworkflow_contract",
+        "retry_policy",
         "mutation_authority",
     ):
         value = metadata.get(key)
