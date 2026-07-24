@@ -13,6 +13,7 @@ from typing import Any
 
 
 KR_MATERIALISATION_GUARD_SCHEMA_VERSION = "kr_materialisation_guard.v1"
+GUARDED_CREATE_DUPLICATE_RESOLUTION_MODE = "canonical_id_only"
 _MAX_GUARD_CONCEPT_SLOTS = 256
 _MAX_GUARD_RELATIONSHIP_RULES = 512
 _MAX_DESCRIPTION_CHARS = 100_000
@@ -23,9 +24,7 @@ def _text(value: Any) -> str:
 
 
 def _sequence(value: Any) -> list[Any]:
-    if not isinstance(value, Sequence) or isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
     return list(value)
 
@@ -36,6 +35,7 @@ def _reject(code: str, *, phase: str) -> dict[str, Any]:
         "guard_applied": True,
         "guard_passed": False,
         "guard_phase": phase,
+        "duplicate_resolution_mode": None,
         "error_code": code,
         "blocking_reason": code,
     }
@@ -53,6 +53,9 @@ def _pass(
         "guard_applied": guard_applied,
         "guard_passed": True,
         "guard_phase": phase,
+        "duplicate_resolution_mode": (
+            GUARDED_CREATE_DUPLICATE_RESOLUTION_MODE if guard_applied else None
+        ),
         "concept_spec_count": concept_count,
         "relationship_spec_count": relationship_count,
         "blocking_reason": None,
@@ -116,9 +119,7 @@ def _normalise_contract(
 
     fixed_ids = {
         _text(item)
-        for item in _sequence(
-            guard_contract.get("fixed_authorised_concept_ids")
-        )
+        for item in _sequence(guard_contract.get("fixed_authorised_concept_ids"))
         if _text(item)
     }
     rules: list[dict[str, Any]] = []
@@ -183,13 +184,11 @@ def _normalise_contract(
         )
 
     try:
-        max_concepts = int(
-            guard_contract.get("max_concept_specs", len(slots))
-        )
+        max_concepts = int(guard_contract.get("max_concept_specs", len(slots)))
         max_relationships = int(
-            guard_contract.get("max_relationship_specs", sum(
-                rule["maximum_count"] for rule in rules
-            ))
+            guard_contract.get(
+                "max_relationship_specs", sum(rule["maximum_count"] for rule in rules)
+            )
         )
     except (TypeError, ValueError):
         return None, "kr_materialisation_guard_contract_bounds_invalid"
@@ -210,15 +209,11 @@ def _normalise_contract(
         "max_relationships": max_relationships,
         "require_all_slots": guard_contract.get("require_all_concept_slots")
         is not False,
-        "reject_unreferenced": guard_contract.get(
-            "reject_unreferenced_concepts"
-        )
+        "reject_unreferenced": guard_contract.get("reject_unreferenced_concepts")
         is not False,
         "require_fixed_ids_referenced": {
             _text(item)
-            for item in _sequence(
-                guard_contract.get("require_fixed_ids_referenced")
-            )
+            for item in _sequence(guard_contract.get("require_fixed_ids_referenced"))
             if _text(item)
         },
     }, None
@@ -240,12 +235,8 @@ def _validate_concept_specs(
 ) -> tuple[dict[str, Mapping[str, Any]] | None, str | None]:
     raw_specs = _sequence(concept_specs)
     slots = contract["slots"]
-    if (
-        len(raw_specs) > int(contract["max_concepts"])
-        or (
-            bool(contract["require_all_slots"])
-            and len(raw_specs) != len(slots)
-        )
+    if len(raw_specs) > int(contract["max_concepts"]) or (
+        bool(contract["require_all_slots"]) and len(raw_specs) != len(slots)
     ):
         return None, "kr_materialisation_guard_concept_count_rejected"
 
@@ -286,11 +277,9 @@ def _validate_concept_specs(
             if (
                 _text(create_spec.get("name")) != slot["stable_name"]
                 or _text(create_spec.get("kind")).lower() != slot["target_kind"]
-                or len(_text(create_spec.get("description")))
-                > _MAX_DESCRIPTION_CHARS
+                or len(_text(create_spec.get("description"))) > _MAX_DESCRIPTION_CHARS
                 or _text(
-                    raw_spec.get("existing_concept_id")
-                    or raw_spec.get("concept_id")
+                    raw_spec.get("existing_concept_id") or raw_spec.get("concept_id")
                 )
             ):
                 return None, "kr_materialisation_guard_create_payload_rejected"
@@ -300,8 +289,7 @@ def _validate_concept_specs(
             )
             if (
                 existing_concept_id == ""
-                or existing_concept_id
-                not in slot["allowed_existing_concept_ids"]
+                or existing_concept_id not in slot["allowed_existing_concept_ids"]
                 or raw_create_specs not in (None, [])
             ):
                 return None, "kr_materialisation_guard_reuse_payload_rejected"
@@ -454,9 +442,7 @@ def _validate_relationship_specs(
         }
         if not required_slots.issubset(referenced_slots):
             return None, "kr_materialisation_guard_unreferenced_concept_rejected"
-    if not set(contract["require_fixed_ids_referenced"]).issubset(
-        referenced_fixed_ids
-    ):
+    if not set(contract["require_fixed_ids_referenced"]).issubset(referenced_fixed_ids):
         return None, "kr_materialisation_guard_fixed_endpoint_missing"
     for raw_spec in raw_specs:
         if not isinstance(raw_spec, Mapping):
@@ -544,8 +530,7 @@ def validate_kr_materialisation_guard(
     )
     if requested is None:
         return _reject(
-            relationship_error
-            or "kr_materialisation_guard_relationships_rejected",
+            relationship_error or "kr_materialisation_guard_relationships_rejected",
             phase=phase_text,
         )
     if phase_text == "plan":
@@ -596,9 +581,7 @@ def validate_kr_materialisation_guard(
         source_id = _text(raw_spec.get("source_id"))
         predicate, predicate_error = _normalise_relationship_predicate(
             raw_spec,
-            invalid_code=(
-                "kr_materialisation_guard_resolved_relationship_invalid"
-            ),
+            invalid_code=("kr_materialisation_guard_resolved_relationship_invalid"),
         )
         if predicate_error is not None or predicate is None:
             return _reject(
@@ -640,6 +623,7 @@ def validate_kr_materialisation_guard(
 
 
 __all__ = [
+    "GUARDED_CREATE_DUPLICATE_RESOLUTION_MODE",
     "KR_MATERIALISATION_GUARD_SCHEMA_VERSION",
     "validate_kr_materialisation_guard",
 ]

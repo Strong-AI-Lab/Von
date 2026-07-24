@@ -222,12 +222,23 @@ Required input:
 Optional input:
 
 - `tool_arguments`: object payload passed to the internal MCP gateway.
+- `suppress_event_workflow_launches`: static boolean control for a
+  workflow-owned mutation whose event-driven fan-out would duplicate the
+  enclosing workflow's represented work. The control is not forwarded to the
+  MCP tool, does not grant mutation authority or bypass access/write
+  guardrails, and applies only for the request-local gateway invocation. When
+  true, event-workflow launch and workflow-discovery cache invalidation are
+  suppressed for that invocation. Workflows MUST use it only when the affected
+  mutation cannot change workflow routing authority and the enclosing workflow
+  performs explicit canonical read-back.
 
 Runtime semantics:
 
 - workflow context bindings inside `tool_arguments` are resolved by the normal action-input resolver before invocation;
 - authenticated namespace context is propagated into the MCP payload as `namespace` when available;
 - the action returns the workflow-visible MCP payload under `result` and `mcp_result`, with `mcp_tool`, `mcp_requested_tool`, `mcp_resolved_tool`, and `mcp_duration_ms` diagnostics;
+- the action reports `event_workflow_launch_suppression_requested` so traces
+  distinguish an authored suppression request from ordinary tool execution;
 - internal MCP advisory budgets are telemetry only: a handler that completes
   before its hard deadline remains successful even when the advisory budget was
   exceeded;

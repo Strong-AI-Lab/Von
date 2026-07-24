@@ -839,6 +839,7 @@ def _coerce_scholarly_materialisation_metadata(
 _CREATE_CONCEPTS_SCOPE_DEFAULT = "user_org_default"
 _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL = "organisation_general"
 _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL = "global_general"
+_CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY = "canonical_id_only"
 _CREATE_CONCEPTS_SCOPE_MODE_ALIASES: dict[str, str] = {
     "default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
     "user_org_default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
@@ -863,6 +864,12 @@ def _normalise_create_concepts_scope_mode(raw_value: Any) -> str | None:
 
 
 def _create_concepts(**kwargs):
+    from .transport import raise_if_internal_mcp_cancelled
+
+    # A handler may sit in the bounded executor queue until after its caller's
+    # deadline. Never begin a write-side preflight in that state.
+    raise_if_internal_mcp_cancelled()
+
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
     from ...services.create_concepts_duplicate_guard_service import (
@@ -888,6 +895,36 @@ def _create_concepts(**kwargs):
         else str(allow_duplicate_instances_raw).strip().lower()
         in {"1", "true", "yes", "on"}
     )
+    raw_duplicate_resolution_mode = kwargs.get("duplicate_resolution_mode")
+    canonical_id_only = False
+    if raw_duplicate_resolution_mode is not None:
+        canonical_id_only = (
+            isinstance(raw_duplicate_resolution_mode, str)
+            and raw_duplicate_resolution_mode
+            == _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+        )
+        if not canonical_id_only:
+            return make_error_response(
+                "invalid_parameter",
+                (
+                    "Invalid duplicate_resolution_mode "
+                    f"'{raw_duplicate_resolution_mode}'."
+                ),
+                details={
+                    "duplicate_resolution_mode": raw_duplicate_resolution_mode,
+                    "supported_duplicate_resolution_modes": [
+                        _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                    ],
+                    "default_behaviour": "canonical identity then semantic name resolution",
+                },
+                suggestions=[
+                    "Omit duplicate_resolution_mode to preserve semantic duplicate resolution",
+                    (
+                        "Use duplicate_resolution_mode='canonical_id_only' only "
+                        "for deterministic stable identities"
+                    ),
+                ],
+            )
     raw_scope_mode = kwargs.get("scope_mode")
     if raw_scope_mode is None:
         raw_scope_mode = kwargs.get("visibility_scope_mode")
@@ -1009,6 +1046,9 @@ def _create_concepts(**kwargs):
         )
 
     parent_resolution = resolve_parent_for_create_concepts(parent_id)
+    # Parent resolution can involve bounded fallback reads. Honour a transport
+    # timeout before progressing to any item-level work.
+    raise_if_internal_mcp_cancelled()
     if not parent_resolution.success:
         canonical_parent = parent_resolution.canonical_parent_id
         related_ids = [
@@ -1055,6 +1095,9 @@ def _create_concepts(**kwargs):
 
     results = []
     for concept_data in concepts:
+        # This is both the batch boundary and the safe cancellation point after
+        # the preceding concept's complete logical write bundle.
+        raise_if_internal_mcp_cancelled()
         if not isinstance(concept_data, dict):
             results.append({"error": "Concept must be an object", "data": concept_data})
             continue
@@ -1085,6 +1128,11 @@ def _create_concepts(**kwargs):
             parent_id_for_concept=parent_id_for_concept,
             preferred_language="en-NZ",
             allow_duplicate_instances=allow_duplicate_instances,
+            duplicate_resolution_mode=(
+                _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                if canonical_id_only
+                else None
+            ),
         )
         if duplicate_match is not None:
             result = build_duplicate_prevented_create_concepts_result(
@@ -1098,6 +1146,9 @@ def _create_concepts(**kwargs):
             results.append(result)
             continue
 
+        # Duplicate preflights are read-only and may consume the entire
+        # transport budget. Never start an insert after cancellation.
+        raise_if_internal_mcp_cancelled()
         result = create_vontology_concept(
             parent_id=parent_id_for_concept,
             new_concept_name=name,
@@ -6971,11 +7022,18 @@ def _concepts_create_input_schema() -> Schema:
         },
         optional={
             "allow_duplicate_instances": (bool,),
+            "duplicate_resolution_mode": (str, type(None)),
             "namespace": (str, type(None)),
             "scope_mode": (str, type(None)),
             "visibility_scope_mode": (str, type(None)),
             "created_by_concept_id": (str, type(None)),
             "organisation_concept_id": (str, type(None)),
+        },
+        enum_values={
+            "duplicate_resolution_mode": [
+                _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY,
+                None,
+            ],
         },
         allow_unknown=True,
         description=(
@@ -6983,6 +7041,8 @@ def _concepts_create_input_schema() -> Schema:
             "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
             "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
+            "For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' "
+            "to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. "
             "Scope defaults to authenticated user+organisation visibility when context is available. "
             "Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' "
             "for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). "
@@ -16610,8 +16670,7 @@ def _workflow_create_instance(**kwargs):
     if required_worker_build_raw is None:
         required_worker_build = None
     elif (
-        isinstance(required_worker_build_raw, str)
-        and required_worker_build_raw.strip()
+        isinstance(required_worker_build_raw, str) and required_worker_build_raw.strip()
     ):
         required_worker_build = required_worker_build_raw.strip()
     else:
@@ -16757,8 +16816,7 @@ def _workflow_execute(**kwargs):
     if required_worker_build_raw is None:
         required_worker_build = None
     elif (
-        isinstance(required_worker_build_raw, str)
-        and required_worker_build_raw.strip()
+        isinstance(required_worker_build_raw, str) and required_worker_build_raw.strip()
     ):
         required_worker_build = required_worker_build_raw.strip()
     else:
@@ -17338,9 +17396,7 @@ def _workflow_instance_control_status(instance: Any) -> dict[str, Any]:
         "status": raw_status.get("status"),
         "current_state": raw_status.get("current_state"),
         "step_index": raw_status.get("step_index"),
-        "manual_resume_required": bool(
-            raw_status.get("manual_resume_required", False)
-        ),
+        "manual_resume_required": bool(raw_status.get("manual_resume_required", False)),
         "checkpoint_pause_receipt": _workflow_control_safe_value(
             raw_status.get("checkpoint_pause_receipt")
         ),
@@ -30425,7 +30481,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_concepts_create_input_schema(),
             output_schema=_concepts_create_output_schema(),
             category="write",
-            description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
         ),
         MethodDefinition(
             name="get_source_processing_marker",
@@ -31540,9 +31596,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_external_integration_definitions() -> List[
+    MethodDefinition
+]:
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -32043,9 +32099,9 @@ def _build_default_catalogue_external_integration_definitions() -> (
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> (
-    List[MethodDefinition]
-):
+def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
+    MethodDefinition
+]:
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",

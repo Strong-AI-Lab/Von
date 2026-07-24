@@ -207,18 +207,14 @@ def stable_json(value: object) -> str:
 def kr_materialisation_dependency_identity() -> dict[str, str]:
     """Return the stable identity of the exact invoked KR seed authority."""
 
-    payload = json.loads(
-        KR_MATERIALISATION_SEED_BUNDLE.read_text(encoding="utf-8")
-    )
+    payload = json.loads(KR_MATERIALISATION_SEED_BUNDLE.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("kr_materialisation_seed_bundle_invalid")
     seed_version = str(payload.get("seed_version") or "").strip()
     family_id = str(payload.get("family_id") or "").strip()
     if not seed_version or not family_id:
         raise ValueError("kr_materialisation_seed_bundle_identity_missing")
-    canonical_sha256 = hashlib.sha256(
-        stable_json(payload).encode("utf-8")
-    ).hexdigest()
+    canonical_sha256 = hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
     return {
         "family_id": family_id,
         "seed_version": seed_version,
@@ -937,7 +933,9 @@ def main_workflow() -> dict[str, object]:
             ],
             "tool_output_mapping_specs": [
                 mapping(prefix, "result.spreadsheet", "spreadsheet_evidence"),
-                mapping(prefix, "result.original_filename", "spreadsheet_source_filename"),
+                mapping(
+                    prefix, "result.original_filename", "spreadsheet_source_filename"
+                ),
                 mapping(
                     prefix,
                     "result.spreadsheet.planning_view",
@@ -1585,9 +1583,10 @@ def build_bundle() -> dict[str, object]:
         "workflows": workflows,
         "authority_dependencies": authority_dependencies,
     }
-    authority_fingerprint = "sha256:" + hashlib.sha256(
-        stable_json(authority_payload).encode("utf-8")
-    ).hexdigest()
+    authority_fingerprint = (
+        "sha256:"
+        + hashlib.sha256(stable_json(authority_payload).encode("utf-8")).hexdigest()
+    )
     resolved_workflows = replace_authority_fingerprint(
         workflows,
         authority_fingerprint,
@@ -1595,7 +1594,7 @@ def build_bundle() -> dict[str, object]:
     return {
         "family_id": "spreadsheet_programme_representation_workflow_seed_bundle",
         "schema_version": "repo_seed_workflow_bundle.v1",
-        "seed_version": "15",
+        "seed_version": "17",
         "source_tag": "JVNAUTOSCI-2592",
         "managed_by": "spreadsheet_programme_workflow_vontology_service",
         "processing_authority_fingerprint": authority_fingerprint,

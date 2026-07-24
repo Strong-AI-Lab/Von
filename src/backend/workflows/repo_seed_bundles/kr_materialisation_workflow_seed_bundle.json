@@ -2,7 +2,7 @@
   "family_id": "#V#kr_design_materialisation_workflow_family",
   "managed_by": "kr_materialisation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "2",
+  "seed_version": "4",
   "source_tag": "JVNAUTOSCI-2271",
   "supported_action_ids": [
     "llm.action",
@@ -267,6 +267,12 @@
                 "context_key": "kr_concept_parent_id",
                 "required": true,
                 "tool_param": "parent_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_kr_design_concept_materialisation_item_workflow_create_concept_kr_concept_duplicate_resolution_mode_to_duplicate_resolution_mode_parameter",
+                "context_key": "kr_concept_duplicate_resolution_mode",
+                "required": false,
+                "tool_param": "duplicate_resolution_mode"
               }
             ],
             "execution_mode": "deterministic",
@@ -286,6 +292,10 @@
               [
                 "scope_mode",
                 "user_org_default"
+              ],
+              [
+                "suppress_event_workflow_launches",
+                true
               ],
               [
                 "tool_name",
@@ -560,6 +570,10 @@
                 "type_of"
               ],
               [
+                "suppress_event_workflow_launches",
+                true
+              ],
+              [
                 "tool_name",
                 "add_relationship"
               ]
@@ -616,6 +630,10 @@
               [
                 "predicate",
                 "instance_of"
+              ],
+              [
+                "suppress_event_workflow_launches",
+                true
               ],
               [
                 "tool_name",
@@ -686,6 +704,10 @@
               [
                 "predicate",
                 "hasDescription"
+              ],
+              [
+                "suppress_event_workflow_launches",
+                true
               ],
               [
                 "tool_name",
@@ -1120,6 +1142,10 @@
             "on_failure_state": "summarise_blocker",
             "state_id": "assert_relationship",
             "static_input_bindings": [
+              [
+                "suppress_event_workflow_launches",
+                true
+              ],
               [
                 "tool_name",
                 "add_relationship"
@@ -1609,11 +1635,17 @@
                 "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_blocking_reason_to_kr_materialisation_blocking_reason",
                 "context_key": "kr_materialisation_blocking_reason",
                 "tool_output_field": "blocking_reason"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_kr_design_materialisation_workflow_validate_materialisation_plan_duplicate_resolution_mode_to_kr_concept_duplicate_resolution_mode",
+                "context_key": "kr_concept_duplicate_resolution_mode",
+                "tool_output_field": "duplicate_resolution_mode"
               }
             ],
             "writes_context_keys": [
               "kr_materialisation_guard_passed",
-              "kr_materialisation_blocking_reason"
+              "kr_materialisation_blocking_reason",
+              "kr_concept_duplicate_resolution_mode"
             ]
           },
           {
@@ -1681,6 +1713,10 @@
               [
                 "max_concurrency",
                 1
+              ],
+              [
+                "stop_on_error",
+                true
               ],
               [
                 "max_items",

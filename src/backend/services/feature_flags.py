@@ -47,7 +47,22 @@ def get_workflow_discovery_cache_invalidation_enabled(
     *,
     default: bool = True,
 ) -> bool:
-    """Return whether mutation paths should invalidate workflow discovery caches."""
+    """Return whether mutation paths should invalidate workflow discovery caches.
+
+    Event-workflow-owned mutations may suppress their own recursive launch and
+    routing-cache fan-out through a request-local context. Import lazily to
+    avoid coupling ordinary feature-flag reads to workflow service start-up.
+    """
+
+    try:
+        from .workflow_event_integration_service import (
+            event_workflow_launches_suppressed,
+        )
+
+        if event_workflow_launches_suppressed():
+            return False
+    except ImportError:
+        pass
 
     return _read_env_flag(
         "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE",

@@ -766,7 +766,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -779,6 +779,16 @@
                     },
                     "allow_duplicate_instances": {
                         "type": "boolean"
+                    },
+                    "duplicate_resolution_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "canonical_id_only",
+                            null
+                        ]
                     },
                     "namespace": {
                         "type": [
@@ -816,7 +826,7 @@
                     "concepts"
                 ],
                 "additionalProperties": true,
-                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Scope defaults to authenticated user+organisation visibility when context is available. Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
+                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Scope defaults to authenticated user+organisation visibility when context is available. Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
             }
         },
         {
@@ -2488,6 +2498,18 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "source_fingerprint": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "processing_authority_fingerprint": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -2685,7 +2707,7 @@
         },
         {
             "name": "gmail_get_message",
-            "description": "Fetch a Gmail message for a profile using message_id from gmail_list_messages. The 'profile' parameter accepts either the configured profile alias or the authorised Gmail address. Supports Gmail API formats metadata|full|raw|minimal and returns normalised sender, subject, date, and snippet fields when available. Read-only; profile token required.",
+            "description": "Fetch a Gmail message for a profile using message_id from gmail_list_messages. The 'profile' parameter accepts either the configured profile alias or the authorised Gmail address. Supports Gmail API formats metadata|full|raw|minimal and returns normalised sender, subject, date, and snippet fields when available. Set include_body=true only for an explicit user request for body text; that returns a bounded plain-text body and truncation flag. Read-only; profile token required.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2697,6 +2719,9 @@
                     },
                     "format": {
                         "type": "string"
+                    },
+                    "include_body": {
+                        "type": "boolean"
                     }
                 },
                 "required": [
@@ -2704,7 +2729,7 @@
                     "message_id"
                 ],
                 "additionalProperties": false,
-                "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal).",
+                "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal). Set include_body=true only when the user explicitly requests message body text; this forces format=full and returns bounded plain-text body evidence.",
                 "x-von-argument-aliases": {
                     "profile_id": "profile",
                     "identity": "profile",
@@ -3147,7 +3172,11 @@
                     "issue_key"
                 ],
                 "additionalProperties": true,
-                "description": "jira_get_issue input: issue_key (str, required), optional fields (list of field names), and optional expand (list of Jira expand tokens such as ['changelog'])."
+                "description": "jira_get_issue input: issue_key (str, required), optional fields (list of individual field names), and optional expand (list of individual Jira expand tokens such as ['changelog']).",
+                "x-von-comma-separated-list-fields": [
+                    "fields",
+                    "expand"
+                ]
             }
         },
         {
@@ -3398,7 +3427,10 @@
                     "jql"
                 ],
                 "additionalProperties": true,
-                "description": "jira_search input: jql (str, required) plus optional max_results, next_page_token, start_at (deprecated), and fields (list of field names)."
+                "description": "jira_search input: jql (str, required) plus optional max_results, next_page_token, start_at (deprecated), and fields (list of individual field names; do not combine names into one item).",
+                "x-von-comma-separated-list-fields": [
+                    "fields"
+                ]
             }
         },
         {
@@ -3952,6 +3984,18 @@
                             "null"
                         ]
                     },
+                    "source_fingerprint": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "processing_authority_fingerprint": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
                     "processing_status": {
                         "type": [
                             "string",
@@ -4001,6 +4045,13 @@
                             "null"
                         ],
                         "items": {},
+                        "additionalProperties": true
+                    },
+                    "processing_evidence": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
                         "additionalProperties": true
                     }
                 },
@@ -4519,7 +4570,10 @@
                     "query"
                 ],
                 "additionalProperties": false,
-                "description": "search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)"
+                "description": "search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)",
+                "x-von-comma-separated-list-fields": [
+                    "filter_kind"
+                ]
             }
         },
         {
@@ -6355,7 +6409,10 @@
                     "query"
                 ],
                 "additionalProperties": false,
-                "description": "search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)"
+                "description": "search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)",
+                "x-von-comma-separated-list-fields": [
+                    "filter_kind"
+                ]
             }
         },
         {
