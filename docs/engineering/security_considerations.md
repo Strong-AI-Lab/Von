@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 18 July 2026
+- **Last reviewed:** 25 July 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -11,12 +11,14 @@
 
 ## When to read this guide
 
-Read the applicable sections before work involving authentication,
-authorisation, private or cross-namespace data, writes, untrusted content,
-external integrations, secrets, deployment, or administrator/operator
-surfaces. The hard security invariants in `AGENTS.md` apply to every task; this
-longer guide is not compulsory reading for unrelated documentation or
-mechanical code work.
+Read the applicable sections before work with material security exposure:
+authentication or authorisation, private or cross-namespace data, secrets,
+untrusted content combined with tool authority, effects outside ordinary
+bounded and recoverable standing delegation, deployment, or
+administrator/operator surfaces. The risk- and profile-calibrated security
+principles in `AGENTS.md` apply to every task; an ordinary bounded write or
+integration does not require this entire guide solely because it is a write or
+integration.
 
 Implementation and deployment observations in this document are dated. Verify
 the affected current code and deployment profile before relying on a statement
@@ -40,13 +42,39 @@ The correct posture is therefore **profiled security**:
 - keep local SAIL research work fast enough to make progress;
 - allow useful public/read-only demo and contributor workflows where data is
   intentionally public;
-- fail closed for private user/org data, secrets, destructive actions, and
-  authority-bearing workflow/Vontology mutations;
+- keep private user/org data and secrets outside capabilities not delegated to
+  the current actor;
+- allow bounded, observable, recoverable action within standing delegation,
+  including ordinary reversible mutations without automatic confirmation;
+- reserve blocking, approval, or stronger confinement for effects whose
+  residual harm cannot be kept tolerable through scoping, read-back, recovery,
+  compensation, or rate/blast-radius limits;
 - make the stricter partner/production path visible and actionable rather than
   burying it as generic "production TODOs".
 
 Von is still **not production-ready for multi-tenant or adversarial
 environments** without the hardening work listed below.
+
+### Risk, recovery, and useful autonomy
+
+Security sets the maximum capability available to an actor; it should not
+silently become a deterministic interpretation of what the actor means.
+Classify the concrete consequence, not the operation name. `Write`, `send`, and
+`delete` cover effects ranging from a versioned draft or recoverable Trash move
+to an irreversible disclosure or purge.
+
+Choose the least restrictive assurance that keeps residual harm within the
+deployment profile and delegated envelope. Consider impact, blast radius and
+repetition, detectability, restoration probability and time, secondary effects,
+external commitment, and recovery burden. Prefer bounded capability,
+reversible defaults, receipts/read-back, compensation, and monitoring when
+they are adequate. Use unbypassable prevention or action-specific approval when
+an effect exceeds delegated authority or those recovery mechanisms are
+demonstrably insufficient.
+
+Reversibility does not create authority, and an advertised undo is not enough:
+recovery must be independently credible. Equally, a probabilistic semantic
+label wrapped in deterministic code is not a security boundary.
 
 ## Operating Profiles
 
@@ -55,7 +83,7 @@ undifferentiated rule set.
 
 | Profile | Intended use | Acceptable loosenings | Required tightenings |
 | --- | --- | --- | --- |
-| Local SAIL development | Trusted SAIL researchers on local machines | Local diagnostics, trusted automation headers, public/sample corpora, experimental namespace warnings | Never commit secrets/runtime data; private RAG remains namespace-scoped; destructive mutations still require explicit confirmation |
+| Local SAIL development | Trusted SAIL researchers on local machines | Local diagnostics, trusted automation headers, public/sample corpora, experimental namespace warnings, bounded recoverable action under standing delegation | Never commit secrets/runtime data; private RAG remains namespace-scoped; materially irreversible or high-blast effects need stronger confinement or approval |
 | Shared SAIL service | Small trusted SAIL group using a shared backend | Read-only operational diagnostics may remain visible to authenticated SAIL users | Admin actions require admin auth; audit sensitive mutations; avoid raw client identity trust |
 | Public open-repo contributor | External users cloning/running their own instance | Public repo docs/sample knowledge can be searchable without login | Root `SECURITY.md`, secret/dependency/code scanning, safe defaults, no expectation that contributors have SAIL credentials |
 | Partner pilot | Partner or Living Lab deployment with real organisational data | Limited public/onboarding help can remain unauthenticated | Strict auth, admin endpoint protection, audit logs, backup encryption, namespace strict mode for high-risk paths |
@@ -71,7 +99,7 @@ Use different controls for different data and capability classes.
 | SAIL internal operational data | Jira tasks, SAIL project notes, internal telemetry | SAIL-authenticated or trusted local operator only |
 | User/org private data | chat history, uploaded files, private RAG chunks, partner data | Authenticated, namespace-scoped, fail closed on missing or conflicting scope |
 | Secrets and credentials | `.env`, API keys, OAuth tokens, DB URIs, device secrets | Never printed, never committed, redacted in diagnostics |
-| Authority-bearing artefacts | Vontology prompts/workflows/policies, publication gates, MCP write tools | Mutations require authenticated authority, provenance, and explicit write policy |
+| Authority-bearing artefacts | Vontology prompts/workflows/policies, publication gates, MCP write tools | Keep effects within authenticated standing delegation; use provenance, read-back, recovery, and additional approval in proportion to the concrete commitment |
 | Admin/operator actions | sync, reindex, DB reconnect, shutdown, imports, backups | Admin auth or local trusted operator profile only |
 
 ## Known Security Limitations
@@ -149,10 +177,16 @@ The agent receives authentication status in system prompt:
 
 ### 2A. Namespace Component Discipline (User + Organisation)
 
-**Intent**: Namespace is not only a storage partition key. It is intended to become a primary access-safety primitive and will interact with future microtheory/theory-inclusion work.
+**Intent**: The security outcome is that one actor cannot read or mutate
+another actor's private data. Namespace is the current implementation's main
+partitioning mechanism, not the only architecture that could satisfy that
+outcome.
 
-Authoritative contract:
-- See `docs/engineering/effective_namespace_contract.md` for canonical resolution order, propagation fields, policy modes, invariants, and migration phases.
+Current implementation details:
+- See `docs/engineering/effective_namespace_contract.md` for the current
+  resolver order, propagation fields, policy modes, and migration history.
+  Treat those details as compatibility notes, not requirements for a
+  replacement path.
 
 **Current model (research phase)**:
 - Support both user-only namespaces (`#V#<user>`) and user@org namespaces (`#V#<user>@<org>`).
@@ -170,7 +204,8 @@ Authoritative contract:
 
 **Tightening path (later)**:
 - During the current experimental phase, prefer visibility and diagnostics for non-critical mismatches over aggressive hard failures.
-- Keep one authoritative effective-namespace resolver and one validation pathway so stricter enforcement can be enabled later with minimal refactoring.
+- Avoid inconsistent duplicate resolvers while the current mechanism remains;
+  a replacement may use a different, simpler isolation design.
 - Design new handlers so switching from “diagnose mismatch” to “reject mismatch” is a policy change, not a codebase-wide rewrite.
 
 **Profile guidance**:
@@ -221,10 +256,13 @@ Authoritative contract:
 - Treat external content as data from the least-privileged party that supplied
   it. Processing an untrusted PDF, web page, or email must not grant the LLM
   access to tools that the content's author should not have.
-- Keep deterministic write and side-effect guardrails outside the LLM. Prompts
-  can reduce risk, but they cannot be the security boundary for tool authority.
-- Add represented tool-risk metadata for external, read-only, additive write,
-  mutative, destructive, credential-bearing, and admin tools.
+- Enforce the actor's maximum tool capability outside untrusted content and
+  model output where bypass would expose undelegated data or effects. Do not
+  turn that ceiling into deterministic semantic policy for every action.
+- Expose the effect, scope, reversibility, recovery, external commitment, and
+  relevant deployment limits of tools when those facts help the model and
+  runtime choose proportionate assurance. Avoid a universal verb-based risk
+  taxonomy.
 - Log enough tool input/output metadata to investigate suspicious tool use while
   redacting secrets and private content where required.
 
@@ -533,6 +571,13 @@ be added before broader external contribution or partner deployment.
 
 ## Change Log
 
+- **2026-07-25**: Replaced categorical write/destructive guardrails with
+  delegated-capability and residual-risk guidance
+  - Distinguished the actor's maximum capability from semantic action choice
+  - Made credible reversibility, read-back, recovery, compensation, and blast
+    radius part of control selection
+  - Clarified that operation names and model-derived risk labels do not
+    determine a universal approval policy
 - **2026-04-24**: Recalibrated security guidance for SAIL-only current use,
   open-repo contributor risk, and future partner/production profiles
   - Added operating profiles and data/capability classes

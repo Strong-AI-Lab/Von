@@ -6,7 +6,7 @@
   apply it at the validation tier justified by the claim
 - **Created:** 2026-04-06
 - **Last substantive content update before this metadata review:** 2026-06-08
-- **Last reviewed:** 2026-07-18
+- **Last reviewed:** 2026-07-25
 - **Evidence boundary:** Each acceptance claim still requires its own dated
   user-view evidence
 
@@ -70,19 +70,17 @@ Anonymous mode is often not representative enough because it may hide or remove:
 Ad-hoc mocking inside DevTools is still useful for diagnosis, but it is not a
 complete substitute for a dependable authenticated browser-testing path.
 
-## 5. Preferred Validation Ladder
+## 5. Validation menu
 
-Use this order for Tier 1 or higher browser-relevant claims unless the task
-clearly needs something different. Tier 0 documentation, copy-only, or
-mechanical changes do not automatically require a live browser:
+Choose the cheapest evidence sufficient for the concrete browser claim. These
+options are not an ordered ladder and Tier 1 does not require all of them:
 
-1. Run targeted impacted tests for the changed module(s).
-2. Run the frontend static JS lint gate on the changed browser-side files.
-3. Start Von locally and verify the real browser surface.
-4. If anonymous mode is insufficient, switch to a realistic authenticated
-   user-view state.
-5. Use targeted in-browser instrumentation only to fill gaps, not as the main
-   acceptance story.
+- targeted tests for the changed module;
+- the relevant static check;
+- a live check on the affected browser surface;
+- authenticated or realistic fixture state when anonymous state cannot expose
+  the claim; and
+- targeted in-browser instrumentation for diagnosis.
 
 A good final acceptance note usually states:
 
@@ -256,18 +254,15 @@ In-browser mocking or synthetic DOM setup is appropriate when:
 But if you stop there, say so explicitly. Mock-backed browser diagnosis is not
 the same as authenticated user-view acceptance.
 
-## 10. Documentation and Closure Expectations
+## 10. Durable validation lessons
 
-If a frontend task reveals a repeatable browser-validation lesson:
+Record or create follow-up work only when a lesson has demonstrated recurring
+material cost and cannot be fixed or noted simply in the current task. Then:
 
-- update this document or a related engineering guide;
-- add or update Jira follow-up work when the current fixture path is too fragile
-  or incomplete;
-- record whether authenticated user-view validation was achieved or whether the
-  result still depended on ad-hoc mocking.
-
-For major frontend or browser-validation improvements, consider whether
-`AGENTS.md` should point to the relevant document more explicitly.
+- update the smallest relevant guide rather than appending a new universal
+  rule;
+- create Jira follow-up only for a concrete unmet capability; and
+- state the actual evidence limitation when it materially affects the claim.
 
 ## 11. Current Follow-Up
 

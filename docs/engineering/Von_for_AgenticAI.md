@@ -4,6 +4,7 @@
 - **Lifecycle:** Active as advisory design; implementation snapshot frozen
 - **Authority:** Advisory; `AGENTS.md` and current explicit user direction govern
 - **State evidence as of:** 24 April 2026
+- **Last reviewed:** 25 July 2026
 - **Freshness boundary:** Durable target-direction arguments may remain useful;
   all “current”, “already”, “still”, code-size, gap, and priority claims require
   live revalidation
@@ -14,6 +15,10 @@
 ## 1. Purpose
 
 This note records the architecture Von is actually moving toward, not merely an aspirational marketing summary.
+
+It is not an implementation template. Direct model, tool, function, or small
+compositional paths remain the baseline; represented layers and stages must
+earn their cost for a concrete capability.
 
 It is intended to do four things:
 
@@ -32,7 +37,9 @@ Von should not evolve into a larger and larger chat application with more ad hoc
 The intended direction is a **deployable neuro-symbolic agent platform** in which:
 
 - enduring knowledge lives in explicit represented form rather than only in latent model state;
-- durable behavioural policy is authored in Vontology, workflows, prompt programmes, KB assertions, and other inspectable authority surfaces;
+- durable behavioural policy that needs independent governance may be authored
+  in Vontology, workflows, prompt programmes, KB assertions, or another
+  inspectable surface;
 - Python provides reusable support surfaces such as execution, validation, telemetry, persistence, integration, and, where implementation in Python will not compromise agentic generality, safety;
 - a **portfolio of model scales** is used intentionally rather than pretending one model class should do everything;
 - the system learns and adapts by promoting evidence-backed knowledge, workflows, prompts, and policy artefacts into durable represented form;
@@ -193,9 +200,10 @@ For the concrete Vontology tool families implied by this direction, see
 connects KA, KCAP, commonsense KR, Cyc-style contextual representation, and
 scientific KR literature to proposed Vontology read/write/support tools.
 
-### 4.2 Workflows, prompts, and contracts as behavioural authority
+### 4.2 Optional durable behavioural authority
 
-Durable behaviour policy should be authored in:
+When behaviour genuinely needs independent authoring, revision, attribution,
+evaluation, or reuse, possible surfaces include:
 
 - VWL workflow definitions;
 - prompt concepts and text relations;
@@ -203,19 +211,24 @@ Durable behaviour policy should be authored in:
 - KB assertions and explicit constraints;
 - contract objects such as turn expected-outcome contracts and required-effects contracts.
 
-Python should not quietly decide ranking, matching, recommendation, retrieval strategy, or answer semantics through lexical helpers and conditionals if those policies can be represented cleanly elsewhere.
+Do not hide such policy in incidental lexical helpers and conditionals. Equally,
+do not create a represented contract merely because the behaviour is durable or
+user-visible; compare it with the simpler direct path.
 
 ### 4.3 Shared turn context as a first-class surface
 
-A genuinely agentic system cannot allow each stage to see materially different hidden contexts unless that reduction is explicit, justified, and telemetry-visible.
+A genuinely agentic system should not give multiple model calls materially
+different hidden contexts without making consequential changes inspectable.
+This applies only when multiple calls are justified.
 
 Von should continue pushing toward:
 
-- one accumulated turn context reused across selector, planner, tool use, critic, and narration stages;
-- explicit stage-local additions where needed;
-- explicit telemetry of what each stage actually saw.
+- a shared situation across the consumers a capability actually needs;
+- explicit call-local additions where consequential; and
+- enough telemetry to explain material context differences.
 
-Without this, Python becomes an invisible policy layer even when the prompts live in Vontology.
+This does not imply a selector, planner, critic, narration stage, or universal
+turn-state object.
 
 ### 4.4 Model hierarchy and capability composition
 
@@ -252,16 +265,17 @@ That implies:
 - search and retrieval before clarification;
 - explicit uncertainty and provenance instead of bluffing;
 - preference for low-risk additive actions over unnecessary permission loops;
-- escalation for destructive or high-impact changes;
+- stronger intervention only when the concrete consequence warrants it;
 - preserving institutional and scholarly practice rather than flattening it into a narrow internal schema.
 
 Minimal imposition is not merely a UX preference. It is a central operational criterion for real-world deployability.
 
-### 4.7 Critic and evaluator workflows as first-class citizens
+### 4.7 Critics and evaluators when evidence warrants them
 
-A powerful agent platform needs not only planners and executors, but also explicit evaluator and critic components.
+A critic or evaluator may help when direct execution has a demonstrated,
+material failure that the extra call catches economically.
 
-Von should therefore treat critic workflows as standard architecture, not an afterthought. This includes:
+Possible uses include:
 
 - postcondition critics;
 - evidence-answer consistency critics;
@@ -269,7 +283,9 @@ Von should therefore treat critic workflows as standard architecture, not an aft
 - recovery-decision workflows;
 - long-horizon reflection and promotion workflows.
 
-The landed prompt-backed postcondition critic is therefore important not just as a bug fix, but as part of the right architectural doctrine.
+Critics are not standard architecture. Compare them with direct execution on
+usefulness, latency, cost, false rejection, and recovery, and remove them when
+they do not improve the complete user job.
 
 ### 4.8 Capability plug-ins and secure deployment surfaces
 

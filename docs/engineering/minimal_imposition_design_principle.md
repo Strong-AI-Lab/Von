@@ -2,18 +2,29 @@
 
 - **Kind:** Design principle
 - **Lifecycle:** Active
-- **Authority:** Normative within the minimal-imposition, elicitation, and
-  write-policy scope selected by `AGENTS.md`, subject to the precedence stated
-  below
+- **Authority:** Explanatory guidance under `AGENTS.md`; adds no independent
+  per-task gate or control taxonomy
 - **Created:** 2026-04-03
-- **Last reviewed:** 2026-07-18
+- **Last reviewed:** 2026-07-25
 - **Freshness boundary:** Principle, not current implementation evidence
 
 ## 1. Purpose
 
 This document explains **minimal imposition** as a design principle for Von. It translates a broad research and alignment framing into concrete guidance for Von's agent, workflow, and knowledge-system design.
 
-This document is intended to support a **strong default policy stance** in Von rather than to act as a purely optional note. At the same time, it is **not** a mechanical override that supersedes everything else. Security constraints, destructive-action safeguards, workflow-authority requirements, authentication/namespace rules, and explicit user instructions still take precedence when they conflict.
+`AGENTS.md` carries the operative repository default. The considerations and
+examples here are explanatory lenses, not required fields, a risk-class schema,
+or another approval surface for every task.
+
+This document is intended to support a **strong default policy stance** in Von
+rather than to act as a purely optional note. It does not manufacture authority
+or override explicit user instructions and concrete protections against
+unacceptable outcomes. It does reject treating security vocabulary, operation
+names, or an existing workflow as a preselected mechanism.
+
+Those concerns do not form a fixed list of mandatory gates. The concrete
+delegation, effect, blast radius, detectability, reversibility, recovery cost,
+and external commitment determine which control—if any—is justified.
 
 Related repo guidance:
 - [README.md](../../README.md)
@@ -75,7 +86,9 @@ minimal imposition. In particular, it says that agents should:
 - prefer low-burden, reversible progress when task authority is clear;
 - treat canonical identifiers and URLs as identity/provenance evidence, not as
   blanket permission for unrelated writes;
-- route destructive changes through confirmation or explicit workflow escalation;
+- let bounded, recoverable actions proceed within standing delegation and
+  reserve confirmation for authority gaps or materially consequential residual
+  risk;
 - preserve Vontology and workflow authority rather than hiding policy in ad-hoc code.
 
 This document does not replace that stance. It explains **why** the stance exists, where it applies, and where it should yield to stronger constraints.
@@ -113,25 +126,42 @@ For Von this implies:
 - expose uncertainty instead of masking it behind assertive language;
 - prefer editable workflow state and explicit KB artefacts over hidden internal assumptions.
 
-### 6.3 Prefer low-risk additive action over unnecessary permission loops
+### 6.3 Prefer low-risk, recoverable action over unnecessary permission loops
 
 When the system has clear task authority and strong evidence for a **low-risk
-additive** action, requiring extra ceremony can itself be a form of imposition.
+or reliably recoverable** action, requiring extra ceremony can itself be a form
+of imposition.
 In Von this often supports:
 
 - representing clearly identified scholarly artefacts;
 - attaching reversible or provenance-preserving metadata;
+- creating or editing drafts, tickets, derived datasets, and version-controlled
+  notes, then exposing the result and recovery path;
+- moving a bounded item to reliable Trash without treating the word `delete`
+  as an automatic approval requirement;
 - proceeding from canonical identifiers or URLs when the intended additive
   action is clear, authorised, provenance-preserving, and read back through the
   canonical surface.
 
-This is not blanket permission. It is a strong default that must still yield to stronger constraints around security, user denial, destructive effects, or ambiguous intent.
+This is not blanket permission. Standing delegation still sets the maximum
+capability, and ambiguity still matters when plausible choices differ
+materially. Within that ceiling, uncertainty by itself is not a reason to stop.
 
-### 6.4 Treat destructive and high-impact actions differently
+### 6.4 Control the consequence, not the verb
 
-Minimal imposition does not argue for indiscriminate autonomy. Destructive actions, major restructurings, and changes with unclear blast radius can impose large recovery costs even when they reduce short-term interruption.
+Minimal imposition does not argue for indiscriminate autonomy. It does reject a
+single policy for everything labelled `write`, `send`, `remove`, or `delete`.
 
-For Von, deletes, removals, and irreversible structural changes should usually route through explicit confirmation or workflow escalation.
+For each concrete action, consider standing delegation, blast radius,
+detectability, restoration probability and time, secondary effects, cost, and
+external commitment. A bounded move-to-trash with independently verified
+restore may proceed without an action-specific confirmation. Permanent purge,
+unbounded bulk mutation, disclosure outside delegated scope, or a commitment
+that cannot readily be corrected should use stronger confinement, approval, or
+abstention.
+
+Reversibility does not manufacture authority. It changes the control needed
+inside authority the user has already granted.
 
 ### 6.5 Preserve institutional and scholarly practice rather than flattening it
 
@@ -149,7 +179,8 @@ Minimal imposition should be treated as a **strong design and operational policy
 In particular, it should **not** be used to justify:
 
 - skipping necessary clarification when ambiguity is genuinely decision-relevant;
-- suppressing escalation for destructive or security-sensitive actions;
+- suppressing escalation where a concrete action exceeds delegated authority or
+  has intolerable residual risk;
 - bypassing authentication, namespace, or workflow-authority constraints;
 - inferring permission for unrelated actions from weak signals;
 - making silent changes that are difficult to inspect, reverse, or audit.
@@ -157,20 +188,28 @@ In particular, it should **not** be used to justify:
 When constraints conflict, the intended order is:
 
 1. explicit user instructions;
-2. security, authentication, and destructive-action safeguards;
-3. authoritative workflow/Vontology requirements;
-4. minimal-imposition judgement about how to carry out the task with the least unnecessary burden.
+2. the maximum capability actually delegated to the actor and system;
+3. the least restrictive control that keeps concrete residual harm tolerable,
+   including bounded capability, read-back, recovery, compensation, or
+   approval;
+4. authored workflow/Vontology policy when the capability has justified that
+   authority surface;
+5. minimal-imposition judgement about how to carry out the task with the least
+   unnecessary burden.
 
 That ordering keeps minimal imposition close to policy without turning it into a rhetorical excuse for either over-automation or under-communication.
 
 ## 8. Evaluation Implications
 
-If Von takes minimal imposition seriously, it should be evaluated on more than answer quality. Relevant measures include:
+If Von takes minimal imposition seriously, evaluation may use the few measures
+material to the claim, not this whole list as a compulsory scorecard:
 
 - interruption rate;
 - clarification burden;
 - unnecessary permission loops;
+- false refusal, needless abandonment, and useful-action rate;
 - reversibility and recovery cost;
+- recovery success and time after induced mistakes;
 - provenance coverage;
 - uncertainty calibration;
 - workflow distortion;
@@ -178,11 +217,9 @@ If Von takes minimal imposition seriously, it should be evaluated on more than a
 
 These metrics fit Von's broader aim of narrowing the verifiability gap: the point is not only to produce good outputs, but to do so in a way that is inspectable, non-disruptive, and compatible with real scholarly and organisational practice.
 
-The first explicit engineering model for this in the repo is now documented in
+The retired weighted implementation is documented for compatibility in
 [docs/engineering/minimal_imposition_benchmark_model.md](./minimal_imposition_benchmark_model.md).
-That model is intentionally honest about current evidence quality by separating
-`direct`, `proxy`, and `missing` dimensions instead of pretending the current
-runtime already exposes a complete imposition taxonomy.
+It is not current policy or an oracle for replacement architecture.
 
 ## 9. Summary
 
@@ -191,7 +228,8 @@ For Von, the right north star is neither "always ask a human" nor "never ask a h
 - learn from existing context before querying;
 - record what is known and how it is known;
 - expose uncertainty instead of masking it;
-- automate well-grounded additive work more readily than destructive work;
+- act readily within standing delegation when effects are bounded and
+  recoverable;
 - escalate mainly when the remaining ambiguity is genuinely important.
 
 That is the sense in which minimal imposition is useful here: not as a weak suggestion, and not as a hard doctrinal gate, but as a strong policy for building a trustworthy, provenance-bearing, workflow-aware agent that is less demanding and less disruptive than the alternatives.

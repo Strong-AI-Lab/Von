@@ -6,7 +6,7 @@
   selected by [`AGENTS.md`](../../AGENTS.md); subordinate to that constitution
   and current explicit user direction
 - **Created:** 2026-04-04
-- **Last reviewed:** 2026-07-18
+- **Last reviewed:** 2026-07-25
 - **Freshness boundary:** Design guidance, not a report of current
   implementation state; verify factual claims against live evidence
 
@@ -14,16 +14,20 @@
 
 This document is a compact design/background primer for coding agents working on Von.
 
-It exists to prevent a recurring failure mode: treating modern agentic-AI behaviour as if it were mainly ordinary application logic that should be hand-coded in Python, with prompts, workflows, knowledge bases, and explicit representations treated as secondary decoration.
-
-For Von, that is often backwards.
+It exists to prevent two reciprocal failure modes: hiding durable adaptable
+behaviour in incidental Python, and turning prompts, workflows, knowledge
+bases, representations, validators, and telemetry into compulsory architecture
+that displaces the user job.
 
 A particularly important variant of this failure is a lexical NLP heuristic masquerading as a "thin inspectable layer": bounded, deterministic, and explainable code that still keeps the real decision policy in Python rather than in the intended workflow/KB/prompt authority surface.
 
-In many tasks, especially behaviour-heavy ones, the most important design question is not "what Python should I write?" but:
+In many tasks, especially behaviour-heavy ones, the important design questions
+are:
 
-- where the authoritative behaviour should live;
-- what should be represented explicitly in Vontology or workflow artefacts;
+- what is the simplest adequate end-to-end path;
+- whether any behaviour needs durable independent authority at all;
+- what, if anything, should be represented explicitly in Vontology or workflow
+  artefacts;
 - what should be handled by prompted model judgement;
 - what should be handled by explicit logical/typed structure;
 - and what reusable runtime support Python should supply.
@@ -64,6 +68,14 @@ evaluation. It is not a requirement to add Vontology/VWL machinery to every
 user-visible behaviour. Complexity must earn its place through capability,
 safety, or measured operational advantage.
 
+Von is predominantly helping with ordinary administrative and scientific work,
+not controlling an aircraft. The default candidate should therefore be a
+capable collaborator acting within standing delegation: interpret reasonably,
+take a bounded action, inspect the result, and repair mistakes. Do not import
+safety-critical control architecture merely because an LLM can be wrong.
+Constrain the concrete residual consequence, and count needless refusal,
+clarification, confirmation, latency, and lost solution strategies as costs.
+
 ### 3.1 Modern LLM systems are not just "models plus wrappers"
 
 For practical agent design, system behaviour is usually co-determined by:
@@ -78,14 +90,16 @@ For practical agent design, system behaviour is usually co-determined by:
 
 If a task changes system behaviour, it may be changing one or more of those authored surfaces, not merely "implementation".
 
-For multi-stage turns, the accumulated turn context presented to each LLM phase
-is one of those behaviour-shaping surfaces. If selector, planner, tool-use, and
-response stages receive materially different contexts because code silently
-rebuilds or thins them, Python has effectively become a hidden policy layer.
+When more than one model stage is justified, the accumulated context presented
+to each call is one of those behaviour-shaping surfaces. If the calls receive
+materially different contexts because code silently rebuilds or thins them,
+Python may have become a hidden policy layer. This does not justify creating
+multiple stages for a turn that a single model or direct tool path can handle.
 
-### 3.2 Behaviour authority matters
+### 3.2 Choose behavioural authority deliberately
 
-In Von, behaviour often ought to be authored in:
+When the governance properties justify an extra layer, behaviour may be
+authored in:
 
 - Vontology concepts and text relations;
 - VWL workflow definitions and metadata;
@@ -93,28 +107,34 @@ In Von, behaviour often ought to be authored in:
 - explicit KB artefacts with provenance;
 - typed relations and other inspectable structures.
 
-Treat those surfaces as first-class implementation surfaces for durable system
-behaviour that needs their governance properties, not as secondary
-configuration or commentary about logic that really lives in Python.
+Treat a selected surface as first-class for the behaviour it actually governs.
+Do not infer that all behaviour needs durable representation or that a direct
+code/tool/model path is merely plumbing.
 
-Python should usually provide:
+Python may provide:
 
 - reusable execution surfaces;
-- validation and constraint checking;
+- exact interface validation where the consumer genuinely requires it;
+- bounded tool capabilities, observation, read-back, and recovery support;
 - retrieval and rendering helpers;
-- telemetry, persistence, and safety checks;
+- telemetry, persistence, and proportionate risk controls;
 - generic interfaces between models, workflows, and KB artefacts.
 
 If Python starts containing adaptable task policy that should be independently
 authored, governed, or learned, Von usually becomes harder to inspect, evolve,
-and improve. Conversely, moving deterministic semantics, algorithms, or hard
-contracts out of code can make the system slower and less reliable.
+and improve. Conversely, moving exact algorithms or interface semantics out of
+code can make the system slower and less reliable. This does not make broad
+categories such as writes, schemas, transactions, or destructive actions
+automatically hard; the concrete capability and residual risk still decide the
+assurance needed.
 
-A good default question is therefore not only "what Python should I write?" but also "can this change be cleanly authored in Vontology, workflow, prompt, or KB artefacts instead?"
+A good default question is therefore: "which smallest surface—direct code or
+tool, model judgement, prompt, workflow, KB artefact, or composition—best serves
+the user job, and does any added authority layer earn its cost?"
 
-Another good default question is: "are different LLM stages receiving
-minimum-sufficient projections from one canonical state, with explicit lineage,
-or has code drifted into undocumented phase-specific context shaping?"
+If multiple model calls are actually needed, also ask whether each receives a
+minimum-sufficient projection from the shared situation with enough lineage to
+explain material differences.
 
 ### 3.3 A strong model is often better at semantics than brittle lexical code
 
@@ -149,8 +169,8 @@ This means a key acceptance question is not merely "is the code inspectable?" bu
 Python is usually the right place for:
 
 - generic workflow/runtime primitives;
-- deterministic validation and type checking;
-- safe tool invocation layers;
+- structural validation and type checking where an interface requires them;
+- bounded tool invocation, receipts, read-back, and recovery mechanisms;
 - provenance capture and telemetry;
 - durable persistence and replay support;
 - generic retrieval, normalisation, and transformation helpers.
@@ -290,7 +310,9 @@ Pause and reconsider when you are about to write:
 - repo-side JSON/YAML/DSL files that become the real production authority;
 - code-side prompt defaults for a Vontology-governed feature;
 - hard-coded ontology IDs or name lists that should be resolved from Vontology;
-- hand-written "mini NLP" whose real purpose is to avoid using the model, workflow, or KB properly.
+- hand-written "mini NLP" whose real purpose is to avoid using the model, workflow, or KB properly;
+- a universal safety class or approval table whose `write`, `send`, or `delete`
+  label substitutes for examining delegation, consequence, and recovery.
 
 These are not always forbidden, but they are design smells and require explicit justification.
 
@@ -299,14 +321,18 @@ These are not always forbidden, but they are design smells and require explicit 
 When a task appears to invite heuristic policy code, ask:
 
 1. What is the real behaviour or policy being authored?
-2. Should that authority live in workflow, prompt, KB, or ontology artefacts?
+2. Does it need durable independent authority, and if so should that live in
+   code, workflow, prompt, KB, or ontology artefacts?
 3. Is the missing piece actually a reusable runtime primitive rather than task-specific logic?
 4. Can model judgement be used with explicit provenance/evaluation instead of lexical hacks?
 5. What explicit representation would make the behaviour inspectable and revisable?
 6. What telemetry and tests would show whether the approach works across model changes?
+7. Would a proposed gate or compulsory stage outperform a permissive baseline
+   on the complete user job?
 
 Often the right move is one of:
 
+- keep or simplify a direct tool/function/model path;
 - add or update a workflow primitive;
 - author or revise a prompt in Vontology;
 - represent missing concepts/relations in Vontology;
@@ -335,15 +361,13 @@ Temporary baselines should be:
 - clearly labelled in code and Jira;
 - non-authoritative by intent.
 
-## 10. Planning Checklist for Coding Agents
+## 10. Planning prompts for coding agents
 
-Before implementing substantial behaviour changes, answer these briefly in
-task notes or Jira comments:
+For substantial behaviour changes, use only the prompts that materially help:
 
 1. What user job and work product are being improved?
 2. What is the simplest adequate path and fair baseline?
-3. What part is deterministic mechanism, and what part is adaptable policy or
-   semantic judgement?
+3. Does any proposed compulsory restriction have comparative outcome evidence?
 4. Which knowledge or behaviour needs durable represented identity, revision,
    governance, or reuse?
 5. Is there a missing reusable runtime primitive or validator, or would adding
@@ -352,17 +376,17 @@ task notes or Jira comments:
 7. What validation tier and evidence path match the actual claim, including
    latency, cost, and human burden where material?
 
-If those questions are not answered, implementation is probably starting too early.
+## 10A. When represented authority was deliberately selected
 
-## 10A. Closure Check for Workflow-First Behaviour
+Verify only the material claims:
 
-Before closing a workflow-first or KB-authoritative task, verify the applicable
-items at the validation tier selected under `AGENTS.md`:
+1. The selected artefact really governs the behaviour it claims to govern.
+2. No hidden case-specific path contradicts it.
+3. Its governance or reuse benefit justifies the extra layer against a simpler
+   baseline.
 
-1. The authoritative decision policy is in Vontology/workflow/prompt/KB artefacts or materialised KB assertions.
-2. Python support code is generic support surface rather than hidden task policy.
-3. Any heuristic fallback is explicitly temporary, non-authoritative, and linked to a removal or replacement task.
-4. The production path does not silently depend on lexical heuristics that merely look tidy or interpretable in code review.
+This check does not require represented authority for a direct path that does
+not need it.
 
 ## 11. Bottom Line
 

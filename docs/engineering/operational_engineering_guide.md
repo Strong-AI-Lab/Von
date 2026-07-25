@@ -6,7 +6,7 @@
   to `AGENTS.md` and the scoped design guides
 - **Created:** 2026-04-04
 - **Last substantive content update:** 2026-07-18
-- **Last reviewed:** 2026-07-18
+- **Last reviewed:** 2026-07-25
 - **Freshness boundary:** Revalidate host-, credential-, launcher-, and
   connector-specific facts before relying on them
 
@@ -127,27 +127,37 @@ For an isolated checkout or automation, install dependencies through the
 repository's declared environment and record any bootstrap requirement in the
 automation definition rather than relying on a previously warmed machine.
 
-### 4.3 Fail closed at authority boundaries
+### 4.3 Do not fabricate unavailable authority
 
 If a required Vontology, workflow, prompt, or credential surface is unavailable,
-return a typed and diagnosable failure. Do not silently use stale prompt bodies,
-repo snapshots, guessed ontology terms, or heuristic policy as a substitute.
+do not invent authority, expose private data, or perform an effect beyond the
+delegated capability. Deny that affected effect with a typed explanation.
+
+Do not turn the absence of a preferred represented path into a universal
+failure. Preserve safe reads, direct-tool or manual alternatives, partial
+progress, and bounded recoverable action when those paths retain the same
+authority and user outcome. A stale prompt body or guessed ontology term must
+not silently impersonate live authority, but neither should a broken wrapper
+erase an otherwise authorised simpler path.
 
 ## 5. Canonical Tool and Access Paths
 
 ### 5.1 Vontology, workflows, and prompts
 
-Use Vontology APIs, MCP tools, or canonical services for governed data. Resolve
-candidate concepts and predicates before creating new ones, and read back a
-write through the canonical surface.
+Use Vontology APIs, MCP tools, or canonical services for data deliberately
+governed there. Resolve candidate concepts and predicates before creating new
+ones, and read back a write through the selected canonical surface.
 
-For workflow or prompt behaviour:
+When a workflow or represented prompt has actually been selected as authority:
 
 1. inspect the current represented artefact;
-2. inspect the context and telemetry the relevant model stage actually saw;
+2. inspect the context and telemetry the relevant model call actually saw;
 3. change represented policy there when the surface can express it;
-4. add Python only for a named reusable execution, validation, telemetry,
-   persistence, or integration primitive.
+4. keep generic execution and task policy on the smallest suitable surfaces.
+
+This does not require every behaviour change to acquire a represented artefact.
+A direct tool, function, model call, or small composition may be the correct
+canonical path.
 
 Repo seeds and snapshots are bootstrap or test material, not production
 authority.
@@ -171,13 +181,15 @@ Do not claim completion from a local file alone.
 
 For substantial Jira-backed implementation:
 
-- create or switch to a task branch;
-- move the issue to `In Progress`;
-- name the intended authority surface and validation claim;
-- keep comments, assignee, links, and status aligned with reality;
-- after implementation, continue through targeted validation, commit,
-  merge/push, remote read-back, closure comment, transition, and Jira read-back
-  unless the user explicitly asks to pause.
+- re-read the live issue and follow its actual decision authority;
+- use a task branch when the work is substantial;
+- keep comments, assignee, links, and status aligned with reality where doing
+  so helps coordination;
+- publish, merge, release, comment, or transition only as the current task
+  authorises; and
+- stop when evidence is ready for a stated human gate or when the current
+  decision authority ends. Implementation completion is not an instruction to
+  close the issue.
 
 Do not require Jira ceremony for an unrelated local inspection or small
 non-ticketed documentation change.
@@ -284,9 +296,10 @@ Do not claim broader coverage than was run.
 
 Inspect, in order:
 
-1. the workflow/prompt/profile/predicate that should own the behaviour;
-2. discovery and candidate-generation evidence;
-3. the model's actual stage context and selected action;
+1. the actual selected authority or execution surface, whether direct
+   tool/function, prompt, workflow, profile, or predicate;
+2. the evidence and capabilities available at the decision point;
+3. the model's actual context and selected action where a model was involved;
 4. execution/tool results and persisted evidence;
 5. final answer composition.
 

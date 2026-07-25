@@ -5,8 +5,8 @@
 - **Authority:** Canonical replay/telemetry protocol routed by `AGENTS.md`; use
   only the sections and validation depth justified by the claim
 - **Created:** 2026-04-17
-- **Last substantive content update:** 2026-07-15
-- **Last reviewed:** 2026-07-18
+- **Last substantive content update:** 2026-07-25
+- **Last reviewed:** 2026-07-25
 - **Evidence boundary:** Each acceptance claim still requires its own dated
   exact-path evidence
 
@@ -19,8 +19,9 @@ synthetic harnesses.
 Use it when the claim you need to validate is something like:
 
 - "Von responds to this text input correctly"
-- "the turn is genuinely workflow-driven"
-- "the selector, dispatch, and answer path are aligned"
+- "the turn succeeds through an appropriate direct, model, tool, or workflow
+  path"
+- "the chosen path and answer are aligned"
 - "telemetry matches what the user actually experienced"
 
 The loop is deliberately iterative, but its depth is risk-tiered. Replay the
@@ -39,8 +40,8 @@ applicable subset for Tier 1. Typical triggers are:
 - the route, orchestrator, workflow, selector, or response path may be at
   fault;
 - a unit test passes but the real system still behaves incorrectly;
-- you need confidence that a behaviour is workflow-driven rather than merely
-  test-driven;
+- you need confidence that a behaviour works for the claimed general reason
+  rather than only in a test harness;
 - the failure might be caused by the wrong candidate set, wrong selector
   steering, wrong execution mode, or weak answer composition.
 
@@ -55,8 +56,11 @@ the claim; it is not an automatic second pass for every backend behaviour fix.
 The job is not to make one answer look plausible.
 
 The job is to make the real turn lifecycle respond correctly to the user's text
-input, with decision policy carried by workflows, prompts, KB state, and
-Vontology artefacts rather than by hidden Python rescue logic.
+input through the smallest adequate path. That may be a direct function or tool
+call, model judgement, a represented prompt/workflow, or a composition of
+these. Durable semantic policy should not hide in case-specific Python rescue
+logic, but replay evidence must not prescribe a workflow merely to count as
+architecturally valid.
 
 That means every replay should answer two questions:
 
@@ -65,44 +69,22 @@ That means every replay should answer two questions:
 
 If those disagree, the task is not done.
 
-### 3.1 Architectural Sentinel Cases
+### 3.1 Architecture-neutral sentinel cases
 
-Treat lower-complexity replay prompts and control prompts as architectural
-sentinels, not as permission to ship a prompt-local rescue.
+Lower-complexity prompts are useful sentinels when they expose whether Von can
+use available context and capabilities without case-specific rescue logic. A
+passing path is credible when it:
 
-A simple prompt such as a direct represented lookup, a straightforward
-Vontology-grounded question, or a lightweight background-knowledge control is
-worth fixing only if it succeeds for the same structural reasons that a richer
-compositional turn would succeed:
+- produces the useful answer or effect with relevant provenance;
+- remains viable across neighbouring phrasings and, where material, languages;
+- does not rely on prompt-bank memorisation, proper-noun forcing, broad
+  irrelevant fan-out, or an English lexical intent table; and
+- leaves materially different competent strategies available unless a concrete
+  risk requires otherwise.
 
-- the right workflow candidates were discoverable from the same authority
-  surfaces;
-- selector and tool planning stayed narrow to the prompt's real evidence needs;
-- KB, Vontology, tools, and background knowledge interacted through the normal
-  turn architecture rather than through case-specific shortcuts; and
-- the answer stayed grounded to the evidence that path actually surfaced.
-
-This also means the success path must not depend on English-specific semantic
-code. If the underlying represented knowledge and tool surfaces are language
-agnostic, the same capability should remain viable in any language rather than
-only through English lexical overlap.
-
-Do not count a replay as architecturally satisfying if the "fix" depends on:
-
-- workflow-family-specific query seeds or literal prompt-bank memorisation;
-- broad external tool fan-out that would be inappropriate for the harder cases
-  in the same family;
-- narrow Python heuristics that happen to rescue the simple wording but would
-  misroute richer multi-surface turns; or
-- English-only stopword lists, lexical anchors, regex intent cues, or similar
-  code-side semantics that would collapse under other languages;
-- special handling that would not remain appropriate once workflows, tools, KB
-  state, and background knowledge are combined in more complex ways.
-
-The question to ask after a simple replay passes is: would this still be the
-right reason for success if the user asked a more compositional variant of the
-same task class? If the answer is no, keep treating the replay as diagnostic
-rather than as closure evidence.
+Do not require the simple case to traverse the same selector, workflow, or tool
+sequence as a richer case. Ask whether the successful reason is general enough
+for the claimed capability, not whether it follows the current architecture.
 
 ## 4. Expectation-First Preflight
 
@@ -232,7 +214,8 @@ pdm run python scripts/run_live_kb_tool_prompt_sampler.py `
 This records whether the normal runtime selected the represented prompt variant;
 it does not inject raw prompt text or promote a variant. A telemetry-inconsistent
 arm can remain useful comparator evidence, but it is non-promotable until the
-response surfaces, completion gate, and user-visible answer agree.
+material response, observed effects, and user-visible answer agree. A
+completion gate is relevant only when that path deliberately uses one.
 
 For earlier fix planning on a poorly performing prompt, use
 `scripts/replay_llm_exchange.py` when you only need to time or compare one LLM
@@ -317,11 +300,9 @@ Useful cases:
 
 Before the first replay:
 
-1. Identify the authoritative artefacts for the path you expect:
-   - workflow concepts
-   - prompt concepts
-   - relevant KB concepts or predicates
-   - any workflow publication/bootstrap surface that must already be current
+1. Identify the capabilities, evidence, and authority surfaces the actual path
+   may use. Do not assume in advance that these must include a workflow,
+   selector, critic, or represented prompt.
 2. Run targeted automated checks for the files you already changed.
 3. Start Von locally through the host-native isolated agent-test launcher:
    - macOS/Linux: `./run.sh restart -AgentTest -NoBrowser -HealthTimeoutSec 180`
@@ -351,19 +332,14 @@ Before the first replay:
    - actual model reported by Von telemetry;
    - local branch/commit identity for the checkout you ran from;
    - server-reported version/branch/commit when the server exposes them.
-7. For terminal-outcome acceptance, reconcile the same
-   `terminal_outcome_receipt_projection.v1` across the Turn Execution Record,
-   tool-observation ledger, bounded live progress, workflow trace, and
-   benchmark/dashboard output. A nested critic JSON object alone is not enough:
-   the outcome, causal stage, cause code, committed effects, remaining
-   obligations, retryability, recovery affordances, and provenance must agree.
-   Treat a missing projection as an evidence gap, not permission to derive an
-   outcome from response wording.
+7. If the claim specifically concerns a selected terminal-outcome receipt,
+   inspect the projections on the surfaces that path actually uses and reconcile
+   the fields material to the claim. Do not require five storage/projection
+   surfaces or a critic receipt for an ordinary successful turn.
 8. Treat `orchestrator_result_ready` and equivalent answer-available events as
-   non-terminal progress. A background task may be reported as completed only
-   after its Turn Execution Record and terminal-outcome evidence have been
-   assembled. Otherwise polling clients can stop on an answer that has not yet
-   acquired the receipt needed to explain success, partial success, or failure.
+   evidence that an answer is available, not proof of every background effect.
+   Verify the terminal status or world state needed by the claim; a receipt is
+   required only when the selected contract makes it part of that claim.
 
 Select the model or comparison arms from the capability slice, active profile,
 or task hypothesis. Record requested and executed models when model choice is
@@ -377,8 +353,9 @@ use different authenticated users or organisations, do not treat model
 differences as a parity defect until you have recorded that identity mismatch
 explicitly.
 
-Do not start by patching Python based only on the symptom. First confirm the
-expected authority surfaces and then inspect the real turn.
+Do not patch any surface from the symptom alone. Inspect the real turn and put
+the repair on the smallest adequate authority or execution surface; Python is
+neither automatically wrong nor automatically the right fix.
 
 ## 7. Preferred Replay Surfaces
 
@@ -507,7 +484,9 @@ already establish the bounded claim.
 
 ## 9. What to Inspect in Telemetry
 
-Inspect the turn in this order.
+Inspect only the surfaces the actual path used. The subsections below are a
+diagnostic menu, not required controller stages; absence of a selector,
+workflow, critic, or dedicated intent phase is not itself a defect.
 
 ### 9.1 Prompt and context
 
@@ -516,14 +495,15 @@ Check:
 - the actual user prompt
 - effective namespace and auth state
 - context size and whether the right conversation state was present
-- whether stage-specific context additions or reductions were recorded
+- whether material call- or path-specific context changes were recorded
 
-If the system is reasoning over the wrong context, do not patch downstream
-selection first.
+If the system is reasoning over the wrong context, do not patch a later surface
+first.
 
-### 9.2 Expected-outcome or intent reasoning
+### 9.2 Interpretation, when separately visible
 
-Look for the stage that should interpret what the user is actually asking for.
+Locate where the path interpreted what the user was asking. This may be within
+one model call rather than a dedicated stage.
 
 Check whether it recognised the request as, for example:
 
@@ -537,7 +517,7 @@ output materially affected downstream discovery and selector context. A stage
 that exists only in telemetry but does not steer the rest of the turn is not
 good enough.
 
-### 9.3 Workflow discovery
+### 9.3 Workflow discovery, if used
 
 Inspect:
 
@@ -553,7 +533,7 @@ Ask:
 - Did discovery search for the underlying intent, or only for lexical overlap
   with a specialised workflow name?
 
-### 9.4 Selector decision
+### 9.4 Selector decision, if used
 
 Inspect:
 
@@ -567,7 +547,7 @@ is usually upstream in discovery. If the candidate set was good and the
 selection was still wrong, the fix is usually in selector context, prompt, or
 policy metadata.
 
-### 9.5 Dispatch and execution
+### 9.5 Dispatch and workflow execution, if used
 
 Inspect:
 
@@ -585,7 +565,7 @@ Typical questions:
 - Did the workflow start but do no useful work?
 - Did represented side-effects happen but fail to surface in the answer?
 
-### 9.6 Response composition and transforms
+### 9.6 Response transforms, if used
 
 Inspect:
 
@@ -640,7 +620,7 @@ The review question is:
 Check in particular whether the card shows:
 
 - what Von is trying to do for the user;
-- which route or workflow family it is using;
+- which capability or route it is using, where that helps;
 - what kind of information or tool work it is using to answer;
 - what it is currently waiting on;
 - whether fallback or tool-planning behaviour is explained in user-facing
@@ -652,36 +632,30 @@ If the answer is acceptable but the live card is dominated by code-mechanics
 detail or fails to communicate the reasoning and information sources in
 user-facing language, that is still a user-visible deficiency worth recording.
 
-### 9.9 Decision attribution and architecture-integrity score
+### 9.9 Decision attribution evidence
 
-Turn diagnostics payloads carry a `decision_attribution` section
-(JVNAUTOSCI-2499): each of the six turn decisions (discovery, selection,
-dispatch, model choice, recovery, acceptance) is attributed to represented
-authority (with source concept ids), `python_fallback` (with the emitting
-function and reason), settings default, or honestly `unknown`/`absent`. The
-`architecture_integrity_score` is the represented fraction of attributable
-decisions.
+Some current diagnostics expose historical `decision_attribution` fields for
+discovery, selection, dispatch, model choice, recovery, and acceptance, plus an
+`architecture_integrity_score` based on represented attribution. Treat these as
+compatibility telemetry, not a model of the decisions every turn must contain
+and not a quality score for new architecture.
 
-Use it in two ways during replay review:
-
-- per turn, confirm the turn passed for represented reasons: a correct answer
-  whose attribution shows `python_fallback` on selection or dispatch is an
-  architectural failure even when the output is good (see 3.1);
-- across a replay set, the sampler's multi-arm reports include a
-  `decision_attribution_aggregate`, and
-  `scripts/report_turn_decision_attribution.py` aggregates the score and the
-  Python-fallback signature histogram over recent live turns, which is the
-  before/after measure for routing-authority seam closures such as
-  JVNAUTOSCI-2365.
+Use attribution to locate where a material decision was actually made and to
+find hidden case-specific policy. A correct direct or Python-supported path is
+not an architectural failure merely because it is not represented. Judge
+whether the chosen surface is the smallest adequate one, whether durable policy
+is inspectable when it needs to be, and whether the complete user job improves.
+Do not optimise the represented fraction or add stages so this legacy score
+rises.
 
 ### 9.10 Telemetry projection quality
 
-Check whether the persisted diagnostics preserve the stages and lineage you
-need.
+Check whether persisted diagnostics preserve the material decisions, evidence,
+effects, and lineage the claim needs.
 
-If the workflow behaved correctly but the telemetry collapsed the authored
-stages into generic buckets, that is a telemetry bug, not a routing bug. Fix it
-separately and say so.
+If the path behaved correctly but telemetry collapsed material events into
+misleading buckets, that is a telemetry bug, not a reason to add controller
+stages. Fix it separately and say so.
 
 ### 9.11 Tool-result lineage and evaluator evidence
 
@@ -701,11 +675,11 @@ follows from it. An evaluator that judges grounding therefore needs a bounded
 semantic projection of the relevant observation, including stable identifiers,
 status, result cardinality, the small set of fields needed for the judgement,
 explicit missing or redacted fields, typed errors, and provenance back to the
-observation. Define those projections through represented evidence agreements
-for the tool family, keep payloads bounded and secret-safe, and treat their
-content as data rather than instructions. If the required projection is absent,
-record an evidence gap instead of inferring success from a tool name or guessing
-the missing payload.
+observation. Use the smallest stable projection that repeated evaluation
+actually needs; representation in Vontology is optional. Keep payloads bounded
+and secret-safe, and treat their content as data rather than instructions. If a
+claim requires a projection that is absent, record an evidence gap instead of
+inferring success from a tool name or guessing the missing payload.
 
 ## 10. Failure Classification
 
@@ -729,85 +703,23 @@ Use a simple classification before editing anything:
 
 This prevents one symptom from turning into three unrelated code patches.
 
-## 11. Fix Discipline
+## 11. Fix discipline
 
-Apply fixes in this order:
+Locate the actual failure boundary, then choose the smallest adequate repair
+under `AGENTS.md`. The correct authority may be a direct tool/function, prompt,
+workflow, Vontology artefact, retrieval policy, support primitive, or user-facing
+composition. Do not prefer a represented layer merely because the symptom is
+user-visible, and do not put durable adaptable policy into Python merely because
+the symptom appeared there.
 
-1. Prompt/workflow/KB/Vontology authority surface.
-2. Missing reusable support surface in Python.
-3. Telemetry or validation support.
+Do not add a compulsory stage or restriction unless comparative end-to-end
+evidence shows that it improves the complete user job. A missing workflow is a
+defect only when a reusable workflow is actually the smallest adequate
+authority surface.
 
-When a replay exposes a missing but genuinely reusable workflow or subworkflow
-for a broader research-team or lab-support task class, prefer authoring that
-workflow in Vontology rather than patching Python or adding a test-shaped
-selector/routing hack.
-
-This includes cases where a competent engineer can design the reusable
-behaviour from background knowledge of the task class itself, provided the
-result is authored as a durable VWL/Vontology artefact and not as a narrow fix
-for the exact prompt combination in the test.
-
-Examples of acceptable reusable workflow/subworkflow targets include:
-
-- author disambiguation for represented or retrieved papers;
-- drafting a daily diary entry from represented activity context;
-- composing a weekly lab activity and progress report;
-- checking whether a task appears stale, superseded, or unnecessary.
-
-In those cases:
-
-1. Prefer a reusable workflow or subworkflow that could serve future adjacent
-   prompts, not just the triggering replay.
-2. Keep the authored policy in Vontology/VWL if the runtime can represent it
-   there.
-3. If the runtime lacks a reusable authoring primitive, add only that support
-   surface in Python and then author the workflow through the canonical
-   workflow-authoring path.
-4. Use the current workflow-authoring guidance in
-   `docs/engineering/von_workflow_language_manual.md`, especially the
-   `Generic Workflow Authoring Primitives` section and the canonical
-   authoring/meta-workflow composition:
-   - `#V#workflow_repair_or_create_workflow`
-   - `#V#workflow_authoring_repair_workflow`
-   - `#V#von_workflow_creation_workflow`
-5. Treat a workflow that is special-cased to the prompt wording, the exact test
-   bank entry, or one accidental combination of tools as a design smell rather
-   than a successful fix.
-
-For failures in the reusable class "get information of a specific kind about an
-entity", apply the repair sequence explicitly:
-
-1. Identify the reusable workflow/subworkflow or bounded authoritative tool set
-   that should have answered the request.
-2. Ensure that artefact exists as a usable VWL/Vontology workflow before
-   normalising any Python-first fix.
-3. Replay the exact prompt and a small nearby family on the real Von path while
-   inspecting telemetry for:
-   - explicit entity resolution;
-   - predicate or relation inspection;
-   - extent retrieval;
-   - result-type filtering;
-   - non-empty user-visible answer production.
-4. Adjust workflow definitions, prompt text, routing metadata, tool metadata,
-   retrieval profiles, and other Vontology-governed artefacts until the real
-   route works for the right workflow-driven reason.
-5. Only if a missing reusable primitive, validator, telemetry surface, or
-   canonical tool support blocks that authority-first repair may
-   execution-related Python be changed.
-
-When this pattern is used, Jira should name both the missing workflow artefact
-and the replay/telemetry evidence that will prove the authored fix is real.
-
-Avoid:
-
-- code-side prompt bodies for durable policy
-- domain-specific forcing rules in core orchestration
-- lexical tables that pretend to be semantic routing
-- closing a task because a harness passes while the real route still fails
-
-If you find yourself forcing one proper-noun workflow or one noun family to win
-selection, step back. The system probably needs a more general information-flow
-fix.
+Replay the exact case and a nearby family when the claim is general. Inspect the
+actual path and final world state. Avoid prompt-local forcing, lexical tables,
+case-specific production branches, and closure from a synthetic harness alone.
 
 ## 12. Re-Run Criteria
 
@@ -822,7 +734,7 @@ After each fix, apply the items required by the chosen validation tier:
 5. For interesting failures, consider the same browser follow-up when the live
    card may reveal user-facing transparency gaps.
 6. Re-check the telemetry for the new run.
-7. Confirm that the explanation for success moved in the expected stage.
+7. Confirm that the actual reason and path for success changed as intended.
 8. Confirm that the live answer cleared the recorded bar, or exceeded it on its
    own grounded merits, rather than merely improving relative to a bad
    baseline.
@@ -842,24 +754,24 @@ After each fix, apply the items required by the chosen validation tier:
 
 Good signs:
 
-- discovery query and candidate set now reflect the underlying request
-- selector context shows the intended steering input
-- selected workflow family is plausible and runnable
-- execution does real work or explicitly reports grounded uncertainty
-- the answer is responsive to the user's text rather than a generic fallback
-- false-empty claims do not survive post-check against authority surfaces
-- the Thinking card explains reasoning and information use in user-facing terms
-- telemetry and answer tell the same story
+- execution does useful work or explicitly reports grounded uncertainty;
+- the answer is responsive to the user's request rather than a generic
+  fallback;
+- neighbouring phrasings and materially different competent paths can succeed;
+- false-empty claims do not survive post-check against relevant evidence;
+- any affected progress UI explains reasoning and information use in
+  user-facing terms; and
+- telemetry, observed effects, and answer tell the same story.
 
 Bad signs:
 
 - the same weak answer with a different justification
 - success only on the exact original wording
-- zero-tool or zero-workflow behaviour with no grounded explanation
+- no grounded explanation for the answer or observed effect
 - a "no results" answer that contradicts actual represented content
 - a Thinking card that mainly explains Von code mechanics rather than the
   answering process
-- stage telemetry still missing the steering step you thought you fixed
+- telemetry still omits a material decision or effect on the path actually used
 
 ## 13. Closure Standard
 
@@ -875,16 +787,16 @@ validation tier hold:
    its own grounded merits.
 5. Any "no results" or "nothing represented" claim survives post-check against
    the relevant authority surfaces.
-6. The answer is grounded in represented state, workflow results, or explicit
-   uncertainty.
+6. The answer is grounded in the relevant evidence and observed effects, with
+   explicit uncertainty where needed.
 7. Where the affected claim includes the live Thinking card or another
    browser-only surface, a successful scripted pass has been followed by a
    browser replay unless a limitation is recorded.
 8. Where a live Thinking card was part of the affected claim, it also meets a
    user-facing usefulness standard consistent with
    `thinking_card_live_llm_visibility_design.md`.
-9. The persisted telemetry shows the intended workflow-driven reason for the
-   behaviour.
+9. The persisted telemetry shows the actual successful reason and path,
+   whether direct function/tool, model-led composition, or workflow.
 10. Targeted regression tests cover the structural failure, not just the final
    string output.
 
@@ -953,21 +865,11 @@ For user-visible issues, record both:
 - the user-visible acceptance evidence
 - the corresponding telemetry evidence
 
-For a Tier 2/3 Jira-backed acceptance campaign, the closure comment should
-normally also record:
-
-- the exact prompt text used for the accepted replay;
-- the user-visible answer text, or a faithful excerpt when the answer is long;
-- the accepted run identifiers such as `request_id`, `session_id`, and any
-  history locator you relied on;
-- a short synopsis of the Thinking card or equivalent live progress surface;
-- a short judgement of whether that card would have helped a user understand
-  how Von answered, and why.
-
-If the browser pass was not run, or if no user-facing Thinking card was
-available on that path, record that absence explicitly in the closure note.
-
-Those two together are the closure story.
+If a Jira-backed campaign is actually being closed under current decision
+authority, record only the evidence material to its claim: for example the
+prompt, answer/effect, and stable run locator. Do not require a closure comment,
+browser pass, Thinking-card synopsis, or full telemetry packet merely because
+the task has a tier or Jira key.
 
 ## 14. Practical Reminder
 

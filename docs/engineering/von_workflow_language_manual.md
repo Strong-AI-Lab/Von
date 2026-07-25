@@ -8,8 +8,8 @@
   workflow definitions; current code, tests, and telemetry govern observed
   runtime behaviour
 - **Created:** 2026-05-03
-- **Last substantive content update:** 2026-07-15
-- **Last reviewed:** 2026-07-18
+- **Last substantive content update:** 2026-07-25
+- **Last reviewed:** 2026-07-25
 - **Audience:** Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -24,8 +24,8 @@ authored behaviour to later bespoke code.
 
 This manual is a reference, not a cover-to-cover prerequisite for every
 workflow change. Sections 1--15 define current language and runtime semantics.
-Section 16 and Appendix A retain planning refinements, worked examples, and
-diagram contracts that should be consulted only when relevant.
+Section 16 records retired planning material; Appendix A contains optional
+diagram contracts.
 
 This manual documents:
 
@@ -40,6 +40,14 @@ Normative keywords in this manual:
 - MUST: required for conformance with current VWL runtime.
 - SHOULD: strong recommendation.
 - MAY: optional.
+
+These keywords apply only after a capability has deliberately selected the
+named VWL feature. They do not require every user job to use a workflow,
+approval gate, idempotency policy, completion contract, or represented risk
+class. A malformed policy that was explicitly selected may fail that route;
+the existence of a policy mechanism does not justify selecting it, blocking
+independently authorised alternatives, or treating the manual as a universal
+controller design.
 
 ## 2. Authoritative Sources
 
@@ -79,7 +87,8 @@ Authoring policy:
   and telemetry for those workflows rather than embedding their task-specific
   orchestration in code.
 - Repo-side workflow/template/prompt files are non-authoritative by default. They MAY exist only as migration seeds, generated snapshots, test fixtures, or exports unless an explicitly approved exception says otherwise.
-- Replacing bespoke Python workflow builders with repo-side declarative files is therefore not, by itself, workflow-first convergence. The authoritative authored logic still belongs in Vontology-native artefacts.
+- Replacing bespoke Python workflow builders with repo-side declarative files is
+  not, by itself, enough when Vontology has been selected as the live authority.
 - Workflow-related Jira work SHOULD record the capability slice, selected
   authority surfaces, and applicable validation tier from `AGENTS.md`.
 
@@ -92,41 +101,23 @@ metadata SHOULD be authored in Vontology-native graph/text/policy structures.
 Normative authority rule:
 
 - supporting code MAY compile, validate, publish, or export these artefacts;
-- repo-side files MUST NOT be treated as the canonical authored source when the same logic can be held in Vontology;
+- repo-side files MUST NOT be treated as canonical authored source for a
+  capability whose selected live authority is Vontology;
 - if a production path depends on repo-side files for workflow authority, that path is source-authority drift and should be treated as contract debt, not normal conformance.
 
-### 2.2 Transitional Repo-Side Workflow Artefacts
+### 2.2 Repo-side workflow artefacts
 
-Some repo-side workflow artefacts currently exist while the stronger authority model is being restored. They do not satisfy the workflow-authority contract on their own.
+Repo-side workflow, template, and prompt artefacts may be migration seeds,
+exports, generated review snapshots, or test fixtures. They are not live
+production authority when a capability has deliberately selected a Vontology
+workflow as that authority. Their role must be explicit, and live activation
+and read-back must make the governing source unambiguous.
 
-Current transitional examples include:
-
-- `src/backend/workflows/repo_seed_bundles/*.json`
-- `src/backend/workflows/repo_seed_bundles/workflow_template_seed_bundle.json`
-- `src/backend/workflows/repo_seed_bundles/README.md`
-
-Permitted roles for such artefacts:
-
-- migration seed data used to move existing file-authored logic into Vontology-native authority;
-- generated snapshots exported from Vontology for diff/review;
-- test fixtures or deterministic export examples.
-
-Non-permitted role:
-
-- acting as the authoritative source of workflow logic, template logic, routing metadata, or prompt metadata for production behaviour.
-
-Supporting code notes:
-
-- generic publication/materialisation helpers, validators, and export tooling remain valid runtime support;
-- `workflow_concept_authority_service.py` now derives canonical publication specs/text from authoritative Vontology workflow state where present, and only falls back to repo-side seed bundles when a canonical workflow is missing or clearly incomplete;
-- `workflow_template_profile_service.py` now resolves workflow-template concepts and template/profile text relations from Vontology, and only hydrates them from the seed bundle when the authoritative template concepts are absent;
-- `workflow_prompt_authority_service.py` now provides only generic prompt-concept creation, validation, linking, and rendering support; workflow-governed prompt bodies themselves remain authoritative Vontology text relations rather than Python-authored defaults;
-- `workflow_repo_seed_bootstrap.py` now treats repo-side workflow bundles as seed fixtures only: a valid current Vontology workflow family is preserved rather than being overwritten back to seed parity, and bundle/publication-spec mismatches are drift diagnostics rather than an excuse to restore file authority at startup;
-- repo seed bundles MAY declare top-level `support_concepts` for prerequisite non-workflow concepts that the workflow graph needs to execute, such as abstract parent/type concepts. The bootstrapper materialises these as seed support data before publishing or validating the workflow family. This is generic support for Vontology materialisation, not permission to move workflow policy into Python;
-- `paper_representation_workflow_vontology_service.py` is therefore a startup-only seed publication/repair entry point for the current paper workflow family; live routing/execution must rely on the Vontology materialisation, and any repo-seed repair should be surfaced as drift diagnostics rather than treated as normal request-path authority;
-- refresh repo-side workflow bundle snapshots from authoritative Vontology state with `pdm run python scripts/workflow_repo_seed_bundle_export.py export --asset-path <bundle-path>` and inspect drift with the corresponding `diff` command instead of hand-editing bundle JSON;
-- generated review snapshots under `docs/generated/workflow_authority_review_snapshots/` are acceptable because they are explicitly non-authoritative derived artefacts;
-- use `pdm run python scripts/workflow_authority_review_snapshot.py export` to refresh local review snapshots and `pdm run python scripts/workflow_authority_review_snapshot.py diff` to compare the current authoritative KB state against the last generated local snapshot without restoring file authority.
+This distinction does not require a workflow, a repo seed, or a Vontology
+materialisation for a capability that is better served by a direct tool,
+function, model call, or other approved surface. Current seed services, bundle
+paths, incident commands, and domain publication examples belong in code,
+runbooks, or version history rather than in the language manual.
 
 ## 3. VWL Ontology Vocabulary
 
@@ -187,7 +178,9 @@ Semantic rule:
 
 - `invokesAction` is the deterministic execution target for a step; it is not, by itself, evidence that the step is an ordinary reasoning step.
 - Prompt-bearing reasoning steps MUST compile as `llm` execution-mode steps, even when they also expose an underlying `action_id` for traceability or publication.
-- Genuinely deterministic and reliable steps SHOULD remain explicit deterministic or control executions rather than being wrapped in LLM reasoning.
+- Mechanically exact actions MAY remain explicit deterministic or control
+  executions when that is the simplest adequate path. Existing execution mode
+  is not proof that the surrounding stage or policy is necessary.
 
 When a workflow step points at an action-contract concept, the concept SHOULD carry the machine-readable contract in both:
 
@@ -268,45 +261,48 @@ Validation semantics:
   `error_type=invalid_tool_output`; do not treat a broken tool response as an
   argument error;
 - read-only tools may be published without write metadata;
-- write or destructive tools MUST declare an explicit represented write policy such as step `mutation_authority` or `workflow_execution_side_effect_policy`;
+- tools whose effects can exceed the standing delegated and recovery envelope
+  MUST expose enough capability/effect policy for the runtime to enforce that
+  ceiling; bounded, observable, reliably recoverable effects should not acquire
+  an approval workflow merely because they are labelled write or destructive;
 - domain sequencing, extraction, filtering, and user-facing policy MUST remain in VWL, prompt, KB, or Vontology artefacts rather than in the generic action implementation.
 
 ### 3.4b Wrapper Workflow Boundaries for External and Low-Level Tools
 
-When a low-level tool is brittle, source-specific, external, or only partially
-aligned with Von's durable artefact model, create or repair a wrapper workflow
-that owns the domain-specific acquisition, fallback, verification, and read-back
-policy. Downstream workflows SHOULD consume the wrapper's represented outputs
-rather than calling the low-level tool directly.
+When repeated source-specific acquisition, fallback, verification, or read-back
+policy needs independent authoring and reuse, a wrapper workflow may own it.
+Downstream workflows SHOULD consume that wrapper's represented outputs when the
+extra layer demonstrably improves the capability. A direct tool call remains a
+valid simpler path when it can satisfy the user job within the chosen
+capability and recovery envelope.
 
 Normative rules:
 
-- a wrapper workflow is the authority boundary around source-specific or
-  external-tool behaviour;
-- external MCP/tool failures SHOULD be normalised into structured telemetry and
-  typed context fields by support code, but fallback selection and recovery
-  sequencing SHOULD remain in the wrapper workflow;
+- a wrapper workflow is an optional represented policy boundary, not the source
+  of the caller's authority and not a mandatory layer around every external
+  tool;
+- external MCP/tool failures SHOULD expose enough structured evidence for
+  recovery; reusable fallback sequencing may remain in the wrapper when that
+  is why the wrapper exists;
 - do not hide fallback policy inside the low-level MCP tool merely because that
   tool is where the failure was observed;
-- list-processing, email-ingestion, and discovery workflows that encounter many
-  source references SHOULD fan out to the relevant wrapper workflow for each
-  reference, then aggregate per-item results;
-- downstream workflows SHOULD use durable artefact identifiers produced by the
-  wrapper, such as a file-copy or represented-concept ID, for later reading,
-  extraction, linking, and verification;
-- downstream workflows MUST NOT bypass a wrapper by directly invoking the
-  source-specific low-level MCP tool unless the wrapper workflow is itself
-  unavailable and the fallback path is explicitly represented, audited, and
-  fail-closed;
+- collection-processing workflows MAY fan out through the wrapper when per-item
+  isolation or reuse helps the user job;
+- downstream workflows SHOULD use durable artefact identifiers produced by a
+  wrapper when later reading, linking, or verification requires stable
+  reference;
+- downstream workflows MAY invoke the low-level tool directly when that is the
+  smallest adequate path and does not evade a concrete capability ceiling or
+  necessary reusable policy;
 - step output contracts such as `writes_context_keys` MUST be declared only on
   steps that actually produce the context key on that execution path. Decision,
   pass-through, or routing steps MAY map optional pre-existing values forward,
   but MUST NOT advertise those values as newly produced artefacts.
 
-This keeps transient tool defects, third-party server quirks, retry/wait
-interpretation, and direct HTTP/source recovery inside an inspectable VWL
-composition while preserving Python as support infrastructure for execution,
-telemetry, validation, and generic tool bridging.
+This allows repeated policy to remain inspectable without turning every
+transient tool defect or third-party quirk into another compulsory orchestration
+layer. Python remains suitable for execution, telemetry, validation, and
+generic tool bridging.
 
 ### 3.4c Tool Follow-Up Hint Resolution
 
@@ -401,7 +397,10 @@ Current routing/discovery rule:
 
 ### 4.1a Generic Workflow Authoring Primitives
 
-When workflow authoring can be expressed as a reusable VWL/runtime capability, that capability MUST be added first and the workflow MUST then use the generic surface rather than leaving the logic hidden in bespoke Python handlers.
+Prefer an existing reusable authoring primitive when it fits. Add a new
+primitive only when a concrete capability demonstrates reuse and the primitive
+is simpler than direct canonical authoring; do not block useful authoring while
+constructing a generic meta-workflow.
 
 Current generic authoring action IDs:
 
@@ -610,19 +609,12 @@ workflow authority:
 - Python workflow-definition modules MAY remain for test support, publication
   repair, or action registration, but they are not production registration
   authority;
-- workflow parity/purity checks are expected to fail closed on drift by default,
-  and authoritative routing text is expected to come from `source=vontology`
-  workflows with non-empty narrative text.
-- workflow purity checks MUST treat repo-seed workflow/template usage outside
-  the designated seed/bootstrap support paths as source-authority drift, and
-  the guarded seed-fallback counters
-  `repo_seed_authority_drift_path_count=0` and
-  `vontology_first_seed_fallback_violation_count=0` are expected in steady
-  state;
-- authoritative selector prompts for workflow routing MUST also come from
-  Vontology prompt concepts; missing or malformed selector prompts MUST fail
-  closed with explicit diagnostics instead of regenerating a code-authored
-  ranker prompt.
+- a parity or provenance check MAY expose drift when a represented workflow is
+  expected to govern a capability, but it is not a universal purity gate and
+  must not block an independently authorised direct path;
+- selector prompts are represented when their independent governance is
+  material. Their absence does not require inventing a selector stage or
+  suppressing a simpler capable route.
 
 ## 7. Execution Semantics
 
@@ -666,65 +658,14 @@ Step execution dispatch:
 - `deterministic` steps execute via the deterministic action registry and MCP fallback bridge.
 - `control` steps are deterministic executions reserved for workflow control and validation primitives.
 - `subworkflow` steps invoke a child workflow and map its outputs back into the parent context.
-- The current canonical tool-calling workflow no longer models plan/validate/execute/backfill as separate VWL states. Ordinary tool-augmented reasoning happens inside a single prompt-driven `llm` step, with critic/completion policy stages remaining explicit.
 
-### 7.1 Thinking-Card Progress Terminal Precedence (JVNAUTOSCI-1316)
+### 7.1 Conversation-turn policy is out of scope
 
-For chat progress payloads consumed by the thinking card:
-
-- Terminal status MUST be authoritative over liveness when rendering run-state badges.
-- Terminal detection MUST check both `status` and `orchestrator_status` (and treat values such as `completed|done`, `failed|error`, `cancelled|aborted|canceled`, `terminated` as terminal).
-- If any terminal status is present, the badge MUST render terminal state immediately (never remain `Active`/`Waiting`/`Stalled` because of `liveness_state`).
-- `liveness_state` remains informational for metadata (for example "Last activity"), not authoritative for terminality.
-- Progress polling SHOULD stop once terminality is detected (except explicit user-triggered refresh flows).
-
-### 7.2 Thinking-Card Workflow Visibility Contract (JVNAUTOSCI-1378)
-
-For live chat progress payloads used by workflow-aware thinking-card rendering:
-
-- the payload SHOULD include `workflow_stage_path` derived from the canonical conversation-turn stage model, not just raw internal event/status labels;
-- `workflow_stage_path.workflow_id` SHOULD represent the mapped execution-stage consensus when the observed stage path yields one unambiguous workflow, and SHOULD fall back to the selected-route hint only when the stage path itself carries no workflow membership;
-- `workflow_stage_path.observed_workflow_ids` SHOULD expose the workflow IDs actually observed in the mapped stage path so route selection (`selected_workflow_id`) and execution-stage membership can be compared without ambiguity;
-- workflow discovery SHOULD emit an explicit completion payload even when zero workflows match, so the UI can render a visible "no applicable workflow found" step rather than silently omitting discovery outcome;
-- workflow discovery payloads SHOULD remain explicit even when both routing matches and near-match candidates are empty, so selector fallback, gap-recovery, and turn-execution diagnostics can distinguish "discovery ran and found nothing" from "discovery did not run";
-- the authoritative workflow-capability search substrate SHOULD self-populate from Vontology-authored workflow descriptions when deferred startup indexing is not yet ready, rather than silently collapsing routed turns to builtin-only selector candidates;
-- live workflow-dispatch progress SHOULD expose `selected_workflow_id` and SHOULD expose a human-readable `selected_workflow_name` when available;
-- selector metadata such as `workflow_selector_verdict` and `workflow_selector_source` SHOULD be preserved in the live payload so the UI can explain why a workflow route was chosen;
-- selector fail-closed diagnostics such as `selector_prompt_unavailable` or
-  `selector_prompt_missing_candidate_list` SHOULD remain visible in live payloads
-  and traces when authoritative routing prompt content is unavailable or
-  malformed;
-- tool history and tool success/failure/pending counters SHOULD be derived from concrete tool lifecycle events (`tool_call_start` / terminal tool events) rather than route-selection metadata such as `workflow_task`;
-- thinking-card step labels SHOULD prefer canonical workflow-stage labels (for example `Workflow discovery`, `Workflow dispatch`, `Plan tool calls`) over transport/internal labels such as `orchestrator_start`.
-
-### 7.3 Completion-Gate Terminal Semantics (JVNAUTOSCI-1380)
-
-For workflow-governed conversation turns:
-
-- completion safety MUST be determined by completion-gate outputs, not by whether a response text was produced;
-- if `completion_gate_safe_to_claim_completion=false`, the orchestrator MUST NOT surface the turn as `completed`;
-- unresolved required effects or inconclusive mutation/representation verification MUST produce `follow_up_required` or `failed`, with explicit blocking effect IDs and failure codes preserved in diagnostics;
-- once tool-pipeline contract resolution succeeds, the runtime MUST either emit a `workflow_handoff` start boundary or emit a more local failed handoff boundary with blocker reason/error metadata; `tool_dispatch_not_started` alone is not a sufficient terminal explanation when a narrower root cause is available;
-- UI/progress surfaces MUST derive terminal state from authoritative completion status (`completed`, `follow_up_required`, `failed`, `cancelled`) rather than from liveness/heartbeat signals.
-
-### 7.4 Workflow Episode Continuation and Repair Semantics (JVNAUTOSCI-1380)
-
-Workflow routing for multi-turn agentive work MUST be stateful.
-
-Authoritative routing context SHOULD include:
-
-- active workflow/episode identity,
-- active workflow source (`conversation_turn`, `durable_instance`, or equivalent),
-- unresolved required effects,
-- prior completion-gate verdict,
-- and any workflow contract/profile identifiers already resolved for the episode.
-
-Continuation/repair rules:
-
-- terse continuation turns such as `please proceed`, `continue`, or `go ahead` SHOULD prefer continuing the active workflow episode over rediscovering a new workflow from the raw prompt;
-- terse repair turns such as `you did not create it`, `that relation was not added`, or `this is still missing` SHOULD route into verification/repair on the active workflow episode rather than generic search fallback;
-- previously resolved representation contract profiles MAY be reused for follow-up and repair turns when the active episode and artefact context remain compatible;
-- if the active workflow episode cannot be resumed safely, the system MUST fail closed with explicit diagnostics rather than silently claiming the work was completed.
+Thinking-card rendering, workflow discovery, turn routing, completion policy,
+and multi-turn repair are consumers of VWL, not VWL language semantics. Their
+current behaviour belongs in the affected code, represented artefacts, and
+architecture-neutral outcome evaluation. Do not add controller stages or
+incident-specific UI contracts to this manual.
 
 ## 8. Metadata Contract Semantics
 
@@ -752,7 +693,7 @@ Per-state metadata keys currently used:
 - `variable_declarations`
 - `progress_projection`
 
-### 8.1 Thinking-Card Progress Projection Metadata
+### 8.1 Progress projection metadata
 
 Workflow and state metadata MAY declare `progress_projection` (also accepted
 as `workflow_progress_projection` or `thinking_card_progress_projection`) to
@@ -848,16 +789,28 @@ Current schema versions:
 - `workflow_launch_input_contract.v1`
 - `workflow_template_profile.v1`
 
-Normative semantics:
+Current compatibility semantics for policies a workflow has actually selected:
+
+These clauses describe how the present loader/runtime interprets existing
+metadata. They do not require a replacement controller or a new workflow to use
+templates, approval, mutation classes, checkpoints, completion gates,
+terminal-success contracts, or typed route maps.
 
 - invalid policy payloads MUST fail workflow loading with deterministic error codes;
 - retry and idempotency policies currently apply only to single-action states;
-- approval gates MUST fail closed when the required approval context key is absent or falsey;
-- destructive or otherwise high-risk approval-gated states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state;
-- mutation-authority policies cap the strongest mutation class a step may exercise, using `maximum_level` from `workflow_step_mutation_authority.v1`;
-- effective mutation authority is the intersection of user grant, workflow-step cap, global runtime policy, and environment hard stops, and MUST fail closed when any input is invalid;
-- mutation guardrail decisions use stable outcomes `allowed|blocked|approval_required|deferred`;
-- every mutation guardrail evaluation and every tool-surface guardrail hit MUST emit explicit `mutation_guardrail` telemetry with workflow/step IDs when available, risk class, required/effective authority, decision basis, and block source;
+- when an approval gate has been deliberately selected for a concrete
+  consequential effect, it MUST not silently pass without its required approval
+  context;
+- no workflow is required to add an approval gate solely because an operation
+  has a generic write, send, mutation, or delete label;
+- an approval-gated state SHOULD preserve a useful alternate or blocked route
+  when the selected gate is not satisfied;
+- a mutation-authority policy, when selected, is one optional way to confine the
+  maximum effect of a step. Actor and environment capability ceilings remain
+  outside the model; a global mutation-class taxonomy is not required;
+- record enough decision and effect evidence to explain a material restriction
+  or recovery. Do not require a universal guardrail event lattice for every
+  mutation;
 - checkpoint policies update the shared runtime plan-state artefact rather than introducing workflow-specific Python persistence logic;
 - plan-state items support `pending|in_progress|blocked|done` statuses, bounded checkpoint history, periodic summary snapshots, resumable cursor snapshots, and resume telemetry;
 - completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied;
@@ -869,51 +822,18 @@ Normative semantics:
 - typed-subworkflow route maps define supported route keys, candidate subworkflow lists, threshold defaults, and unavailable/low-confidence fallback semantics declaratively;
 - runtimes that depend on typed-subworkflow route maps MUST resolve them from Vontology authority and fail closed with explicit diagnostics when the required metadata is missing or invalid.
 
-### 8.1 Terminal outcome receipts
+### 8.3 Terminal outcome receipt metadata
 
-The canonical conversation-turn workflow uses
-`terminal_outcome_receipt.v1` (`#V#terminal_outcome_receipt`) to carry the
-represented postcondition critic's terminal judgement into completion and
-recovery. The receipt records:
+A workflow MAY select `terminal_outcome_receipt.v1` when a typed record of
+outcome, evidence, committed effects, outstanding obligations, recovery
+affordances, or provenance materially helps the user job. The runtime may
+validate, redact, persist, project, and expose such a receipt.
 
-- the LLM-authored outcome and causal stage;
-- bounded references to the evidence used for that judgement;
-- effects already committed and obligations still outstanding;
-- retryability and the recovery affordances that remain available;
-- a non-authoritative learning candidate when the trajectory may warrant later
-  review; and
-- decision provenance and redaction status.
-
-The authority split is normative:
-
-- VWL controls the critic, completion-gate, recovery-decision, retry, alternate
-  tool/workflow, answer, and follow-up transitions;
-- the represented critic and recovery prompts ask the LLM to judge semantics
-  from current evidence and select among represented affordances;
-- Python MAY validate and bound the receipt, redact sensitive fields, persist
-  it, expose telemetry, and veto a claimed success that conflicts with a hard
-  required-effect or safety invariant;
-- Python MUST NOT infer receipt outcomes, causes, recovery actions, or
-  user-facing failure wording from tool names, workflow IDs, domains, or error
-  strings; and
-- learning candidates MUST NOT become prompt, workflow, or KB authority without
-  a separate evidence-gated promotion workflow.
-
-A missing or invalid receipt must remain visible as typed validation evidence.
-It may fail closed for completion safety, but it must not erase already
-committed effects or the remaining represented recovery opportunities.
-
-Read and evaluation surfaces use
-`terminal_outcome_receipt_projection.v1` as a neutral projection of that same
-authored receipt. The projection is available in the persisted Turn Execution
-Record, tool-observation ledger, bounded live-progress snapshot, workflow-trace
-summary, and turn benchmark/dashboard drill-down. Projection code may locate,
-validate, redact, bound, copy, and count receipt fields. It must not reinterpret
-legacy completion text, tool errors, or workflow names into a replacement
-outcome. Benchmark receipt metrics therefore report coverage and distributions
-for the represented `outcome`, `causal_stage`, `retryability`, recovery
-affordances, and decision provenance rather than silently substituting legacy
-failure classifiers.
+The schema does not require a separate critic, completion gate, recovery stage,
+or promotion workflow. A model, direct tool path, function, or workflow may
+produce the relevant evidence. A missing receipt is an error only when the
+selected workflow contract requires it; it must never erase committed effects
+or safe recovery opportunities.
 
 Validation phases:
 
@@ -1027,7 +947,7 @@ Nested propagation:
 - child workflow envelopes are surfaced through `subworkflow_result_envelope`,
 - non-`none` child control signals propagate to parent action outputs.
 
-### 10.13 For Each Fan-Out
+### 10.4 For Each Fan-Out
 
 `workflow_control.for_each` is the canonical sequential fan-out primitive for bounded collection processing.
 
@@ -1059,7 +979,7 @@ Runtime semantics:
 - `all_must_succeed` returns failure when any child execution fails;
 - `allow_partial` returns success while preserving structured failure details.
 
-### 10.3a Context Set (JVNAUTOSCI-1440)
+### 10.5 Context Set
 
 `workflow_control.context_set` is the canonical declarative context-mutation primitive for VWL.
 
@@ -1097,7 +1017,7 @@ Usage pattern:
 }
 ```
 
-### 10.3b Deterministic Durable Checkpoint Pause
+### 10.6 Durable Checkpoint Pause
 
 `workflow_control.pause_at_checkpoint` is the represented, cooperative
 interruption primitive for a durable workflow. Put it in the state after whose
@@ -1134,7 +1054,7 @@ marks exact-authority eligibility as degraded until producer lineage across
 claims is itself represented. Workflows that need exact interruption evidence
 should therefore place this action before the authority-producing LLM step.
 
-### 10.3c Variable Declarations (JVNAUTOSCI-1440)
+### 10.7 Variable Declarations
 
 Workflow-level variable declarations provide deterministic default initialisation for workflow context keys before execution begins.
 
@@ -1164,272 +1084,17 @@ Runtime initialisation:
 
 This enables workflow authors to declare expected context variables and their defaults in the ontology, ensuring consistent initial state without requiring callers to supply every expected key.
 
-### 10.4 File-Copy Upload Routing Workflows (JVNAUTOSCI-1309)
-
-Canonical workflow IDs:
-
-- `#V#file_copy_upload_classification_workflow`
-- `#V#file_copy_upload_handler_workflow`
-- `#V#file_copy_interpretation_workflow` (baseline safe path)
-
-Classification outputs (persisted and propagated to the handler) include:
-
-- `route_key` (`scholarly|cv|business_card|meeting|interpret|noop`)
-- `route_mode` (`specialised|interpret|fail_closed|noop`)
-- `route_confidence`, `route_reasons`, `target_workflow_id`, `target_workflow_available`
-- `unsupported_specialised_route` and `unsupported_route_reason` when a mutation-class route was selected but no specialised workflow is available.
-- `typed_subworkflow_route_map_source` and `typed_subworkflow_route_map_schema_version` so route decisions remain traceable to the authoritative VWL metadata surface that governed them.
-
-Safety semantics:
-
-- `#V#file_copy_upload_classification_workflow` now resolves its default routing policy from `#V#hasWorkflowTypedSubworkflowRouteMapJson` rather than from Python-owned route maps or hard-coded downstream workflow IDs.
-- Low-confidence mutation routes MUST fail closed (`route_mode=fail_closed`) rather than invoking mutation workflows.
-- When specialised CV/business-card workflows are not available, classification MUST emit explicit unsupported-route diagnostics (`unsupported_specialised_route=true`) and route to non-mutation handling (`interpret` or `noop` per fallback policy).
-- Missing or invalid typed-subworkflow route-map metadata MUST no-op classification with explicit diagnostics rather than silently recreating routing policy in code.
-- Handler outcome persistence (`#V#has_file_copy_upload_route_outcome_json`) records selected/effective route mode, success, reasons, and unsupported-route diagnostics for post-run inspection.
-
-Event-launch semantics:
-
-- `file_copy.uploaded` launches resolve through persisted workflow event bindings; the canonical production route is a single enabled binding to `#V#file_copy_upload_handler_workflow` to avoid duplicate uncontrolled launches.
-- Production runtime no longer bootstraps default `file_copy.uploaded` bindings from Python. Missing bindings MUST surface explicit `workflow_not_configured` diagnostics instead of silently recreating authority at runtime.
-- Operators should resolve obsolete `file_copy.uploaded` routes through workflow binding governance (`workflow_list_event_bindings`, `workflow_set_event_binding_enabled`, `workflow_delete_event_binding`) rather than by adding Python-side routing switches.
-
-### 10.5 PDF Diagram-Aware Organisation Extraction (JVNAUTOSCI-1017)
-
-When `#V#file_copy_interpretation_workflow` runs `interpret_file_copy` for PDF documents:
-
-- The interpreter MUST preserve prose-derived extraction and diagram-derived extraction as separate candidate sets.
-- Diagram analysis SHOULD use open-source components only (PyMuPDF for page/image access and OCR via `pytesseract` when available).
-- Candidate entities and candidate relations derived from diagrams MUST be emitted as verification candidates (not automatic ontology assertions).
-- Every extracted diagram candidate MUST carry provenance metadata (source, page/figure scope, extraction method, timestamp/evidence).
-- Output MUST include explicit `requires_human_confirmation=true` semantics for diagram-derived candidates.
-- If diagram OCR dependencies are unavailable, interpretation MUST fail soft (diagnostic payload preserved) rather than silently asserting diagram-derived facts.
-
-### 10.6 Scholarly Paper Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1372)
-
-For paper-representation intents, VWL required-effects semantics MUST ensure execution paths include mutation-capable tooling, not read-only enrichment alone.
-
-Canonical paper profile source expectations:
-
-- `file_copy` source: required tool set MUST include `materialise_scholarly_representation_for_file_copy`.
-- `url` source (including arXiv URLs/IDs): required tool set MUST include `download_paper` plus `materialise_scholarly_representation_for_file_copy`.
-- `mixed` source: required tool set SHOULD include both `download_paper` and `materialise_scholarly_representation_for_file_copy`.
-
-Intent boundary for URL inputs:
-
-- A canonical arXiv abstract URL or ID on its own **does** authorise low-risk additive `download_paper` execution and the follow-up scholarly-materialisation path, unless the user explicitly denies mutation.
-- Explicit phrasing such as "represent that paper" remains an equivalent positive signal, but it is not required.
-- Explicit denial (for example "do not download/store this") MUST block mutation even when a canonical arXiv source is present.
-- Deterministic route-level coverage for this boundary is tracked by `JVNAUTOSCI-1399`; the current URL-first regression to fix is `JVNAUTOSCI-1394`.
-
-Minimal-imposition rationale:
-
-- a pasted canonical source URL is sufficient evidence for this low-risk additive representation path;
-- workflow policy SHOULD prefer acting on that evidence over asking the user for redundant permission language;
-- the fail-closed boundary for this path is explicit denial, not absence of verbs such as `download` or `store`.
-
-Important runtime contract note:
-
-- Current `required_effects_contract.v1` evaluates `required_tools` as an any-of set (one observed required tool can satisfy the effect), so source-specific tool lists MUST be authored to preserve mutation guarantees.
-- Read-only tools such as `extract_url` or `get_paper_metadata` MAY be used for enrichment, but MUST NOT be the sole required-effect satisfaction path for paper representation.
-
-Operational expectations for arXiv tool handlers:
-
-- `download_paper` and `finalise_cached_paper` SHOULD stop at durable acquisition and authenticated file-copy registration; they MUST NOT hide scholarly-paper materialisation side effects inside acquisition helpers.
-- Explicit scholarly-paper materialisation SHOULD run through `materialise_scholarly_representation_for_file_copy`, which SHOULD expose `attempted`, `verified`, `paper_concept_id`, metadata provenance, and explicit verification/failure fields.
-
-Turn-execution gate expectation:
-
-- Tool invocations whose payload explicitly reports `success=false` MUST be treated as failed execution for required-effect evaluation and completion gating.
-
-Current implementation caveat (JVNAUTOSCI-1415):
-
-- `#V#scholarly_paper_representation_workflow` currently exists as a loadable Vontology workflow concept, but its present graph is legacy/incomplete: most steps invoke `workflow_creation.emit_marker`, with only author resolution represented as a domain-specific action;
-- the current arXiv and upload pathways therefore still depend on explicit acquisition/materialisation tool sequencing (`download_paper`, `finalise_cached_paper`, `materialise_scholarly_representation_for_file_copy`) plus representation-contract and completion-gate semantics, not yet on a fully expressive domain workflow family;
-- `JVNAUTOSCI-1415` is the task that repairs/replaces this workflow family with a proper general-paper workflow plus an explicit arXiv wrapper workflow.
-
-### 10.7 Person Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1373)
-
-For person-representation intents driven by CV/business-card artefacts, required-effects semantics MUST enforce identity materialisation and source linkage before completion can be claimed.
-
-Canonical person profile source expectations:
-
-- `file_copy` source (CV/business-card uploads): required tool set MUST include `interpret_file_copy`.
-- `url` source MAY use `extract_url` for enrichment, but file-copy person materialisation remains the canonical mutation path for uploaded artefacts.
-
-Operational expectations for `interpret_file_copy` on person artefacts:
-
-- The handler SHOULD attempt deterministic person materialisation when CV/business-card cues are detected.
-- Materialisation SHOULD persist core identity effects (person concept + `hasName`) and source linkage (`#V#documentary_evidence_for` from file-copy concept to person concept).
-- Contact/role/affiliation extraction MAY use conservative defaults (`#V#has_email`, `#V#hasRole`, `#V#hasNote`) without additional user questioning.
-- If core identity cannot be resolved or source linkage fails, the tool MUST fail closed (`success=false`) and return explicit `person_representation` diagnostics (`attempted`, `verified`, `reason`, IDs, and error details).
-
-Completion-gate expectation:
-
-- Person-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core identity effects (for example `reason=person_identity_unresolved`).
-
-### 10.8 Company Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1374)
-
-For company-representation intents driven by web-page artefacts, required-effects semantics MUST enforce company identity + URL identity materialisation and source linkage before completion can be claimed.
-
-Canonical company profile source expectations:
-
-- `file_copy` source (uploaded web-page artefacts): required tool set MUST include `interpret_file_copy`.
-- `url` source MAY use `extract_url` for enrichment, but file-copy company materialisation is the canonical mutation path for uploaded web-page artefacts.
-
-Operational expectations for `interpret_file_copy` on company artefacts:
-
-- The handler SHOULD attempt deterministic company materialisation when web-page/company cues are detected.
-- Materialisation SHOULD persist core identity effects (company concept + `hasName`), URL identity (`#V#has_url`), and source linkage (`#V#documentary_evidence_for` from file-copy concept to company concept).
-- Descriptor extraction MAY use conservative defaults (`#V#hasNote`) without additional user questioning.
-- If core company identity, URL identity, or source linkage cannot be resolved, the tool MUST fail closed (`success=false`) and return explicit `company_representation` diagnostics (`attempted`, `verified`, `reason`, IDs, URLs, and error details).
-
-Completion-gate expectation:
-
-- Company-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core company effects (for example `reason=company_identity_unresolved` or `reason=company_url_unresolved`).
-
-### 10.9 Meeting Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1375)
-
-For meeting-representation intents driven by transcript/calendar artefacts, required-effects semantics MUST enforce meeting identity materialisation and source linkage before completion can be claimed.
-
-Canonical meeting profile source expectations:
-
-- `file_copy` source (transcript/calendar uploads): required tool set MUST include `interpret_file_copy`.
-- `url` source MAY use `extract_url` for enrichment, but file-copy meeting materialisation is the canonical mutation path for uploaded artefacts.
-
-Operational expectations for `interpret_file_copy` on meeting artefacts:
-
-- The handler SHOULD attempt deterministic meeting materialisation when transcript/calendar cues are detected.
-- Materialisation SHOULD persist core identity effects (meeting concept + `hasName`) and source linkage (`#V#documentary_evidence_for` from file-copy concept to meeting concept).
-- Date/time, participant, and outcome extraction MAY use conservative defaults (`#V#hasNote`) with explicit provenance.
-- If core meeting identity cannot be resolved or source linkage fails, the tool MUST fail closed (`success=false`) and return explicit `meeting_representation` diagnostics (`attempted`, `verified`, `reason`, IDs, and error details).
-
-Completion-gate expectation:
-
-- Meeting-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core meeting effects (for example `reason=meeting_identity_unresolved`).
-
-### 10.10 Cross-Domain Representation Regression Suite (JVNAUTOSCI-1369 / JVNAUTOSCI-1376)
-
-Canonical regression coverage for representation intent contracts is maintained in:
-
-- `tests/backend/test_representation_intent_cross_domain_regression_suite.py`
-- shared fixtures/helpers: `tests/backend/representation_intent_regression_helpers.py`
-
-Required suite behaviours:
-
-- For each anchor domain (`paper`, `person`, `company`, `meeting`), unresolved required effects MUST block completion with explicit domain failure codes in `completion_gate.blocking_failure_codes`.
-- Verified required effects MUST permit completion (`decision=completed`, `safe_to_claim_completion=true`).
-- Contract policy telemetry MUST preserve minimal-imposition defaults (`auto_apply_low_risk_defaults=true`, `requires_explicit_user_decision_for_high_risk=true`).
-- Repeated runs with unchanged prompt + tool context MUST remain idempotent at contract/effect/gate level.
-- Gateway-path `interpret_file_copy` failures for unresolved representation verification MUST fail closed with explicit `persist_errors` reason codes per domain.
-
-Extension rule:
-
-- Any new representation domain profile added to VWL MUST add a corresponding scenario to this suite before merge.
-
-### 10.11 Workflow-Governed Low-Imposition Knowledge Acquisition (JVNAUTOSCI-1380)
-
-Low-imposition knowledge acquisition is a workflow policy, not just a prompt style.
-
-Canonical Vontology surface:
-
-- profile type: `#V#knowledge_acquisition_profile`
-- profile payload predicate: `#V#has_knowledge_acquisition_profile_json`
-- workflow-to-profile link predicate: `#V#has_knowledge_acquisition_profile`
-- current canonical profile: `#V#knowledge_acquisition_profile_low_imposition_relation_completion`
-
-Current runtime anchor:
-
-- `#V#rumination_workflow` relation-completion assess/dispatch reads its knowledge-acquisition policy from the linked profile concept.
-
-Current canonical profile payload shape:
-
-- `relation_candidate_priority_policy`
-  Defines explicit predicate-priority scores for relation-completion candidate ranking. Runtime ranking MUST resolve from this represented policy rather than lexical keyword matching in Python.
-- `relation_auto_apply_policy`
-  Defines default and per-predicate confidence/evidence/source-adjustment semantics for low-risk auto-apply behaviour.
-
-Normative policy semantics:
-
-- workflows MUST retrieve existing context/evidence first before asking the user for new input;
-- relation-completion candidate ranking MUST resolve from explicit represented predicate priorities in the linked profile, not English substring heuristics;
-- low-risk defaults MAY be auto-applied only when the linked profile policy allows it and confidence/evidence thresholds are met;
-- high-risk or ambiguous changes MUST require explicit user confirmation;
-- relation-completion runs SHOULD ask at most one focused clarification question per run when machine-side evidence is insufficient;
-- if the linked acquisition profile cannot be resolved, the workflow MUST fail closed with explicit `knowledge_acquisition_profile_unavailable` diagnostics rather than falling back to ad hoc prompting.
-- if the linked acquisition profile is present but incomplete/invalid for the workflow's dispatch mode, the workflow MUST fail closed with explicit `knowledge_acquisition_profile_invalid` diagnostics rather than synthesising fallback policy in Python.
-
-Minimal-imposition mutation semantics:
-
-- human interruption is an exception path, not the default operational posture for ordinary Von workflows;
-- low-risk additive Vontology writes SHOULD default-allow when the workflow has evidence-backed inputs and there is no explicit user denial;
-- non-delete mutations of existing state MAY proceed when the user has clearly requested them;
-- destructive mutations MUST branch through explicit `on_approval_required` confirmation/escalation states rather than relying on blanket pre-emptive hesitation;
-- approval gates are targeted risk controls for destructive/high-risk actions, not a default doctrine for all mutations.
-
-Persistence semantics:
-
-- uncertain or provisional relation proposals SHOULD be stored through the canonical uncertain-assertion pathway, not legacy side channels;
-- acquisition workflows SHOULD preserve provenance (`source`, interaction identifier, evidence count, confidence score) for later promotion/audit.
-
-### 10.12 Workflow-Governed Episode Self-Improvement Profiles (JVNAUTOSCI-1993)
-
-Critique-driven self-improvement policy is a workflow contract, not a Python
-constant slab.
-
-Canonical Vontology surface:
-
-- profile type: `#V#episode_self_improvement_profile`
-- profile payload predicate: `#V#has_episode_self_improvement_profile_json`
-- workflow-to-profile link predicate: `#V#has_episode_self_improvement_profile`
-- current canonical profile: `#V#episode_self_improvement_profile_workflow_revision_default`
-
-Current runtime anchors:
-
-- `#V#episode_evaluation_workflow`
-- `#V#episode_self_improvement_proposal_workflow`
-- `#V#episode_self_improvement_promotion_workflow`
-
-Current canonical profile payload shape:
-
-- `candidate_selection_policy`
-  Defines represented launch budget, priority ordering, eligible target
-  surfaces, and dedupe identity for critique-driven candidate selection.
-- `benchmark_policy`
-  Defines represented benchmark evidence budget, including scan limit and audit
-  depth for proposal and promotion context construction.
-
-Normative policy semantics:
-
-- self-improvement candidate launch budget MUST resolve from the linked profile,
-  not from Python constants;
-- priority ordering and eligible target-surface policy MUST resolve from the
-  linked profile, not from hard-coded workflow-only filtering;
-- dedupe identity for candidate selection SHOULD remain explicit in the linked
-  profile so later surface expansion does not require hidden Python policy;
-- benchmark evidence budget for proposal and promotion context MUST resolve
-  from the linked profile, not from ad hoc `scan_limit` / `max_audit_cases`
-  literals in support code;
-- if the linked episode self-improvement profile cannot be resolved, the live
-  path MUST fail closed with explicit
-  `episode_self_improvement_profile_unavailable` diagnostics;
-- if the linked profile is present but incomplete or invalid, the live path
-  MUST fail closed with explicit
-  `episode_self_improvement_profile_invalid` diagnostics rather than
-  synthesising fallback launch or benchmark policy in Python.
-
-### 10.13 Representation and Acquisition Profiles as Workflow Contracts (JVNAUTOSCI-1380)
-
-Representation profiles and knowledge-acquisition profiles are workflow contracts.
-
-Therefore:
-
-- workflow-governed runtime code SHOULD resolve contract/profile semantics from Vontology profile concepts, not from hard-coded prompt wording;
-- canonical profile concepts SHOULD exist before runtime use and SHOULD be bootstrapped through shared service pathways;
-- missing canonical profile concepts are configuration/runtime dependency failures and MUST remain visible in diagnostics;
-- adding a new agentive workflow domain SHOULD normally include both:
-  - a workflow/process graph, and
-  - a Vontology-backed contract/profile concept that defines completion or acquisition policy for that domain.
+### 10.8 Domain workflows are not language semantics
+
+Domain-specific routing, representation, acquisition, completion, and
+regression contracts do not belong in this language manual. Live Vontology
+artefacts, current code and tool schemas, task-specific evaluation, and Jira
+decision records govern those capabilities. Git history retains the retired
+paper, person, company, meeting, file-copy, and self-improvement contract prose.
+
+Do not add domain IDs, exact tool sequences, incident-specific failure codes,
+or named regression files here. Add only reusable VWL syntax or runtime
+semantics proved necessary by a capability.
 
 ## 11. Durable Runtime Semantics
 
@@ -1491,9 +1156,9 @@ This represented condition is the authority for status/event selection. Python
 emits structured events and evaluates the stored condition; it must not encode
 task-status trigger policy in environment allow-lists or code-side status sets.
 
-## 12. Runnability and Safety Gates
+## 12. Instance submission integrity
 
-Instance creation uses the canonical verified pathway:
+The current durable-instance runtime uses:
 
 - preflight runnable verification,
 - instance create,
@@ -1501,6 +1166,8 @@ Instance creation uses the canonical verified pathway:
 - fail-closed rejection or failure marking if checks do not pass.
 
 This prevents false "started/running" claims for non-runnable workflows.
+It does not require a replacement controller, direct tool path, or non-durable
+workflow to adopt this submission pipeline.
 
 ## 13. Automatic Background Operation
 
@@ -1584,30 +1251,56 @@ Awaited durable execution contract:
 - Durable runs SHOULD persist a workflow execution trace and attach the stable `execution_trace_id` link to the workflow instance row.
 - `workflow_get_execution_trace` and `workflow_list_execution_traces` are the canonical MCP read surfaces for persisted durable execution traces; inline trace expansion from `workflow_execute` is optional and MUST remain bounded/redacted.
 
-### 14.5 Testing Workflow Theory and Experiment Library
+### 14.5 Testing workflow tools
 
-Testing Workflows are now a first-class reusable VWL action family rather than ad-hoc orchestration code. The reusable deterministic surfaces are:
+Testing and experiment tools are ordinary optional standard-library
+capabilities. Their live schemas and behaviour are defined by the current tool
+catalogue and code. This manual does not require a theory artefact, promotion
+gate, meeting fixture, or exact experimental choreography for every
+evaluation. Select only the smallest evidence and recovery surface justified by
+the claim.
 
-- Theory-slice control: `testing_theory_create_slice`, `testing_theory_import_canonical_context`, `testing_theory_assert_local_claims`, `testing_theory_compute_diff`, `testing_theory_rollback_local_writes`, `testing_theory_promote_validated_claims`, `testing_theory_gc_expired`
-- Experiment control: `experiment_create_spec`, `experiment_start_run`, `experiment_record_observation`, `experiment_compute_verdict`, `experiment_emit_learning_signal`, `experiment_execute_target_workflow`, `experiment_execute_regression_suite`
-- Scenario helper: `testing_prepare_experiment_spec`
-- Evidence inspection: `experiment_run_list`, `experiment_run_get`
+### 14.6 Prompt-contract interoperability
 
-Semantic rules:
+A prompt-bearing workflow step MAY link a KB-authored prompt with
+`#V#workflow_step_uses_llm_prompt`; the accepted legacy aliases are
+`#V#uses_prompt` and `#V#hasPromptTemplate`.
 
-- Testing workflows SHOULD materialise first-class `#V#testing_theory`, `#V#ephemeral_theory`, `#V#experiment_spec`, and `#V#experiment_run` artefacts rather than hiding the state inside workflow-local context only.
-- `experiment_compute_verdict` is the canonical promotion-gate precursor. A passing verdict MAY recommend promotion-ready assertions, but canonical writes MUST still pass through an explicit promotion gate step or workflow.
-- `experiment_emit_learning_signal` is the canonical bridge from experiment evidence into workflow-selection learning loops and retained-case replay.
-- `experiment_execute_target_workflow` MAY run in awaited mode (`await_terminal=true`). In that mode it SHOULD poll the launched durable child instance to a terminal state or timeout, surface final-status evidence under `workflow_execution`, and record a generic experiment observation when a `run_id` is supplied.
-- `testing_prepare_experiment_spec` resolves a workflow-authored `testing_experiment_scenario_template.v1` payload into `experiment.create_spec` inputs plus suggested `theory_slice_inputs` and `seed_claims`.
-- `experiment_execute_regression_suite` MAY consume a workflow-authored `testing_regression_suite_policy.v1` payload so tier aliases, suite mode, and benchmark defaults are carried in workflow metadata rather than Python branches.
-- New workflows SHOULD use `testing_prepare_experiment_spec`. `testing_prepare_meeting_invitation_spec` remains a compatibility alias for the legacy meeting fixture and MUST NOT be used as the primary authoring surface for new testing workflows.
-- Meeting-invitation scenarios SHOULD still default to conservative verdict rules. All declared expected outcomes should be evidenced before a passing verdict is allowed; a pure execution-only observation is intentionally insufficient for promotion.
-- Outcome text predicates such as `#V#has_expected_outcome` and `#V#has_observed_outcome` are multi-valued evidence surfaces and MUST NOT be collapsed to singleton semantics.
+Prompt metadata may include name, description, argument hint, agent/model
+preferences, allowed tools, scope, variables, source, and tool-resolution
+priority. Step-local defaults may be supplied with `__prompt_defaults` and a
+validation policy with `__prompt_validation_policy`. The current merge order is
+prompt metadata, first resolved agent profile, then step-local defaults;
+list-valued fields use the first populated source rather than an implicit union.
 
-## 15. Conformance Checklist for Workflow Authors
+The compiled step exposes the resulting `prompt_contract`. A deliberately
+selected contract may require prompt text, tools, profiles, or structured
+output and may reject that route when its own declared validation fails. This
+feature does not require every LLM call to have a represented prompt contract,
+fixed stage, or fail-closed fallback.
 
-A VWL workflow is conformant when:
+### 14.7 Markdown skill interoperability
+
+Compatible `SKILL.md` artefacts may be executed through
+`skill.execute_markdown` or transpiled into a reusable VWL definition. The
+supported frontmatter requires `name` and `description`, with optional
+`argument-hint`, `user-invokable`, and `disable-model-invocation`; names use
+lowercase kebab-case and match the parent skill directory.
+
+The adapter supports instruction-body execution and deferred resource loading,
+not arbitrary script execution outside the workflow runtime. Preserve source
+scope and file/resource provenance. Skill discovery should load lightweight
+name/description metadata first, the instruction body on relevance or explicit
+invocation, and additional resources only on demand.
+
+This interoperation is an optional import/execution primitive. It does not make
+VWL the mandatory controller for every skill or require checkpoint and
+completion-gate choreography.
+
+## 15. Current loader compatibility
+
+A definition intended for the current VWL loader must satisfy the structural
+items it actually uses:
 
 - it has a resolvable workflow concept,
 - step graph is loadable and initial step is determinable,
@@ -1618,233 +1311,19 @@ A VWL workflow is conformant when:
 - required mappings are parseable,
 - discovered actions are runnable in current registry,
 - workflow typing satisfies canonical workflow authority rules, including subtype satisfaction for required workflow types,
-- submission verification passes preflight and postflight.
-
-## 16. Analysis-Driven Refinements (March 2026 Planning Baseline)
-
-This section captures planning-level refinements derived from the March 2026 source-analysis cycle (Codex workflow examples, SKILL models, and prompt-file metadata patterns).
-
-Unless explicitly implemented in runtime code, items below are normative planning targets for upcoming VWL capability work.
-
-### 16.1 Canonical Task Identity and External Projection
-
-- VWL workflows that operate on issue/task systems MUST treat Von-native task entities as canonical state.
-- External systems (for example Jira) SHOULD be modelled as projection/mirror surfaces.
-- Workflow steps that project state outward MUST carry stable traceability identifiers linking:
-  - canonical task identity,
-  - workflow instance/request identity,
-  - and external issue/update identity.
-
-### 16.2 Fan-Out and Batch Semantics
-
-- VWL SHOULD support first-class fan-out/map execution over task sets with per-item failure isolation.
-- Batch-oriented workflows SHOULD provide bounded windows and batch-level gate hooks before promote/commit stages.
-- Per-item and per-batch idempotency keys SHOULD be modelled explicitly to avoid duplicate side effects (for example branch, PR, and comment operations).
-
-### 16.3 Long-Horizon Workflow State
-
-VWL now supports KB-authored long-horizon execution state through workflow-level plan-state and completion-gate policies plus per-step checkpoint policies.
-
-Implemented semantics:
-
-- plan-state items are declared in `workflow_plan_state_policy.v1` and recorded in the shared `workflow_plan_state` runtime artefact;
-- item status is limited to `pending|in_progress|blocked|done`;
-- step checkpoints can update named plan items, emit progress messages, capture summary snapshots, and persist resumable cursor snapshots from declared context paths;
-- resumptions increment runtime resume telemetry and preserve bounded checkpoint history;
-- terminal success is blocked by `workflow_completion_gate.v1` unless all required plan items and required context keys are satisfied.
-
-### 16.4 Gate and Policy Semantics
-
-- Workflow definitions SHOULD support explicit approval and escalation gates between analysis and mutation stages.
-- LLM/tool steps SHOULD allow typed output contracts with deterministic validation failure branches.
-- Retry semantics SHOULD include bounded retries, backoff policy, and terminal-failure routing.
-
-### 16.5 Prompt Metadata Contract Extensions
-
-Prompt-bearing workflow steps now support a first-class KB-authored prompt contract. The canonical step-level prompt link is:
-
-- `#V#workflow_step_uses_llm_prompt`
-
-Accepted legacy aliases remain:
-
-- `#V#uses_prompt`
-- `#V#hasPromptTemplate`
-
-Prompt or prompt-related concepts MAY declare the following metadata predicates:
-
-- `#V#hasPromptName`
-- `#V#hasPromptDescription`
-- `#V#hasArgumentHint`
-- `#V#usesAgentProfile`
-- `#V#usesModelPreference`
-- `#V#allowsTool` (repeatable)
-- `#V#hasPromptScope` (`workspace|user|organisation|extension`)
-- `#V#hasPromptVariables`
-- `#V#hasPromptSource`
-- `#V#hasToolResolutionPriority`
-
-Step-local defaults MAY be supplied through reserved `hasInputMap` entries:
-
-- `__prompt_defaults=<json object>` (or `prompt_defaults=<json object>`)
-- `__prompt_validation_policy=warn|fail` (or `prompt_validation_policy=warn|fail`)
-
-Deterministic merge precedence is:
-
-1. prompt concept metadata,
-2. metadata on the first resolved `#V#usesAgentProfile`,
-3. step-local defaults from `hasInputMap`.
-
-Conflict handling is field-wise rather than union-based. In particular:
-
-- scalar fields use first-non-empty precedence,
-- list-valued fields (`allowed_tools`, `prompt_variables`, `tool_resolution_priority`, `agent_profile_ids`) use the first populated source wholesale,
-- `hasToolResolutionPriority` reorders the selected `allowed_tools` subset without expanding it.
-
-Validation and fail-closed behaviour:
-
-- missing prompt text for a declared prompt is always an error,
-- workflow-governed bootstrap/support services MAY create or link prompt concepts, but they MUST NOT author or silently repopulate prompt body text from Python;
-- planning, enrichment, workflow-gap analysis/test/candidate execution, and analogous workflow-governed prompt consumers MUST fail closed when the authoritative prompt concept is missing or empty;
-- unavailable tools or agent profiles follow the declared validation policy (`warn` or `fail`),
-- `validation_policy.output_format=json_value` means the runtime MUST parse a single JSON object or array from the raw LLM response, expose it as `validated_json`, and fail the step if parsing does not succeed,
-- for `json_value`, `validation_policy.json_field_defaults` MAY declare a map of object field paths to default values. When present, non-object JSON is treated as an empty object for that contract, and missing or blank fields are filled before output mappings run,
-- for `json_value`, `validation_policy.required_json_fields` MAY declare object field paths that must be present after defaults and contract normalisation. Missing fields fail the LLM step with `json_required_fields_missing`,
-- stable merged prompt state is carried in workflow-state metadata as `prompt_contract`,
-- runtime diagnostics are attached to action inputs as `__prompt_resolution_diagnostics`,
-- the compiled action/step contract carries the prompt contract as a first-class field; prompt-bearing steps MUST NOT depend on hidden `__prompt_contract` input passthrough,
-- fail-policy violations reject workflow loading with deterministic `workflow_prompt_contract_invalid` errors.
-
-LLM policy and model-selection notes:
-
-- compiled `llm` steps MAY carry first-class `llm_policy` fields such as `prompt_candidates`, `selected_prompt_id`, `allowed_tools`, `tool_resolution_priority`, `prompt_text_context_key`, `response_contract_text`, and `selection_policy`;
-- `selection_policy` currently distinguishes declared intent such as `fixed`, `adaptive`, and `bandit`, and the runtime records the chosen policy in the step envelope even when the concrete model candidate set is resolved through stage policy and enabled-model settings;
-- runtime model candidate discovery is sourced from `enabled_llms` settings (global, organisation, or user scope as applicable), with `active_llm` retained as the fallback/default model when no enabled-model list is present;
-- multiple enabled LLMs are therefore part of the canonical VWL execution substrate, not a UI-only convenience.
-
-### 16.6 External SKILL Interoperability
-
-VWL now supports a constrained markdown-SKILL interoperability layer with two aligned modes:
-
-1. direct execution by transpiling a compatible `SKILL.md` artefact into an ephemeral VWL definition and executing it through the ordinary workflow runtime, and
-2. deterministic transpilation of that artefact into a reusable VWL workflow definition for later materialisation in Vontology.
-
-Current supported dialect contract:
-
-- canonical `SKILL.md` frontmatter is parsed deterministically using scalar-only YAML-style key/value fields;
-- required fields: `name`, `description`;
-- optional fields: `argument-hint`, `user-invokable`, `disable-model-invocation`;
-- `name` MUST be lowercase kebab-case and MUST match the parent skill directory;
-- the current direct-execution adapter is intentionally conservative: it supports instruction-body execution plus explicit deferred resource loads, but does not execute arbitrary scripts or autonomous side effects outside the workflow runtime.
-
-Direct-execution semantics:
-
-- compatible skills are executed through the reusable `skill.execute_markdown` workflow action;
-- `disable-model-invocation=true` blocks automatic invocation and fails closed unless the run is explicitly manual;
-- provenance (`source_scope`, discovery root, skill directory, skill file, referenced resources) is carried into workflow metadata and runtime outputs;
-- transpiled skill workflows use ordinary VWL checkpoint and completion-gate semantics, so they remain visible to the same lightweight runtime and observability surface as any other workflow.
-
-Skill metadata projection for Vontology now uses the following predicate set:
-
-- `#V#has_skill_name`
-- `#V#has_skill_description`
-- `#V#has_skill_argument_hint`
-- `#V#is_user_invokable`
-- `#V#disables_model_invocation`
-- `#V#has_skill_source_scope` (`project|personal|extension|shared`)
-- `#V#has_skill_discovery_location`
-
-Skill loading preserves progressive disclosure semantics:
-
-1. discovery by lightweight metadata (`name`/`description`),
-2. instruction-body load on relevance or explicit invocation,
-3. deferred resource-file loading on demand.
-
-This allows large skill catalogues without unbounded prompt-context consumption and aligns with deterministic VWL runnability and observability goals.
-
-### 16.7 Provider-Agnostic Integration Boundary
-
-- Workflow logic SHOULD remain provider-agnostic (GitHub/GitLab/Jira adapters as bindings, not baked workflow semantics).
-- Security- and quality-sensitive loops SHOULD expose policy hooks for risk-tiered review requirements.
-- Scanner/model/tool provenance SHOULD be preserved in context diagnostics for reproducibility audits.
-
-### 16.8 Implementation Planning Output Requirement
-
-After analysis and manual refinement are complete, maintainers SHOULD create linked implementation tasks that:
-
-- scope each capability increment separately,
-- define acceptance checks and sequencing,
-- and preserve traceability back to analysis sources.
-
-### 16.9 Canonical Design-Only Workflow Artefacts
-
-Some workflows are intentionally represented first as design-only KB artefacts before the language/runtime can execute them directly. In those cases:
-
-- the canonical artefact SHOULD still be created in Vontology,
-- the concept SHOULD keep the final workflow identity if it is expected to become executable later,
-- and the artefact SHOULD fail closed as a design document rather than inviting bespoke Python orchestration.
-
-Preferred pattern:
-
-- create the workflow concept in Vontology as the target durable or AI workflow identity,
-- attach narrative contract text via `hasContent`/`hasDescription`,
-- and, where useful, also type it as `#V#workflow_description_document`.
-
-### 16.10 Worked Example: Jira-GitHub Autofix Loop (`JVNAUTOSCI-1338`)
-
-Canonical concept:
-
-- `#V#jira_github_autofix_loop_workflow`
-
-Current status:
-
-- design-only canonical VWL artefact,
-- intended to become a durable workflow once iterator, approval, idempotency, and checkpoint semantics are available.
-
-Normative design requirements:
-
-- discover explicitly labelled Jira issues via bounded JQL;
-- map each issue to an allow-listed repository and base branch;
-- use guarded internal GitHub MCP methods for branch, PR, or Copilot delegation paths;
-- persist per-issue outcomes and run summary under stable context keys;
-- comment resulting GitHub metadata back to Jira;
-- fail closed on missing auth, allow-list mismatch, missing approval, or missing loop semantics.
-
-This example MUST NOT be implemented as a bespoke Python polling service. Supporting code may add generic VWL capabilities, validators, and telemetry, but the autofix-loop behaviour itself belongs in the Vontology workflow representation.
-
-Reference design document:
-
-- `docs/engineering/jira_github_autofix_loop_workflow.md`
-
-### 16.11 Canonical Fan-Out Example (`JVNAUTOSCI-1339`)
-
-Minimal per-item dispatch shape:
-
-1. `discover_candidates`
-   Action writes `candidate_issues`.
-
-2. `dispatch_per_issue`
-   Uses `workflow_control.for_each` with:
-   - `items_context_key=candidate_issues`
-   - `workflow_id=#V#jira_github_autofix_issue_workflow`
-   - `item_context_key=current_item`
-   - `index_context_key=index`
-   - `max_items` set explicitly
-   - `success_policy=all_must_succeed` or `allow_partial`
-
-3. `dispatch_per_issue` step metadata MAY also declare:
-   - retry policy via `#V#hasWorkflowStepRetryPolicyJson`
-   - approval gate via `#V#hasWorkflowStepApprovalGateJson`
-   - idempotency policy via `#V#hasWorkflowStepIdempotencyPolicyJson`
-
-4. `summarise_dispatch`
-   Reads `iteration_results`, `for_each_success_count`, and `for_each_error_count`.
-
-Blocked-state routing:
-
-- destructive or otherwise approval-gated child-dispatch steps SHOULD declare `on_approval_required` to an explicit blocked or escalation state;
-- blocked runs MUST preserve `approval_required`, `approval_state`, and approval-gate event diagnostics rather than silently continuing.
-
----
+- the chosen submission path accepts it.
+
+Optional policy families are not conformance requirements when absent. This
+compatibility list does not establish that VWL, the durable runtime, or any
+particular metadata family is the right architecture for a new capability.
+
+## 16. Retired planning material
+
+The former March 2026 planning baseline and Jira-GitHub worked examples mixed
+proposals, current inventory, domain policy, and language semantics. They are
+retained in git history, not as active VWL requirements. Promote an individual
+reusable syntax or runtime contract into Sections 3-15 only after live
+implementation and a capability demonstrate its need.
 
 ## Appendix A: Diagram Specification Pack (Tool-Ready)
 
