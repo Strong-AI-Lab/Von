@@ -18,8 +18,6 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 EXPERIMENT = "JVNAUTOSCI-2596/A1"
 PROVIDER = "openai"
@@ -63,6 +61,11 @@ READ_TOOL_NAMES = tuple(
 
 class ReadOnlyBoundaryError(RuntimeError):
     """A tool is outside the candidate's sole hard boundary."""
+
+
+def _make_backend_imports_available() -> None:
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def frozen_configuration() -> dict[str, Any]:
@@ -344,6 +347,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="verify and print the frozen non-secret configuration",
     )
     args = parser.parse_args(argv)
+    _make_backend_imports_available()
 
     try:
         if args.env_file:
@@ -381,12 +385,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             client = _build_client()
             setup_ms = round((time.perf_counter() - submitted_started) * 1000, 1)
+            allowed_names = frozenset(READ_TOOL_NAMES)
             result = run_candidate_turn(
                 prompt,
                 client=client,
                 provider_tools=tools,
                 invoke_tool=lambda name, payload: invoke_frozen_read_tool(
-                    gateway, frozenset(READ_TOOL_NAMES), name, payload
+                    gateway, allowed_names, name, payload
                 ),
             )
             result["runtime_setup_ms"] = setup_ms
