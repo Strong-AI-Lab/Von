@@ -7,8 +7,10 @@ What user or operational job improves, and why is the change needed?
 Describe only the affected code, represented artefacts, data, or guidance.
 Link the Jira issue or decision record when one governs the work.
 
-If this adds a compulsory gate or restriction, cite the demonstrated harm and
-comparative evidence against a permissive baseline.
+If this adds a compulsory semantic gate or restriction, identify the specific,
+credible, materially unacceptable outcome; the evidence or causal demonstration
+that it is reachable here; and why the least restrictive bounded, observable,
+and recoverable approach is inadequate. Scope the control to that failure mode.
 
 ## Evidence
 

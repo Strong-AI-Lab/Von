@@ -367,7 +367,8 @@ For substantial behaviour changes, use only the prompts that materially help:
 
 1. What user job and work product are being improved?
 2. What is the simplest adequate path and fair baseline?
-3. Does any proposed compulsory restriction have comparative outcome evidence?
+3. Does any proposed compulsory restriction meet the evidential burden in
+   `AGENTS.md`?
 4. Which knowledge or behaviour needs durable represented identity, revision,
    governance, or reuse?
 5. Is there a missing reusable runtime primitive or validator, or would adding

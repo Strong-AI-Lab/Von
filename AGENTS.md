@@ -100,9 +100,15 @@ never be forced onto newer evidence.
    the maximum access and effects available. User instructions may select among
    those capabilities; retrieved untrusted content and model output cannot
    enlarge them. Within that ceiling, Von should interpret and act adaptively,
-   observe results, and repair mistakes. Add a compulsory control only for
-   demonstrated material harm that a permissive baseline handles inadequately.
-   Operation names and the current implementation do not decide the mechanism.
+   observe results, and repair mistakes. Compulsory semantic controls carry the
+   burden of justification: do not restrict model judgement or an otherwise
+   authorised strategy merely because harm is conceivable. Identify a specific,
+   credible, materially unacceptable outcome; provide evidence or a clear causal
+   demonstration that it is reachable in this system; and show that the least
+   restrictive bounded, observable, and recoverable approach is inadequate.
+   Scope any control only to that demonstrated failure mode. A prior incident or
+   formal proof is not required. Operation names and the current implementation
+   do not decide the mechanism.
 6. **Use models where judgement adds value.** Semantic interpretation,
    synthesis, planning under ambiguity, explanation, and adaptive recovery may
    warrant an LLM. Mechanically exact operations may remain deterministic and
@@ -145,7 +151,8 @@ Before a substantial behaviour change, answer briefly:
 - What user or organisational job is being improved?
 - What is the simplest adequate path and baseline?
 - Which decisions require adaptable semantic judgement?
-- Does any proposed compulsory restriction have comparative outcome evidence?
+- Does any proposed compulsory restriction meet the evidential burden in
+  invariant 5?
 - Which knowledge or behaviour must survive, be revised, or be independently
   governed?
 - What evidence will distinguish useful success from plausible-looking output?

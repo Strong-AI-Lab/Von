@@ -76,8 +76,8 @@ judgement, and any reusable mechanism the capability genuinely needs. Use the
 constitutional default in `AGENTS.md`; do not create a local risk taxonomy or
 repeat a generic control checklist here.
 
-If a proposed refactor adds a compulsory restriction, stage, or wrapper, require
-evidence of the failure it prevents and compare it with the simplest permissive
+If a proposed refactor adds a compulsory restriction, stage, or wrapper, apply
+the evidential burden in `AGENTS.md` and compare it with the simplest permissive
 baseline on the complete user job. Otherwise, no safety dossier is required.
 Refactoring should clarify authority without moving hidden policy into smaller
 functions, freezing a probabilistic label behind code, or forcing an exact

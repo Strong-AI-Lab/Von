@@ -40,10 +40,10 @@ should resemble Von's predominantly low-risk administrative and scientific
 work. Measure final useful outcomes, false refusal or unnecessary interruption,
 latency and human burden, and observed recovery or harm only where material.
 
-When code adds a compulsory gate, branch, or wrapper, compare it with a
-permissive baseline and count safe strategies it blocks. Different competent
-paths may pass. This is not a universal runtime schema or a fixed evaluator
-pipeline.
+When code adds a compulsory gate, branch, or wrapper, first apply the evidential
+burden in `AGENTS.md`; then compare it with a permissive baseline and count safe
+strategies it blocks. Different competent paths may pass. This is not a
+universal runtime schema or a fixed evaluator pipeline.
 
 Retire the compatibility profile and its code when no live consumer needs it;
 do not preserve it as an oracle for the new controller.
