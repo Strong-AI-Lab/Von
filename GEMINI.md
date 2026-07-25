@@ -1,6 +1,6 @@
-# Gemini Notes
+# Gemini instruction routing
 
-This file is reserved for recent tool-usage learnings related to Gemini-facing
-automation in Von.
+[`AGENTS.md`](AGENTS.md) is the sole repository constitution. Read it first and
+use [`docs/design_index.md`](docs/design_index.md) for progressive disclosure.
 
-No curated notes have been recorded here yet.
+This file contains no independent rules or tool-use diary.

@@ -1,41 +1,24 @@
-## Summary
-- What does this PR do? (1–3 bullets)
-- Why is this change needed?
+## User outcome
 
-## Jira / Tracking
-- Jira: JVNAUTOSCI-XXXX (or N/A)
+What user or operational job improves, and why is the change needed?
 
-## Key Changes
-- Backend:
-- Frontend:
-- Vontology / Knowledge:
-- Docs:
+## Material changes
 
-## Testing
-- [ ] Backend tests (note DB): `VON_DB_NAME=test_von_db` used
-  - Command/task:
-- [ ] Frontend tests:
-  - Command/task:
-- [ ] Manual checks (if relevant):
+Describe only the affected code, represented artefacts, data, or guidance.
+Link the Jira issue or decision record when one governs the work.
 
-## Vontology / MCP (complete if applicable)
-- [ ] No Vontology changes
-- OR details:
-  - Concepts/predicates added/updated:
-  - Tooling changes:
-  - If an MCP tool was changed: updated all three implementations + manifest:
-    - [ ] `src/backend/mcp_server/mcp_stdio_server.py`
-    - [ ] `src/backend/mcp_server/mcp_server.py`
-    - [ ] `src/backend/integrations/internal_mcp/catalogue.py`
-    - [ ] `src/backend/mcp_server/vontology_mcp.json`
+If this adds a compulsory semantic gate or restriction, identify the specific,
+credible, materially unacceptable outcome; the evidence or causal demonstration
+that it is reachable here; and why the least restrictive bounded, observable,
+and recoverable approach is inadequate. Scope the control to that failure mode.
 
-## Risk & Rollback
-- Risk level: Low / Medium / High
-- Rollback plan:
+## Evidence
 
-## Screenshots / UI Notes (if applicable)
-- Before/after screenshots or a short description:
+What was actually run or inspected, and what scope does that evidence support?
+Include the nearest faithful user path when the claim is user-visible.
 
-## Checklist
-- [ ] No secrets or runtime data committed (check `data/`, `logs/`, etc.)
-- [ ] Changes are scoped to the issue
+## Decision boundary
+
+State any human gate, unmerged experiment, activation step, unresolved
+uncertainty, or follow-up needed. Do not mark inapplicable subsystems or tests
+merely to complete a template.

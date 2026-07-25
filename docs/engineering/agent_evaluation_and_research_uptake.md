@@ -3,7 +3,7 @@
 - **Kind:** Evaluation and research-uptake guide
 - **Lifecycle:** Active
 - **Authority:** Normative only for the evaluation or research claim being made
-- **Last reviewed:** 18 July 2026
+- **Last reviewed:** 25 July 2026
 
 ## 1. When to read this
 
@@ -26,6 +26,8 @@ Evaluate the property you actually care about, on the nearest real task path, wi
 Where relevant, measure:
 
 - task success
+- useful-action rate and false refusal or abandonment
+- unnecessary clarification, confirmation, and approval burden
 - reliability across multiple trials
 - policy adherence
 - perturbation robustness
@@ -34,7 +36,8 @@ Where relevant, measure:
 - retrieval hit quality
 - memory use quality
 - uncertainty or calibration quality
-- recovery behaviour
+- recovery success, time, and burden after induced mistakes
+- residual harm weighted by credible consequence rather than operation label
 
 ## 4. Benchmark scepticism
 
@@ -44,6 +47,13 @@ Before relying on a benchmark, ask:
 - Does it score the final world state or only text similarity?
 - Does it hide important failure modes?
 - Does it over-reward empty or partial responses?
+- Does it over-reward refusal, clarification, or confirmation that avoids useful
+  low-risk work?
+- Does its distribution resemble Von's predominantly ordinary administrative
+  and scientific workload, or do adversarial boundary cases dominate far beyond
+  their real base rate?
+- Can materially different competent strategies pass, or is one internal path
+  encoded as the answer?
 - Would a simpler baseline already do well?
 
 ## 5. Real-path acceptance
@@ -54,6 +64,12 @@ For user-visible or end-to-end claims, acceptance should use:
 - the nearest faithful path if production cannot be used safely
 
 Nearby unit tests and synthetic harnesses are supporting evidence, not the whole story.
+
+For ordinary capability claims, representative low-risk work should dominate
+the evaluation distribution. Include high-consequence and adversarial cases in
+proportion to the claim, and weight failures by plausible residual harm,
+detectability, and recovery. Otherwise the benchmark will select for a
+paralysed agent even when the prose asks for useful autonomy.
 
 ## 6. Literature note requirement
 
@@ -93,12 +109,15 @@ When reporting results, state clearly:
 - cost or latency effect
 - important caveats
 
-## 9. Acceptance checklist
+## 9. Acceptance prompts
 
-Before closing research-sensitive or evaluation-heavy work, verify:
+For research-sensitive or evaluation-heavy work, use the items material to the
+claim:
 
 - the baseline was appropriate
 - the measured metric matches the claimed improvement
+- useful action, unnecessary intervention, residual harm, and recovery are
+  measured where they are material
 - the evaluation path is reproducible
 - the task notes capture the literature-informed design choice
 - any benchmark limitation that materially affects interpretation was documented

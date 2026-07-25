@@ -3,8 +3,8 @@
 - **Kind:** Routed architecture-review guidance
 - **Lifecycle:** Active
 - **Authority:** Advisory method under the constitutional rules in `AGENTS.md`
-- **Last substantive content update:** 2026-07-18
-- **Last reviewed:** 2026-07-18
+- **Last substantive content update:** 2026-07-25
+- **Last reviewed:** 2026-07-25
 
 ## 1. Purpose
 
@@ -68,30 +68,20 @@ A strong refactor candidate normally combines at least two of:
 Size alone is not evidence. Old code, unfamiliar style, or a large line count
 does not justify a refactor.
 
-## 5. Diagnose the Authority Boundary
+## 5. Diagnose the authority boundary
 
-For each candidate, distinguish:
+Identify the user outcome, the actual selected authority or execution surface,
+the maximum capability available, the decisions that benefit from model
+judgement, and any reusable mechanism the capability genuinely needs. Use the
+constitutional default in `AGENTS.md`; do not create a local risk taxonomy or
+repeat a generic control checklist here.
 
-1. **Hard deterministic boundary**
-   - schemas, security, permissions, storage invariants, transactionality,
-     idempotency, namespace propagation, and destructive-action gates;
-   - normally owned and enforced by code.
-2. **Reusable mechanism**
-   - execution primitives, algorithms, query engines, adapters, persistence,
-     validation, telemetry, and rendering;
-   - normally implemented and tested in code.
-3. **Adaptive behavioural authority**
-   - goals, routing guidance, ranking criteria, prompt behaviour, completion
-     expectations, recovery strategy, and user-facing explanation;
-   - represented when it must be inspectable, editable, governable, or learned.
-4. **Ephemeral model judgement**
-   - case-specific interpretation and planning from current evidence;
-   - belongs in the model's working context and execution trace, not necessarily
-     in durable state.
-
-Refactoring should clarify these boundaries. It should not merely move hidden
-policy into smaller Python functions or force deterministic mechanisms through
-an LLM/workflow layer.
+If a proposed refactor adds a compulsory restriction, stage, or wrapper, apply
+the evidential burden in `AGENTS.md` and compare it with the simplest permissive
+baseline on the complete user job. Otherwise, no safety dossier is required.
+Refactoring should clarify authority without moving hidden policy into smaller
+functions, freezing a probabilistic label behind code, or forcing an exact
+mechanism through an LLM/workflow layer.
 
 ## 6. Common Drift Patterns
 
@@ -169,10 +159,13 @@ A useful task names:
 - the affected capability and current failure/cost;
 - exact files, functions, or boundaries;
 - responsibilities that should separate;
-- the intended hard, mechanism, represented, and ephemeral authority split;
+- the delegated-capability, assurance, mechanism, represented, and ephemeral
+  judgement split;
 - compatibility constraints;
 - a targeted and nearest-faithful validation plan;
-- what will become simpler, faster, safer, or easier to change.
+- what will become simpler, faster, safer, or easier to change;
+- what safe actions, strategies, or recovery options a proposed compulsory
+  control would block.
 
 Avoid titles such as “clean up large file”. Prefer an outcome such as “separate
 HTTP parsing from turn execution so route variants share one tested execution

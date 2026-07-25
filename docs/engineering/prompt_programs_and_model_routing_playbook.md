@@ -3,7 +3,7 @@
 - **Kind:** Prompt and model-routing playbook
 - **Lifecycle:** Active
 - **Authority:** Normative within its stated prompt/model scope
-- **Last reviewed:** 18 July 2026
+- **Last reviewed:** 25 July 2026
 
 ## 1. When to read this
 
@@ -17,7 +17,8 @@ Read this document before planning or implementing work that touches:
 
 ## 2. Core doctrine
 
-Von prompt programs are operational policy. They should be treated as:
+When a prompt is deliberately retained as durable, independently governed
+operational policy, treat it as:
 
 - first-class artefacts
 - versioned and inspectable
@@ -28,29 +29,33 @@ Model selection is also policy. It should not be hidden in scattered conditional
 
 ## 3. Prompt program rules
 
-1. Store authoritative prompt content in Vontology text relations.
+1. For a feature that deliberately selects Vontology prompt governance, store
+   its authoritative prompt content in Vontology text relations. Direct or
+   ephemeral prompts may remain in the smallest suitable code, configuration,
+   or model context with their role made clear.
 2. Give important prompt concepts stable identities and descriptions.
 3. Maintain prompt lineage when revising or optimising prompts.
 4. Keep evaluation notes with the prompt or linked task.
 5. Do not silently override a Vontology-governed prompt in code.
 6. Do not treat a prompt change as harmless copy-editing when it changes behaviour.
 
-Selector/classifier prompts are not second-class helper prompts. If they steer
-semantic routing or stage behaviour, they are prompt-programme authority
-surfaces and should be governed, versioned, and published with the same
-discipline as response, narration, and recovery prompts.
+If a selector or classifier exists and its prompt needs independent durable
+governance, apply the same discipline as to other governed prompts. This rule
+does not require a selector, classifier, or separate response/recovery stage.
 
 ## 3A. Shared turn-context discipline
 
-For multi-stage turns, canonical accumulated turn state and each stage's
-model-visible projection are both part of the behaviour contract.
+When a capability has demonstrated a need for more than one model stage,
+canonical accumulated turn state and each stage's model-visible projection are
+both part of the behaviour contract. Do not create selector, planner, critic,
+or response stages merely to instantiate this pattern.
 
-Maintain one shared canonical turn-state object. Give selector, planner,
-tool-use, and response stages the minimum sufficient projection for their job.
-Stage prompts may add instructions or evidence; projections may omit or
-summarise material when that improves relevance, safety, latency, or cost.
-Material additions, omissions, and summaries must be explicit, justified, and
-evaluated.
+Maintain one shared canonical turn-state object where multiple consumers
+actually need it. Give each selected stage the minimum sufficient projection
+for its job. Stage prompts may add instructions or evidence; projections may
+omit or summarise material when that improves relevance, safety, latency, or
+cost. Material additions, omissions, and summaries should be inspectable and
+evaluated in proportion to the claim.
 
 Different projections are not authority drift by themselves. Undocumented or
 unevaluated projection policy is. Keep stable projection mechanisms in code and
@@ -150,79 +155,46 @@ A reasonable default pattern is:
 
 Do not hard-code this into many helpers. Centralise it.
 
-## 7A. Replay-Backed Model Certification
+## 7A. Proportionate replay evidence
 
-Cheap/local model use should be certified per workflow stage, prompt profile,
-and replay set. A passing single turn is evidence, not authority to update the
-runtime policy.
+Use replay evidence before materially changing a shared model policy. Match the
+campaign to the claim: a narrow low-risk routing preference may need only a
+small representative comparison and easy rollback; a broad release,
+high-consequence capability, or research claim may need repeated cases,
+holdouts, provenance, and human review.
 
-For replay campaigns that use the maintained live prompt bank, the sampler emits
-model-portfolio evidence alongside the normal response and telemetry summary:
+Report the final user outcome, useful-action and refusal rates, cost, latency,
+recovery, and the actual model/tool path. Stage-specific evidence is relevant
+only for stages the candidate really uses. No separate certification artefact,
+critic workflow, or Vontology mutation choreography is universal.
 
-- selector evidence: selected workflow, raw selector response capture,
-  structured-output validity, selected model-policy candidate, and fallback
-  metadata;
-- answer evidence: final answer length/usefulness, missing required evidence,
-  empty-success suspect calls, completion-gate status, critic status, tool
-  count, and timing rows;
-- certification decision: whether the evidence is sufficient to promote a
-  model-stage certification.
+Promotion must stay within delegated authority and remain observable and
+reversible. A passing single turn is bounded evidence, not proof of generality;
+equally, the absence of a full certification campaign is not a reason to block
+an ordinary reversible experiment.
 
-The certification decision is deliberately conservative. The sampler must not
-mutate workflow model policy by itself. Promotion requires represented evidence
-with replay provenance, enough distinct cases, passing stage evidence, and a
-separate Vontology/model-policy mutation path. A strong critic workflow or
-human review should decide whether to promote, expire, or reject the
-certification.
+When a model-specific prompt variant is worth retaining independently, represent
+it with lineage and replay evidence rather than hiding it in provider-name
+branches. The base prompt remains a usable default when no matching variant
+exists.
 
-When a model-specific prompt variant appears useful, represent it as a prompt
-concept with lineage and replay evidence. Do not hide the variant in Python
-branches keyed by provider or model name.
+## 8. Routing and recovery guidance
 
-Model- or model-family-specific prompt variants should be linked from the base
-prompt concept through represented Vontology metadata. Runtime support may
-select variants by exact model, then model family or capability profile, but
-the base prompt remains the default. If no matching variant exists, execution
-must continue with the base prompt and record the fallback in telemetry rather
-than treating the missing variant as a turn failure.
+When a turn uses discovery, continuation, a selector, a direct tool path, or
+some combination, preserve user intent and safe solution opportunity:
 
-## 8. Workflow routing guardrails
-
-When workflow discovery, continuation, and selector preparation interact, keep
-the following policy constraints intact:
-
-1. Preserve discovery-side routing eligibility and exclusion reasons into
-   selector preparation. Do not overwrite them with later executability or
-   registry defaults.
-2. Apply routing-profile policy to normal discovered candidates as well as to
-   custom override candidates. An authoring workflow is still an authoring
-   workflow when found through ordinary discovery.
-3. Treat explicit user divergence from an active workflow continuation as
-   authoritative. If the user says the current workflow is wrong, asks for
-   manual inspection, or explicitly forbids continuing it, do not keep forcing
-   the stale workflow context into the next routing turn.
-4. Require explicit authoring intent before routing into workflow-creation or
-   workflow-authoring flows. Casual mention of “workflow”, or discussion of what
-   workflow might eventually be needed, is not sufficient.
-5. Preserve one canonical accumulated turn state while giving each stage a
-   minimum-sufficient projection. Silent or unevaluated thinning is an
-   architectural smell; explicit, telemetry-visible curation is expected.
-6. Do not let workflow execution bookkeeping become the user-facing answer.
-   Completion reports, dispatch summaries, and renderer diagnostics are
-   supporting surfaces unless the user explicitly asked for an operational
-   view.
-7. Treat a failed specialised workflow as a routing event, not automatically
-   as the end of the turn. When a specialised route fails before meaningful
-   tool progress or verified durable effects, the default next step should be
-   bounded compositional recovery from accumulated turn context, such as the
-   general tool workflow or an authorised direct tool batch, before
-   workflow-gap escalation or user-facing surrender. Telemetry should preserve
-   both the failed specialised attempt and the recovery handoff.
-8. Do not repair simple routing regressions with English-specific lexical
-   rescue logic. Lower-complexity replay cases should succeed for the same
-   discovery, selector, workflow, and tool-planning reasons that richer
-   compositional turns would succeed, and that success path should remain valid
-   in any language rather than only for English phrasings.
+1. Treat explicit user divergence from an active workflow as authoritative; do
+   not force stale continuation context into the next turn.
+2. Require actual authoring intent before entering workflow-creation flows. A
+   casual mention of a workflow is not sufficient.
+3. Do not let execution bookkeeping become the user-facing answer unless the
+   user asked for an operational view.
+4. Treat a failed specialised route as evidence, not automatically as the end
+   of the turn. Try an authorised bounded alternative such as direct tools,
+   another workflow, model-led composition, or a manual path before surrender.
+5. Do not repair routing regressions with English-specific lexical rescue logic
+   or case-specific route forcing. Evaluate the user outcome across varied
+   phrasings and allow materially different competent strategies to pass.
 
 ## 9. Fine-tuning guidance
 
@@ -238,20 +210,23 @@ Fine-tuning is not a substitute for:
 - good prompts
 - good retrieval/context
 - validators
-- explicit workflow policy
+- clear behavioural authority where durable governance is material
 
-## 10. Acceptance checklist
+## 10. Acceptance prompts
 
-Before closing prompt- or routing-related work, verify:
+Use only the items material to the claim:
 
-- the authoritative prompt lives in Vontology
-- selector/classifier prompts are under the same authority and publishing
-  discipline as other prompt artefacts
+- a prompt that needs independent durable governance lives in its selected
+  authority surface, normally Vontology for Vontology-governed production
+  features
+- any selector/classifier that actually steers semantic behaviour is governed
+  and evaluated proportionately; no selector stage was added merely to satisfy
+  this checklist
 - prompt or router changes were evaluated on a relevant downstream metric
 - the previous baseline remains reproducible
 - model and prompt differences are visible in telemetry or task notes
-- any stage-specific context additions or reductions are visible in telemetry
-  and justified in task notes when non-obvious
+- any material context additions or reductions are visible when they affect the
+  claim
 - user-facing evaluation cases verify that execution summaries do not displace
   answers
 - routing and retrieval improvements do not depend on English-only semantic

@@ -1,49 +1,9 @@
-# Von - AI Development Instructions
+# Von coding-agent instruction routing
 
-This project is an AI-agent system for academic research (knowledge management, ontologies).
-Follow these instructions to be productive and compliant with project standards.
+[`AGENTS.md`](../AGENTS.md) is the sole repository constitution. Read it first
+and use [`docs/design_index.md`](../docs/design_index.md) for progressive
+disclosure.
 
-## 1. Architecture & Boundaries
-- **Core Principle**: "Vontology" (ontology graph) is the source of truth, not just the DB.
-- **Backend (`src/backend/`)**: Python/Flask application.
-  - `vontology/`: Core logic for concepts and relationships.
-  - `server/`: Flask routes and API definitions.
-  - `integrations/internal_mcp/`: Gateway for MCP tool handling.
-- **Frontend (`src/frontend/web/`)**: React/TypeScript application.
-- **Data**: MongoDB is the persistence layer (`von_db` or `test_von_db`).
-
-## 2. Development Workflow
-- **Shell**: Use the native shell for the current host. On Windows, default to
-  PowerShell and do not use Bash-only syntax (`export`, POSIX path assumptions,
-  etc.) unless explicitly asked. On macOS/Linux, prefer the native POSIX shell
-  (`zsh`/`sh`) for shell probes and PATH-sensitive commands; use PowerShell only
-  when invoking `.ps1` scripts or testing Windows/PowerShell behaviour.
-- **Package Manager**:
-  - Python: `pdm` (e.g., `pdm run pytest`).
-  - JS: `npm` (e.g., `npm run test`).
-- **Running the App**: Windows/PowerShell: `./run.ps1`; macOS/Linux: `./run.sh`
-  unless specifically validating the PowerShell launcher.
-- **Testing**:
-  - Backend: `pdm run python scripts/pytest_lanes.py recommend --git-diff origin/main --risk normal`, then run the suggested lane(s) or direct targets. Use `pdm run python scripts/pytest_lanes.py aggregate-plan` for broader shard coverage.
-  - Frontend: `npm run test:frontend`.
-  - **Critical**: Never run tests against accessing the production `von_db`.
-
-## 3. Coding Conventions
-- **Language**: Use **New Zealand English** spelling (e.g., "behaviour", "visualise").
-- **Vontology-First**:
-  - **Read**: Use Vontology services/MCP tools to fetch data.
-  - **Write**: Use Vontology services/MCP tools to mutate data.
-  - **Avoid**: Direct raw MongoDB calls for ontology data unless writing low-level services.
-- **Refactoring**: Implement the "3-strike rule". If code is repeated 3 times, refactor into valid helper in `utils/` or `services/`.
-- **Error Handling**: Fail fast with diagnostic messages (expected vs actual).
-
-## 4. Agent Specific Rules
-- **Tooling**: Prefer MCP tools (Vontology, Jira) over direct code manipulation for data tasks.
-- **Validation**: Check `get_problems` or `pyright` results after editing files.
-- **Documentation**: Update `AGENTS.md` if discovering new critical patterns.
-- **Git**: Keep changes small. Fast-forward merge into `main` after tests pass.
-
-## 5. Key File Locations
-- `src/backend/integrations/internal_mcp/catalogue.py`: Definition of internal tools.
-- `AGENTS.md`: Detailed behavioral rules for AI agents.
-- `tests/backend/`: Backend test suite (consult for API usage examples).
+This file adds no independent rules. If agent-specific instructions duplicate
+or conflict with the constitution, remove the duplicate rather than maintaining
+a second policy surface.

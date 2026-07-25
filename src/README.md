@@ -28,5 +28,6 @@ Standalone operational scripts for maintainers, including local database initial
 Composable workflow definitions (e.g., `onboarding_workflow.py` and `von/main.py`) that orchestrate services, memories, and personas for specific research tasks.
 
 ## Supporting files
-- `GEMINI.md` captures recent tool-usage learnings for Gemini-related automation.
+- `GEMINI.md` points to the repository-root Gemini instruction-routing entrypoint
+  and contains no independent rules.
 - `__init__.py` marks the package root so modules under `src/` can be imported using absolute paths.

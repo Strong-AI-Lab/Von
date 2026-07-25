@@ -6,7 +6,7 @@
   override current user direction, `AGENTS.md`, live represented authority, or
   live evidence
 - **Owner:** Von maintainers
-- **Last reviewed:** 18 July 2026
+- **Last reviewed:** 25 July 2026
 - **Review trigger:** Any change to `AGENTS.md` reading routes, canonical
   document selection, or document supersession
 - **Scope:** Tracked design, engineering, operational, review, and generated
@@ -80,7 +80,7 @@ live.
 |---|---|
 | Every task | [`AGENTS.md`](../AGENTS.md) |
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
-| Authentication, private/cross-namespace data, writes, untrusted content, integrations, deployment, or administrator surfaces | [Security considerations](engineering/security_considerations.md) |
+| Material security exposure: authentication/authorisation, private or cross-namespace data, secrets, untrusted content with tool authority, effects outside ordinary bounded and recoverable delegation, deployment, or administrator surfaces | [Security considerations](engineering/security_considerations.md) |
 | Substantial agent-behaviour implementation | Relevant sections of the [modern agentic AI primer](engineering/intro_to_modern_agentic_ai_for_coding_agents.md) |
 | Workflow or orchestration | Relevant vocabulary/semantics in the [VWL manual](engineering/von_workflow_language_manual.md); domain examples and appendices are reference material |
 | Prompts, models, routing, optimisation, or fine-tuning | [prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) |
@@ -107,7 +107,7 @@ from `AGENTS.md`.
 | [Prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) | Active playbook | Normative only within its stated prompt/model scope |
 | [Agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) | Active design guide | Normative only within its stated memory/retrieval scope |
 | [Agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) | Active protocol/design guide | Normative only for the evaluation or research claim being made |
-| [Minimal-imposition principle](engineering/minimal_imposition_design_principle.md) | Active principle | Normative within its stated scope, subject to user direction, security, and authority boundaries |
+| [Minimal-imposition principle](engineering/minimal_imposition_design_principle.md) | Active principle | Explanatory guidance under `AGENTS.md`; it adds no independent per-task gates |
 | [Frontend browser validation](engineering/frontend_browser_user_view_validation.md) | Active practical guide | Risk-tiered reference; browser evidence needs a dated locator when used |
 | [Real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md) | Active practical guide | Risk-tiered protocol; exact-path evidence outranks prose, but full protocol is not universal |
 | [Operational engineering guide](engineering/operational_engineering_guide.md) | Active companion runbook | Consult by operational need and revalidate host/tool-specific details |

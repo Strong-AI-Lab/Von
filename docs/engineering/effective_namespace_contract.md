@@ -1,9 +1,20 @@
-# Effective Namespace Contract (User + Organisation)
+# Effective Namespace Implementation Compatibility (User + Organisation)
 
-This document defines the authoritative contract for effective namespace handling in Von.
-It is the canonical reference for namespace semantics across generate, persistence, and RAG retrieval/indexing paths.
+- **Kind:** Current-implementation compatibility record
+- **Lifecycle:** Active for the existing namespace service; retired as a
+  universal architecture contract
+- **Authority:** The required outcome is preventing access to another actor's
+  private data. The resolver order, report fields, counters, and propagation
+  topology below are not mandatory for a replacement path.
+- **Last reviewed:** 2026-07-25
 
-Status:
+This document describes the namespace mechanism currently used across generate,
+persistence, and RAG retrieval/indexing paths. Keep it accurate while that code
+exists, but do not preserve or reproduce the mechanism merely because this
+record names it. A simpler replacement is valid if it provides the same
+private-data isolation and appropriate compatibility during cutover.
+
+History:
 - Normative contract approved for implementation and migration planning (JVNAUTOSCI-1168).
 - Current implementation alignment work landed in JVNAUTOSCI-1169.
 - Namespace-component telemetry and compact diagnostics reporting landed in JVNAUTOSCI-1167.
@@ -51,7 +62,7 @@ Practical derivation rule for concept IDs:
 - Remove trailing scope suffixes where relevant (`@...`, `+...`) before slugging.
 - Slug to `[a-z0-9_]+`.
 
-## 4) Authoritative resolution contract
+## 4) Current resolver behaviour
 
 ### 4.1 Generate path (`/von/generate`)
 
@@ -193,7 +204,8 @@ Phase A (completed):
 - Add resolver provenance and mismatch diagnostics.
 
 Phase B (this contract, completed):
-- Publish this authoritative contract and link it from security/access-control docs (JVNAUTOSCI-1168).
+- Published the then-authoritative contract, now retained as this compatibility
+  record, and linked it from security/access-control docs (JVNAUTOSCI-1168).
 - Make enforcement modes and invariants explicit.
 
 Phase C (in progress):
@@ -216,4 +228,3 @@ Phase E (planned):
 - `src/backend/integrations/internal_mcp/catalogue.py` (`_resolve_rag_namespace_from_kwargs`, `_rag_namespace_resolution_error`)
 - `src/backend/services/namespace_isolation_diagnostics_service.py`
 - `src/backend/server/utils_flask.py` (`/admin/rag_status`, `/diag`)
-
