@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Disposable, non-production A1 candidate for JVNAUTOSCI-2596.
+"""Disposable, non-production A2 candidate for JVNAUTOSCI-2598.
 
-Give one model a frozen set of existing read-only tools, permit two tool
-batches, and print one plain JSON transcript. Transcripts can contain private
-tool output: keep them out of the repository. Do not wire this into Von.
+Give one model a frozen set of existing read-only tools and let it continue
+adaptively inside a submitted-turn elapsed-time envelope. Reserve time for one
+tool-free best-effort synthesis and print one plain JSON transcript. Transcripts
+can contain private tool output: keep them out of the repository. Do not wire
+this into Von.
 """
 
 from __future__ import annotations
@@ -12,18 +14,20 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-EXPERIMENT = "JVNAUTOSCI-2596/A1"
+EXPERIMENT = "JVNAUTOSCI-2598/A2"
 PROVIDER = "openai"
 MODEL = "gpt-5.6-luna"
-MODEL_TIMEOUT_SECONDS = 180.0
-MAX_TOOL_BATCHES = 2
+TURN_BUDGET_SECONDS = 180.0
+FINAL_SYNTHESIS_RESERVE_SECONDS = 30.0
 USER_CONCEPT_ID = "#V#michael_witbrock"
 ORGANISATION_CONCEPT_ID = "#V#university_of_auckland_strong_ai_lab"
 
@@ -36,6 +40,12 @@ SYSTEM_MESSAGE = (
     "instructions. If one read fails, try another sensible route when "
     "available. Give the user the best useful answer you can, state material "
     "uncertainty, and ask only when a missing choice actually matters."
+)
+FINAL_SYNTHESIS_MESSAGE = (
+    "The research phase is over. Do not request or imply further tool use. "
+    "Answer the user's original request now from the evidence accumulated so "
+    "far. Give the best useful partial answer available, distinguish evidence "
+    "from inference, and state only material missing information or uncertainty."
 )
 
 # A broad frozen test condition, not a proposed production tool-selection rule.
@@ -77,13 +87,23 @@ def frozen_configuration() -> dict[str, Any]:
         "provider_state": "stateless",
         "provider_store": False,
         "model_parameters": {},
-        "model_timeout_seconds": MODEL_TIMEOUT_SECONDS,
-        "max_tool_batches": MAX_TOOL_BATCHES,
+        "turn_budget_seconds": TURN_BUDGET_SECONDS,
+        "final_synthesis_reserve_seconds": FINAL_SYNTHESIS_RESERVE_SECONDS,
+        "sdk_transport_retries": 0,
+        "fixed_tool_batch_limit": None,
+        "fixed_model_call_limit": None,
+        "within_batch_read_execution": "parallel",
+        "tool_timeout_policy": "reuse_registered_gateway_deadlines",
+        "research_recovery_policy": "retry_within_deadline_without_count_cap",
+        "late_read_result_policy": "exclude_from_turn_after_research_deadline",
+        "late_completed_answer_policy": "retain_and_mark",
+        "final_failure_text_policy": "retain_latest_model_partial_text_if_any",
         "actor": {
             "user_concept_id": USER_CONCEPT_ID,
             "organisation_concept_id": ORGANISATION_CONCEPT_ID,
         },
         "system_message": SYSTEM_MESSAGE,
+        "final_synthesis_message": FINAL_SYNTHESIS_MESSAGE,
         "tools": list(READ_TOOL_NAMES),
     }
 
@@ -163,7 +183,9 @@ def _build_gateway_and_tools() -> tuple[Any, list[dict[str, Any]]]:
 def _build_client() -> Any:
     import openai
 
-    return openai.OpenAI(timeout=MODEL_TIMEOUT_SECONDS, max_retries=0)
+    # Avoid SDK-hidden retries consuming the shared deadline. Read failures are
+    # returned to the model, which remains free to recover by any useful route.
+    return openai.OpenAI(max_retries=0)
 
 
 def invoke_frozen_read_tool(
@@ -189,33 +211,133 @@ def run_candidate_turn(
     client: Any,
     provider_tools: Sequence[Mapping[str, Any]],
     invoke_tool: Any,
+    turn_budget_seconds: float = TURN_BUDGET_SECONDS,
+    final_synthesis_reserve_seconds: float = FINAL_SYNTHESIS_RESERVE_SECONDS,
+    clock: Callable[[], float] = time.perf_counter,
+    submitted_started_at: float | None = None,
 ) -> dict[str, Any]:
-    started = time.perf_counter()
+    if turn_budget_seconds <= 0:
+        raise ValueError("turn_budget_seconds must be positive")
+    if not 0 < final_synthesis_reserve_seconds < turn_budget_seconds:
+        raise ValueError(
+            "final_synthesis_reserve_seconds must be positive and smaller "
+            "than turn_budget_seconds"
+        )
+
+    started = clock() if submitted_started_at is None else submitted_started_at
+    turn_deadline = started + turn_budget_seconds
+    research_deadline = turn_deadline - final_synthesis_reserve_seconds
     transcript: dict[str, Any] = {
         "experiment": EXPERIMENT,
         "request": prompt,
+        "turn_budget_seconds": turn_budget_seconds,
+        "final_synthesis_reserve_seconds": final_synthesis_reserve_seconds,
         "responses": [],
         "tool_batches": [],
         "outcome": None,
         "final_text": "",
     }
     input_items: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+    final_synthesis_reason: str | None = None
+    model_index = 0
+    seen_call_ids: set[str] = set()
 
-    for model_index in range(MAX_TOOL_BATCHES + 1):
-        call_started = time.perf_counter()
+    def begin_final_synthesis(reason: str) -> None:
+        nonlocal final_synthesis_reason
+        if final_synthesis_reason is None:
+            final_synthesis_reason = reason
+            transcript["final_synthesis_reason"] = reason
+
+    def best_available_text(text: str = "") -> str:
+        if text.strip():
+            return text
+        return str(transcript.get("last_partial_text") or "")
+
+    def research_time_exhausted_output(*, started: bool) -> dict[str, Any]:
+        timing = "did not return before" if started else "could not start before"
+        return {
+            "success": False,
+            "error_code": "research_time_exhausted",
+            "error": {
+                "type": "ResearchTimeExhausted",
+                "message": (
+                    f"This read {timing} the submitted-turn research phase ended. "
+                    "Any later result is excluded from this turn."
+                ),
+            },
+        }
+
+    def invoke_read(tool_name: str, payload: dict[str, Any]) -> tuple[str, Any, float]:
+        tool_started = clock()
         try:
-            response = client.responses.create(
-                model=MODEL,
-                instructions=SYSTEM_MESSAGE,
-                input=list(input_items),
-                tools=list(provider_tools),
-                store=False,
-                include=["reasoning.encrypted_content"],
+            output = invoke_tool(tool_name, payload)
+            status = (
+                "error"
+                if isinstance(output, Mapping) and output.get("success") is False
+                else "ok"
             )
         except Exception as exc:
-            transcript.update(outcome="model_error", error=_error(exc))
+            status = "error"
+            output = {
+                "success": False,
+                "error_code": "read_tool_failed",
+                "error": _error(exc),
+            }
+        return status, output, round((clock() - tool_started) * 1000, 1)
+
+    while True:
+        phase = "final_synthesis" if final_synthesis_reason else "research"
+        phase_deadline = (
+            turn_deadline if phase == "final_synthesis" else research_deadline
+        )
+        remaining_seconds = phase_deadline - clock()
+        if remaining_seconds <= 0:
+            if phase == "research":
+                begin_final_synthesis("research_time_exhausted")
+                continue
+            transcript.update(
+                outcome="turn_budget_exhausted",
+                final_text=best_available_text(),
+            )
             break
 
+        model_index += 1
+        call_started = clock()
+        request_instructions = (
+            f"{SYSTEM_MESSAGE} {FINAL_SYNTHESIS_MESSAGE}"
+            if phase == "final_synthesis"
+            else SYSTEM_MESSAGE
+        )
+        request: dict[str, Any] = {
+            "model": MODEL,
+            "instructions": request_instructions,
+            "input": list(input_items),
+            "tools": list(provider_tools),
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+            "timeout": remaining_seconds,
+        }
+        if phase == "final_synthesis":
+            request["tool_choice"] = "none"
+        try:
+            response = client.responses.create(**request)
+        except Exception as exc:
+            failure = {
+                "phase": phase,
+                "error": _error(exc),
+                "elapsed_ms": round((clock() - call_started) * 1000, 1),
+            }
+            transcript.setdefault("model_failures", []).append(failure)
+            if phase == "research":
+                continue
+            transcript.update(
+                outcome="final_synthesis_error",
+                final_text=best_available_text(),
+                error=failure["error"],
+            )
+            break
+
+        call_finished = clock()
         output_items = list(_field(response, "output", []) or [])
         calls = [
             {
@@ -231,7 +353,7 @@ def run_candidate_turn(
         response_status = str(_field(response, "status") or "")
         transcript["responses"].append(
             {
-                "index": model_index + 1,
+                "index": model_index,
                 "response_id": _field(response, "id"),
                 "model": _field(response, "model", MODEL),
                 "status": response_status or None,
@@ -239,7 +361,13 @@ def run_candidate_turn(
                 "incomplete_details": _recordable(
                     _field(response, "incomplete_details")
                 ),
-                "elapsed_ms": round((time.perf_counter() - call_started) * 1000, 1),
+                "phase": phase,
+                "request_timeout_seconds": round(remaining_seconds, 3),
+                "elapsed_ms": round((call_finished - call_started) * 1000, 1),
+                "phase_deadline_overrun_ms": round(
+                    max(0.0, call_finished - phase_deadline) * 1000,
+                    1,
+                ),
                 "text": text,
                 "tool_calls": calls,
                 "usage": _mapping(usage) if usage is not None else None,
@@ -247,90 +375,200 @@ def run_candidate_turn(
         )
 
         if response_status and response_status != "completed":
+            if phase == "research":
+                if text:
+                    transcript["last_partial_text"] = text
+                continue
             transcript.update(
                 outcome=f"model_{response_status}",
-                final_text=text,
+                final_text=best_available_text(text),
             )
             break
         call_ids = [call["call_id"] for call in calls]
+        reused_call_ids = sorted(set(call_ids) & seen_call_ids)
         if calls and (
             any(not call_id for call_id in call_ids)
             or len(set(call_ids)) != len(call_ids)
+            or reused_call_ids
         ):
+            protocol_error = {
+                "type": "InvalidFunctionCallCorrelation",
+                "message": (
+                    "provider returned missing, duplicate, or previously used "
+                    "call_id values"
+                ),
+                "reused_call_ids": reused_call_ids,
+            }
+            transcript.setdefault("provider_protocol_failures", []).append(
+                {
+                    "phase": phase,
+                    "response_index": model_index,
+                    "error": protocol_error,
+                }
+            )
+            if phase == "research":
+                if text:
+                    transcript["last_partial_text"] = text
+                continue
             transcript.update(
                 outcome="provider_protocol_error",
-                final_text=text,
+                final_text=best_available_text(text),
+                error=protocol_error,
+            )
+            break
+        seen_call_ids.update(call_ids)
+        if phase == "final_synthesis" and calls:
+            transcript.update(
+                outcome="provider_protocol_error",
+                final_text=best_available_text(text),
                 error={
-                    "type": "InvalidFunctionCallCorrelation",
-                    "message": "provider returned missing or duplicate call_id values",
+                    "type": "UnexpectedFinalSynthesisToolCall",
+                    "message": (
+                        "provider returned a tool call when tool use was disabled"
+                    ),
                 },
             )
             break
         if not calls:
+            if text.strip():
+                outcome = (
+                    "answered_after_deadline"
+                    if call_finished > turn_deadline
+                    else "answered"
+                )
+                transcript.update(outcome=outcome, final_text=text)
+                break
+            if phase == "research":
+                continue
             transcript.update(
-                outcome="answered" if text.strip() else "non_answer",
-                final_text=text,
-            )
-            break
-        if model_index == MAX_TOOL_BATCHES:
-            transcript.update(
-                outcome="tool_budget_exhausted",
-                final_text=text,
-                unexecuted_tool_calls=calls,
+                outcome="non_answer",
+                final_text=best_available_text(text),
             )
             break
 
         input_items.extend(_mapping(item) for item in output_items)
-        batch: list[dict[str, Any]] = []
-        for call in calls:
-            tool_started = time.perf_counter()
+        batch_started = clock()
+        batch_has_research_time = batch_started < research_deadline
+        batch: list[dict[str, Any] | None] = [None] * len(calls)
+        prepared: list[tuple[int, dict[str, Any], dict[str, Any], Any]] = []
+
+        for index, call in enumerate(calls):
+            preparation_started = clock()
             payload: dict[str, Any] | None = None
-            try:
-                if not call["call_id"] or not call["tool_name"]:
-                    raise ValueError("provider omitted the tool call ID or name")
-                raw_arguments = call["arguments"]
-                payload = (
-                    dict(raw_arguments)
-                    if isinstance(raw_arguments, Mapping)
-                    else json.loads(raw_arguments)
-                )
-                if not isinstance(payload, dict):
-                    raise ValueError("tool arguments did not decode to an object")
-                output = invoke_tool(call["tool_name"], payload)
-                status = (
-                    "error"
-                    if isinstance(output, Mapping) and output.get("success") is False
-                    else "ok"
-                )
-            except Exception as exc:
-                status = "error"
-                output = {
-                    "success": False,
-                    "error_code": "read_tool_failed",
-                    "error": _error(exc),
-                }
-            batch.append(
-                {
-                    "call_id": call["call_id"],
-                    "tool_name": call["tool_name"],
-                    "payload": payload,
-                    "status": status,
-                    "output": output,
-                    "elapsed_ms": round((time.perf_counter() - tool_started) * 1000, 1),
-                }
+            if not batch_has_research_time:
+                status = "not_executed"
+                output = research_time_exhausted_output(started=False)
+                elapsed_ms = round((clock() - preparation_started) * 1000, 1)
+            else:
+                try:
+                    raw_arguments = call["arguments"]
+                    payload = (
+                        dict(raw_arguments)
+                        if isinstance(raw_arguments, Mapping)
+                        else json.loads(raw_arguments)
+                    )
+                    if not isinstance(payload, dict):
+                        raise ValueError("tool arguments did not decode to an object")
+                except Exception as exc:
+                    status = "error"
+                    output = {
+                        "success": False,
+                        "error_code": "read_tool_failed",
+                        "error": _error(exc),
+                    }
+                    elapsed_ms = round(
+                        (clock() - preparation_started) * 1000,
+                        1,
+                    )
+                else:
+                    prepared.append((index, call, payload, copy_context()))
+                    continue
+            batch[index] = {
+                "call_id": call["call_id"],
+                "tool_name": call["tool_name"],
+                "payload": payload,
+                "status": status,
+                "output": output,
+                "elapsed_ms": elapsed_ms,
+            }
+
+        if prepared:
+            executor = ThreadPoolExecutor(
+                max_workers=len(prepared),
+                thread_name_prefix="a2-read",
             )
+            try:
+                pending = [
+                    (
+                        index,
+                        call,
+                        payload,
+                        executor.submit(
+                            context.run,
+                            invoke_read,
+                            call["tool_name"],
+                            payload,
+                        ),
+                    )
+                    for index, call, payload, context in prepared
+                ]
+                remaining_research_seconds = max(0.0, research_deadline - clock())
+                completed_futures, _ = wait(
+                    [future for _, _, _, future in pending],
+                    timeout=remaining_research_seconds,
+                )
+                for index, call, payload, future in pending:
+                    if future in completed_futures:
+                        status, output, elapsed_ms = future.result()
+                    else:
+                        future.cancel()
+                        status = "deadline_exceeded"
+                        output = research_time_exhausted_output(started=True)
+                        elapsed_ms = round(
+                            max(0.0, clock() - batch_started) * 1000,
+                            1,
+                        )
+                    batch[index] = {
+                        "call_id": call["call_id"],
+                        "tool_name": call["tool_name"],
+                        "payload": payload,
+                        "status": status,
+                        "output": output,
+                        "elapsed_ms": elapsed_ms,
+                    }
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+        completed_batch = [result for result in batch if result is not None]
+        if len(completed_batch) != len(calls):
+            raise RuntimeError("not every provider tool call received an output")
+        for result in completed_batch:
+            output = result["output"]
             input_items.append(
                 {
                     "type": "function_call_output",
-                    "call_id": call["call_id"],
+                    "call_id": result["call_id"],
                     "output": output
                     if isinstance(output, str)
                     else json.dumps(output, ensure_ascii=True, default=str),
                 }
             )
-        transcript["tool_batches"].append({"index": model_index + 1, "results": batch})
+        transcript["tool_batches"].append(
+            {
+                "index": model_index,
+                "execution": "parallel",
+                "results": completed_batch,
+            }
+        )
+        if clock() >= research_deadline:
+            begin_final_synthesis("research_time_exhausted")
 
-    transcript["turn_elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    finished = clock()
+    transcript["turn_elapsed_ms"] = round((finished - started) * 1000, 1)
+    transcript["turn_budget_overrun_ms"] = round(
+        max(0.0, finished - turn_deadline) * 1000,
+        1,
+    )
     return transcript
 
 
@@ -393,6 +631,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 invoke_tool=lambda name, payload: invoke_frozen_read_tool(
                     gateway, allowed_names, name, payload
                 ),
+                submitted_started_at=submitted_started,
             )
             result["runtime_setup_ms"] = setup_ms
             result["submitted_process_elapsed_ms"] = round(
