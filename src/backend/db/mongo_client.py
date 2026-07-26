@@ -3,6 +3,7 @@ import sys
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from pymongo import MongoClient, ASCENDING, DESCENDING, monitoring
 from pymongo.collection import Collection
@@ -1204,23 +1205,40 @@ def _ensure_meta_relations_indexes(coll: Collection) -> None:
 
 
 def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
-    existing_indexes = {idx["name"] for idx in coll.list_indexes()}
-    if "relation_id_1_unique" not in existing_indexes:
+    existing = [
+        idx for idx in coll.list_indexes() if isinstance(idx, Mapping)
+    ]
+    existing_names = {
+        str(idx.get("name") or "") for idx in existing if idx.get("name")
+    }
+    if "relation_id_1_unique" not in existing_names:
         coll.create_index(
             [("relation_id", ASCENDING)],
             name="relation_id_1_unique",
             unique=True,
         )
-    if "target_predicate_source_lookup" not in existing_indexes:
+
+    target_first_keys = [
+        ("target_value", ASCENDING),
+        ("predicate_id", ASCENDING),
+        ("source_concept_id", ASCENDING),
+    ]
+    target_first_exists = any(
+        isinstance(index.get("key"), Mapping)
+        and list(index["key"].items()) == target_first_keys
+        for index in existing
+    )
+    if not target_first_exists:
+        # A historical deployment can have the old canonical name attached to
+        # predicate-first keys. Do not drop an index in this lazy accessor:
+        # additive creation keeps the old protection available if Atlas fails
+        # or stalls while building the target-first lookup.
         coll.create_index(
-            [
-                ("target_value", ASCENDING),
-                ("predicate_id", ASCENDING),
-                ("source_concept_id", ASCENDING),
-            ],
-            name="target_predicate_source_lookup",
+            target_first_keys,
+            name="target_value_predicate_source_lookup_v2",
         )
-    if "predicate_source_target_lookup" not in existing_indexes:
+
+    if "predicate_source_target_lookup" not in existing_names:
         coll.create_index(
             [
                 ("predicate_id", ASCENDING),
@@ -1229,11 +1247,11 @@ def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
             ],
             name="predicate_source_target_lookup",
         )
-    if "source_concept_id_1" not in existing_indexes:
+    if "source_concept_id_1" not in existing_names:
         coll.create_index(
             [("source_concept_id", ASCENDING)], name="source_concept_id_1"
         )
-    if "updated_at_-1" not in existing_indexes:
+    if "updated_at_-1" not in existing_names:
         coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 

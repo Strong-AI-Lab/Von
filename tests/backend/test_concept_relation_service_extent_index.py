@@ -8,6 +8,47 @@ def _fail_if_aggregated(*_args: Any, **_kwargs: Any) -> None:
     raise AssertionError("canonical aggregation must not run")
 
 
+def test_relationship_target_visibility_is_batched_without_changing_shape(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    checked: list[list[str]] = []
+    monkeypatch.setattr(
+        service,
+        "should_enforce_access_control",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: (
+            checked.append(list(concept_ids)) or {"#V#visible"}
+        ),
+    )
+
+    filtered = service._filter_accessible_relationships(
+        {
+            "#V#list_relation": [
+                "#V#visible",
+                "#V#hidden",
+                "literal value",
+            ],
+            "#V#single_hidden": "#V#hidden",
+            "#V#single_literal": "literal value",
+            "#V#structured_value": {"key": "value"},
+        }
+    )
+
+    assert checked == [["#V#visible", "#V#hidden", "#V#hidden"]]
+    assert filtered == {
+        "#V#list_relation": ["#V#visible", "literal value"],
+        "#V#single_hidden": [],
+        "#V#single_literal": "literal value",
+        "#V#structured_value": {"key": "value"},
+    }
+
+
 def test_incoming_asserted_binary_uses_extent_index_without_changing_results(
     monkeypatch,
 ) -> None:
@@ -106,6 +147,15 @@ def test_incoming_asserted_binary_uses_extent_index_without_changing_results(
     assert index_query == {
         "target_value": target_id,
         "count_total": False,
+        "projection": {
+            "_id": 0,
+            "source_concept_id": 1,
+            "predicate_id": 1,
+            "target_value": 1,
+            "target_index": 1,
+            "source_updated_at": 1,
+        },
+        "batch_size": 20_000,
     }
     assert "#V#private_source" in access_candidates
     assert payload["total_hits"] == 2

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import mongomock
+import pytest
+
 from src.backend.db import mongo_client as mc
 
 
@@ -189,6 +192,104 @@ def test_text_relation_indexes_cover_concept_search_and_atlas_name_lookup(monkey
         ("predicate", mc.ASCENDING),
         ("subject_concept_id", mc.ASCENDING),
     ]
+
+
+def test_relationship_extent_indexes_add_target_first_lookup_without_dropping_drift():
+    coll = mongomock.MongoClient().db.relationship_extent_index
+    wrong_keys = [
+        ("predicate_id", mc.ASCENDING),
+        ("source_concept_id", mc.ASCENDING),
+        ("target_value", mc.ASCENDING),
+    ]
+    coll.create_index(
+        wrong_keys,
+        name="target_predicate_source_lookup",
+    )
+
+    mc._ensure_relationship_extent_index_indexes(coll)
+
+    indexes = {index["name"]: index for index in coll.list_indexes()}
+    assert list(indexes["target_predicate_source_lookup"]["key"].items()) == (
+        wrong_keys
+    )
+    assert list(
+        indexes["target_value_predicate_source_lookup_v2"]["key"].items()
+    ) == [
+        ("target_value", mc.ASCENDING),
+        ("predicate_id", mc.ASCENDING),
+        ("source_concept_id", mc.ASCENDING),
+    ]
+    assert list(indexes["predicate_source_target_lookup"]["key"].items()) == (
+        wrong_keys
+    )
+    assert indexes["relation_id_1_unique"]["unique"] is True
+
+
+def test_relationship_extent_indexes_accept_equivalent_target_first_lookup():
+    coll = mongomock.MongoClient().db.relationship_extent_index
+    coll.create_index(
+        [
+            ("target_value", mc.ASCENDING),
+            ("predicate_id", mc.ASCENDING),
+            ("source_concept_id", mc.ASCENDING),
+        ],
+        name="deployment_specific_target_lookup",
+    )
+
+    mc._ensure_relationship_extent_index_indexes(coll)
+
+    names = {index["name"] for index in coll.list_indexes()}
+    assert "deployment_specific_target_lookup" in names
+    assert "target_value_predicate_source_lookup_v2" not in names
+
+
+def test_relationship_extent_target_index_failure_preserves_existing_indexes(
+    monkeypatch,
+):
+    coll = mongomock.MongoClient().db.relationship_extent_index
+    coll.create_index(
+        [
+            ("predicate_id", mc.ASCENDING),
+            ("source_concept_id", mc.ASCENDING),
+            ("target_value", mc.ASCENDING),
+        ],
+        name="target_predicate_source_lookup",
+    )
+    original_create_index = coll.create_index
+
+    def fail_target_v2(keys, **kwargs):
+        if kwargs.get("name") == "target_value_predicate_source_lookup_v2":
+            raise RuntimeError("simulated Atlas index-build failure")
+        return original_create_index(keys, **kwargs)
+
+    monkeypatch.setattr(coll, "create_index", fail_target_v2)
+
+    with pytest.raises(RuntimeError, match="simulated Atlas"):
+        mc._ensure_relationship_extent_index_indexes(coll)
+
+    indexes = {index["name"]: index for index in coll.list_indexes()}
+    assert "target_predicate_source_lookup" in indexes
+    assert list(indexes["target_predicate_source_lookup"]["key"].items()) == [
+        ("predicate_id", mc.ASCENDING),
+        ("source_concept_id", mc.ASCENDING),
+        ("target_value", mc.ASCENDING),
+    ]
+
+
+def test_relationship_extent_index_ensure_does_not_replace_named_unique_drift():
+    coll = mongomock.MongoClient().db.relationship_extent_index
+    coll.create_index(
+        [("relation_id", mc.ASCENDING)],
+        name="relation_id_1_unique",
+        unique=False,
+    )
+
+    mc._ensure_relationship_extent_index_indexes(coll)
+
+    index = {
+        item["name"]: item for item in coll.list_indexes()
+    }["relation_id_1_unique"]
+    assert index.get("unique") is not True
 
 
 def test_workflow_instance_indexes_include_atlas_claim_and_lookup_indexes(monkeypatch):

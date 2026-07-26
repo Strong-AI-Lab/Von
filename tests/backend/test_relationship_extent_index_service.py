@@ -192,6 +192,8 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
 
     deadline_active = False
     observed_timeouts: list[float] = []
+    observed_projection = None
+    observed_batch_size = None
     expected_doc = {
         "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
         "relation_id": "row-1",
@@ -217,13 +219,20 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
         def limit(self, _value):
             return self
 
+        def batch_size(self, value):
+            nonlocal observed_batch_size
+            observed_batch_size = value
+            return self
+
         def __iter__(self):
             assert deadline_active is True
             return iter([expected_doc])
 
     class DeadlineAwareCollection:
-        def find(self, _query):
+        def find(self, _query, projection=None):
+            nonlocal observed_projection
             assert deadline_active is True
+            observed_projection = projection
             return DeadlineAwareCursor()
 
         def count_documents(self, _query):
@@ -243,11 +252,15 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
         offset=1,
         limit=1,
         sort=[("relation_id", 1)],
+        projection={"_id": 0, "source_concept_id": 1},
+        batch_size=20_000,
     )
 
     assert docs == [expected_doc]
     assert total == 1
     assert observed_timeouts == [service.RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS]
+    assert observed_projection == {"_id": 0, "source_concept_id": 1}
+    assert observed_batch_size == 20_000
 
 
 def test_relationship_extent_query_timeout_returns_fallback_sentinel(monkeypatch):

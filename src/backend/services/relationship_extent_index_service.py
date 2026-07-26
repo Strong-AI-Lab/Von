@@ -63,7 +63,7 @@ RELATIONSHIP_EXTENT_STATE_WRITE_TIMEOUT_SECONDS = max(
 )
 RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS = max(
     0.1,
-    float(os.environ.get("VON_RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS", "2")),
+    float(os.environ.get("VON_RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS", "10")),
 )
 RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS = max(
     0.1,
@@ -716,6 +716,8 @@ def query_relationship_extent_index(
     limit: int = 0,
     sort: list[tuple[str, int]] | None = None,
     count_total: bool = True,
+    projection: Mapping[str, int] | None = None,
+    batch_size: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
     """Query derived structured relationship rows.
 
@@ -741,13 +743,19 @@ def query_relationship_extent_index(
 
     try:
         with timeout(RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS):
-            cursor = coll.find(query)
+            cursor = (
+                coll.find(query, dict(projection))
+                if projection is not None
+                else coll.find(query)
+            )
             if sort:
                 cursor = cursor.sort(sort)
             if offset:
                 cursor = cursor.skip(max(0, int(offset)))
             if limit:
                 cursor = cursor.limit(max(0, int(limit)))
+            if batch_size:
+                cursor = cursor.batch_size(max(1, int(batch_size)))
             docs = list(cursor)
             total = coll.count_documents(query) if count_total else len(docs)
             return docs, total

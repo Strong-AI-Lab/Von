@@ -431,6 +431,15 @@ def find_relations_with_argument(
         index_rows, index_total = query_relationship_extent_index(
             target_value=resolved_concept_id,
             count_total=False,
+            projection={
+                "_id": 0,
+                "source_concept_id": 1,
+                "predicate_id": 1,
+                "target_value": 1,
+                "target_index": 1,
+                "source_updated_at": 1,
+            },
+            batch_size=20_000,
         )
         if index_total >= 0:
             incoming_asserted_binary_diagnostics.update(
@@ -2872,30 +2881,54 @@ def _load_accessible_relation_subject_document(
 def _filter_accessible_relationships(
     relationships: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    filtered: Dict[str, Any] = {}
-    for predicate_id, raw_targets in relationships.items():
-        filtered[predicate_id] = _filter_accessible_relationship_value(raw_targets)
-    return filtered
-
-
-def _filter_accessible_relationship_value(raw_targets: Any) -> Any:
     if not should_enforce_access_control():
-        return raw_targets
-    if isinstance(raw_targets, str):
-        if raw_targets.startswith("#") and not can_access_concept(raw_targets):
-            return []
-        return raw_targets
-    if not isinstance(raw_targets, Iterable) or isinstance(raw_targets, Mapping):
-        return raw_targets
-    filtered: List[Any] = []
-    for entry in raw_targets:
-        if (
-            isinstance(entry, str)
-            and entry.startswith("#")
-            and not can_access_concept(entry)
-        ):
+        return dict(relationships)
+
+    prepared: Dict[str, Any] = {}
+    candidate_ids: List[str] = []
+    for predicate_id, raw_targets in relationships.items():
+        if isinstance(raw_targets, str):
+            prepared[predicate_id] = raw_targets
+            if raw_targets.startswith("#"):
+                candidate_ids.append(raw_targets)
             continue
-        filtered.append(entry)
+        if isinstance(raw_targets, Iterable) and not isinstance(
+            raw_targets,
+            Mapping,
+        ):
+            entries = list(raw_targets)
+            prepared[predicate_id] = entries
+            candidate_ids.extend(
+                entry
+                for entry in entries
+                if isinstance(entry, str) and entry.startswith("#")
+            )
+            continue
+        prepared[predicate_id] = raw_targets
+
+    accessible_ids = filter_accessible_concept_ids(candidate_ids)
+    filtered: Dict[str, Any] = {}
+    for predicate_id, raw_targets in prepared.items():
+        if isinstance(raw_targets, str):
+            filtered[predicate_id] = (
+                []
+                if raw_targets.startswith("#")
+                and raw_targets not in accessible_ids
+                else raw_targets
+            )
+            continue
+        if isinstance(raw_targets, list):
+            filtered[predicate_id] = [
+                entry
+                for entry in raw_targets
+                if not (
+                    isinstance(entry, str)
+                    and entry.startswith("#")
+                    and entry not in accessible_ids
+                )
+            ]
+            continue
+        filtered[predicate_id] = raw_targets
     return filtered
 
 
