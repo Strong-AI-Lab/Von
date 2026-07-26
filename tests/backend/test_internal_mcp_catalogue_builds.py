@@ -64,6 +64,211 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "testing_cleanup_arxiv_paper_ingestion_artifacts" in methods
 
 
+def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+    from src.backend.services.adaptive_turn_service import (
+        ordinary_turn_read_delegation,
+    )
+
+    catalogue = build_default_catalogue()
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    public_reads = set(
+        ordinary_turn_read_delegation(gateway, user_concept_id=None)
+    )
+    actor_reads = set(
+        ordinary_turn_read_delegation(
+            gateway,
+            user_concept_id="#V#ordinary_actor",
+        )
+    )
+    actor_mail_reads = set(
+        ordinary_turn_read_delegation(
+            gateway,
+            user_concept_id="#V#ordinary_actor",
+            trusted_argument_values={
+                "gmail_profile": "represented-profile",
+            },
+        )
+    )
+
+    # A newly registered ordinary read does not need a second positive
+    # allow-list entry. These representative unannotated capabilities are
+    # inherited directly from the live catalogue for an authenticated actor.
+    assert {
+        "concept_exists",
+        "fetch_concept",
+        "find_relations_with_argument",
+        "read_file_copy",
+        "search_concepts",
+        "task_list",
+        "workflow_list_instances",
+    } <= actor_reads
+    assert public_reads <= actor_reads
+
+    # Capabilities that can persist state remain write-category even when
+    # their primary output is a report or ranking.
+    assert catalogue.get("build_paper_recommendations").category == "write"
+    assert catalogue.get("episode_critique_build_benchmark").category == "write"
+    assert {
+        "build_paper_recommendations",
+        "episode_critique_build_benchmark",
+    }.isdisjoint(actor_mail_reads)
+
+    # Server-bound resources are absent until the entry point supplies the
+    # actor's represented binding; the model never selects the profile.
+    gmail_reads = {
+        "gmail_get_auth_config",
+        "gmail_get_attachment",
+        "gmail_get_message",
+        "gmail_list_labels",
+        "gmail_list_messages",
+    }
+    assert gmail_reads.isdisjoint(actor_reads)
+    assert gmail_reads <= actor_mail_reads
+
+    # These are mechanism-level exclusions: they expose ambient deployment
+    # accounts, host-local data, raw cross-namespace data, or operator state.
+    assert {
+        "chat_introspect",
+        "coding_agent_mcp_access_profile",
+        "failure_case_intake_collect",
+        "failure_case_reference_resolve",
+        "get_predicate_extent",
+        "github_get_file_contents",
+        "github_list_tools",
+        "gmail_list_profiles",
+        "jira_search",
+        "linkedin_get_messages",
+        "list_recent_screenshots",
+        "mongo_cost_guardrails_report",
+        "mongo_query_diagnostics_report",
+        "repo_dossier_search",
+        "skill_catalogue_list",
+        "testing_theory_compute_diff",
+        "turn_execution_get_diagnostics",
+        "workflow_concept_parity_audit",
+        "workflow_list_event_bindings",
+        "workflow_materialisation_diagnostics",
+    }.isdisjoint(actor_mail_reads)
+
+    # A proven unsafe option narrows that option rather than excluding the
+    # whole otherwise-readable capability.
+    assert {
+        "context_bundle_build_benchmark",
+        "search_proxy_diagnostics",
+        "turn_execution_build_context_answering_benchmark",
+        "turn_execution_build_selector_benchmark",
+    } <= actor_reads
+
+
+def test_actor_scoped_private_reads_reject_payload_only_identity(monkeypatch):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+    from src.backend.security import access_control
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    payload_identity = {
+        "user_concept_id": "#V#claimed_user",
+        "org_id": "#V#claimed_org",
+        "namespace": "#V#claimed_user@claimed_org",
+    }
+    calls = {
+        "chat_history_get_segments": {
+            **payload_identity,
+            "session_id": "claimed-session",
+        },
+        "chat_history_get_debug_entry": {
+            **payload_identity,
+            "session_id": "claimed-session",
+            "history_index": 0,
+        },
+        "conversation_telemetry_get_locator": {
+            **payload_identity,
+            "session_id": "claimed-session",
+        },
+        "turn_execution_list": payload_identity,
+        "turn_execution_get": {
+            **payload_identity,
+            "request_id": "claimed-turn",
+        },
+        "turn_execution_search_failures": payload_identity,
+        "turn_execution_build_benchmark": payload_identity,
+        "experiment_run_list": payload_identity,
+        "experiment_run_get": {
+            **payload_identity,
+            "run_id": "claimed-run",
+        },
+        "episode_critique_memory_list": payload_identity,
+        "episode_critique_memory_get": {
+            **payload_identity,
+            "memory_id": "claimed-memory",
+        },
+    }
+
+    for method_name, arguments in calls.items():
+        result = gateway.invoke(method_name, arguments).payload
+        assert result["success"] is False
+        assert result["error_code"] == "authenticated_actor_context_required"
+
+    monkeypatch.setattr(
+        catalogue_module,
+        "_rag_list_indexed",
+        lambda **_kwargs: {"success": True, "items": [], "count": 0},
+    )
+    with access_control.override_current_actor(
+        user_concept_id="#V#authenticated_user",
+        organisation_concept_id="#V#authenticated_org",
+    ):
+        authenticated = gateway.invoke(
+            "turn_execution_list",
+            payload_identity,
+        ).payload
+
+    assert authenticated["success"] is True
+
+
+def test_failure_case_learning_reads_require_operator_provenance():
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    for method_name in (
+        "failure_case_intake_collect",
+        "failure_case_reference_resolve",
+    ):
+        result = gateway.invoke(method_name, {}).payload
+        assert result["success"] is False
+        assert (
+            result["error_code"]
+            == "workflow_global_admin_authority_required"
+        )
+
+
 def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
     from src.backend.integrations.internal_mcp import build_default_catalogue
     from src.backend.integrations.internal_mcp.schemas import validate_payload

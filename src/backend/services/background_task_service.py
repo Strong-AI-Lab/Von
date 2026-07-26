@@ -1,6 +1,6 @@
 """Background task execution service for JVNAUTOSCI-1038.
 
-Provides a registry for running orchestrator requests in the background,
+Provides a registry for running agent requests in the background,
 allowing users to switch conversations without aborting in-progress agent work.
 
 Usage:
@@ -12,7 +12,7 @@ Usage:
     # Submit a task
     background_task_registry.submit_task(
         task_id="request-123",
-        callable=orchestrator.run,
+        callable=run_request,
         kwargs={"prompt": "...", "context": [...], ...},
         progress_callback=lambda info: ...,
     )
@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from src.backend.integrations.internal_mcp.orchestrator import CancellationRequested
+from src.backend.services.request_progress_service import CancellationRequested
 
 _logger = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ class BackgroundTaskRegistry:
 
         Args:
             task_id: Unique identifier for this task (typically request_id).
-            callable: The function to execute (e.g., orchestrator.run).
+            callable: The request function to execute.
             args: Positional arguments for the callable.
             kwargs: Keyword arguments for the callable.
             progress_callback: Optional callback for progress updates.
@@ -305,36 +305,9 @@ class BackgroundTaskRegistry:
                 return task_status
 
             if task_status.status in _TERMINAL_STATUSES:
-                if (
-                    task_status.status != terminal_status
-                    and terminal_status == "completed"
-                ):
-                    task_status.status = terminal_status
-                    task_status.completed_at = now
-                    task_status.result = result
-                    task_status.error = None
-                    task_status.progress = progress_payload
-                    _append_progress_history(task_status, progress_payload)
-                    return task_status
-                if task_status.status == terminal_status == "completed":
-                    if result is not None:
-                        task_status.result = result
-                    task_status.error = None
-                    if progress_payload:
-                        task_status.progress = progress_payload
-                        _append_progress_history(task_status, progress_payload)
-                    if task_status.session_id is None and session_id is not None:
-                        task_status.session_id = session_id
-                    if task_status.user_id is None and user_id is not None:
-                        task_status.user_id = user_id
-                    return task_status
-                if task_status.result is None and result is not None:
-                    task_status.result = result
-                if task_status.error is None and error is not None:
-                    task_status.error = error
-                if not task_status.progress and progress_payload:
-                    task_status.progress = progress_payload
-                    _append_progress_history(task_status, progress_payload)
+                # The first terminal observation is final. A worker, durable
+                # poller, or cancellation path may arrive later, but it cannot
+                # rewrite the already-published outcome or its evidence.
                 return task_status
 
             task_status.status = terminal_status

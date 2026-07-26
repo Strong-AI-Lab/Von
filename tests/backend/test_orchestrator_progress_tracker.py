@@ -3,14 +3,9 @@
 Validates that concurrent requests using ProgressTracker maintain isolation.
 """
 
-from typing import Any, Mapping, cast
+from typing import Any, Mapping
 
-
-from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
-from src.backend.integrations.internal_mcp.orchestrator import (
-    InternalMCPChatOrchestrator,
-    ProgressTracker,
-)
+from src.backend.services.request_progress_service import ProgressTracker
 
 
 class TestProgressTracker:
@@ -147,45 +142,3 @@ class TestProgressTrackerIsolation:
         assert tracker2.current_phase == "completed"
         assert len(captured2) == 1
         assert captured2[0]["phase"] == "completed"
-
-    def test_tracker_does_not_affect_orchestrator_instance_state(self) -> None:
-        """Using a tracker should not modify orchestrator instance variables."""
-
-        class _MinimalGateway:
-            enabled = True
-
-            def describe_methods(self):
-                return {}
-
-            def invoke(self, tool_name, payload=None):
-                class Result:
-                    payload = {"ok": True}
-                    duration_ms = 1.0
-
-                return Result()
-
-        class _StubLLM:
-            def generate(self, prompt, *, context=None, model=None):
-                return "done"
-
-        captured: list[dict[str, Any]] = []
-
-        def _capture(info: Mapping[str, Any]) -> None:
-            captured.append(dict(info))
-
-        orchestrator = InternalMCPChatOrchestrator(
-            gateway=cast(InternalMCPGateway, _MinimalGateway()),
-            max_tool_invocations=3,
-        )
-
-        # Record initial state
-        initial_phase = orchestrator._progress_current_phase
-        initial_history_len = len(orchestrator._progress_phase_history)
-
-        tracker = ProgressTracker(callback=_capture)
-        tracker.transition_phase("tool_plan")
-        tracker.transition_phase("tool_execute")
-
-        # Orchestrator instance state should be unchanged
-        assert orchestrator._progress_current_phase == initial_phase
-        assert len(orchestrator._progress_phase_history) == initial_history_len

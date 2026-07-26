@@ -5,10 +5,10 @@ basic handler behaviour.
 """
 
 from src.backend.integrations.internal_mcp.catalogue import (
-    build_default_catalogue,
     _chat_get_prompt_context,
     _chat_introspect,
     _settings_get_public,
+    build_default_catalogue,
 )
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
@@ -42,6 +42,22 @@ def _patch_prompt_services(monkeypatch, *, behaviour_fragments, behaviour_prompt
             if kwargs.get("prompt_types") == _BEHAVIOUR_PROMPT_TYPES
             else ""
         ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_enabled_llm_settings",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.get_setting",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.list_event_workflow_bindings",
+        lambda limit=200: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.coding_agent_mcp_access_profile_service.build_coding_agent_mcp_access_profile",
+        lambda: {"success": True, "profile_id": "test"},
     )
 
 
@@ -89,6 +105,10 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
         {"concept_id": "#V#prompt_a"},
         {"concept_id": "#V#prompt_b"},
     ]
+    assert set(result["resolved_templates"]) == {
+        "behaviour_prompt",
+        "narration_prompt",
+    }
 
 
 def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
@@ -108,22 +128,6 @@ def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
 
 
 def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
-    class _StubOrchestrator:
-        def __init__(self, *, gateway):
-            self.gateway = gateway
-
-        def _instruction_message(
-            self,
-            *,
-            user_namespace,
-            auxiliary_system_prompt,
-            preferred_language,
-        ):
-            return (
-                f"guidance::{user_namespace}::{auxiliary_system_prompt}::"
-                f"{preferred_language}"
-            )
-
     _patch_prompt_services(
         monkeypatch,
         behaviour_fragments=[{"concept_id": "#V#prompt_a", "content": "Alpha"}],
@@ -141,13 +145,11 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
         "src.backend.services.settings_service.resolve_llm_setting",
         lambda **_kwargs: {"provider": "resolved", "model": "resolved-model"},
     )
-    monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.catalogue._get_internal_mcp_chat_orchestrator_cls",
-        lambda: _StubOrchestrator,
-    )
 
     result = _chat_introspect(
-        namespace="#V#michael_witbrock", organisation_concept_id="#V#uoa"
+        namespace="#V#michael_witbrock",
+        organisation_concept_id="#V#uoa",
+        include_tool_guidance_preview=True,
     )
     assert result.get("success") is True
     assert result["active_model_name"] == "test-model"
@@ -155,9 +157,16 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     assert result["resolved_llm"] == {"provider": "resolved", "model": "resolved-model"}
     assert result["prompt_concept_ids"] == ["#V#prompt_a"]
     assert result["tool_guidance_hash"], "expected a tool guidance hash"
+    assert "direct adaptive turn path" in result["tool_guidance_preview"]
+    assert "turn_read_capabilities" in result["tool_guidance_preview"]
     assert "gateway_enabled" in result
-    assert "orchestrator_max_tool_invocations" in result
-    assert "orchestrator_missing_tool_call_retry_cap" in result
+    assert result["orchestrator_max_tool_invocations"] is None
+    assert result["orchestrator_missing_tool_call_retry_cap"] is None
+    assert result["workflow_mode"]["ordinary_turn_path"] == "direct_adaptive_turn"
+    assert result["workflow_mode"]["ordinary_turn_capability_mode"] == "read_only"
+    assert (
+        result["workflow_mode"]["automatic_workflow_selector_enabled"] is False
+    )
 
 
 def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypatch):
@@ -204,9 +213,7 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
         ],
     )
     monkeypatch.setenv("OPENAI_API_KEY", "sk-live")
-    monkeypatch.setenv("VON_DETERMINISTIC_INTROSPECTION", "1")
     monkeypatch.setenv("VON_WORKFLOWS_TRACE_ENABLED", "0")
-    monkeypatch.setenv("VON_CRITIC_ENABLE", "0")
     monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "1")
     monkeypatch.setenv("VON_MCP_ALLOW_WRITES", "0")
     monkeypatch.setenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0")
@@ -225,12 +232,15 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
     assert result["configured_openai_api_key_env_var"] == "OPENAI_API_KEY"
     assert result["configured_openai_api_key_env_var_present"] is True
     assert result["sensitive_env_presence"]["OPENAI_API_KEY"] is True
-    assert result["workflow_mode"]["workflow_selector_enabled"] is True
-    assert result["workflow_mode"]["deterministic_introspection_enabled"] is True
-    assert result["workflow_mode"]["workflow_model_policy_enabled"] is True
-    assert result["workflow_mode"]["durable_workflows_enabled"] is True
+    assert result["workflow_mode"]["ordinary_turn_path"] == "direct_adaptive_turn"
+    assert (
+        result["workflow_mode"]["automatic_workflow_selector_enabled"] is False
+    )
+    assert result["workflow_mode"]["legacy_orchestrator_status"] == "retired"
+    assert result["workflow_mode"]["explicit_workflow_model_policy_enabled"] is True
+    assert result["workflow_mode"]["explicit_workflows_enabled"] is True
     assert result["workflow_mode"]["event_workflow_integration_enabled"] is True
-    assert result["workflow_mode"]["runtime_mode"] == "workflow_routed_tool_calling"
+    assert result["workflow_mode"]["runtime_mode"] == "direct_adaptive_read"
     assert result["event_workflow_bindings"]["task.created"] == "#V#todo_refresh_workflow"
     assert (
         result["event_workflow_bindings"]["task.status_changed"]
@@ -260,7 +270,6 @@ def test_chat_introspect_gateway_invoke_success_path(monkeypatch):
             "api_token": "token-value",
         },
     )
-
     gateway = _build_gateway()
     result = gateway.invoke(
         "chat_introspect",
@@ -291,6 +300,10 @@ def test_settings_get_public_returns_settings(monkeypatch):
     monkeypatch.setattr(
         "src.backend.services.settings_service.resolve_llm_setting",
         lambda **_kwargs: {"provider": "x", "model": "y"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_enabled_llm_settings",
+        lambda **_kwargs: [],
     )
 
     result = _settings_get_public(user_concept_id="#V#michael_witbrock")

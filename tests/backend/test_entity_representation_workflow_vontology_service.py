@@ -53,7 +53,7 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
     report = bootstrap_canonical_entity_representation_workflows()
 
     template_publication = report.get("template_publication") or {}
-    assert template_publication.get("repo_seed_version") == "3"
+    assert template_publication.get("repo_seed_version") == "4"
     assert (template_publication.get("counts") or {}).get("persisted_templates") == 4
 
     publication = report.get("publication") or {}

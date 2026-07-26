@@ -35,7 +35,8 @@ def _patch_access_profile(
                 "reason_codes": [write_mode],
             },
             "von_chat_run_policy": {
-                "default_allow_writes": write_allowed,
+                "default_allow_writes": False,
+                "default_dry_run": True,
             },
         },
     )
@@ -46,6 +47,7 @@ def _build_gateway() -> InternalMCPGateway:
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
 
 

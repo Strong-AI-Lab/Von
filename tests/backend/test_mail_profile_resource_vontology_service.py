@@ -124,3 +124,33 @@ def test_materialise_gmail_profile_resources_links_user_profiles_and_aliases(
     assert profile_attributes["runtime_profile_alias"] == "vonwitbrock-gmail"
     assert "token_path" not in profile_attributes
     assert "credentials_path" not in profile_attributes
+
+    default_resolution = service.resolve_authorised_gmail_profile_for_user(
+        user_concept_id=user_concept_id,
+    )
+    assert default_resolution == {
+        "success": True,
+        "reason_code": "authorised_mail_profile_resolved",
+        "profile_id": "vonwitbrock-gmail",
+        "profile_resource_concept_id": von_profile,
+        "selection_source": "represented_default",
+    }
+
+    requested_resolution = service.resolve_authorised_gmail_profile_for_user(
+        user_concept_id=user_concept_id,
+        requested_profile_id="zhan-gmail",
+    )
+    assert requested_resolution["success"] is True
+    assert requested_resolution["profile_id"] == "zhan-gmail"
+    assert requested_resolution["profile_resource_concept_id"] == zhan_profile
+    assert requested_resolution["selection_source"] == "request"
+
+    rejected_resolution = service.resolve_authorised_gmail_profile_for_user(
+        user_concept_id=user_concept_id,
+        requested_profile_id="somebody-elses-profile",
+    )
+    assert rejected_resolution == {
+        "success": False,
+        "reason_code": "mail_profile_not_authorised_for_actor",
+        "profile_id": None,
+    }

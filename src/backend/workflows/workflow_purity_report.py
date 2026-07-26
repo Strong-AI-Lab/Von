@@ -552,18 +552,6 @@ MONOLITH_RATCHET_FILES = (
     "src/backend/server/routes/von_routes.py",
 )
 
-SUPERVISED_FAIL_OPEN_CONTRACT = {
-    "path": "src/backend/integrations/internal_mcp/orchestrator.py",
-    "function": "execute_conversation_turn_supervised",
-    "forbidden_patterns": {
-        "fallback_to_legacy_run": re.compile(r"\bself\.run\s*\("),
-        "synthetic_missing_response_success": re.compile(
-            r"Workflow execution completed without response text",
-            re.IGNORECASE,
-        ),
-    },
-}
-
 SEED_FALLBACK_ORDER_CONTRACTS = (
     {
         "name": "workflow_template_bundle_vontology_first",
@@ -1709,65 +1697,6 @@ def _scan_workflow_id_special_case_branches(project_root: Path) -> dict[str, Any
     }
 
 
-def _scan_supervised_fail_open_fallbacks(project_root: Path) -> dict[str, Any]:
-    contract = dict(SUPERVISED_FAIL_OPEN_CONTRACT)
-    relative_path = str(contract["path"])
-    function_name = str(contract["function"])
-    forbidden_patterns = {
-        str(name): pattern
-        for name, pattern in dict(contract.get("forbidden_patterns") or {}).items()
-        if isinstance(name, str) and isinstance(pattern, re.Pattern)
-    }
-    source_path = project_root / relative_path
-    if not source_path.exists():
-        return {
-            "path": relative_path,
-            "function": function_name,
-            "status": "file_missing",
-            "offending_match_count": 0,
-            "offending_matches": [],
-            "forbidden_patterns": sorted(forbidden_patterns),
-        }
-
-    function_record = _extract_top_level_function_source(
-        path=source_path,
-        project_root=project_root,
-        function_name=function_name,
-    )
-    if function_record is None:
-        return {
-            "path": relative_path,
-            "function": function_name,
-            "status": "function_missing",
-            "offending_match_count": 0,
-            "offending_matches": [],
-            "forbidden_patterns": sorted(forbidden_patterns),
-        }
-
-    function_text = str(function_record["text"])
-    start_line = int(function_record["start_line"])
-    offending_matches: list[dict[str, Any]] = []
-    for pattern_name, pattern in forbidden_patterns.items():
-        for match in pattern.finditer(function_text):
-            offending_matches.append(
-                {
-                    "path": relative_path,
-                    "function": function_name,
-                    "pattern": pattern_name,
-                    "line": start_line + _line_number(function_text, match.start()) - 1,
-                }
-            )
-
-    return {
-        "path": relative_path,
-        "function": function_name,
-        "status": "violation" if offending_matches else "ok",
-        "offending_match_count": len(offending_matches),
-        "offending_matches": offending_matches,
-        "forbidden_patterns": sorted(forbidden_patterns),
-    }
-
-
 def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
     if registry is None:
         return {
@@ -1992,7 +1921,6 @@ def build_workflow_purity_report(
     repo_seed_authority = _scan_repo_seed_authority_drift(repo_root)
     seed_fallback_contracts = _scan_vontology_first_seed_fallback_contracts(repo_root)
     workflow_id_special_cases = _scan_workflow_id_special_case_branches(repo_root)
-    supervised_fail_open_fallbacks = _scan_supervised_fail_open_fallbacks(repo_root)
     core_support_policy_contracts = _scan_core_support_policy_contracts(repo_root)
     monolith_line_ratchet = _scan_monolith_line_ratchet(repo_root)
     builtin_capability_overrides = sorted(BUILTIN_WORKFLOW_CAPABILITIES)
@@ -2028,9 +1956,6 @@ def build_workflow_purity_report(
         ),
         "workflow_id_special_case_count": int(
             workflow_id_special_cases.get("match_count", 0)
-        ),
-        "supervised_fail_open_fallback_count": int(
-            supervised_fail_open_fallbacks.get("offending_match_count", 0)
         ),
         "support_surface_policy_contract_violation_count": int(
             core_support_policy_contracts.get("violation_count", 0)
@@ -2079,7 +2004,6 @@ def build_workflow_purity_report(
             "repo_seed_authority_drift": repo_seed_authority,
             "vontology_first_seed_fallback_contracts": seed_fallback_contracts,
             "workflow_id_special_cases": workflow_id_special_cases,
-            "supervised_fail_open_fallbacks": supervised_fail_open_fallbacks,
             "support_surface_policy_contracts": core_support_policy_contracts,
             "monolith_line_ratchet": monolith_line_ratchet,
             "direct_instance_create": direct_create,

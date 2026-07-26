@@ -28,6 +28,7 @@ from .types import (
     StructuredToolTransportError,
     UnsupportedStructuredToolTransportError,
     StructuredToolCapabilityRejectedError,
+    StructuredToolContextLimitError,
     StructuredToolProtocolError,
 )
 from .client import LLMClient, LLMClientConfig
@@ -43,6 +44,7 @@ __all__ = [
     "StructuredToolTransportError",
     "UnsupportedStructuredToolTransportError",
     "StructuredToolCapabilityRejectedError",
+    "StructuredToolContextLimitError",
     "StructuredToolProtocolError",
     "LLMClient",
     "LLMClientConfig",

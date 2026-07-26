@@ -156,7 +156,6 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         workflow_capability_service as workflow_capability_service,
         workflow_authoring_vontology_service as workflow_authoring_prompt_bootstrap,
         workflow_description_vontology_service as workflow_description_prompt_bootstrap,
-        workflow_gap_vontology_service as workflow_gap_prompt_bootstrap,
         workflow_model_selection_workflow_vontology_service as workflow_model_selection_bootstrap,
     )
 
@@ -279,17 +278,6 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         parent_specificity_schedule_bootstrap,
         "ensure_parent_specificity_background_schedule",
         lambda: {"success": True, "ensured": True, "created_count": 1},
-    )
-    monkeypatch.setattr(
-        workflow_gap_prompt_bootstrap,
-        "ensure_workflow_gap_prompt_support",
-        lambda: {
-            "success": True,
-            "linked_workflow_ids": [
-                "#V#workflow_discovery_gap_recovery_workflow",
-                "#V#workflow_gap_test_workflow",
-            ],
-        },
     )
     monkeypatch.setattr(
         workflow_description_prompt_bootstrap,
@@ -575,9 +563,6 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     parent_prompt_report = result.get("parent_specificity_prompt_bootstrap")
     assert isinstance(parent_prompt_report, dict)
     assert parent_prompt_report.get("success") is True
-    workflow_gap_prompt_report = result.get("workflow_gap_prompt_bootstrap")
-    assert isinstance(workflow_gap_prompt_report, dict)
-    assert workflow_gap_prompt_report.get("success") is True
     workflow_description_prompt_report = result.get(
         "workflow_description_prompt_bootstrap"
     )

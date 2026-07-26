@@ -61,9 +61,10 @@ def test_mirror_instance_is_never_claimed():
     claimed = manager.find_and_claim_instance("worker-1")
     assert claimed is None
 
-    # A normally-claimable instance alongside the mirror is still claimed.
+    # An independently useful explicit workflow alongside the mirror is still
+    # claimed.
     claimable_id = manager.create_instance(
-        "#V#conversation_turn_execution_workflow",
+        "#V#tool_calling_workflow",
         user_id="user-1",
         org_id="org-1",
         namespace="user-1/org-1",
@@ -80,6 +81,58 @@ def test_mirror_instance_is_never_claimed():
     )
     assert mirror_doc["status"] == WorkflowInstanceStatus.RUNNING.value
     assert mirror_doc.get("locked_by") == SUPERVISED_HOLD_LOCK_HOLDER
+
+
+def test_retired_master_instance_is_never_auto_claimed():
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        "#V#conversation_turn_execution_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        source_event_type="conversation_turn",
+    )
+
+    assert manager.find_and_claim_instance("worker-general") is None
+    assert (
+        manager.find_and_claim_instance(
+            "worker-filtered",
+            workflow_ids=["#V#conversation_turn_execution_workflow"],
+        )
+        is None
+    )
+
+    stored = manager.get_instance(instance_id)
+    assert stored is not None
+    assert stored.status == WorkflowInstanceStatus.PENDING
+    assert stored.locked_by is None
+
+
+def test_explicit_workflow_remains_claimable_alongside_retired_master():
+    manager = WorkflowInstanceManager()
+    retired_id = manager.create_instance(
+        "#V#conversation_turn_execution_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        source_event_type="conversation_turn",
+    )
+    explicit_id = manager.create_instance(
+        "#V#chat_assistant_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        source_event_type="conversation_turn",
+    )
+
+    claimed = manager.find_and_claim_instance("worker-explicit")
+
+    assert claimed is not None
+    assert claimed.instance_id == explicit_id
+    assert claimed.workflow_id == "#V#chat_assistant_workflow"
+    retired = manager.get_instance(retired_id)
+    assert retired is not None
+    assert retired.status == WorkflowInstanceStatus.PENDING
 
 
 def test_mirror_instance_resists_legacy_claim_query():

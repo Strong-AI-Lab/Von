@@ -142,6 +142,153 @@ def test_hard_deadline_returns_typed_timeout_and_requests_cooperative_cancel() -
     assert method_metrics["last_error"] == "tool_timeout"
 
 
+def test_caller_deadline_shortens_the_registered_method_timeout() -> None:
+    cancellation_seen = Event()
+    handler_deadlines: list[float] = []
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.5,
+        read_advisory_timeout_sec=0.1,
+    )
+
+    def _handler():
+        scope = get_internal_mcp_execution_scope()
+        assert scope is not None
+        handler_deadlines.append(scope.deadline_monotonic)
+        while not internal_mcp_cancellation_requested():
+            time.sleep(0.002)
+        cancellation_seen.set()
+        return {"success": True, "late_payload": "must_be_discarded"}
+
+    gateway = _gateway_for(
+        method_name="synthetic_caller_bounded_read",
+        handler=_handler,
+        transport=transport,
+    )
+    caller_deadline = time.monotonic() + 0.04
+
+    started_at = time.perf_counter()
+    result = gateway.invoke(
+        "synthetic_caller_bounded_read",
+        {},
+        deadline_monotonic=caller_deadline,
+    )
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.2
+    assert result.outcome == "timed_out"
+    assert result.timeout_sec is not None
+    assert 0.0 < result.timeout_sec < 0.1
+    assert result.payload["timeout_phase"] == "handler"
+    assert result.payload["late_result_policy"] == "discard_from_turn"
+    assert "late_payload" not in result.payload
+    assert handler_deadlines
+    assert handler_deadlines[0] <= caller_deadline + 0.005
+    assert cancellation_seen.wait(timeout=1.0)
+
+
+def test_result_completed_after_absolute_deadline_is_discarded() -> None:
+    class _AfterDeadlineExecutor:
+        @staticmethod
+        def submit(task) -> bool:
+            with task.lock:
+                task.started_at = task.submitted_at
+                task.result = {"success": True, "late_payload": "discard me"}
+                task.completed_at = time.perf_counter()
+                task.completed_monotonic = task.deadline_monotonic + 0.001
+                task.done_event.set()
+            return True
+
+        @staticmethod
+        def diagnostics() -> dict:
+            return {"test_executor": True}
+
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.05,
+        read_advisory_timeout_sec=0.01,
+        handler_executor=_AfterDeadlineExecutor(),  # type: ignore[arg-type]
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_deadline_race",
+        handler=lambda: {"success": True},
+        transport=transport,
+    )
+
+    result = gateway.invoke("synthetic_deadline_race", {})
+
+    assert result.outcome == "timed_out"
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.payload["outcome_finality"] == "terminal_for_turn"
+    assert "late_payload" not in result.payload
+    diagnostics = transport.get_diagnostics()
+    assert diagnostics["late_completion_count"] == 1
+    assert diagnostics["late_completions"][0]["payload_discarded"] is True
+
+
+def test_expired_caller_deadline_returns_timeout_without_dispatch() -> None:
+    handler_called = Event()
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.5,
+        read_advisory_timeout_sec=0.1,
+        handler_executor=executor,
+    )
+
+    def _handler():
+        handler_called.set()
+        return {"success": True}
+
+    gateway = _gateway_for(
+        method_name="synthetic_expired_read",
+        handler=_handler,
+        transport=transport,
+    )
+
+    result = gateway.invoke(
+        "synthetic_expired_read",
+        {},
+        deadline_monotonic=time.monotonic() - 1.0,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.timeout_sec == 0.0
+    assert result.timeout_phase == "pre_dispatch"
+    assert result.payload["timeout_phase"] == "pre_dispatch"
+    assert result.payload["cancellation_requested"] is True
+    assert result.payload["outcome_finality"] == "terminal_for_turn"
+    assert handler_called.is_set() is False
+    assert executor.diagnostics()["submitted_count"] == 0
+
+
+def test_expired_write_deadline_reports_that_no_mutation_started() -> None:
+    handler_called = Event()
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.5,
+        write_advisory_timeout_sec=0.1,
+        handler_executor=executor,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_expired_write",
+        handler=lambda: handler_called.set(),
+        transport=transport,
+        category="write",
+    )
+
+    result = gateway.invoke(
+        "synthetic_expired_write",
+        {},
+        deadline_monotonic=time.monotonic() - 1.0,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.timeout_phase == "pre_dispatch"
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.payload["retryable"] is True
+    assert "mutation_outcome" not in result.payload
+    assert handler_called.is_set() is False
+    assert executor.diagnostics()["submitted_count"] == 0
+
+
 def test_non_cooperative_late_handler_does_not_hold_the_calling_worker() -> None:
     late_handler_released = Event()
     transport = InternalMCPTransport(

@@ -53,8 +53,11 @@ def test_resolve_effective_context_reads_string_relationship_targets_and_returns
         },
     }
 
+    bootstrap_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        svc, "ensure_canonical_context_bundle_ontology", lambda **kwargs: {"success": True}
+        svc,
+        "ensure_canonical_context_bundle_ontology",
+        lambda **kwargs: bootstrap_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(svc, "_get_concept_or_none", lambda concept_id: concepts.get(concept_id))
     monkeypatch.setattr(svc, "load_context_bundle_state", lambda bundle_id: bundle_states.get(bundle_id))
@@ -77,6 +80,7 @@ def test_resolve_effective_context_reads_string_relationship_targets_and_returns
     assert result["facet_states"][0]["content"] == "Direct concept context."
     assert result["diagnostics"]["effective_policy"]["budget_cap"] == 3
     assert result["diagnostics"]["counts"]["effective_facet_count"] == 2
+    assert bootstrap_calls == []
 
 
 def test_assemble_context_dossier_reuses_testing_theory_state_and_normalises_branch_kinds(

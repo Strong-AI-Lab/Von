@@ -188,6 +188,85 @@ def gmail_profile_alias_concept_id(profile_id: str) -> str:
     return f"#V#gmail_runtime_profile_alias_{normalise_profile_id_for_concept_id(profile_id)}"
 
 
+def resolve_authorised_gmail_profile_for_user(
+    *,
+    user_concept_id: str,
+    requested_profile_id: str | None = None,
+) -> dict[str, Any]:
+    """Resolve one runtime Gmail alias from represented user authority.
+
+    This is a read-only authority check. It neither enumerates globally
+    configured profiles nor infers ownership from a runtime alias alone.
+    """
+
+    cleaned_user_id = str(user_concept_id or "").strip()
+    requested = str(requested_profile_id or "").strip() or None
+    user_doc = load_concept(cleaned_user_id)
+    if not isinstance(user_doc, Mapping):
+        return {
+            "success": False,
+            "reason_code": "mail_profile_actor_not_represented",
+            "profile_id": None,
+        }
+
+    relationships = user_doc.get("relationships")
+    relation_map = relationships if isinstance(relationships, Mapping) else {}
+    authorised_resource_ids = normalise_relationship_targets(
+        relation_map.get(HAS_AUTHORISED_MAIL_PROFILE_PREDICATE_ID)
+    )
+    default_resource_ids = normalise_relationship_targets(
+        relation_map.get(HAS_DEFAULT_MAIL_PROFILE_PREDICATE_ID)
+    )
+
+    aliases_by_resource: dict[str, str] = {}
+    for resource_id in authorised_resource_ids:
+        resource_doc = load_concept(resource_id)
+        if not isinstance(resource_doc, Mapping):
+            continue
+        attributes = resource_doc.get("attributes")
+        if not isinstance(attributes, Mapping):
+            continue
+        alias = attributes.get("runtime_profile_alias")
+        if isinstance(alias, str) and alias.strip():
+            aliases_by_resource[resource_id] = alias.strip()
+
+    selected_resource_id: str | None = None
+    if requested is not None:
+        for resource_id, alias in aliases_by_resource.items():
+            if requested in {resource_id, alias}:
+                selected_resource_id = resource_id
+                break
+        if selected_resource_id is None:
+            return {
+                "success": False,
+                "reason_code": "mail_profile_not_authorised_for_actor",
+                "profile_id": None,
+            }
+    else:
+        selected_resource_id = next(
+            (
+                resource_id
+                for resource_id in default_resource_ids
+                if resource_id in aliases_by_resource
+            ),
+            None,
+        )
+        if selected_resource_id is None:
+            return {
+                "success": False,
+                "reason_code": "default_mail_profile_not_represented",
+                "profile_id": None,
+            }
+
+    return {
+        "success": True,
+        "reason_code": "authorised_mail_profile_resolved",
+        "profile_id": aliases_by_resource[selected_resource_id],
+        "profile_resource_concept_id": selected_resource_id,
+        "selection_source": "request" if requested is not None else "represented_default",
+    }
+
+
 def _ensure_structural_targets(
     *,
     concept_id: str,
@@ -529,5 +608,6 @@ __all__ = [
     "gmail_profile_resource_concept_id",
     "materialise_gmail_profile_resources_for_user",
     "normalise_profile_id_for_concept_id",
+    "resolve_authorised_gmail_profile_for_user",
     "validate_mail_profile_resource_vocabulary",
 ]

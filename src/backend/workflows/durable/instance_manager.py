@@ -69,6 +69,13 @@ DEFAULT_LOCK_TTL_SECONDS = 300
 SUPERVISED_HOLD_LOCK_HOLDER = "supervised_route_hold"
 SUPERVISED_HOLD_LOCK_DAYS = 3650
 
+# The universal conversation-turn controller was retired by JVNAUTOSCI-2600.
+# Historical instances remain readable, but a durable worker must never revive
+# pending or interrupted work under that retired authority.
+_RETIRED_AUTO_CLAIM_WORKFLOW_IDS = frozenset(
+    {"#V#conversation_turn_execution_workflow"}
+)
+
 _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "_id": 0,
     "instance_id": 1,
@@ -1623,6 +1630,7 @@ class WorkflowInstanceManager:
         # re-execute the same turn (JVNAUTOSCI-2503).
         query: dict[str, Any] = {
             "auto_claim_enabled": {"$ne": False},
+            "workflow_id": {"$nin": sorted(_RETIRED_AUTO_CLAIM_WORKFLOW_IDS)},
             "$or": [
                 {"status": WorkflowInstanceStatus.PENDING.value},
                 {
@@ -1636,11 +1644,17 @@ class WorkflowInstanceManager:
             ],
         }
         if workflow_ids:
-            query["workflow_id"] = {"$in": workflow_ids}
+            eligible_workflow_ids = [
+                workflow_id
+                for workflow_id in workflow_ids
+                if workflow_id not in _RETIRED_AUTO_CLAIM_WORKFLOW_IDS
+            ]
+            if not eligible_workflow_ids:
+                return None
+            query["workflow_id"] = {"$in": eligible_workflow_ids}
         query = self._with_claim_build_filter(query, normalised_build_identity)
 
         priority_workflow_ids = [
-            "#V#conversation_turn_execution_workflow",
             "#V#chat_assistant_workflow",
             "#V#tool_calling_workflow",
         ]

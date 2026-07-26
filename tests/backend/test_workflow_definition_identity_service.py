@@ -160,10 +160,10 @@ def test_validate_contract_rejects_transient_execution_defaults_in_static_inputs
                 state_id="start",
                 actions=(
                     WorkflowActionInvocation(
-                        action_id="workflow_gap.execute_candidate",
+                        action_id="candidate.execute",
                         inputs={
-                            "workflow_gap_request_text": "Recover this workflow.",
-                            "prompt_concept_id": "#V#workflow_gap_candidate_execution_prompt",
+                            "candidate_request_text": "Run this candidate.",
+                            "prompt_concept_id": "#V#candidate_execution_prompt",
                         },
                     ),
                 ),
@@ -183,8 +183,8 @@ def test_validate_contract_rejects_transient_execution_defaults_in_static_inputs
     assert validation.get("transient_execution_input_issues") == [
         {
             "state_id": "start",
-            "action_id": "workflow_gap.execute_candidate",
-            "tool_param": "workflow_gap_request_text",
+            "action_id": "candidate.execute",
+            "tool_param": "candidate_request_text",
             "reason_code": "transient_request_text_default_persisted",
         }
     ]
@@ -199,13 +199,13 @@ def test_validate_contract_allows_transient_execution_keys_when_context_mapped()
                 state_id="start",
                 actions=(
                     WorkflowActionInvocation(
-                        action_id="workflow_gap.execute_candidate",
+                        action_id="candidate.execute",
                         inputs={
-                            "workflow_gap_request_text": {
-                                "$context_key": "workflow_gap_request_text"
+                            "candidate_request_text": {
+                                "$context_key": "candidate_request_text"
                             },
-                            "workflow_gap_base_response_text": {
-                                "$context_key": "workflow_gap_base_response_text"
+                            "candidate_base_response_text": {
+                                "$context_key": "candidate_base_response_text"
                             },
                         },
                     ),

@@ -233,14 +233,27 @@ Current implementation details:
 
 ### 4. MCP Tool Access Control and Agentic-AI Threats
 
-**Current**: Internal MCP tools injectable with user namespace via orchestrator.
+**Current**: Ordinary adaptive turns receive a standing read-only projection
+of internal MCP capabilities. The gateway binds trusted actor and namespace
+context outside model arguments. Gmail reads are projected only when a
+represented actor-to-profile relation authorises a configured profile, which
+the entry point injects without letting the model choose it.
 
 **Protection**:
-- Orchestrator injects `user_namespace` into tool payloads if authenticated
-- RAG tools validate namespace presence before query execution
+- The ordinary-turn projection contains no write-category capability
+- Gateway handlers distinguish trusted ambient actor context from raw
+  tool-payload identity claims
+- Actor-private RAG, chat, turn, experiment, and critique-memory reads validate
+  or derive namespace from the trusted actor context
+- Deployment-global diagnostics, host-local paths, connector accounts, and
+  operator control-plane reads are excluded or source-constrained
 - No namespace → error response (fail closed)
 
 **Limitations**:
+- Standalone trusted-local/developer MCP entry points are separate authority
+  surfaces and may use operator-supplied scope. They are not part of the
+  ordinary actor-scoped projection and must not be described as though every
+  MCP route shared its identity model.
 - External MCP servers (arXiv, future integrations) may not respect namespace
 - No rate limiting on tool invocations
 - No audit trail of tool access by user
@@ -578,6 +591,12 @@ be added before broader external contribution or partner deployment.
     radius part of control selection
   - Clarified that operation names and model-derived risk labels do not
     determine a universal approval policy
+- **2026-07-26**: Updated ordinary MCP access guidance for the direct adaptive
+  read path
+  - Replaced the retired universal orchestrator description with the standing
+    gateway capability projection
+  - Documented trusted actor binding and represented Gmail profile injection
+  - Distinguished actor-scoped reads from host/deployment/operator surfaces
 - **2026-04-24**: Recalibrated security guidance for SAIL-only current use,
   open-repo contributor risk, and future partner/production profiles
   - Added operating profiles and data/capability classes

@@ -210,10 +210,9 @@ def _log_gmail_audit(
 
     try:
         safe_labels = list(label_ids[:10]) if label_ids else None
-        trimmed_query = (query or "")[:100] if query else None
         record: Dict[str, object] = {
             "profile_id": profile_id,
-            "query_preview": trimmed_query,
+            "query_length": len(query) if query else None,
             "label_ids": safe_labels,
             "label_name": label_name,
             "label_list_visibility": label_list_visibility,

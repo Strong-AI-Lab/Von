@@ -170,6 +170,157 @@ def test_turn_execution_diagnostics_exposes_response_surface_reconciliation(
     )
 
 
+def test_observational_diagnostics_do_not_synthesise_retired_workflow_identity(
+    monkeypatch,
+) -> None:
+    embedded_diagnostics = {
+        "schema_version": "turn_execution_diagnostics.v1",
+        "record_kind": "observational",
+        "request_id": "req-observational",
+        "latest_progress": {
+            "status": "completed",
+            "phase": "completed",
+        },
+        "phase_history": [
+            {"phase": "context_build"},
+            {"phase": "model_call"},
+            {"phase": "completed"},
+        ],
+    }
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_resolve_history_context",
+        lambda **_: {
+            "user_id": "#V#user",
+            "session_id": "session-observational",
+            "namespace": "#V#user@org",
+            "org_id": "#V#org",
+            "target_index": 1,
+            "target_message": {
+                "role": "assistant",
+                "content": "Answered.",
+            },
+            "target_llm_debug": {
+                "request_id": "req-observational",
+                "turn_execution_diagnostics": embedded_diagnostics,
+            },
+            "prompt_text": "Answer adaptively.",
+        },
+    )
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_load_turn_execution_record",
+        lambda **_: {
+            "schema_version": "turn_execution_record.observational.v1",
+            "record_kind": "observational",
+            "request_id": "req-observational",
+        },
+    )
+
+    payload = get_turn_execution_diagnostics_payload(
+        request_id="req-observational",
+        namespace="#V#user@org",
+    )
+
+    assert payload is not None
+    assert payload["record_kind"] == "observational"
+    assert "workflow_stage_model" not in payload
+    assert "workflow_stage_path" not in payload
+    assert payload["phase_history"] == embedded_diagnostics["phase_history"]
+
+
+def test_legacy_diagnostics_still_reconstruct_historical_workflow_identity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_resolve_history_context",
+        lambda **_: {
+            "user_id": "#V#user",
+            "session_id": "session-legacy",
+            "namespace": "#V#user@org",
+            "org_id": "#V#org",
+            "target_index": 1,
+            "target_message": {
+                "role": "assistant",
+                "content": "Legacy answer.",
+            },
+            "target_llm_debug": {
+                "request_id": "req-legacy",
+                "turn_execution_diagnostics": {
+                    "schema_version": "turn_execution_diagnostics.v1",
+                    "request_id": "req-legacy",
+                },
+            },
+            "prompt_text": "Legacy request.",
+        },
+    )
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_load_turn_execution_record",
+        lambda **_: None,
+    )
+
+    payload = get_turn_execution_diagnostics_payload(
+        request_id="req-legacy",
+        namespace="#V#user@org",
+    )
+
+    assert payload is not None
+    assert payload["workflow_stage_model"]["workflow_representation_id"] == (
+        "#V#conversation_turn_execution_workflow"
+    )
+    assert payload["workflow_stage_path"]["workflow_representation_id"] == (
+        "#V#conversation_turn_execution_workflow"
+    )
+
+
+def test_observational_fallback_does_not_invent_workflow_identity(
+    monkeypatch,
+) -> None:
+    observational_record = {
+        "schema_version": "turn_execution_record.observational.v1",
+        "record_kind": "observational",
+        "request_id": "req-observational-fallback",
+        "tool_invocations": [],
+    }
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_resolve_history_context",
+        lambda **_: {
+            "user_id": "#V#user",
+            "session_id": "session-observational-fallback",
+            "namespace": "#V#user@org",
+            "org_id": "#V#org",
+            "target_index": 1,
+            "target_message": {
+                "role": "assistant",
+                "content": "Answered without embedded diagnostics.",
+            },
+            "target_llm_debug": {
+                "request_id": "req-observational-fallback",
+                "turn_execution_record": observational_record,
+            },
+            "prompt_text": "Answer adaptively.",
+        },
+    )
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_load_turn_execution_record",
+        lambda **_: observational_record,
+    )
+
+    payload = get_turn_execution_diagnostics_payload(
+        request_id="req-observational-fallback",
+        namespace="#V#user@org",
+    )
+
+    assert payload is not None
+    assert payload["reconstruction"]["lossy"] is True
+    assert "workflow_stage_model" not in payload
+    assert "workflow_stage_path" not in payload
+
+
 def test_turn_execution_diagnostics_repairs_sparse_selector_from_debug_aux(
     monkeypatch,
 ) -> None:

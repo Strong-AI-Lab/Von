@@ -1,73 +1,7 @@
-import json
-
 import pytest
 from flask import Flask
 
-
-class _DummyLLM:
-    def generate(self, *_args, **_kwargs):
-        raise AssertionError("LLM generate() should not be called in these tests")
-
-
-class _StubOrchestratorResult:
-    def __init__(
-        self, response_text, extra_messages, tool_invocations, aux_llm_calls=()
-    ):
-        self.response_text = response_text
-        self.extra_messages = tuple(extra_messages)
-        self.tool_invocations = tuple(tool_invocations)
-        self.aux_llm_calls = tuple(aux_llm_calls)
-
-
-class _StubOrchestrator:
-    def _extract_json_blob(self, text: str):
-        try:
-            return json.loads(text)
-        except Exception:
-            return None
-
-    def run(self, **_kwargs):
-        return _StubOrchestratorResult(
-            response_text="ok",
-            extra_messages=[
-                {
-                    "role": "tool",
-                    "content": json.dumps({"tool": "search_knowledge_base"}),
-                }
-            ],
-            tool_invocations=[
-                {
-                    "tool": "search_knowledge_base",
-                    "payload": {"query": "x", "top_k": 5},
-                    "effective_payload": {
-                        "success": True,
-                        "results": [
-                            {
-                                "concept_id": "#V#search_trace_example",
-                                "text": "Example retrieved knowledge",
-                            }
-                        ],
-                    },
-                    "status": "ok",
-                    "result_summary": "Found 1 knowledge-base result for 'x'",
-                }
-            ],
-        )
-
-
-class _StubOrchestratorNoTools:
-    def _extract_json_blob(self, text: str):
-        try:
-            return json.loads(text)
-        except Exception:
-            return None
-
-    def run(self, **_kwargs):
-        return _StubOrchestratorResult(
-            response_text="ok",
-            extra_messages=[],
-            tool_invocations=[],
-        )
+from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
 
 
 class _StubGateway:
@@ -79,23 +13,131 @@ class _StubGateway:
 
 @pytest.fixture()
 def app(monkeypatch):
-    from src.backend.server.routes.von_routes import von_bp
+    from src.backend.server.routes import von_routes
 
+    evidence = {
+        "schema_version": "turn_evidence_envelope.v1",
+        "evidence_id": "ev_rag_trace",
+        "tool_name": "search_knowledge_base",
+        "call_id": "call-rag-trace",
+        "turn_id": "turn-rag-trace",
+        "status": "ok",
+        "trust_boundary": "untrusted_tool_output",
+        "sha256": "0" * 64,
+        "size_bytes": 100,
+        "char_count": 100,
+        "content_type": "application/json",
+        "value_kind": "object",
+        "preview": '{"results":[{"concept_id":"#V#search_trace_example"}]}',
+        "preview_format": "json",
+        "preview_truncated": False,
+        "available_selectors": ["json_pointer", "query", "offset"],
+    }
+    adaptive_state = {
+        "extra_messages": [
+            {
+                "role": "tool",
+                "name": "turn_invoke_read_capability",
+                "tool_call_id": "call-rag-trace",
+                "content": '{"evidence_id":"ev_rag_trace"}',
+            }
+        ],
+        "tool_invocations": [
+            {
+                "tool": "search_knowledge_base",
+                "via": "turn_invoke_read_capability",
+                "call_id": "call-rag-trace",
+                "payload": {
+                    "name": "search_knowledge_base",
+                    "arguments": {"query": "x", "top_k": 5},
+                },
+                "effective_arguments": {"query": "x", "top_k": 5},
+                "evidence": evidence,
+                "status": "ok",
+            }
+        ],
+        "aux_llm_calls": [
+            {
+                "type": "adaptive_turn_evidence_index",
+                "schema_version": "adaptive_turn_evidence_index.v1",
+                "turn_id": "turn-rag-trace",
+                "terminal_status": "completed",
+                "evidence": [evidence],
+            }
+        ],
+    }
+
+    def _execute_adaptive_turn(**_kwargs):
+        return AdaptiveTurnResult(
+            response_text="ok",
+            extra_messages=tuple(adaptive_state["extra_messages"]),
+            tool_invocations=tuple(adaptive_state["tool_invocations"]),
+            aux_llm_calls=tuple(adaptive_state["aux_llm_calls"]),
+        )
+
+    monkeypatch.setattr(von_routes, "execute_adaptive_turn", _execute_adaptive_turn)
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.get_llm_client",
-        lambda **_kwargs: _DummyLLM(),
+        von_routes,
+        "get_llm_client",
+        lambda **_kwargs: object(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.get_active_model_name",
+        von_routes,
+        "get_active_model_name",
         lambda *_args, **_kwargs: "test-model",
+    )
+    monkeypatch.setattr(von_routes, "get_show_tool_use_during_thinking", lambda: False)
+    monkeypatch.setattr(von_routes, "get_buttonify_model_enabled", lambda: False)
+    monkeypatch.setattr(
+        von_routes,
+        "_ensure_generate_conversation_session",
+        lambda **_kwargs: ("test-session", None, False),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_add_chat_history_message",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "build_context_concept_reference_metadata",
+        lambda *_args, **_kwargs: {
+            "source": "sent_context_user_assistant",
+            "metadata_version": 1,
+            "message_roles": ["user", "assistant"],
+            "messages_scanned": 0,
+            "concept_count": 0,
+            "concept_count_capped": False,
+            "max_concepts": None,
+            "include_direct_supertypes": False,
+            "max_direct_supertypes": 0,
+            "concepts": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
+        lambda *_args, **_kwargs: [],
     )
 
     flask_app = Flask(__name__)
     flask_app.secret_key = "test-secret"
-    flask_app.register_blueprint(von_bp, url_prefix="/von")
+    flask_app.config["TESTING"] = True
+    flask_app.config["PROPAGATE_EXCEPTIONS"] = True
+    flask_app.register_blueprint(von_routes.von_bp, url_prefix="/von")
 
     flask_app.config["CONTEXT"] = []
-    flask_app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator()
+    flask_app.config["_ADAPTIVE_STATE"] = adaptive_state
+    flask_app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
     flask_app.config["INTERNAL_MCP_GATEWAY"] = _StubGateway()
 
     return flask_app
@@ -119,7 +161,10 @@ def test_generate_includes_rag_trace_when_authenticated(app):
     rag_trace = body["rag_trace"]
     assert rag_trace["authenticated"] is True
     assert rag_trace["namespace"] == "#V#user@org"
-    assert rag_trace["namespace_source"] == "effective_context.namespace"
+    assert rag_trace["namespace_source"] in {
+        "effective_context.namespace",
+        "session.namespace",
+    }
     assert rag_trace["user_concept_id"] == "#V#user"
     assert rag_trace["organisation_concept_id"] is None
     assert rag_trace["retrieval_attempted"] is True
@@ -138,14 +183,8 @@ def test_generate_includes_rag_trace_when_authenticated(app):
     tool_invocations = body["llm_debug"]["tool_invocations"]
     assert tool_invocations[0]["tool"] == "search_knowledge_base"
     assert tool_invocations[0]["arguments"] == {"query": "x", "top_k": 5}
-    assert tool_invocations[0]["result_summary"] == "Found 1 knowledge-base result for 'x'"
-    search_evidence = body["llm_debug"]["search_evidence"]
-    assert len(search_evidence) == 1
-    assert search_evidence[0]["tool"] == "search_knowledge_base"
-    assert search_evidence[0]["arguments"]["query"] == "x"
-    assert search_evidence[0]["result"]["results"][0]["concept_id"] == "#V#search_trace_example"
     turn_record = body["llm_debug"]["turn_execution_record"]
-    assert turn_record["execution"]["search_evidence"][0]["tool"] == "search_knowledge_base"
+    assert turn_record["evidence_index"][0]["evidence_id"] == "ev_rag_trace"
 
 
 def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
@@ -172,12 +211,11 @@ def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
 
     captured_namespaces = []
 
-    def _capture_add_message(_user_id, _session_id, _message, llm_debug_data=None, **kwargs):
+    def _capture_add_message(**kwargs):
         captured_namespaces.append(kwargs.get("namespace"))
-        return None
 
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.chat_history_service.add_message_to_history",
+        "src.backend.server.routes.von_routes._add_chat_history_message",
         _capture_add_message,
     )
 
@@ -208,7 +246,9 @@ def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
 def test_generate_rag_trace_marks_unauthenticated(app):
     client = app.test_client()
 
-    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestratorNoTools()
+    app.config["_ADAPTIVE_STATE"]["extra_messages"] = []
+    app.config["_ADAPTIVE_STATE"]["tool_invocations"] = []
+    app.config["_ADAPTIVE_STATE"]["aux_llm_calls"] = []
 
     with client.session_transaction() as sess:
         sess["session_id"] = "test-session"

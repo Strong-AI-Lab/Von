@@ -5,7 +5,12 @@ from src.backend.db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
 )
-from src.backend.security.access_control import bypass_access_control
+from src.backend.security.access_control import (
+    bypass_access_control,
+    get_effective_user_concept_id,
+    override_current_actor,
+)
+from src.backend.services import concept_resolution_service
 from src.backend.services.concept_resolution_service import resolve_concept_by_name
 from src.backend.services.text_value_service import upsert_text_for_concept
 
@@ -197,3 +202,77 @@ def test_resolve_concept_by_name_does_not_resolve_deleted_concepts_from_stale_te
     assert result["success"] is True
     assert result["status"] == "not_found"
     assert result["resolved_concept_id"] is None
+
+
+def test_resolve_concept_by_name_audit_counts_only_actor_accessible_candidates(
+    monkeypatch,
+) -> None:
+    private_concept_id = "#V#secret_quasar_project"
+    private_name = "Secret Quasar Project"
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        lambda *_args, **_kwargs: {private_concept_id},
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda candidate_ids: (
+            set(candidate_ids)
+            if get_effective_user_concept_id() == "#V#actor_b"
+            else set()
+        ),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: (
+            [{"concept_id": private_concept_id, "relationships": {}}]
+            if get_effective_user_concept_id() == "#V#actor_b"
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concept",
+        lambda *_args, **_kwargs: [
+            {
+                "text": private_name,
+                "lang": "en-NZ",
+                "predicate": "hasName",
+                "context": {"name_type": "NL"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.TextRelationsRepository,
+        "find",
+        lambda *_args, **_kwargs: [],
+    )
+
+    with override_current_actor("#V#actor_b"):
+        actor_b_result = resolve_concept_by_name(
+            name=private_name,
+            match_code_strings=False,
+        )
+    with override_current_actor("#V#actor_a"):
+        actor_a_result = resolve_concept_by_name(
+            name=private_name,
+            match_code_strings=False,
+        )
+
+    assert actor_b_result["status"] == "resolved"
+    assert actor_b_result["resolved_concept_id"] == private_concept_id
+    assert any(
+        item.get("hits") == 1
+        for item in actor_b_result["audit"]
+        if item.get("stage") == "candidate_generation"
+    )
+    assert actor_a_result["status"] == "not_found"
+    assert actor_a_result["resolved_concept_id"] is None
+    assert all(
+        item.get("hits", 0) == 0
+        for item in actor_a_result["audit"]
+        if item.get("stage") == "candidate_generation"
+    )

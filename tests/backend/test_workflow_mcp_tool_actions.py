@@ -157,14 +157,9 @@ def test_workflow_mcp_action_invokes_read_tool_and_maps_structured_output():
     ]
 
 
-def test_workflow_mcp_event_launch_control_propagates_without_payload_forwarding(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        workflow_mcp_mod,
-        "validate_tool_target_contract",
-        lambda **_kwargs: SimpleNamespace(ok=True),
-    )
+def test_workflow_mcp_event_launch_control_propagates_without_payload_forwarding() -> (
+    None
+):
     observations: list[tuple[str, str | None]] = []
 
     def _handler(*, message: str) -> dict[str, object]:
@@ -313,14 +308,7 @@ def test_workflow_mcp_action_distinguishes_output_schema_failure() -> None:
     }
 
 
-def test_workflow_mcp_action_preserves_typed_transport_timeout_and_timings(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        workflow_mcp_mod,
-        "validate_tool_target_contract",
-        lambda **_kwargs: SimpleNamespace(ok=True),
-    )
+def test_workflow_mcp_action_preserves_typed_transport_timeout_and_timings() -> None:
     catalogue = MethodCatalogue()
     catalogue.register(
         MethodDefinition(
@@ -543,392 +531,6 @@ def test_workflow_mcp_action_injects_default_gmail_profile_for_strict_schema():
     assert gateway.invocations == [("gmail_list_labels", {"profile": "zhan-gmail"})]
 
 
-def test_turn_recovery_tool_batch_omits_namespace_for_strict_mcp_fallback(
-    monkeypatch,
-):
-    from src.backend.workflows.durable import registry_factory
-    from src.backend.workflows.durable.turn_execution_actions import (
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        register_turn_execution_actions,
-    )
-
-    strict_schema = SimpleNamespace(
-        required={"profile": str},
-        optional={},
-        allow_unknown=False,
-    )
-
-    class _Gateway:
-        enabled = True
-
-        def __init__(self) -> None:
-            self.invocations: list[tuple[str, dict[str, object]]] = []
-
-        def describe_methods(self):
-            return {"gmail_list_labels": {"category": "read"}}
-
-        def get_method_definition(self, method_name: str):
-            if method_name != "gmail_list_labels":
-                return None
-            return SimpleNamespace(category="read", input_schema=strict_schema)
-
-        def invoke(self, method_name: str, payload=None):
-            self.invocations.append((method_name, dict(payload or {})))
-            return SimpleNamespace(
-                payload={"success": True, "labels": []},
-                duration_ms=3.0,
-            )
-
-    gateway = _Gateway()
-    monkeypatch.setattr(
-        registry_factory,
-        "_get_or_build_durable_mcp_gateway",
-        lambda: gateway,
-    )
-    registry = ActionRegistry()
-    register_turn_execution_actions(registry)
-    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
-
-    result = registry.execute(
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        inputs={
-            "tool_calls": [
-                {
-                    "tool": "gmail_list_labels",
-                    "arguments": {"profile": "zhan-gmail"},
-                }
-            ]
-        },
-        context={},
-        env=WorkflowEnvironment(llm_client=None, user_namespace="#V#tester"),
-    )
-
-    assert result.status == "success"
-    assert gateway.invocations == [("gmail_list_labels", {"profile": "zhan-gmail"})]
-    assert result.outputs["completion_report"]["status"] == "completed"
-
-
-def test_turn_recovery_tool_batch_replaces_default_profile_and_strips_unknown_fields(
-    monkeypatch,
-):
-    from src.backend.workflows.durable import registry_factory
-    from src.backend.workflows.durable.turn_execution_actions import (
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        register_turn_execution_actions,
-    )
-
-    strict_schema = Schema(
-        required={"profile": str, "message_id": str},
-        optional={"format": str},
-        allow_unknown=False,
-    )
-
-    class _Gateway:
-        enabled = True
-
-        def __init__(self) -> None:
-            self.invocations: list[tuple[str, dict[str, object]]] = []
-
-        def describe_methods(self):
-            return {"gmail_get_message": {"category": "read"}}
-
-        def get_method_definition(self, method_name: str):
-            if method_name != "gmail_get_message":
-                return None
-            return SimpleNamespace(category="read", input_schema=strict_schema)
-
-        def invoke(self, method_name: str, payload=None):
-            payload_dict = dict(payload or {})
-            self.invocations.append((method_name, payload_dict))
-            return SimpleNamespace(
-                payload={
-                    "success": True,
-                    "message_id": payload_dict.get("message_id"),
-                    "labelIds": ["INBOX"],
-                },
-                duration_ms=3.0,
-            )
-
-    gateway = _Gateway()
-    monkeypatch.setattr(
-        registry_factory,
-        "_get_or_build_durable_mcp_gateway",
-        lambda: gateway,
-    )
-    registry = ActionRegistry()
-    register_turn_execution_actions(registry)
-    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
-
-    result = registry.execute(
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        inputs={
-            "tool_calls": [
-                {
-                    "tool": "gmail_get_message",
-                    "payload": {
-                        "profile": "default",
-                        "message_id": "msg-1",
-                        "include_labels": True,
-                    },
-                }
-            ]
-        },
-        context={},
-        env=WorkflowEnvironment(
-            llm_client=None,
-            gateway=gateway,
-            user_namespace="#V#tester",
-            default_gmail_profile="zhan-gmail",
-        ),
-    )
-
-    assert result.status == "success"
-    assert gateway.invocations == [
-        ("gmail_get_message", {"profile": "zhan-gmail", "message_id": "msg-1"})
-    ]
-    invocation = result.outputs["turn_recovery_tool_batch_execution"][
-        "tool_invocations"
-    ][0]
-    assert invocation["payload"] == {"profile": "zhan-gmail", "message_id": "msg-1"}
-    assert {
-        (entry.get("field"), entry.get("source"))
-        for entry in invocation["payload_bindings"]
-    } >= {
-        ("profile", "default_gmail_profile_placeholder_replacement"),
-        ("include_labels", "removed_for_strict_tool_schema"),
-    }
-
-
-def test_turn_recovery_tool_batch_strips_unknown_fields_from_tolerant_schema(
-    monkeypatch,
-):
-    from src.backend.workflows.durable import registry_factory
-    from src.backend.workflows.durable.turn_execution_actions import (
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        register_turn_execution_actions,
-    )
-
-    tolerant_schema = Schema(
-        required={"query": str},
-        optional={"match_type": str, "namespace": (str, type(None))},
-        allow_unknown=True,
-    )
-    gateway = _SchemaAwareGateway(
-        method_name="verification_lookup",
-        category="read",
-        input_schema=tolerant_schema,
-        payload_factory=lambda _tool_name, payload: {
-            "success": True,
-            "results": [{"item_id": "item-1", "query": payload.get("query")}],
-        },
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "_get_or_build_durable_mcp_gateway",
-        lambda: gateway,
-    )
-    registry = ActionRegistry()
-    register_turn_execution_actions(registry)
-    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
-
-    result = registry.execute(
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        inputs={
-            "tool_calls": [
-                {
-                    "tool": "verification_lookup",
-                    "payload": {
-                        "query": "synthetic target",
-                        "matching_policy": "exact",
-                    },
-                }
-            ]
-        },
-        context={},
-        env=WorkflowEnvironment(
-            llm_client=None,
-            gateway=gateway,
-            user_namespace="#V#tester@test_org",
-        ),
-    )
-
-    assert result.status == "success"
-    assert gateway.invocations == [
-        (
-            "verification_lookup",
-            {
-                "query": "synthetic target",
-                "namespace": "#V#tester@test_org",
-            },
-        )
-    ]
-    invocation = result.outputs["turn_recovery_tool_batch_execution"][
-        "tool_invocations"
-    ][0]
-    assert {
-        (entry.get("field"), entry.get("source"))
-        for entry in invocation["payload_bindings"]
-    } >= {("matching_policy", "removed_for_strict_tool_schema")}
-
-
-def test_turn_recovery_tool_batch_binds_predicate_target_alias_to_contract_type(
-    monkeypatch,
-):
-    from src.backend.workflows.durable import registry_factory
-    from src.backend.workflows.durable.turn_execution_actions import (
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        register_turn_execution_actions,
-    )
-
-    predicate_schema = Schema(
-        required={},
-        optional={
-            "concept_id": (str, type(None)),
-            "instance_of": (str, type(None)),
-            "argument_index": (str, int, type(None)),
-            "relation_kind": (str, type(None)),
-            "include_argument_type_counts": (bool, type(None)),
-            "include_concept_preview": (bool, type(None)),
-            "limit": (int, type(None)),
-            "namespace": (str, type(None)),
-        },
-        allow_unknown=False,
-    )
-    gateway = _SchemaAwareGateway(
-        method_name="get_predicate_incidence",
-        category="read",
-        input_schema=predicate_schema,
-        payload_factory=lambda _tool_name, payload: {
-            "success": True,
-            "mode": "type",
-            "instance_of": payload.get("instance_of"),
-            "total_predicates": 0,
-            "predicates": [],
-            "paging": {},
-        },
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "_get_or_build_durable_mcp_gateway",
-        lambda: gateway,
-    )
-    registry = ActionRegistry()
-    register_turn_execution_actions(registry)
-    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
-
-    result = registry.execute(
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        inputs={
-            "tool_calls": [
-                {
-                    "tool": "get_predicate_incidence",
-                    "payload": {"target": "#V#scientific_paper"},
-                }
-            ]
-        },
-        context={
-            "turn_expected_outcome_contract_state": {
-                "schema_version": "turn_expected_outcome_contract.v1",
-                "required_tools": ["get_predicate_incidence"],
-                "target_type_ids": ["#V#scientific_paper"],
-            }
-        },
-        env=WorkflowEnvironment(
-            llm_client=None,
-            gateway=gateway,
-            user_namespace="#V#tester",
-        ),
-    )
-
-    assert result.status == "success"
-    assert gateway.invocations == [
-        (
-            "get_predicate_incidence",
-            {
-                "instance_of": "#V#scientific_paper",
-                "argument_index": "subject",
-                "relation_kind": "binary",
-                "include_argument_type_counts": True,
-                "include_concept_preview": False,
-                "limit": 12,
-                "namespace": "#V#tester",
-            },
-        )
-    ]
-    invocation = result.outputs["turn_recovery_tool_batch_execution"][
-        "tool_invocations"
-    ][0]
-    assert invocation["status"] == "ok"
-    assert invocation["payload"]["instance_of"] == "#V#scientific_paper"
-    assert "target" not in invocation["payload"]
-    assert {
-        (entry.get("field"), entry.get("source"))
-        for entry in invocation["payload_bindings"]
-        if isinstance(entry, dict)
-    } >= {
-        ("instance_of", "turn_expected_outcome.target_type_ids_alias"),
-        ("argument_index", "tool_metadata_default_payload"),
-    }
-
-
-def test_turn_recovery_tool_batch_blocks_symbolic_target_contract_mismatch(
-    monkeypatch,
-):
-    from src.backend.workflows.durable import registry_factory
-    from src.backend.workflows.durable.turn_execution_actions import (
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        register_turn_execution_actions,
-    )
-
-    gateway = _FakeGateway(
-        definitions={"get_predicate_incidence": "read"},
-        payload_factory=lambda _tool_name, _payload: {"success": True},
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "_get_or_build_durable_mcp_gateway",
-        lambda: gateway,
-    )
-    registry = ActionRegistry()
-    register_turn_execution_actions(registry)
-    registry.set_fallback_handler(registry_factory._durable_mcp_fallback_action)
-
-    result = registry.execute(
-        TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
-        inputs={
-            "tool_calls": [
-                {
-                    "tool": "get_predicate_incidence",
-                    "payload": {"concept_id": "#V#michael_witbrock"},
-                }
-            ]
-        },
-        context={
-            "turn_expected_outcome_contract_state": {
-                "schema_version": "turn_expected_outcome_contract.v1",
-                "required_tools": ["get_predicate_incidence"],
-                "target_type_ids": ["#V#scientific_paper"],
-            }
-        },
-        env=WorkflowEnvironment(
-            llm_client=None,
-            gateway=gateway,
-            user_namespace="#V#tester",
-        ),
-    )
-
-    assert result.status == "success"
-    assert gateway.invocations == []
-    invocation = result.outputs["turn_recovery_tool_batch_execution"][
-        "tool_invocations"
-    ][0]
-    assert invocation["status"] == "failed"
-    assert invocation["error"] == "target_contract_symbolic_mismatch"
-    assert invocation["tool_call_validation_diagnostics"][0]["error_code"] == (
-        "target_contract_symbolic_mismatch"
-    )
-
-
 def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():
     gateway = _FakeGateway(
         definitions={"delete_concept": "write"},
@@ -961,47 +563,7 @@ def test_workflow_mcp_action_blocks_write_tool_without_represented_policy():
     assert gateway.invocations == []
 
 
-def test_workflow_mcp_action_blocks_symbolic_target_contract_mismatch():
-    gateway = _FakeGateway(
-        definitions={"get_predicate_incidence": "read"},
-        payload_factory=lambda _tool_name, _payload: {"success": True},
-    )
-    registry = ActionRegistry()
-    register_workflow_mcp_tool_actions(registry)
-
-    result = registry.execute(
-        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
-        inputs={
-            "tool_name": "get_predicate_incidence",
-            "tool_arguments": {"concept_id": "#V#michael_witbrock"},
-        },
-        context={
-            "turn_expected_outcome_contract_state": {
-                "schema_version": "turn_expected_outcome_contract.v1",
-                "required_tools": ["get_predicate_incidence"],
-                "target_type_ids": ["#V#scientific_paper"],
-            }
-        },
-        env=WorkflowEnvironment(
-            llm_client=None,
-            gateway=gateway,
-            user_namespace="#V#tester",
-        ),
-    )
-
-    assert result.status == "failed"
-    assert result.error == (
-        "workflow_mcp_target_contract_validation_failed:"
-        "get_predicate_incidence:target_contract_symbolic_mismatch"
-    )
-    assert result.outputs["target_contract_validation_failed"] is True
-    assert result.outputs["tool_call_validation_diagnostics"][0]["error_code"] == (
-        "target_contract_symbolic_mismatch"
-    )
-    assert gateway.invocations == []
-
-
-def test_workflow_mcp_action_uses_prior_search_result_to_authorise_focal_fetch():
+def test_workflow_mcp_action_allows_direct_read_with_unresolved_semantic_hint():
     gateway = _FakeGateway(
         definitions={"fetch_concept": "read"},
         payload_factory=lambda _tool_name, payload: {
@@ -1023,48 +585,13 @@ def test_workflow_mcp_action_uses_prior_search_result_to_authorise_focal_fetch()
         ],
     }
 
-    blocked_result = registry.execute(
-        WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
-        inputs={
-            "tool_name": "fetch_concept",
-            "tool_arguments": {"concept_id": "#V#grounded_candidate"},
-        },
-        context={"turn_expected_outcome_contract_state": target_contract_state},
-        env=WorkflowEnvironment(
-            llm_client=None,
-            gateway=gateway,
-            user_namespace="#V#tester",
-        ),
-    )
-
-    assert blocked_result.status == "failed"
-    assert blocked_result.error == (
-        "workflow_mcp_target_contract_validation_failed:"
-        "fetch_concept:target_contract_unresolved_for_symbolic_tool"
-    )
-    assert gateway.invocations == []
-
     result = registry.execute(
         WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,
         inputs={
             "tool_name": "fetch_concept",
             "tool_arguments": {"concept_id": "#V#grounded_candidate"},
         },
-        context={
-            "turn_expected_outcome_contract_state": target_contract_state,
-            "invocations": [
-                {
-                    "tool": "search_concepts",
-                    "status": "ok",
-                    "call_id": "call-search-1",
-                    "effective_payload": {
-                        "results": [
-                            {"concept_id": "#V#grounded_candidate"},
-                        ]
-                    },
-                }
-            ],
-        },
+        context={"turn_expected_outcome_contract_state": target_contract_state},
         env=WorkflowEnvironment(
             llm_client=None,
             gateway=gateway,
@@ -1277,9 +804,6 @@ def test_workflow_mcp_output_can_feed_subworkflow_without_tool_batch_action():
 
 
 def _patch_workflow_studio_runtime(monkeypatch, *, method_metadata):
-    registry = ActionRegistry()
-    register_workflow_mcp_tool_actions(registry)
-
     class _WorkflowRegistry:
         def all_workflow_ids(self):
             return []
@@ -1291,8 +815,8 @@ def _patch_workflow_studio_runtime(monkeypatch, *, method_metadata):
     )
     monkeypatch.setattr(
         studio_mod,
-        "get_shared_durable_action_registry",
-        lambda: registry,
+        "get_supported_durable_workflow_action_ids",
+        lambda: (WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID,),
     )
     monkeypatch.setattr(
         studio_mod,

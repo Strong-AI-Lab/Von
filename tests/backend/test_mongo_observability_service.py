@@ -472,6 +472,7 @@ def test_internal_mcp_gateway_exposes_mongo_query_diagnostics_report(monkeypatch
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
 
     result = gateway.invoke(
@@ -487,6 +488,34 @@ def test_internal_mcp_gateway_exposes_mongo_query_diagnostics_report(monkeypatch
     assert payload["success"] is True
     assert payload["summary"]["rows"][0]["collection"] == "concepts"
     assert payload["direct_index_mutation"] is False
+
+
+def test_internal_mcp_mongo_diagnostics_reject_payload_only_operator_claims():
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    query_report = gateway.invoke(
+        "mongo_query_diagnostics_report",
+        {
+            "allow_operator_diagnostics": True,
+            "source": "in_process",
+        },
+    ).payload
+    cost_report = gateway.invoke(
+        "mongo_cost_guardrails_report",
+        {},
+    ).payload
+
+    assert query_report["success"] is False
+    assert cost_report["success"] is False
+    assert (
+        query_report["error_code"]
+        == "workflow_global_admin_authority_required"
+    )
+    assert cost_report["error_code"] == "workflow_global_admin_authority_required"
 
 
 def test_mongo_cost_guardrail_report_warns_for_remote_local_operation_rate(
@@ -629,6 +658,7 @@ def test_internal_mcp_gateway_exposes_mongo_cost_guardrails_report(monkeypatch):
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=True,
     )
 
     result = gateway.invoke(

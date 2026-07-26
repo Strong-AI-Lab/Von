@@ -67,12 +67,6 @@ from src.backend.services.representation_workflow_routing_coverage_audit_contrac
 from src.backend.workflows.durable.representation_workflow_routing_coverage_audit_workflow import (
     build_representation_workflow_routing_coverage_audit_test_registration,
 )
-from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
-    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-    WORKFLOW_GAP_TEST_WORKFLOW_ID,
-    build_workflow_discovery_gap_recovery_workflow_test_registration,
-    build_workflow_gap_test_registration,
-)
 from src.backend.workflows.durable.file_copy_interpretation_workflow import (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
     build_file_copy_interpretation_workflow_test_registration,
@@ -212,14 +206,6 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
         "Review parent candidates using dossier evidence and apply or defer "
         "taxonomy refinements."
     ),
-    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID: (
-        "Recover from workflow discovery misses by analysing the gap, creating "
-        "candidate workflows, and optionally testing them."
-    ),
-    WORKFLOW_GAP_TEST_WORKFLOW_ID: (
-        "Run and assess a candidate workflow against explicit workflow-gap "
-        "acceptance requirements."
-    ),
 }
 
 AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
@@ -227,8 +213,6 @@ AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
     RUMINATION_WORKFLOW_ID,
     PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
     PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
-    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-    WORKFLOW_GAP_TEST_WORKFLOW_ID,
 )
 AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
@@ -417,8 +401,6 @@ def bootstrap_authoritative_reasoning_recovery_workflows() -> dict[str, Any]:
         build_rumination_workflow_test_registration(),
         build_parent_specificity_concept_dossier_workflow_test_registration(),
         build_parent_specificity_rumination_workflow_test_registration(),
-        build_workflow_discovery_gap_recovery_workflow_test_registration(),
-        build_workflow_gap_test_registration(),
     ):
         registry.register(registration)
 

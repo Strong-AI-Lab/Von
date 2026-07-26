@@ -93,7 +93,6 @@ from .control_flow_actions import register_control_flow_actions
 from .entity_representation_workflow import (
     register_entity_representation_actions,
 )
-from .workflow_gap_recovery_workflow import register_workflow_gap_recovery_actions
 
 WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME = "#V#workflow_context_key_validated_type_name"
 DEFAULT_WORKFLOW_PARENT_TYPE_ID = "#V#ai_workflow"
@@ -2374,10 +2373,6 @@ def _handle_ground_phd_student_text(request: WorkflowActionRequest) -> WorkflowA
 
 def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegistry:
     registry = ActionRegistry()
-    # Candidate workflows created by workflow-gap recovery must verify through
-    # the same action registry they will later execute under, or verification
-    # can incorrectly reject otherwise runnable workflows.
-    register_workflow_gap_recovery_actions(registry)
     register_control_flow_actions(
         registry,
         definition_loader=load_workflow_definition_from_vontology,

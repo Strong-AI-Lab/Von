@@ -9,12 +9,18 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping
+from time import monotonic
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 import openai
 
-from ..client import LLMClient, LLMClientConfig, resolve_safe_temperature_for_model
+from ..client import (
+    LLMClient,
+    LLMClientConfig,
+    resolve_safe_temperature_for_model,
+    split_request_timeout_from_llm_params,
+)
 from ..transport import (
     API_SURFACE_CHAT_COMPLETIONS,
     API_SURFACE_RESPONSES,
@@ -27,6 +33,7 @@ from ..types import (
     LLMContinuation,
     LLMResponse,
     StructuredToolCapabilityRejectedError,
+    StructuredToolContextLimitError,
     StructuredToolProtocolError,
     StructuredToolTransportError,
     ToolCall,
@@ -43,30 +50,6 @@ from ....services.model_parameter_service import (
 
 
 logger = logging.getLogger(__name__)
-
-
-def _split_request_timeout_from_llm_params(
-    raw_params: Any,
-) -> tuple[dict[str, Any], float | None]:
-    """Separate the caller-owned request deadline from model parameters.
-
-    ``request_timeout_seconds`` is a transport boundary, not a model
-    capability.  Keeping it out of the represented parameter projection
-    prevents it from being silently discarded by model-parameter filtering
-    while still allowing the OpenAI SDK to cancel the underlying request.
-    """
-
-    params = dict(raw_params) if isinstance(raw_params, Mapping) else {}
-    raw_timeout = params.pop("request_timeout_seconds", None)
-    if raw_timeout is None:
-        raw_timeout = params.pop("timeout_seconds", None)
-    try:
-        timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
-    except (TypeError, ValueError):
-        timeout_seconds = None
-    if timeout_seconds is not None:
-        timeout_seconds = max(1.0, min(600.0, timeout_seconds))
-    return params, timeout_seconds
 
 
 def _value(item: Any, key: str, default: Any = None) -> Any:
@@ -111,20 +94,14 @@ class OpenAIClient(LLMClient):
         request_kwargs = dict(kwargs)
         request_model = request_kwargs.pop("model", None) or self.config.model
         raw_llm_params = request_kwargs.pop("llm_params", None)
-        llm_params, request_timeout_seconds = _split_request_timeout_from_llm_params(
+        llm_params, request_timeout_seconds = split_request_timeout_from_llm_params(
             raw_llm_params
         )
-        request_client = self._client
-        if request_timeout_seconds is not None:
-            # The SDK's default retry policy would turn a represented
-            # per-record deadline into as many as three attempts.  A caller-
-            # owned workflow budget is a total transport boundary, so bind it
-            # to a no-retry request client rather than merely passing a
-            # per-attempt ``timeout`` keyword.
-            request_client = self._client.with_options(
-                timeout=request_timeout_seconds,
-                max_retries=0,
-            )
+        request_deadline_monotonic = (
+            monotonic() + request_timeout_seconds
+            if request_timeout_seconds is not None
+            else None
+        )
         raw_continuation = request_kwargs.pop("continuation", None)
         continuation = LLMContinuation.from_value(raw_continuation)
         if raw_continuation is not None and continuation is None:
@@ -170,6 +147,19 @@ class OpenAIClient(LLMClient):
             selected_decision: StructuredToolTransportDecision,
         ) -> LLMResponse:
             selected_request_kwargs = dict(request_kwargs)
+            request_client = self._client
+            if request_deadline_monotonic is not None:
+                remaining_seconds = request_deadline_monotonic - monotonic()
+                if remaining_seconds <= 0.0:
+                    raise TimeoutError(
+                        "OpenAI structured-tool request deadline exhausted."
+                    )
+                # Disable SDK retries and give each represented surface attempt
+                # only the time left in the one caller-owned request budget.
+                request_client = self._client.with_options(
+                    timeout=remaining_seconds,
+                    max_retries=0,
+                )
             if selected_decision.effective_api_surface == API_SURFACE_RESPONSES:
                 return await self._generate_responses(
                     prompt=prompt,
@@ -205,6 +195,16 @@ class OpenAIClient(LLMClient):
         except Exception as exc:
             safe_error = self._sanitise_provider_error(exc)
             self.logger.error("OpenAI structured-tool API error: %s", safe_error)
+            if self._has_exact_context_length_exceeded_code(exc):
+                raise StructuredToolContextLimitError(
+                    "OpenAI rejected the structured-tool request because its "
+                    f"context exceeded the model limit: {safe_error}",
+                    decision={
+                        **decision.to_telemetry(),
+                        **self._provider_error_metadata(exc),
+                        "failure_kind": "provider_context_length_exceeded",
+                    },
+                ) from exc
             if self._looks_like_tool_call_lineage_rejection(exc):
                 raise StructuredToolProtocolError(
                     "OpenAI rejected a function-call output whose provider call "
@@ -275,6 +275,25 @@ class OpenAIClient(LLMClient):
                         alternate_safe_error = self._sanitise_provider_error(
                             alternate_exc
                         )
+                        if self._has_exact_context_length_exceeded_code(
+                            alternate_exc
+                        ):
+                            raise StructuredToolContextLimitError(
+                                "OpenAI rejected the advertised alternate "
+                                "structured-tool surface because its context "
+                                f"exceeded the model limit: {alternate_safe_error}",
+                                decision={
+                                    **alternate_decision.to_telemetry(),
+                                    **self._provider_error_metadata(alternate_exc),
+                                    "surface_fallback_used": True,
+                                    "initial_effective_api_surface": (
+                                        decision.effective_api_surface
+                                    ),
+                                    "failure_kind": (
+                                        "provider_context_length_exceeded"
+                                    ),
+                                },
+                            ) from alternate_exc
                         if self._looks_like_tool_call_lineage_rejection(alternate_exc):
                             raise StructuredToolProtocolError(
                                 "OpenAI rejected a function-call output whose "
@@ -1625,6 +1644,17 @@ class OpenAIClient(LLMClient):
         )
 
     @staticmethod
+    def _has_exact_context_length_exceeded_code(exc: Exception) -> bool:
+        """Use only the provider's structured code to identify context overflow."""
+
+        metadata = OpenAIClient._provider_error_metadata(exc)
+        code = metadata.get("provider_error_code")
+        return (
+            isinstance(code, str)
+            and code.strip().lower() == "context_length_exceeded"
+        )
+
+    @staticmethod
     def _looks_like_capability_rejection(exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None)
         text = str(exc).lower()
@@ -1656,7 +1686,14 @@ class OpenAIClient(LLMClient):
         if isinstance(status_code, int):
             metadata["provider_status_code"] = status_code
         body = getattr(exc, "body", None)
-        error_body = body.get("error") if isinstance(body, Mapping) else None
+        nested_error_body = body.get("error") if isinstance(body, Mapping) else None
+        error_body = (
+            nested_error_body
+            if isinstance(nested_error_body, Mapping)
+            else body
+            if isinstance(body, Mapping)
+            else None
+        )
         for key in ("code", "param", "type"):
             value = getattr(exc, key, None)
             if value is None and isinstance(error_body, Mapping):

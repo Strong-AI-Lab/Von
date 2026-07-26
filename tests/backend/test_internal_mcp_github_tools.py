@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+
+import pytest
 
 from src.backend.integrations.internal_mcp.catalogue import (
     _github_create_branch,
@@ -268,7 +271,11 @@ def test_github_create_pull_request_success_through_gateway_invoke(monkeypatch) 
     assert payload.get("proxy_tool") == "create_pull_request"
 
 
-def test_github_build_env_prefers_repo_dotenv_token(monkeypatch, tmp_path: Path) -> None:
+def test_github_build_env_prefers_repo_dotenv_token_without_leaking_process_secrets(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
     import src.backend.integrations.internal_mcp.github_proxy_mcp as github_proxy_mcp
     import src.backend.utils.runtime_env as runtime_env
 
@@ -281,14 +288,57 @@ def test_github_build_env_prefers_repo_dotenv_token(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(runtime_env, "get_project_root", lambda: tmp_path)
     monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_stale_shell_token")
     monkeypatch.setenv("GITHUB_TOKEN", "ghu_vscode_injected_token")
+    monkeypatch.setenv("OPENAI_API_KEY", "sentinel-openai-secret")
+    monkeypatch.setenv("VON_GITHUB_MCP_ARGS", "sentinel-config-argument")
     monkeypatch.delenv("GITHUB_VON_TOKEN", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
+    caplog.set_level("INFO")
     env = github_proxy_mcp._build_github_env()
 
     assert env["GITHUB_PERSONAL_ACCESS_TOKEN"] == dotenv_token
     assert env["GITHUB_TOKEN"] == dotenv_token
     assert env["GH_TOKEN"] == dotenv_token
+    assert (
+        github_proxy_mcp.os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+        == "ghp_stale_shell_token"
+    )
+    assert "OPENAI_API_KEY" not in env
+    assert "VON_GITHUB_MCP_ARGS" not in env
+    assert "sentinel-openai-secret" not in caplog.text
+    assert dotenv_token not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_github_proxy_initialisation_does_not_log_config_arguments(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    import src.backend.integrations.internal_mcp.github_proxy_mcp as github_proxy_mcp
+    import src.backend.utils.runtime_env as runtime_env
+
+    config_secret = "sentinel-private-config-argument"
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_test_token",
+                f"VON_GITHUB_MCP_ARGS=-y package --header {config_secret}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(runtime_env, "get_project_root", lambda: tmp_path)
+    monkeypatch.setattr(github_proxy_mcp, "_proxy_instance", None)
+    monkeypatch.setattr(github_proxy_mcp, "_proxy_lock", asyncio.Lock())
+    caplog.set_level("INFO")
+
+    proxy = await github_proxy_mcp.get_github_proxy()
+
+    assert proxy is not None
+    assert config_secret not in caplog.text
 
 
 def test_github_auth_config_uses_repo_dotenv_token_through_gateway_invoke(
@@ -348,4 +398,9 @@ def test_github_auth_config_uses_repo_dotenv_token_through_gateway_invoke(
     assert payload.get("token_length") == len(dotenv_token)
     assert payload.get("env_keys_used", {}).get("token") == "GITHUB_PERSONAL_ACCESS_TOKEN"
     assert "GITHUB_PERSONAL_ACCESS_TOKEN" in payload.get("dotenv_overrides_applied", [])
+    assert payload.get("process_environment_mutated") is False
+    assert (
+        runtime_env.os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+        == "ghp_stale_shell_token"
+    )
     assert payload.get("proxy_tools_available") is True

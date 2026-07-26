@@ -5,9 +5,11 @@ from typing import Any
 
 import pytest
 
-from src.backend.services import context_bundle_benchmark_service
-from src.backend.services import context_grounded_answering_benchmark_service
-from src.backend.services import workflow_selector_benchmark_service
+from src.backend.services import (
+    context_bundle_benchmark_service,
+    context_grounded_answering_benchmark_service,
+    workflow_selector_benchmark_service,
+)
 from tests.backend.benchmark_suite_test_helpers import (
     represented_suite_case_set_loader,
 )
@@ -63,7 +65,7 @@ class _Cursor:
         reverse = False
         try:
             reverse = int(direction) < 0
-        except Exception:
+        except (TypeError, ValueError):
             reverse = False
         self._docs.sort(key=lambda doc: str(doc.get(field) or ""), reverse=reverse)
         return self
@@ -105,12 +107,12 @@ class _TurnExecutionCollection:
             return False
 
         requires_follow_up = query.get("completion_gate.requires_follow_up")
-        if isinstance(requires_follow_up, bool):
-            if (
-                bool((doc.get("completion_gate") or {}).get("requires_follow_up"))
-                != requires_follow_up
-            ):
-                return False
+        if (
+            isinstance(requires_follow_up, bool)
+            and bool((doc.get("completion_gate") or {}).get("requires_follow_up"))
+            != requires_follow_up
+        ):
+            return False
 
         prompt_filter = query.get("prompt.preview")
         if isinstance(prompt_filter, dict):
@@ -140,10 +142,9 @@ class _TurnExecutionCollection:
             return False
 
         session_id = query.get("session_id")
-        if isinstance(session_id, str) and doc.get("session_id") != session_id:
-            return False
-
-        return True
+        return not (
+            isinstance(session_id, str) and doc.get("session_id") != session_id
+        )
 
     def find(self, query: dict[str, Any], _projection: dict[str, Any] | None = None):
         docs = [doc for doc in self._docs if self._matches(doc, query)]
@@ -1792,10 +1793,13 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
         ]
         is True
     )
-    assert any(
-        "route through #V#conversation_turn_execution_workflow" in rec
-        for rec in result["recommendations"]
-    )
+    recommendations = result["recommendations"]
+    assert recommendations
+    recommendation_text = " ".join(recommendations).lower()
+    assert "authority" in recommendation_text
+    assert "capability" in recommendation_text
+    assert "execution" in recommendation_text
+    assert "#v#conversation_turn_execution_workflow" not in recommendation_text
 
 
 def test_turn_execution_search_failures_flags_completed_record_with_failed_dispatch(
@@ -1868,7 +1872,13 @@ def test_turn_execution_search_failures_flags_completed_record_with_failed_dispa
     assert item["failure_mode"] == "false_completion_gate_state"
     assert item["likely_failure_to_act"] is True
     assert item["execution_correctness"]["metric_labels"]["false_success"] is True
-    assert any("completion-gate invariants" in rec for rec in result["recommendations"])
+    recommendations = result["recommendations"]
+    assert recommendations
+    recommendation_text = " ".join(recommendations).lower()
+    assert "effects" in recommendation_text
+    assert "evidence" in recommendation_text
+    assert "terminal state" in recommendation_text
+    assert "completion-gate" not in recommendation_text
 
 
 def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeypatch):
@@ -2784,16 +2794,16 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     assert payload["success"] is True
     metrics = payload.get("metrics")
     assert isinstance(metrics, dict)
-    assert metrics.get("scanned_count") == 5
-    assert metrics.get("matched_case_count") == 4
-    assert metrics.get("selector_accuracy_pct") == 80.0
-    assert metrics.get("baseline_accuracy_pct") == 20.0
+    assert metrics.get("scanned_count") == 4
+    assert metrics.get("matched_case_count") == 3
+    assert metrics.get("selector_accuracy_pct") == 75.0
+    assert metrics.get("baseline_accuracy_pct") == 25.0
     assert (
         metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 1
     )
     assert (
         metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
-        == 1
+        == 0
     )
 
     corpus = payload.get("corpus")
@@ -2810,7 +2820,7 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     }
     assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
     assert signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
-    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "not_evaluated"
 
 
 def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
@@ -2845,6 +2855,7 @@ def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
         if isinstance(case, dict)
         and case.get("case_id") == "represented_context_tool_pipeline_answer"
     )
+
     assert represented_case["expected_execution_mode"] == "tool_pipeline"
 
     signal_by_id = {
@@ -2864,6 +2875,26 @@ def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
     assert signal_by_id["benchmark_backed_by_exact_path_validation"]["status"] == "pass"
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "context_bundle_build_benchmark",
+        "turn_execution_build_selector_benchmark",
+        "turn_execution_build_context_answering_benchmark",
+    ),
+)
+def test_turn_benchmark_host_bundle_path_requires_operator_authority(method_name):
+    gateway = _build_gateway()
+
+    payload = gateway.invoke(
+        method_name,
+        {"bundle_path": "/tmp/private-benchmark.json"},
+    ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "host_path_authority_required"
+
+
 def test_turn_execution_build_selector_benchmark_supports_entity_representation_case_set():
     gateway = _build_gateway()
     payload = gateway.invoke(
@@ -2874,14 +2905,14 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
     assert payload["success"] is True
     metrics = payload.get("metrics")
     assert isinstance(metrics, dict)
-    assert metrics.get("scanned_count") == 11
-    assert metrics.get("matched_case_count") == 11
+    assert metrics.get("scanned_count") == 10
+    assert metrics.get("matched_case_count") == metrics.get("scanned_count")
     assert metrics.get("selector_accuracy_pct") == 100.0
     assert metrics.get("baseline_accuracy_pct") == 0.0
     assert metrics.get("outcome_label_counts", {}).get("successful_completion") == 10
     assert (
         metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
-        == 1
+        in {None, 0}
     )
     assert (
         metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 0
@@ -2894,6 +2925,22 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
 
     replay_cases = payload.get("replay_cases")
     assert isinstance(replay_cases, list)
+    assert {
+        case.get("case_id")
+        for case in replay_cases
+        if isinstance(case, dict)
+    } == {
+        "entity_people_follow_up_reasoning_override",
+        "entity_person_representation_success",
+        "entity_company_representation_success",
+        "entity_event_representation_success",
+        "entity_event_write_with_tool_calling_competitor",
+        "entity_event_write_without_explicit_vontology_phrasing",
+        "entity_event_write_with_storage_verb",
+        "entity_event_write_with_capture_verb",
+        "entity_place_representation_success",
+        "entity_ambiguity_low_imposition_route",
+    }
     follow_up_case = next(
         case
         for case in replay_cases
@@ -2909,7 +2956,7 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
     }
     assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
     assert signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
-    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "not_evaluated"
     assert (
         signal_by_id["selector_misrouting_examples_detected"]["status"]
         == "not_evaluated"

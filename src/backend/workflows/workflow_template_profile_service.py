@@ -1,9 +1,8 @@
 """Vontology-backed workflow-template selection and rendering helpers.
 
-Workflow creation and gap recovery should resolve reusable workflow-spec
-templates from first-class Vontology artefacts. Repo-side workflow template
-bundles remain seed fixtures only and are used only to hydrate missing
-template concepts.
+Workflow creation resolves reusable workflow-spec templates from first-class
+Vontology artefacts. Repo-side workflow template bundles remain seed fixtures
+only and are used only to hydrate missing template concepts.
 """
 
 from __future__ import annotations
@@ -54,9 +53,6 @@ WORKFLOW_CREATION_PERSON_TEMPLATE_ID = "workflow_creation.person_representation"
 WORKFLOW_CREATION_COMPANY_TEMPLATE_ID = "workflow_creation.company_representation"
 WORKFLOW_CREATION_EVENT_TEMPLATE_ID = "workflow_creation.event_representation"
 WORKFLOW_CREATION_PLACE_TEMPLATE_ID = "workflow_creation.place_representation"
-WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID = (
-    "workflow_gap_recovery.candidate_execution"
-)
 
 WORKFLOW_TEMPLATE_TYPE_ID = "#V#workflow_definition_template"
 WORKFLOW_TEMPLATE_ID_PREDICATE = "#V#hasWorkflowTemplateId"
@@ -108,9 +104,6 @@ _CANONICAL_TEMPLATE_CONCEPT_IDS = {
     ),
     WORKFLOW_CREATION_PLACE_TEMPLATE_ID: (
         "#V#workflow_template_workflow_creation_place_representation"
-    ),
-    WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID: (
-        "#V#workflow_template_workflow_gap_recovery_candidate_execution"
     ),
 }
 
@@ -1696,7 +1689,6 @@ __all__ = [
     "WORKFLOW_CREATION_PERSON_TEMPLATE_ID",
     "WORKFLOW_CREATION_PLACE_TEMPLATE_ID",
     "WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID",
-    "WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID",
     "WORKFLOW_TEMPLATE_DEFAULT_DESCRIPTION_PREDICATE",
     "WORKFLOW_TEMPLATE_ID_PREDICATE",
     "WORKFLOW_TEMPLATE_PROFILE_PREDICATE",

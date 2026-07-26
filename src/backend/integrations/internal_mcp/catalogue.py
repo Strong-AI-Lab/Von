@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, List, Mapping, Sequence, cast
 
 from pymongo import DESCENDING
+from src.backend.services.workflow_actor_scope_service import WorkflowActorScopeError
 
 from .dynamic_tool_loader import load_dynamic_method_definitions
 from .gateway import MethodCatalogue, MethodDefinition
@@ -43,8 +44,6 @@ from .spreadsheet_record_tools import build_spreadsheet_record_tool_definitions
 from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
-from src.backend.services.prompt_template_service import PromptTemplateService
-from src.backend.services.workflow_actor_scope_service import WorkflowActorScopeError
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +58,6 @@ def _utc_now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _get_internal_mcp_chat_orchestrator_cls():
-    """Lazy-import orchestrator class to avoid heavy import side effects."""
-    from .orchestrator import InternalMCPChatOrchestrator
-
-    return InternalMCPChatOrchestrator
 
 
 def _run_async_compat(async_fn):
@@ -6420,11 +6412,24 @@ def _search_proxy_diagnostics(**kwargs):
     from .search_proxy_mcp import get_search_proxy, SearchProxyError
 
     include_health_check = kwargs.get("include_health_check", False)
+    safe_summary_only = bool(kwargs.get("safe_summary_only", False))
 
     async def _async_diagnostics():
         try:
             proxy = await get_search_proxy()
             diagnostics = proxy.get_diagnostics()
+            if safe_summary_only:
+                config = diagnostics.get("config")
+                diagnostics = {
+                    "stats": diagnostics.get("stats"),
+                    "config": {
+                        "api_key_set": bool(
+                            config.get("api_key_set")
+                            if isinstance(config, Mapping)
+                            else False
+                        )
+                    },
+                }
 
             if include_health_check:
                 health = await proxy.check_health()
@@ -6661,8 +6666,17 @@ def _resilient_extract_url(**kwargs):
     fallback_query = kwargs.get("fallback_query")
     context = kwargs.get("context")
 
-    max_fallback_results = int(kwargs.get("max_fallback_results", 5) or 5)
-    max_extracts = int(kwargs.get("max_extracts", 4) or 4)
+    # Public fallback extraction performs paid/external calls. Keep the
+    # caller's choice within an algorithmic fan-out ceiling rather than
+    # replacing the caller's search or extraction strategy.
+    max_fallback_results = max(
+        1,
+        min(10, int(kwargs.get("max_fallback_results", 5) or 5)),
+    )
+    max_extracts = max(
+        0,
+        min(8, int(kwargs.get("max_extracts", 4) or 4)),
+    )
     max_chars = int(kwargs.get("max_chars", 12000) or 12000)
     min_content_chars = int(kwargs.get("min_content_chars", 200) or 200)
     search_depth = kwargs.get("search_depth", "basic")
@@ -9125,9 +9139,16 @@ def _extract_url_output_schema() -> Schema:
 def _search_proxy_diagnostics_input_schema() -> Schema:
     return Schema(
         required={},
-        optional={"include_health_check": (bool,)},
+        optional={
+            "include_health_check": (bool,),
+            "safe_summary_only": (bool,),
+        },
         allow_unknown=True,
-        description="search_proxy_diagnostics input: include_health_check (bool, default false, runs a test search to verify Tavily connectivity)",
+        description=(
+            "search_proxy_diagnostics input: include_health_check (bool, default "
+            "false, runs a test search to verify Tavily connectivity); "
+            "safe_summary_only omits recent-call and host-command details"
+        ),
     )
 
 
@@ -9324,7 +9345,7 @@ def _resilient_extract_url_input_schema() -> Schema:
         allow_unknown=True,
         description=(
             "resilient_extract_url input: url (str, required), optional fallback_query (str, overrides derived search query), "
-            "context (str, optional context for context_search), max_fallback_results (int, default 5), max_extracts (int, default 4), "
+            "context (str, optional context for context_search), max_fallback_results (int, default 5, maximum 10), max_extracts (int, default 4, maximum 8), "
             "search_depth ('basic'|'advanced', default 'basic'), max_chars (int, default 12000), min_content_chars (int, default 200), "
             "include_domains/exclude_domains (list of domains)."
         ),
@@ -9512,6 +9533,8 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
     org_candidate = _normalise_concept_id(kwargs.get("organisation_concept_id"))
     if org_candidate is None:
         org_candidate = _normalise_concept_id(kwargs.get("org_id"))
+    payload_user_candidate = user_candidate
+    payload_org_candidate = org_candidate
 
     def _derive_namespace_from_components(
         user_component: str | None, organisation_component: str | None
@@ -9593,6 +9616,59 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
                 org_candidate,
             )
         return enriched
+
+    from .gateway import get_internal_mcp_preexisting_actor_context
+
+    preexisting_actor = get_internal_mcp_preexisting_actor_context()
+    if preexisting_actor is not None:
+        trusted_user = _normalise_concept_id(preexisting_actor[0])
+        trusted_org = _normalise_concept_id(preexisting_actor[1])
+        trusted_namespace = _derive_namespace_from_components(
+            trusted_user,
+            trusted_org,
+        )
+        mismatch_fields: list[str] = []
+        if (
+            payload_user_candidate is not None
+            and payload_user_candidate != trusted_user
+        ):
+            mismatch_fields.append("user_concept_id")
+        if (
+            payload_org_candidate is not None
+            and payload_org_candidate != trusted_org
+        ):
+            mismatch_fields.append("organisation_concept_id")
+        if (
+            explicit_namespace is not None
+            and explicit_namespace != trusted_namespace
+        ):
+            mismatch_fields.append("namespace")
+
+        user_candidate = trusted_user
+        org_candidate = trusted_org
+        derived_namespace = trusted_namespace
+        if mismatch_fields:
+            return _finalise_report(
+                {
+                    "namespace": None,
+                    "namespace_source": "conflict",
+                    "namespace_resolution_note": "namespace_mismatch",
+                    "namespace_mismatch": True,
+                    "mismatch_fields": mismatch_fields,
+                    "provided_namespace": explicit_namespace,
+                    "derived_namespace": trusted_namespace,
+                }
+            )
+        return _finalise_report(
+            {
+                "namespace": trusted_namespace,
+                "namespace_source": "trusted_actor_context",
+                "namespace_resolution_note": "derived_from_trusted_actor",
+                "namespace_mismatch": False,
+                "provided_namespace": explicit_namespace,
+                "derived_namespace": trusted_namespace,
+            }
+        )
 
     if (
         explicit_namespace
@@ -9741,19 +9817,19 @@ def _derive_turn_execution_failure_recommendations(
 
     if mutation_not_executed > 0:
         recommendations.append(
-            "Increase selector pressure for mutation-intent turns so they route through #V#conversation_turn_execution_workflow and execute write-capable tools."
+            "Inspect the sampled turns to distinguish missing authority, unavailable capability, model abandonment, or failed execution, while preserving bounded strategies that remain available."
         )
     if failed_or_blocked > 0:
         recommendations.append(
-            "Capture and surface write-tool failure causes (blocked/permissions/tool errors) and attach deterministic recovery steps."
+            "Surface the specific failure evidence and the bounded recovery or retry options that remain available."
         )
     if verification_issues > 0:
         recommendations.append(
-            "Strengthen postcondition checks to require state re-query verification before completion is allowed."
+            "Inspect canonical read-back for consequential effects and report uncertainty honestly when evidence is inconclusive."
         )
     if false_completion > 0:
         recommendations.append(
-            "Tighten completion-gate invariants so completed decisions are impossible while unresolved effects or unverified checks remain."
+            "Compare the reply with recorded effects and evidence, and make the terminal state reflect the observed outcome."
         )
     if not recommendations:
         recommendations.append(
@@ -12204,8 +12280,6 @@ def _combine_dashboard_recommendations(
 
 
 def _turn_execution_build_benchmark(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
-        return denial
     from ...db.connection_manager import get_db
     from ...services.turn_execution_record_service import (
         TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
@@ -12863,8 +12937,14 @@ def _benchmark_suite_source_system(
 
 
 def _turn_execution_build_selector_benchmark(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn benchmark"):
-        return denial
+    if (
+        kwargs.get("bundle_path") is not None
+        and not _internal_mcp_global_workflow_admin_authorised()
+    ):
+        return make_error_response(
+            "host_path_authority_required",
+            "Selecting a host-local selector benchmark bundle requires trusted operator authority.",
+        )
     from ...services.workflow_selector_benchmark_service import (
         build_selector_routing_benchmark_report,
     )
@@ -12914,8 +12994,14 @@ def _turn_execution_build_selector_benchmark(**kwargs):
 
 
 def _turn_execution_build_context_answering_benchmark(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn benchmark"):
-        return denial
+    if (
+        kwargs.get("bundle_path") is not None
+        and not _internal_mcp_global_workflow_admin_authorised()
+    ):
+        return make_error_response(
+            "host_path_authority_required",
+            "Selecting a host-local context benchmark bundle requires trusted operator authority.",
+        )
     from ...services.context_grounded_answering_benchmark_service import (
         build_context_grounded_answering_benchmark_report,
     )
@@ -13556,7 +13642,7 @@ def _turn_execution_namespace_coverage_report(**kwargs):
 
 
 def _chat_history_get_segments(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("chat history"):
         return denial
     from ...services import chat_history_service
 
@@ -13621,7 +13707,7 @@ def _chat_history_get_segments(**kwargs):
 
 
 def _chat_history_get_debug_entry(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("chat history"):
         return denial
     from ...services import chat_history_service
 
@@ -13704,7 +13790,7 @@ def _chat_history_get_debug_entry(**kwargs):
 
 
 def _conversation_telemetry_get_locator(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("conversation telemetry"):
         return denial
     from ...services.conversation_telemetry_locator_service import (
         build_conversation_llm_telemetry_locator,
@@ -13802,7 +13888,7 @@ def _turn_execution_get_live_progress(**kwargs):
 
 
 def _turn_execution_list(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("turn telemetry"):
         return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
@@ -13810,7 +13896,7 @@ def _turn_execution_list(**kwargs):
 
 
 def _turn_execution_get(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("turn telemetry"):
         return denial
     request_id = kwargs.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
@@ -13884,12 +13970,20 @@ def _turn_execution_get_diagnostics(**kwargs):
 
 
 def _failure_case_intake_collect(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "failure-case learning evidence"
+    ):
+        return denial
     from ...services.failure_case_intake_service import collect_failure_case_intake
 
     return collect_failure_case_intake(**kwargs)
 
 
 def _failure_case_reference_resolve(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "failure-case learning evidence"
+    ):
+        return denial
     from ...services.failure_case_intake_service import resolve_failure_case_reference
 
     return resolve_failure_case_reference(**kwargs)
@@ -13911,9 +14005,7 @@ def _turn_execution_get_critic_bundle(**kwargs):
 
 
 def _experiment_run_list(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial(
-        "experiment control plane"
-    ):
+    if denial := _internal_mcp_actor_scoped_read_denial("experiment telemetry"):
         return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "experiment_runs"
@@ -13921,9 +14013,7 @@ def _experiment_run_list(**kwargs):
 
 
 def _experiment_run_get(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial(
-        "experiment control plane"
-    ):
+    if denial := _internal_mcp_actor_scoped_read_denial("experiment telemetry"):
         return denial
     run_id = kwargs.get("run_id")
     session_id = kwargs.get("session_id")
@@ -13942,12 +14032,16 @@ def _experiment_run_get(**kwargs):
 
 
 def _episode_critique_memory_list(**kwargs):
+    if denial := _internal_mcp_actor_scoped_read_denial("episode critique memory"):
+        return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "episode_critique_memories"
     return _rag_list_indexed(**forwarded)
 
 
 def _episode_critique_memory_get(**kwargs):
+    if denial := _internal_mcp_actor_scoped_read_denial("episode critique memory"):
+        return denial
     memory_id = kwargs.get("memory_id")
     session_id = kwargs.get("session_id")
     target = memory_id if memory_id is not None else session_id
@@ -14084,6 +14178,14 @@ def _context_bundle_build_reconstructed_workspace(**kwargs):
 
 
 def _context_bundle_build_benchmark(**kwargs):
+    if (
+        kwargs.get("bundle_path") is not None
+        and not _internal_mcp_global_workflow_admin_authorised()
+    ):
+        return make_error_response(
+            "host_path_authority_required",
+            "Selecting a host-local context-bundle benchmark requires trusted operator authority.",
+        )
     from ...services.context_bundle_benchmark_service import (
         build_context_bundle_benchmark_report,
     )
@@ -14146,7 +14248,9 @@ def _testing_theory_assert_local_claims(**kwargs):
 
 
 def _testing_theory_compute_diff(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "testing control plane"
+    ):
         return denial
     from ...services.testing_theory_service import compute_testing_theory_diff
 
@@ -14483,7 +14587,7 @@ def _testing_cleanup_arxiv_paper_ingestion_artifacts(**kwargs):
 
 
 def _turn_execution_search_failures(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("turn telemetry"):
         return denial
     from ...services.turn_execution_record_service import (
         build_turn_execution_correctness_summary,
@@ -16083,6 +16187,10 @@ def _workflow_concept_parity_audit(**kwargs):
 
 
 def _coding_agent_mcp_access_profile(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "coding-agent runtime configuration"
+    ):
+        return denial
     from ...services.coding_agent_mcp_access_profile_service import (
         build_coding_agent_mcp_access_profile,
     )
@@ -16591,6 +16699,47 @@ def _internal_mcp_operator_control_plane_denial(
     return make_error_response(
         "workflow_global_admin_authority_required",
         f"{surface.strip().capitalize()} access requires trusted operator authority.",
+    )
+
+
+def _internal_mcp_actor_scoped_read_denial(
+    surface: str,
+) -> dict[str, Any] | None:
+    """Require real actor provenance for reads whose storage is actor-scoped.
+
+    An authenticated request/workflow actor and the deliberately configured
+    local-operator MCP route are both sufficient. Raw tool arguments are not
+    identity authority, so a payload-only caller cannot select another actor's
+    namespace merely by naming it.
+    """
+
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from .gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+    )
+
+    source = get_internal_mcp_actor_context_source()
+    if get_internal_mcp_preexisting_actor_context() is not None:
+        return None
+    if source == "trusted_operator_payload_fallback":
+        return None
+    if source is None and not bool(
+        get_effective_user_concept_id()
+        or get_effective_organisation_concept_id()
+    ):
+        # Preserve explicit in-process operator/startup calls. Gateway and
+        # proxy callers always bind a source and cannot reach this branch.
+        return None
+    return make_error_response(
+        "authenticated_actor_context_required",
+        (
+            f"{surface.strip().capitalize()} access requires an authenticated "
+            "actor or trusted operator route."
+        ),
     )
 
 
@@ -19243,6 +19392,8 @@ def _rag_get_status(**kwargs):
 def _mongo_query_diagnostics_report(**kwargs):
     """Build a bounded, redacted Mongo query-targeting diagnostics report."""
 
+    if denial := _internal_mcp_operator_control_plane_denial("Mongo diagnostics"):
+        return denial
     from ...services.mongo_query_diagnostics_service import (
         build_von_mongo_query_diagnostics_report,
     )
@@ -19275,6 +19426,8 @@ def _mongo_query_diagnostics_report(**kwargs):
 def _mongo_cost_guardrails_report(**kwargs):
     """Build a compact, redacted Mongo cost guardrail report."""
 
+    if denial := _internal_mcp_operator_control_plane_denial("Mongo diagnostics"):
+        return denial
     from ...db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri
     from ...db.mongo_uri_redaction import (
         classify_mongo_connection_location,
@@ -23017,7 +23170,7 @@ def _github_execute_write_tool(
 def _github_get_auth_config(**kwargs):
     import os
     import shlex
-    from ...utils.runtime_env import apply_repo_dotenv_overrides
+    from ...utils.runtime_env import read_repo_dotenv_values
     from .github_proxy_mcp import (
         GitHubProxyError,
         GITHUB_PROXY_ENV_OVERRIDE_KEYS,
@@ -23025,12 +23178,13 @@ def _github_get_auth_config(**kwargs):
         resolve_github_token,
     )
 
-    applied_overrides = apply_repo_dotenv_overrides(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
+    dotenv_values = read_repo_dotenv_values(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
     env = os.environ.copy()
+    env.update(dotenv_values)
     token_key, token = resolve_github_token(env)
 
-    command = str(os.getenv("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
-    raw_args = os.getenv("VON_GITHUB_MCP_ARGS")
+    command = str(env.get("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
+    raw_args = env.get("VON_GITHUB_MCP_ARGS")
     if isinstance(raw_args, str) and raw_args.strip():
         args = shlex.split(raw_args.strip())
     else:
@@ -23044,14 +23198,15 @@ def _github_get_auth_config(**kwargs):
             "token": token_key,
             "command": (
                 "VON_GITHUB_MCP_COMMAND"
-                if os.getenv("VON_GITHUB_MCP_COMMAND")
+                if env.get("VON_GITHUB_MCP_COMMAND")
                 else None
             ),
-            "args": "VON_GITHUB_MCP_ARGS" if os.getenv("VON_GITHUB_MCP_ARGS") else None,
+            "args": "VON_GITHUB_MCP_ARGS" if env.get("VON_GITHUB_MCP_ARGS") else None,
             "allow_list": "VON_GITHUB_REPO_ALLOW_LIST",
             "execute_mode": "VON_INTERNAL_MCP_GITHUB_EXECUTE_MODE",
         },
-        "dotenv_overrides_applied": sorted(applied_overrides.keys()),
+        "dotenv_overrides_applied": sorted(dotenv_values.keys()),
+        "process_environment_mutated": False,
         "allow_repositories": _github_repo_allow_list(),
         "execute_mode_enabled": _github_execute_mode_enabled(),
         "command": command,
@@ -25676,36 +25831,12 @@ def _chat_get_prompt_context(
     behaviour_prompt_concepts = _format_fragments(behaviour_fragments)
     narration_prompt_concepts = _format_fragments(narration_fragments)
 
-    orchestrator_cls = _get_internal_mcp_chat_orchestrator_cls()
-    template_service = PromptTemplateService()
-    classifier_prompt_id, classifier_prompt_text = template_service.resolve_prompt_text(
-        orchestrator_cls._MISSING_TOOL_CLASSIFIER_PROMPTS,
-        fallback=None,
-        max_chars=max_chars_int,
-    )
-    retry_prompt_id, retry_prompt_text = template_service.resolve_prompt_text(
-        orchestrator_cls._MISSING_TOOL_RETRY_PROMPTS,
-        fallback=None,
-        max_chars=max_chars_int,
-    )
-    classifier_preview = (
-        classifier_prompt_text[:max_chars_int] if classifier_prompt_text else ""
-    )
-    retry_preview = retry_prompt_text[:max_chars_int] if retry_prompt_text else ""
     narration_preview = ""
     if narration_fragments and isinstance(narration_fragments[0], dict):
         content = narration_fragments[0].get("content")
         if isinstance(content, str):
             narration_preview = content[:max_chars_int]
     resolved_templates = {
-        "missing_tool_call_classifier": {
-            "prompt_id": classifier_prompt_id,
-            "preview": classifier_preview,
-        },
-        "missing_tool_call_retry": {
-            "prompt_id": retry_prompt_id,
-            "preview": retry_preview,
-        },
         "behaviour_prompt": {"prompt_id": None, "preview": prompt_text or ""},
         "narration_prompt": {
             "prompt_id": (
@@ -25890,7 +26021,6 @@ def _chat_introspect(
 
     # User-specific prompt fragments (JVNAUTOSCI-797)
     from src.backend.services.chat_auxiliary_prompt_service import (
-        build_user_specific_system_prompt,
         get_user_specific_prompt_fragments,
     )
 
@@ -25917,18 +26047,6 @@ def _chat_introspect(
         for f in narration_fragments
         if isinstance(f.get("concept_id"), str)
     ]
-
-    auxiliary_prompt_text = (
-        build_user_specific_system_prompt(
-            namespace,
-            prompt_types=(
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            ),
-        )
-        or ""
-    )
 
     prompt_concepts: list[dict] = []
     for fragment in behaviour_fragments:
@@ -26008,6 +26126,7 @@ def _chat_introspect(
     )
 
     gateway_enabled = None
+    legacy_orchestrator_status = "retired"
     orchestrator_max_tool_invocations = None
     orchestrator_tool_batch_cap = None
     orchestrator_missing_tool_call_retry_cap = None
@@ -26016,29 +26135,18 @@ def _chat_introspect(
             from flask import current_app
 
             gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-            orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
             gateway_enabled = getattr(gateway, "enabled", None)
-            orchestrator_max_tool_invocations = getattr(
-                orchestrator, "_max_tool_invocations", None
+            startup_status = current_app.config.get(
+                "INTERNAL_MCP_ORCHESTRATOR_STATUS"
             )
-            orchestrator_tool_batch_cap = getattr(orchestrator, "_tool_batch_cap", None)
-            orchestrator_missing_tool_call_retry_cap = getattr(
-                orchestrator,
-                "_max_missing_tool_call_retries_per_turn",
-                None,
-            )
+            if isinstance(startup_status, dict):
+                legacy_orchestrator_status = str(
+                    startup_status.get("state") or legacy_orchestrator_status
+                )
         except Exception:
             gateway_enabled = None
-            orchestrator_max_tool_invocations = None
-            orchestrator_tool_batch_cap = None
-            orchestrator_missing_tool_call_retry_cap = None
 
-    workflow_selector_enabled = True
     workflow_trace_enabled = _env_flag("VON_WORKFLOWS_TRACE_ENABLED", default="0")
-    critic_enabled = _env_flag("VON_CRITIC_ENABLE", default="0")
-    deterministic_introspection_enabled = _env_flag(
-        "VON_DETERMINISTIC_INTROSPECTION", default="0"
-    )
     workflow_model_policy_enabled = _env_flag(
         "VON_WORKFLOW_MODEL_POLICY_ENABLE", default="0"
     )
@@ -26082,27 +26190,24 @@ def _chat_introspect(
         if existing != workflow_id:
             event_workflow_bindings[event_type] = [existing, workflow_id]
 
-    if gateway_enabled is False:
-        inferred_runtime_mode = "llm_only"
-    elif (
-        isinstance(orchestrator_max_tool_invocations, int)
-        and orchestrator_max_tool_invocations <= 0
-    ):
-        inferred_runtime_mode = "llm_only"
-    else:
-        inferred_runtime_mode = "workflow_routed_tool_calling"
+    inferred_runtime_mode = (
+        "direct_adaptive_model_only"
+        if gateway_enabled is False
+        else "direct_adaptive_read"
+    )
 
     workflow_mode = {
         "runtime_mode": inferred_runtime_mode,
-        "workflow_selector_enabled": workflow_selector_enabled,
-        "deterministic_introspection_enabled": deterministic_introspection_enabled,
-        "workflow_trace_enabled": workflow_trace_enabled,
-        "critic_enabled": critic_enabled,
-        "workflow_model_policy_enabled": workflow_model_policy_enabled,
-        "write_tools_enabled": write_tools_enabled,
-        "durable_workflows_enabled": durable_workflows_enabled,
+        "ordinary_turn_path": "direct_adaptive_turn",
+        "ordinary_turn_capability_mode": "read_only",
+        "automatic_workflow_selector_enabled": False,
+        "legacy_orchestrator_status": legacy_orchestrator_status,
+        "explicit_workflow_trace_enabled": workflow_trace_enabled,
+        "explicit_workflow_model_policy_enabled": workflow_model_policy_enabled,
+        "explicit_effect_tools_enabled": write_tools_enabled,
+        "explicit_workflows_enabled": durable_workflows_enabled,
         "event_workflow_integration_enabled": event_workflow_integration_enabled,
-        "jira_execute_mode_enabled": jira_execute_mode_enabled,
+        "explicit_jira_execute_mode_enabled": jira_execute_mode_enabled,
     }
 
     try:
@@ -26117,50 +26222,22 @@ def _chat_introspect(
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    # Tool-guidance fingerprint (stable-ish) without dumping full text by default
-    tool_guidance_text = ""
-    tool_guidance_hash = None
+    # Fingerprint the ordinary-turn capability surface without reactivating the
+    # retired controller merely to ask it how it would have controlled a turn.
+    tool_guidance_text = (
+        "Ordinary chat turns use the direct adaptive turn path. The model may "
+        "inspect delegated read capabilities with turn_read_capabilities, invoke "
+        "an authorised read with turn_invoke_read_capability, and hydrate bounded "
+        "evidence by provenance handle with turn_read_evidence. There is no "
+        "automatic workflow selector or general controller on this path. Explicit "
+        "workflows remain separately callable through their registered interfaces."
+    )
+    tool_guidance_hash = hashlib.sha256(
+        tool_guidance_text.encode("utf-8")
+    ).hexdigest()
     tool_guidance_preview = None
-
-    try:
-        # Prefer the live orchestrator (includes the real tool listing) when available.
-        orchestrator_cls = _get_internal_mcp_chat_orchestrator_cls()
-        live_orchestrator = None
-        try:
-            from flask import current_app
-
-            live_orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
-        except Exception:
-            live_orchestrator = None
-
-        if live_orchestrator is not None and hasattr(
-            live_orchestrator, "_instruction_message"
-        ):
-            tool_guidance_text = live_orchestrator._instruction_message(  # type: ignore[attr-defined]
-                user_namespace=namespace,
-                auxiliary_system_prompt=auxiliary_prompt_text,
-                preferred_language=None,
-            )
-        else:
-
-            class _StubGateway:
-                def describe_methods(self):
-                    return {}
-
-            dummy_orchestrator = orchestrator_cls(gateway=_StubGateway())  # type: ignore[arg-type]
-            tool_guidance_text = dummy_orchestrator._instruction_message(
-                user_namespace=namespace,
-                auxiliary_system_prompt=auxiliary_prompt_text,
-                preferred_language=None,
-            )
-
-        tool_guidance_hash = hashlib.sha256(
-            tool_guidance_text.encode("utf-8")
-        ).hexdigest()
-        if include_tool_guidance_preview and max_preview_chars_int:
-            tool_guidance_preview = tool_guidance_text[:max_preview_chars_int]
-    except Exception:
-        tool_guidance_hash = None
+    if include_tool_guidance_preview and max_preview_chars_int:
+        tool_guidance_preview = tool_guidance_text[:max_preview_chars_int]
 
     # Keep these keys aligned with the MethodDefinition output_schema for
     # chat_introspect: InternalMCPGateway validates success payloads end-to-end.
@@ -28106,19 +28183,31 @@ def _resolve_shared_conversation_actor_context(
         resolve_event_actor_context,
     )
 
-    namespace = _clean_optional_string(payload.get("namespace"))
-    requested_user = _normalise_optional_concept_id(
-        payload.get("user_concept_id")
-        or payload.get("acting_user_concept_id")
-        or payload.get("actor_user_id")
-        or payload.get("on_behalf_of_user_concept_id")
-    )
-    requested_org = _normalise_optional_concept_id(
-        payload.get("organisation_concept_id") or payload.get("org_id")
-    )
-    actor_concept_id = _normalise_optional_concept_id(
-        payload.get("actor_concept_id") or payload.get("agent_concept_id")
-    )
+    from .gateway import get_internal_mcp_preexisting_actor_context
+
+    preexisting_actor = get_internal_mcp_preexisting_actor_context()
+    if preexisting_actor is not None:
+        # These fields denote the acting principal for this capability, rather
+        # than a target or filter. The gateway's pre-existing actor context
+        # therefore outranks all payload spellings as one indivisible scope.
+        requested_user = _normalise_optional_concept_id(preexisting_actor[0])
+        requested_org = _normalise_optional_concept_id(preexisting_actor[1])
+        namespace = _derive_namespace_for_actor(requested_user, requested_org)
+        actor_concept_id = None
+    else:
+        namespace = _clean_optional_string(payload.get("namespace"))
+        requested_user = _normalise_optional_concept_id(
+            payload.get("user_concept_id")
+            or payload.get("acting_user_concept_id")
+            or payload.get("actor_user_id")
+            or payload.get("on_behalf_of_user_concept_id")
+        )
+        requested_org = _normalise_optional_concept_id(
+            payload.get("organisation_concept_id") or payload.get("org_id")
+        )
+        actor_concept_id = _normalise_optional_concept_id(
+            payload.get("actor_concept_id") or payload.get("agent_concept_id")
+        )
     # Keep shared-conversation read paths side-effect free: bootstrap writes are
     # only allowed when the caller explicitly opts in on write-category paths.
     if allow_actor_bootstrap_writes:
@@ -30245,6 +30334,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="get_context output: context info including user, org, llm_model (string), llm_provider, language. User/org managed client-side per JVNAUTOSCI-628.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="server_runtime_context",
             description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
         ),
         MethodDefinition(
@@ -30313,6 +30403,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="User-specific chat prompt context for debugging and transparency.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="cross_namespace_prompt_configuration",
             description=(
                 "Report which Vontology chat behaviour prompt concepts (including legacy "
                 "`#V#von_llm_prompt`, linked via `#V#specific_to_von_user`) apply to the authenticated "
@@ -30377,6 +30468,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="Chat context introspection snapshot (safe, no secrets).",
             ),
             category="read",
+            ordinary_turn_excluded_reason="server_runtime_context",
             description=(
                 "Introspect chat context influences for a user: model configuration, Vontology prompt concepts, "
                 "and tool-guidance fingerprint. Useful for debugging and transparency."
@@ -30412,6 +30504,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 ),
             ),
             category="read",
+            ordinary_turn_excluded_reason="host_local_configuration",
             description=(
                 "Report the effective coding-agent Vontology MCP access profile, including "
                 "dev/test/prod-like authority state, write defaults, and safety boundaries."
@@ -30439,6 +30532,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="Public settings snapshot (no secrets).",
             ),
             category="read",
+            ordinary_turn_excluded_reason="cross_namespace_model_configuration",
             description=(
                 "Return a safe subset of settings (no secrets), including the active LLM and resolved LLM when "
                 "user/org IDs are provided."
@@ -30531,6 +30625,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_predicate_extent_input_schema(),
             output_schema=_predicate_extent_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="cross_namespace_raw_relation_extent",
             description=(
                 "Return the extent (all uses) of a predicate concept. Supports filtering by subject/object type, "
                 "source (text_relations|structured|all), pagination, and optional sampling (sample_size). "
@@ -31016,6 +31111,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_search_arxiv_input_schema(),
             output_schema=_search_arxiv_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=30.0,
             description="Search arXiv.org for scholarly articles. Use when user asks to find papers by author, keyword, topic, or date range. Returns list of papers with id, title, authors, summary, and publication date. Supports boolean operators in query (AND, OR, NOT). Example: 'causal reasoning AND neural networks'. Results can be sorted by relevance, submission date, or last updated date.",
         ),
@@ -31025,6 +31121,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_get_paper_metadata_input_schema(),
             output_schema=_get_paper_metadata_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=20.0,
             description="Get detailed metadata for a single arXiv paper (title, authors, abstract, categories, DOI, pdf_url). Use when a user needs paper details without downloading the PDF.",
         ),
@@ -31060,12 +31157,12 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             handler=_build_paper_recommendations,
             input_schema=_build_paper_recommendations_input_schema(),
             output_schema=_build_paper_recommendations_output_schema(),
-            category="read",
+            category="write",
             timeout_sec=30.0,
             description=(
-                "Rank represented scholarly-paper candidates against a represented user "
-                "paper recommendation profile and return grounded rationale/provenance. "
-                "This is the workflow-first ranking core, independent of later delivery surfaces."
+                "Rank represented scholarly-paper candidates against a represented "
+                "user paper recommendation profile, materialise the resulting "
+                "recommendation assertions, and return grounded rationale/provenance."
             ),
         ),
         MethodDefinition(
@@ -31113,6 +31210,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_skill_catalogue_list_input_schema(),
             output_schema=_skill_catalogue_list_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_configuration",
             timeout_sec=20.0,
             description=(
                 "Discover external SKILL artefacts across configured roots and return "
@@ -31139,6 +31237,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_list_papers_input_schema(),
             output_schema=_list_papers_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_process_cache",
             timeout_sec=15.0,
             description="List arXiv papers available in the local cache directory used by the external arXiv toolchain. This may not reflect all documents stored in the blob store. Use when user asks 'what papers do I have?' or similar.",
         ),
@@ -31223,6 +31322,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_list_recent_screenshots_input_schema(),
             output_schema=_list_recent_screenshots_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "List recent screenshot files from local machine folders and optionally "
@@ -31237,6 +31337,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_list_exports_input_schema(),
             output_schema=_linkedin_list_exports_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=20.0,
             description=(
                 "List available LinkedIn data exports from the configured local data root. "
@@ -31249,6 +31350,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_list_files_input_schema(),
             output_schema=_linkedin_list_files_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=20.0,
             description=(
                 "List files within one LinkedIn export. "
@@ -31261,6 +31363,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_profile_input_schema(),
             output_schema=_linkedin_get_profile_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=20.0,
             description=(
                 "Get profile information from Profile.csv for a selected LinkedIn export."
@@ -31272,6 +31375,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_csv_data_input_schema(),
             output_schema=_linkedin_get_csv_data_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "Read sampled rows from any CSV file in a LinkedIn export "
@@ -31284,6 +31388,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_company_stats_input_schema(),
             output_schema=_linkedin_get_company_stats_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "Get top company counts from Connections.csv for a LinkedIn export."
@@ -31295,6 +31400,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_messages_input_schema(),
             output_schema=_linkedin_get_messages_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "Retrieve message rows from a LinkedIn export (optionally filtered by query text)."
@@ -31307,8 +31413,17 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_search_web_input_schema(),
             output_schema=_search_web_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=15.0,
-            description="⚠️ USE FOR RECENT/CURRENT INFORMATION ⚠️ Search the web for information published after your training cutoff. REQUIRED when user asks for: recent, latest, current, new, breaking, today's, this week's, 2024+, 2025+, 'what's new', 'recent advances', 'latest research', 'current developments'. Returns web pages with titles, URLs, content snippets, and relevance scores. Supports advanced search (search_depth='advanced'), domain filtering (include_domains/exclude_domains), AI-generated answers (include_answer=true), full page content (include_raw_content=true), and images (include_images=true).",
+            description=(
+                "Search the web for current or otherwise externally grounded "
+                "information. Returns pages with titles, URLs, content snippets, "
+                "and relevance scores. Supports advanced search, domain filters, "
+                "an optional provider-generated answer, raw page content, and "
+                "image URLs. This is one available evidence source; choose it "
+                "when it helps the request rather than treating recency wording "
+                "as a compulsory route."
+            ),
         ),
         MethodDefinition(
             name="context_search",
@@ -31334,6 +31449,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_extract_url_input_schema(),
             output_schema=_extract_url_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=15.0,
             description="Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
         ),
@@ -31343,6 +31459,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_resilient_extract_url_input_schema(),
             output_schema=_resilient_extract_url_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=30.0,
             description=(
                 "Extract main text from a URL with deterministic fallbacks. First tries direct extraction; if the page is empty/blocked "
@@ -31356,12 +31473,14 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_search_proxy_diagnostics_input_schema(),
             output_schema=_search_proxy_diagnostics_output_schema(),
             category="read",
+            ordinary_turn_fixed_arguments={
+                "include_health_check": False,
+                "safe_summary_only": True,
+            },
             timeout_sec=30.0,
             description=(
-                "Get diagnostics and health status for the Tavily search proxy. Returns stats (call count, error rate, "
-                "average latency), recent call telemetry with timing and error details, and configuration. "
-                "Set include_health_check=true to run a live connectivity test. "
-                "Use this to debug search/extraction failures or verify Tavily API connectivity."
+                "Get aggregate Tavily search-proxy diagnostics: call count, error "
+                "rate, average latency, and whether an API key is configured."
             ),
         ),
         # Gmail MCP tools (profile-scoped read/write surface)
@@ -31371,6 +31490,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_list_profiles_input_schema,
             output_schema=gmail_list_profiles_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=10.0,
             description=(
                 "List the Gmail profiles configured for this deployment, with "
@@ -31389,6 +31509,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_get_auth_config_input_schema,
             output_schema=gmail_get_auth_config_output_schema,
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile_id": "gmail_profile",
+            },
             timeout_sec=10.0,
             description=(
                 "Return the OAuth scope and token status for a configured Gmail "
@@ -31426,6 +31549,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_list_messages_input_schema,
             output_schema=_gmail_list_messages_output_schema(),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=20.0,
             description=(
                 "List Gmail messages for a profile with optional query and label "
@@ -31454,6 +31580,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_get_message_input_schema,
             output_schema=_gmail_get_message_output_schema(),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=20.0,
             description=(
                 "Fetch a Gmail message for a profile using message_id from "
@@ -31497,6 +31626,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 description="Gmail API attachment response",
             ),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=20.0,
             description="Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
         ),
@@ -31511,6 +31643,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 description="Gmail API labels response",
             ),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=15.0,
             description="List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
         ),
@@ -31674,6 +31809,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_auth_config_input_schema(),
             output_schema=github_get_auth_config_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=12.0,
             description=(
                 "Inspect GitHub MCP auth/config state (token presence, allow-list, execute mode, command args) "
@@ -31686,6 +31822,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_tools_input_schema(),
             output_schema=github_list_tools_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_connector",
             timeout_sec=20.0,
             description="List tools exposed by the configured external GitHub MCP server.",
         ),
@@ -31695,6 +31832,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_me_input_schema(),
             output_schema=github_get_me_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="Get details of the authenticated GitHub user.",
         ),
@@ -31704,6 +31842,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_file_contents_input_schema(),
             output_schema=github_get_file_contents_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Get the contents of a file or directory from a GitHub repository.",
         ),
@@ -31713,6 +31852,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_commits_input_schema(),
             output_schema=github_list_commits_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="List commits for a branch, tag, or repository default branch.",
         ),
@@ -31722,6 +31862,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_search_code_input_schema(),
             output_schema=github_search_code_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Search code across GitHub repositories using GitHub search syntax.",
         ),
@@ -31731,6 +31872,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_pull_requests_input_schema(),
             output_schema=github_list_pull_requests_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="List pull requests for a GitHub repository.",
         ),
@@ -31740,6 +31882,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_pull_request_read_input_schema(),
             output_schema=github_pull_request_read_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Read pull request details/files/reviews/status for a repository pull request.",
         ),
@@ -31749,6 +31892,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_issue_read_input_schema(),
             output_schema=github_issue_read_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Read issue details/comments/labels for a repository issue.",
         ),
@@ -31758,6 +31902,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_releases_input_schema(),
             output_schema=github_list_releases_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="List releases in a GitHub repository.",
         ),
@@ -31767,6 +31912,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_latest_release_input_schema(),
             output_schema=github_get_latest_release_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="Get the latest release in a GitHub repository.",
         ),
@@ -31776,6 +31922,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_tags_input_schema(),
             output_schema=github_list_tags_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="List tags in a GitHub repository.",
         ),
@@ -31785,6 +31932,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_branches_input_schema(),
             output_schema=github_list_branches_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="List branches in a GitHub repository.",
         ),
@@ -31853,6 +32001,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_search_input_schema(),
             output_schema=jira_search_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields. Requires valid ATLASSIAN_BASE_URL, ATLASSIAN_EMAIL, and ATLASSIAN_API_TOKEN in the environment. Returns the Jira search response including issues array.",
         ),
@@ -31862,6 +32011,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_issue_input_schema(),
             output_schema=jira_get_issue_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). "
@@ -31875,6 +32025,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_project_issue_types_input_schema(),
             output_schema=jira_get_project_issue_types_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "Inspect a Jira project's style and available issue types. Use to "
@@ -31888,6 +32039,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_bulk_operation_progress_input_schema(),
             output_schema=jira_get_bulk_operation_progress_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "Read the progress state of a previously submitted Jira bulk operation. "
@@ -31900,6 +32052,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_transitions_input_schema(),
             output_schema=jira_get_transitions_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "List available Jira workflow transitions/status changes for an "
@@ -32012,6 +32165,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_myself_input_schema(),
             output_schema=jira_get_myself_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=10.0,
             description=(
                 "Return the Jira user profile for the currently configured Atlassian credentials. "
@@ -32024,6 +32178,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_auth_config_input_schema(),
             output_schema=jira_get_auth_config_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             description=(
                 "Inspect Jira auth configuration (base URL, email, whether a token is present) from environment variables. "
                 "Does not contact Jira and never returns the token. Use when Jira calls return 401 and you need to confirm which account is configured."
@@ -32035,6 +32190,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_hygiene_discover_input_schema(),
             output_schema=jira_hygiene_discover_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=25.0,
             description=(
                 "Discover Jira hygiene candidates for a project: epic catalogue, true orphans, "
@@ -32111,6 +32267,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status.",
         ),
         MethodDefinition(
@@ -32147,6 +32304,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             timeout_sec=30.0,
             description=(
                 "Run read-only Mongo query-targeting diagnostics for trusted operator "
@@ -32173,6 +32331,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             timeout_sec=10.0,
             description=(
                 "Summarise recent Mongo operation volume, slow calls, large write "
@@ -32339,6 +32498,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Fetch a bounded live progress snapshot for an active turn so thinking "
                 "telemetry can be dereferenced through MCP without oversized stdio "
@@ -32496,6 +32656,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="host_local_repository",
             description=(
                 "Inspect one tracked repo file safely with bounded content, tracked blob receipt, and secret-aware sanitisation."
             ),
@@ -32518,6 +32679,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="host_local_repository",
             description=(
                 "Search tracked repo files with bounded match output and receipts suitable for critic-grounded diagnosis."
             ),
@@ -32577,6 +32739,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="host_local_repository",
             description=(
                 "Inspect bounded git metadata for critic or maintenance workflows without exposing unrestricted shell access."
             ),
@@ -32727,6 +32890,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_fixed_arguments={"bundle_path": None},
             description=(
                 "Generate the ablation/retained-case evaluation report for context bundles, dossiers, and report revision."
             ),
@@ -32794,6 +32958,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description="Compare theory-local assertions against canonical state and identify promotion-ready entries.",
         ),
         MethodDefinition(
@@ -33129,6 +33294,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Fetch the full persisted turn diagnostics payload by request_id, including progress history, "
                 "activity history, workflow routing diagnostics, stage diagnostics, timing breakdown, "
@@ -33173,6 +33339,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Collect compact prompt, model, workflow, tool-ledger, critic, "
                 "completion-gate, user-visible-response, and response-surface "
@@ -33212,6 +33379,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Resolve a same-conversation failure reference to the concrete "
                 "prior request_id so represented workflows can start failure-case "
@@ -33236,6 +33404,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Return a bounded critic-ready evidence bundle with receipts over turn execution, "
                 "chat-history debug context, tool ledger, workflow runtime state, and trace artefacts."
@@ -33325,6 +33494,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_fixed_arguments={"bundle_path": None},
             description=(
                 "Evaluate workflow selector routing against a reviewable benchmark corpus while emitting the shared execution-correctness outcome labels."
             ),
@@ -33348,6 +33518,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_fixed_arguments={"bundle_path": None},
             description=(
                 "Evaluate context-grounded answering coverage across direct-response, tool-pipeline, continuation, and workflow-result answer paths."
             ),
@@ -33396,6 +33567,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Generate dashboards and regression views for selector accuracy, intent completion, false success, and pre-dispatch latency."
             ),
@@ -33429,10 +33601,11 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
                 ),
             ),
             output_schema=None,
-            category="read",
+            category="write",
             description=(
                 "Report bounded actor/critic benchmark metrics, recurrence and remediation proxies, "
-                "and sampled meta-audit cases with fresh evidence-bundle receipts."
+                "and sampled meta-audit cases with fresh evidence-bundle receipts. "
+                "When run_id is supplied, the benchmark observation is persisted."
             ),
         ),
         MethodDefinition(
@@ -33478,6 +33651,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Report namespace-by-namespace turn execution coverage, request-id overlap, "
                 "and gap signals so benchmark readiness can be validated."
@@ -34461,6 +34635,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Workflow MCP health-check result with per-tool diagnostics.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Run lightweight workflow/introspection MCP health checks through "
                 "InternalMCPGateway.invoke() and return actionable diagnostics."
@@ -34504,6 +34679,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 ),
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Explain whether missing workflow/testing concepts reflect a "
                 "fresh/test DB, skipped bootstrap, pending parity, partial "
@@ -34549,6 +34725,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 ),
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Audit multiple workflow/testing concepts at once and return parity "
                 "counts, per-concept states, and environment/bootstrap provenance."
@@ -34698,6 +34875,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="List of event->workflow bindings.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "List authoritative persisted event bindings from workflow storage."
             ),

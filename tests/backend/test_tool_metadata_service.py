@@ -84,6 +84,26 @@ def test_source_processing_marker_metadata_is_vontology_internal(monkeypatch):
         service.invalidate_cache()
 
 
+def test_state_materialising_reports_are_classified_as_writes(monkeypatch):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", lambda: {})
+    service.invalidate_cache()
+    try:
+        assert (
+            service.get_tool_operation_category("build_paper_recommendations")
+            == "write"
+        )
+        assert (
+            service.get_tool_operation_category(
+                "episode_critique_build_benchmark"
+            )
+            == "write"
+        )
+    finally:
+        service.invalidate_cache()
+
+
 def test_gmail_read_tools_share_external_surface_metadata(monkeypatch):
     from src.backend.services import tool_metadata_service as service
 

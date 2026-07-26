@@ -167,6 +167,7 @@ class _HandlerTask:
     lock: threading.Lock = field(default_factory=threading.Lock)
     started_at: float | None = None
     completed_at: float | None = None
+    completed_monotonic: float | None = None
     result: Any = None
     exception: BaseException | None = None
     terminal_returned: bool = False
@@ -190,6 +191,7 @@ class _HandlerTask:
             if self.cancellation_event.is_set():
                 self.cancelled_before_start = True
                 self.completed_at = time.perf_counter()
+                self.completed_monotonic = time.monotonic()
                 self.done_event.set()
                 return
             self.started_at = time.perf_counter()
@@ -203,10 +205,12 @@ class _HandlerTask:
             exception = None
 
         completed_at = time.perf_counter()
+        completed_monotonic = time.monotonic()
         with self.lock:
             self.result = result
             self.exception = exception
             self.completed_at = completed_at
+            self.completed_monotonic = completed_monotonic
             was_late = self.terminal_returned
             self.done_event.set()
 
@@ -452,6 +456,7 @@ class InternalMCPTransport:
         handler_elapsed_ms: float | None,
     ) -> Dict[str, Any]:
         is_write = str(category or "").strip().lower() == "write"
+        outcome_unknown = is_write and timeout_phase != "pre_dispatch"
         payload: Dict[str, Any] = {
             "success": False,
             "status": "timed_out",
@@ -460,10 +465,12 @@ class InternalMCPTransport:
                 f"{timeout_sec:.1f}s hard deadline."
             ),
             "error_code": (
-                "tool_timeout_outcome_unknown" if is_write else "tool_timeout"
+                "tool_timeout_outcome_unknown"
+                if outcome_unknown
+                else "tool_timeout"
             ),
             "error_type": "deadline_exceeded",
-            "retryable": not is_write,
+            "retryable": not outcome_unknown,
             "timeout_seconds": timeout_sec,
             "advisory_timeout_seconds": advisory_timeout_sec,
             "timeout_phase": timeout_phase,
@@ -475,7 +482,7 @@ class InternalMCPTransport:
             "outcome_finality": "terminal_for_turn",
             "late_result_policy": "discard_from_turn",
         }
-        if is_write:
+        if outcome_unknown:
             payload["mutation_outcome"] = "unknown"
             payload["recovery_affordances"] = [
                 {"action_type": "inspect_operation_state_before_retry"}
@@ -529,6 +536,7 @@ class InternalMCPTransport:
         timeout_sec: float | None,
         category: str = "read",
         advisory_timeout_sec: float | None = None,
+        deadline_monotonic: float | None = None,
         log_tag: str = "[mcp_gateway]",
     ) -> TransportResult:
         """Execute a handler within a bounded hard deadline.
@@ -536,9 +544,11 @@ class InternalMCPTransport:
         The returned result is immutable for the current turn.  If the handler
         ignores cooperative cancellation and completes late, only bounded
         aggregate diagnostics are updated; the late payload is never surfaced.
+        A caller may provide an absolute monotonic deadline to shorten, but
+        never extend, the method's configured hard timeout.
         """
 
-        hard_timeout_sec = float(
+        configured_hard_timeout_sec = float(
             timeout_sec
             if timeout_sec is not None and float(timeout_sec) > 0.0
             else (
@@ -547,25 +557,61 @@ class InternalMCPTransport:
                 else self._read_timeout_sec
             )
         )
+        submitted_at = time.perf_counter()
+        submitted_monotonic = time.monotonic()
+        hard_timeout_sec = configured_hard_timeout_sec
+        if deadline_monotonic is not None:
+            hard_timeout_sec = min(
+                configured_hard_timeout_sec,
+                max(0.0, float(deadline_monotonic) - submitted_monotonic),
+            )
         advisory_sec = float(
             advisory_timeout_sec
             if advisory_timeout_sec is not None and advisory_timeout_sec > 0.0
             else self.advisory_timeout_sec(
                 category,
-                hard_timeout_sec=hard_timeout_sec,
+                hard_timeout_sec=configured_hard_timeout_sec,
             )
         )
         advisory_sec = min(advisory_sec, hard_timeout_sec)
-        submitted_at = time.perf_counter()
         execution_id = f"mcp_{uuid.uuid4().hex}"
-        deadline_monotonic = submitted_at + hard_timeout_sec
+        handler_deadline_monotonic = submitted_monotonic + hard_timeout_sec
+
+        if hard_timeout_sec <= 0.0:
+            with self._diagnostics_lock:
+                self._timeout_count += 1
+            timeout_payload = self._timeout_payload(
+                method_name=method_name,
+                execution_id=execution_id,
+                category=category,
+                timeout_sec=hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                timeout_phase="pre_dispatch",
+                queue_duration_ms=0.0,
+                handler_elapsed_ms=None,
+            )
+            return TransportResult(
+                payload=timeout_payload,
+                duration_ms=max(0.0, (time.perf_counter() - submitted_at) * 1000.0),
+                execution_id=execution_id,
+                outcome="timed_out",
+                timeout_sec=hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                advisory_budget_exceeded=True,
+                queue_duration_ms=0.0,
+                handler_duration_ms=None,
+                handler_elapsed_ms=None,
+                transport_overhead_ms=0.0,
+                timeout_phase="pre_dispatch",
+            )
+
         task = _HandlerTask(
             execution_id=execution_id,
             method_name=method_name,
             context=copy_context(),
             handler=handler,
             payload=dict(payload),
-            deadline_monotonic=deadline_monotonic,
+            deadline_monotonic=handler_deadline_monotonic,
             submitted_at=submitted_at,
             on_late_completion=self._record_late_completion,
         )
@@ -605,16 +651,29 @@ class InternalMCPTransport:
 
         completed = task.done_event.wait(timeout=hard_timeout_sec)
         terminal_at = time.perf_counter()
+        record_already_completed_late = False
         with task.lock:
-            if completed or task.done_event.is_set():
+            completed_within_deadline = bool(
+                (completed or task.done_event.is_set())
+                and task.completed_monotonic is not None
+                and task.completed_monotonic <= handler_deadline_monotonic
+            )
+            if completed_within_deadline:
                 task_completed = True
             else:
                 task.terminal_returned = True
                 task.cancellation_event.set()
                 task_completed = False
+                record_already_completed_late = bool(
+                    task.done_event.is_set()
+                    and task.completed_monotonic is not None
+                    and task.completed_monotonic > handler_deadline_monotonic
+                )
             result = task.result
             exception = task.exception
             started_at = task.started_at
+        if record_already_completed_late:
+            self._record_late_completion(task)
 
         queue_ms, handler_ms, handler_elapsed_ms = self._timing_snapshot(
             task,

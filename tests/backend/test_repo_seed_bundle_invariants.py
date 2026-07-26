@@ -7,22 +7,21 @@ do not bootstrap, mutate, or otherwise treat the bundles as authoritative;
 Vontology remains the authority surface, and bundles only seed missing
 state at runtime.
 
-The point is to fail fast on edits that break documented invariants
-(missing ``seed_version``, dangling ``to_state`` references, regressions
-of the canonical conversation-turn workflow's completion-gate /
-recovery-decision wiring, or removal of the ``Thinking Card Mode``
-adaptation rules from the recovery prompt seed) before they reach the
-runtime seed-version gate.
+The point is to fail fast on edits that break representation mechanics such as
+a missing ``seed_version``, dangling ``to_state`` references, or a referenced
+prompt with no seed source. It deliberately does not prescribe a universal
+conversation-turn workflow, stage sequence, selector, critic, or completion
+gate.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import pytest
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SEED_BUNDLE_DIR = PROJECT_ROOT / "src/backend/workflows/repo_seed_bundles"
@@ -31,20 +30,6 @@ WORKFLOW_BUNDLE_SCHEMA = "repo_seed_workflow_bundle.v1"
 CANONICAL_BUNDLE_PATH = (
     SEED_BUNDLE_DIR / "canonical_workflow_publication_seed_bundle.json"
 )
-RECOVERY_PROMPT_SEED_PATH = (
-    SEED_BUNDLE_DIR / "prompt_turn_execution_recovery_decision_seed.md"
-)
-RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
-# Workflow whose completion_gate / recovery_decision wiring is enforced by
-# the JVNAUTOSCI-2130 invariants below. The conversation-turn execution
-# workflow owns the post-response completion_gate that, on a missing
-# user-facing response, must route to recovery_decision.
-CONVERSATION_TURN_WORKFLOW_ID = "#V#conversation_turn_execution_workflow"
-WORKFLOW_EXPERIENCE_GUIDANCE_CONTEXT_KEYS = {
-    "workflow_success_guidance_history",
-    "workflow_failure_avoidance_history",
-    "workflow_low_imposition_exploration_history",
-}
 
 
 def _all_seed_bundles() -> list[Path]:
@@ -75,34 +60,6 @@ def _iter_workflow_steps(bundle_payload: dict[str, Any]) -> Iterable[dict[str, A
         for step in spec.get("steps", []) or []:
             if isinstance(step, dict):
                 yield step
-
-
-def _find_state(bundle_payload: dict[str, Any], state_id: str) -> dict[str, Any] | None:
-    for step in _iter_workflow_steps(bundle_payload):
-        if step.get("state_id") == state_id:
-            return step
-    return None
-
-
-def _find_workflow(
-    bundle_payload: dict[str, Any], workflow_id: str
-) -> dict[str, Any] | None:
-    for workflow in bundle_payload.get("workflows", []) or []:
-        if isinstance(workflow, dict) and workflow.get("workflow_id") == workflow_id:
-            return workflow
-    return None
-
-
-def _find_state_in_workflow(
-    workflow: dict[str, Any], state_id: str
-) -> dict[str, Any] | None:
-    spec = workflow.get("publication_spec") or {}
-    if not isinstance(spec, dict):
-        return None
-    for step in spec.get("steps") or []:
-        if isinstance(step, dict) and step.get("state_id") == state_id:
-            return step
-    return None
 
 
 def _bundled_prompt_concept_ids() -> set[str]:
@@ -207,149 +164,6 @@ def test_workflow_state_transitions_reference_existing_states(
     )
 
 
-@pytest.mark.parametrize("bundle_path", _workflow_bundles(), ids=lambda p: p.name)
-def test_llm_steps_expose_workflow_experience_guidance_context(
-    bundle_path: Path,
-) -> None:
-    """Prompt-bearing workflow steps must receive bounded experience-memory hints."""
-
-    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
-    failures: list[str] = []
-    for workflow in payload.get("workflows", []) or []:
-        if not isinstance(workflow, dict):
-            continue
-        workflow_id = str(workflow.get("workflow_id") or "<unknown-workflow>")
-        spec = workflow.get("publication_spec") or {}
-        if not isinstance(spec, dict):
-            continue
-        for step in spec.get("steps") or []:
-            if not isinstance(step, dict) or step.get("action_id") != "llm.action":
-                continue
-            llm_policy = step.get("llm_policy") or {}
-            context_fields = (
-                llm_policy.get("context_fields") if isinstance(llm_policy, dict) else []
-            )
-            context_keys = {
-                field.get("context_key")
-                for field in context_fields or []
-                if isinstance(field, dict)
-            }
-            missing = WORKFLOW_EXPERIENCE_GUIDANCE_CONTEXT_KEYS - context_keys
-            if missing:
-                failures.append(
-                    f"{workflow_id}:{step.get('state_id')}: missing {sorted(missing)}"
-                )
-
-    assert failures == [], (
-        f"{bundle_path.name}: LLM steps missing experience guidance context: "
-        f"{failures}"
-    )
-
-
-def test_canonical_completion_gate_routes_empty_response_to_recovery() -> None:
-    """JVNAUTOSCI-2130 wiring must remain intact in the seed bundle.
-
-    The canonical conversation-turn workflow's ``completion_gate`` state
-    must route empty/missing ``response_text`` and the
-    ``completion_gate_requires_follow_up`` flag to ``recovery_decision``,
-    and otherwise transition to ``completed``.
-    """
-
-    payload = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
-    workflow = _find_workflow(payload, CONVERSATION_TURN_WORKFLOW_ID)
-    assert workflow is not None, (
-        f"{CONVERSATION_TURN_WORKFLOW_ID} not found in canonical bundle"
-    )
-    completion_gate = _find_state_in_workflow(workflow, "completion_gate")
-    assert completion_gate is not None, (
-        f"completion_gate state not found in {CONVERSATION_TURN_WORKFLOW_ID}"
-    )
-
-    transitions = completion_gate.get("conditional_transitions") or []
-    assert transitions, "completion_gate has no conditional_transitions"
-
-    reasons_to_targets: dict[str, str] = {}
-    for transition in transitions:
-        reason = transition.get("reason")
-        target = transition.get("to_state")
-        if isinstance(reason, str) and isinstance(target, str):
-            reasons_to_targets[reason] = target
-
-    assert reasons_to_targets.get("missing_user_facing_response") == "recovery_decision"
-    assert reasons_to_targets.get("follow_up_required") == "recovery_decision"
-    assert reasons_to_targets.get("completion_gate_decided") == "completed"
-
-    # Verify the missing-response branch genuinely keys on response_text
-    # being null or empty rather than some unrelated condition.
-    missing_response_branch = next(
-        (t for t in transitions if t.get("reason") == "missing_user_facing_response"),
-        None,
-    )
-    assert missing_response_branch is not None
-    spec = missing_response_branch.get("condition_spec") or {}
-    assert spec.get("kind") == "any"
-    sub_kinds = {
-        (sub.get("kind"), sub.get("key"))
-        for sub in spec.get("conditions") or []
-        if isinstance(sub, dict)
-    }
-    assert ("context_is_null", "response_text") in sub_kinds
-    assert ("context_value_equals", "response_text") in sub_kinds
-
-
-def test_canonical_recovery_decision_exposes_thinking_card_mode_context() -> None:
-    """The ``recovery_decision`` LLM step must surface the context fields the
-    JVNAUTOSCI-2130 prompt depends on: ``thinking_card_mode``,
-    ``invocations``, ``tool_messages``, and ``response_text``.
-    """
-
-    payload = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
-    workflow = _find_workflow(payload, CONVERSATION_TURN_WORKFLOW_ID)
-    assert workflow is not None
-    recovery_decision = _find_state_in_workflow(workflow, "recovery_decision")
-    assert recovery_decision is not None, (
-        f"recovery_decision state not found in {CONVERSATION_TURN_WORKFLOW_ID}"
-    )
-
-    llm_policy = recovery_decision.get("llm_policy") or {}
-    context_fields = llm_policy.get("context_fields") or []
-    context_keys = {
-        field.get("context_key")
-        for field in context_fields
-        if isinstance(field, dict)
-    }
-    required = {
-        "thinking_card_mode",
-        "invocations",
-        "tool_messages",
-        "response_text",
-    }
-    missing = required - context_keys
-    assert not missing, (
-        "recovery_decision.llm_policy.context_fields missing required keys: "
-        f"{sorted(missing)}"
-    )
-
-    prompt_concept_ids = recovery_decision.get("prompt_concept_ids") or []
-    assert RECOVERY_PROMPT_CONCEPT_ID in prompt_concept_ids
-
-
-def test_recovery_prompt_seed_teaches_thinking_card_modes() -> None:
-    """The recovery-decision prompt seed must keep teaching the JVNAUTOSCI-2130
-    thinking-card-mode adaptation rules (default / expert / debug).
-    """
-
-    text = RECOVERY_PROMPT_SEED_PATH.read_text(encoding="utf-8")
-    assert "Thinking Card Mode" in text
-    assert "`default`" in text
-    assert "`expert` or `debug`" in text
-    assert "`debug`" in text
-    # The prompt must instruct the model to draw the partial-progress
-    # summary from the context fields the workflow exposes.
-    assert "Tool Invocations Observed" in text
-    assert "Tool Messages Observed" in text
-
-
 def test_referenced_prompt_seed_files_exist_for_canonical_bundle() -> None:
     """Each ``prompt_concept_ids`` entry in the canonical bundle should have a
     matching ``prompt_<id>_seed.md`` file in the seed-bundle directory.
@@ -387,3 +201,45 @@ def test_referenced_prompt_seed_files_exist_for_canonical_bundle() -> None:
         "canonical bundle references prompt concepts with no seed source "
         f"(neither standalone _seed.md nor prompt seed bundle): {missing}"
     )
+
+
+def test_explicit_workflow_experience_prelude_callers_keep_their_seed_definition() -> (
+    None
+):
+    """Retain the shared prelude while repo-seeded explicit workflows invoke it."""
+
+    prelude_id = "#V#workflow_experience_context_prelude"
+    canonical = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
+    canonical_workflow_ids = {
+        workflow.get("workflow_id")
+        for workflow in canonical.get("workflows", [])
+        if isinstance(workflow, dict)
+    }
+
+    caller_paths = (
+        SEED_BUNDLE_DIR
+        / "operational_certification_evaluator_workflow_seed_bundle.json",
+        SEED_BUNDLE_DIR
+        / "operational_learning_candidate_behaviour_workflow_seed_bundle.json",
+        SEED_BUNDLE_DIR
+        / "operational_learning_release_authority_workflow_seed_bundle.json",
+    )
+    callers: list[str] = []
+    for path in caller_paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for workflow in payload.get("workflows", []):
+            if not isinstance(workflow, dict):
+                continue
+            for step in (
+                (workflow.get("publication_spec") or {}).get("steps", [])
+            ):
+                if (
+                    isinstance(step, dict)
+                    and step.get("invoked_workflow_id") == prelude_id
+                ):
+                    callers.append(
+                        f"{workflow.get('workflow_id')}:{step.get('state_id')}"
+                    )
+
+    assert callers
+    assert prelude_id in canonical_workflow_ids

@@ -1,10 +1,28 @@
-"""Materialise the canonical conversation-turn workflow family."""
+"""Publish independently useful workflow-support artefacts.
+
+The former universal conversation-turn controller is deliberately absent from
+this publication surface. Ordinary ``/von/generate`` turns use the direct
+adaptive engine; specialised workflows and reusable explicit-workflow support
+remain publishable when their user job independently warrants them.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
+from ..workflows.definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    GENERAL_MAIL_REVIEW_WORKFLOW_ID,
+    GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
+)
+from .synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+)
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_prompt_authority_service import (
     DEFAULT_PROMPT_TYPE_ID,
@@ -13,36 +31,16 @@ from .workflow_prompt_authority_service import (
     prompt_concept_has_content,
 )
 from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
-from .synthesiser_context_framing_service import (
-    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
-)
-from ..workflows.definitions import (
-    CHAT_ASSISTANT_WORKFLOW_ID,
-    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-    GENERAL_MAIL_REVIEW_WORKFLOW_ID,
-    GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
-    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
-    TOOL_CALLING_WORKFLOW_ID,
-    TURN_COMPLETION_GATE_WORKFLOW_ID,
-    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
-    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
-)
 
 _MANAGED_BY = "conversation_turn_workflow_vontology_service"
-_SOURCE_TAG = "JVNAUTOSCI-2333"
+_SOURCE_TAG = "JVNAUTOSCI-2600"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
     / "repo_seed_bundles"
     / "canonical_workflow_publication_seed_bundle.json"
 )
-_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
-    "#V#prompt_turn_execution_expected_outcome_inference"
-)
-_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID = "#V#turn_prompt_context_adjudication_prompt"
-_SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
-_NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
-_RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
+
 _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID = "#V#missing_tool_call_retry_prompt"
 _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
     "#V#prompt_turn_execution_postcondition_critic"
@@ -51,162 +49,89 @@ _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID = "#V#tool_call_repair_prompt"
 WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID = (
     "#V#workflow_step_structured_output_backfill_prompt"
 )
-_EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "prompt_turn_execution_expected_outcome_inference_seed.md"
+
+_PROMPT_SPECS: tuple[WorkflowPromptConceptSpec, ...] = (
+    WorkflowPromptConceptSpec(
+        concept_id=_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
+        name="Missing tool-call retry prompt",
+        description=(
+            "Repair support for an explicitly invoked tool workflow when its "
+            "model response omitted executable tool-call JSON."
+        ),
+        parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+    ),
+    WorkflowPromptConceptSpec(
+        concept_id=_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
+        name="Effect workflow postcondition critic prompt",
+        description=(
+            "Postcondition evidence review for concrete consequential workflows "
+            "that independently require it; not a universal turn gate."
+        ),
+        parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+    ),
+    WorkflowPromptConceptSpec(
+        concept_id=_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
+        name="Tool-call repair prompt",
+        description=(
+            "One-shot schema repair for an explicitly selected tool workflow."
+        ),
+        parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+    ),
+    WorkflowPromptConceptSpec(
+        concept_id=WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID,
+        name="Structured workflow-step output backfill prompt",
+        description=(
+            "Continue an active structured-output workflow step after tool "
+            "evidence has accumulated."
+        ),
+        parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+    ),
+    WorkflowPromptConceptSpec(
+        concept_id=SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
+        name="Synthesiser context framing template",
+        description=(
+            "Represented system-message framing for a selected synthesiser step."
+        ),
+        parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+    ),
 )
-_CONTEXT_ADJUDICATION_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "turn_prompt_context_adjudication_prompt_seed.md"
-)
-_SELECTOR_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "prompt_chat_turn_classifier_seed.md"
-)
-_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "prompt_turn_execution_narrate_completion_report_seed.md"
-)
-_RECOVERY_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "prompt_turn_execution_recovery_decision_seed.md"
-)
-_MISSING_TOOL_RETRY_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "missing_tool_call_retry_prompt_seed.md"
-)
-_POSTCONDITION_CRITIC_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "prompt_turn_execution_postcondition_critic_seed.md"
-)
-_TOOL_CALL_REPAIR_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "tool_call_repair_prompt_seed.md"
-)
-_WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "workflow_step_structured_output_backfill_prompt_seed.md"
-)
-_SYNTHESISER_CONTEXT_FRAMING_PROMPT_SEED_ASSET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "workflows"
-    / "repo_seed_bundles"
-    / "synthesiser_context_framing_prompt_seed.json"
-)
+
+_PROMPT_SEED_PATHS: Mapping[str, Path] = {
+    _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID: (
+        _REPO_SEED_ASSET_PATH.parent / "missing_tool_call_retry_prompt_seed.md"
+    ),
+    _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID: (
+        _REPO_SEED_ASSET_PATH.parent
+        / "prompt_turn_execution_postcondition_critic_seed.md"
+    ),
+    _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID: (
+        _REPO_SEED_ASSET_PATH.parent / "tool_call_repair_prompt_seed.md"
+    ),
+    WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID: (
+        _REPO_SEED_ASSET_PATH.parent
+        / "workflow_step_structured_output_backfill_prompt_seed.md"
+    ),
+    SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID: (
+        _REPO_SEED_ASSET_PATH.parent
+        / "synthesiser_context_framing_prompt_seed.json"
+    ),
+}
+
 _TARGET_WORKFLOW_IDS: tuple[str, ...] = (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     GENERAL_MAIL_REVIEW_WORKFLOW_ID,
     GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
-    TURN_COMPLETION_GATE_WORKFLOW_ID,
     WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
-    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
-    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )
 
 
-def _load_narration_prompt_seed_text() -> str:
-    prompt_text = _PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
+def _load_prompt_seed_text(prompt_concept_id: str) -> str:
+    path = _PROMPT_SEED_PATHS[prompt_concept_id]
+    prompt_text = path.read_text(encoding="utf-8").strip()
     if not prompt_text:
-        raise ValueError("turn_execution_narration_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_expected_outcome_prompt_seed_text() -> str:
-    prompt_text = _EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH.read_text(
-        encoding="utf-8"
-    ).strip()
-    if not prompt_text:
-        raise ValueError("turn_execution_expected_outcome_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_context_adjudication_prompt_seed_text() -> str:
-    prompt_text = _CONTEXT_ADJUDICATION_PROMPT_SEED_ASSET_PATH.read_text(
-        encoding="utf-8"
-    ).strip()
-    if not prompt_text:
-        raise ValueError("turn_prompt_context_adjudication_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_selector_prompt_seed_text() -> str:
-    prompt_text = _SELECTOR_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
-    if not prompt_text:
-        raise ValueError("chat_turn_classifier_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_recovery_prompt_seed_text() -> str:
-    prompt_text = _RECOVERY_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
-    if not prompt_text:
-        raise ValueError("turn_execution_recovery_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_missing_tool_retry_prompt_seed_text() -> str:
-    prompt_text = _MISSING_TOOL_RETRY_PROMPT_SEED_ASSET_PATH.read_text(
-        encoding="utf-8"
-    ).strip()
-    if not prompt_text:
-        raise ValueError("missing_tool_call_retry_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_postcondition_critic_prompt_seed_text() -> str:
-    prompt_text = _POSTCONDITION_CRITIC_PROMPT_SEED_ASSET_PATH.read_text(
-        encoding="utf-8"
-    ).strip()
-    if not prompt_text:
-        raise ValueError("turn_execution_postcondition_critic_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_tool_call_repair_prompt_seed_text() -> str:
-    prompt_text = _TOOL_CALL_REPAIR_PROMPT_SEED_ASSET_PATH.read_text(
-        encoding="utf-8"
-    ).strip()
-    if not prompt_text:
-        raise ValueError("tool_call_repair_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_workflow_step_structured_output_backfill_prompt_seed_text() -> str:
-    prompt_text = (
-        _WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_SEED_ASSET_PATH.read_text(
-            encoding="utf-8"
-        ).strip()
-    )
-    if not prompt_text:
-        raise ValueError("workflow_step_structured_output_backfill_prompt_seed_missing")
-    return prompt_text
-
-
-def _load_synthesiser_context_framing_prompt_seed_text() -> str:
-    prompt_text = _SYNTHESISER_CONTEXT_FRAMING_PROMPT_SEED_ASSET_PATH.read_text(
-        encoding="utf-8"
-    ).strip()
-    if not prompt_text:
-        raise ValueError("synthesiser_context_framing_prompt_seed_missing")
+        raise ValueError(f"workflow_support_prompt_seed_missing:{prompt_concept_id}")
     return prompt_text
 
 
@@ -215,414 +140,83 @@ def _ensure_conversation_turn_prompt_support(
     force_prompt_seed: bool = False,
     ensure_tool_evidence_contracts: bool = False,
 ) -> dict[str, Any]:
+    """Ensure prompts retained for explicit workflows and concrete effects."""
+
     report = ensure_prompt_concept_support(
-        prompt_specs=(
-            WorkflowPromptConceptSpec(
-                concept_id=_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
-                name="Turn expected-outcome inference prompt",
-                description=(
-                    "Canonical early-turn inference prompt for deriving the "
-                    "grounded success contract that should shape workflow "
-                    "selection, omission policy, and direct-answer behaviour."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
-                name="Turn prompt context adjudication prompt",
-                description=(
-                    "Canonical conversation-turn prompt for deciding which "
-                    "prior conversational context is relevant to the current "
-                    "prompt before expected-outcome inference and workflow "
-                    "selection consume context."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=_SELECTOR_PROMPT_CONCEPT_ID,
-                name="Chat turn classifier prompt",
-                description=(
-                    "Canonical workflow-selector prompt for conversation turns. "
-                    "The selector receives the full turn context as LLM context "
-                    "messages and chooses the best workflow from the candidate set."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=_NARRATION_PROMPT_CONCEPT_ID,
-                name="Turn execution completion-report narration prompt",
-                description=(
-                    "Canonical conversation-turn narration prompt for composing "
-                    "the user-facing answer from selected-workflow result "
-                    "content, using completion-report data only as supporting "
-                    "evidence."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=_RECOVERY_PROMPT_CONCEPT_ID,
-                name="Turn execution recovery decision prompt",
-                description=(
-                    "Canonical recovery prompt for choosing the next best "
-                    "bounded executable turn-next-action from accumulated turn "
-                    "evidence, including a workflow retry, a direct bounded "
-                    "tool batch, a direct grounded answer, or an explicit "
-                    "follow-up response when no further automated route is "
-                    "likely to help."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
-                name="Missing tool-call retry prompt",
-                description=(
-                    "Canonical retry prompt used when a response describes an "
-                    "action requiring MCP tools but omits the executable "
-                    "tool-call JSON. The prompt instructs the model to use "
-                    "available generic Vontology mutation tools for explicit "
-                    "low-risk additive writes, and exact external write tools "
-                    "for explicitly requested side effects, rather than "
-                    "inventing domain-specific tool names."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
-                name="Turn execution postcondition critic prompt",
-                description=(
-                    "Canonical postcondition-critic prompt for deciding whether "
-                    "a turn's answer is safely supported by the evidence actually "
-                    "produced by the selected workflow and verification reads."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
-                name="Tool-call repair prompt",
-                description=(
-                    "Canonical one-shot repair prompt for converting a malformed "
-                    "or schema-invalid tool plan into a corrected JSON-only MCP "
-                    "tool-call batch, or an empty batch when no repair is possible."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=(WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID),
-                name="Structured workflow-step output backfill prompt",
-                description=(
-                    "Canonical prompt for continuing an active structured-output "
-                    "workflow step after tool evidence has been accumulated, without "
-                    "collapsing the step into ordinary end-user narration."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-            WorkflowPromptConceptSpec(
-                concept_id=SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
-                name="Synthesiser context framing template",
-                description=(
-                    "Canonical represented template for the summariser-stage "
-                    "system messages that preserve the active request and "
-                    "Vontology-authored tool-output hints."
-                ),
-                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
-            ),
-        ),
+        prompt_specs=_PROMPT_SPECS,
         provenance_source=_MANAGED_BY,
     )
 
-    # Tool-specific extraction and evidence expectations are represented in
-    # Vontology. Materialise those graphs before publishing the conversation
-    # workflow so a clean environment cannot silently use an uncontracted
-    # projection path.
     support_bootstraps: dict[str, Any] = {}
     if ensure_tool_evidence_contracts:
-        try:
-            from .jira_tool_evidence_contract_vontology_service import (
-                bootstrap_jira_tool_evidence_contract,
-            )
+        from .grounded_read_tool_evidence_contract_vontology_service import (
+            bootstrap_grounded_read_tool_evidence_contract,
+        )
+        from .jira_tool_evidence_contract_vontology_service import (
+            bootstrap_jira_tool_evidence_contract,
+        )
 
-            support_bootstraps["jira_tool_evidence_contract"] = (
-                bootstrap_jira_tool_evidence_contract()
-            )
-        except Exception as exc:
-            support_bootstraps["jira_tool_evidence_contract"] = {
-                "success": False,
-                "error": str(exc),
-            }
-        try:
-            from .grounded_read_tool_evidence_contract_vontology_service import (
+        for name, bootstrap in (
+            ("jira_tool_evidence_contract", bootstrap_jira_tool_evidence_contract),
+            (
+                "grounded_read_tool_evidence_contract",
                 bootstrap_grounded_read_tool_evidence_contract,
-            )
-
-            support_bootstraps["grounded_read_tool_evidence_contract"] = (
-                bootstrap_grounded_read_tool_evidence_contract()
-            )
-        except Exception as exc:
-            support_bootstraps["grounded_read_tool_evidence_contract"] = {
-                "success": False,
-                "error": str(exc),
-            }
-    report["support_bootstraps"] = support_bootstraps
+            ),
+        ):
+            try:
+                support_bootstraps[name] = bootstrap()
+            except Exception as exc:
+                support_bootstraps[name] = {
+                    "success": False,
+                    "error": str(exc),
+                }
 
     seeded_prompt_ids: list[str] = []
-    if force_prompt_seed or not prompt_concept_has_content(
-        _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_expected_outcome_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_context_adjudication_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-2544", "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID):
-        upsert_singleton_text_relation(
-            subject_concept_id=_SELECTOR_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_selector_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_SELECTOR_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _NARRATION_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=_NARRATION_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_narration_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_NARRATION_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID):
-        upsert_singleton_text_relation(
-            subject_concept_id=_RECOVERY_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_recovery_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-2577", "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_missing_tool_retry_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_postcondition_critic_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-2577", "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_tool_call_repair_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(
-        WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=(
-                WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
-            ),
-            predicate="hasContent",
-            text=_load_workflow_step_structured_output_backfill_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-2577", "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(
-            WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
-        )
-    if force_prompt_seed or not prompt_concept_has_content(
-        SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
-    ):
-        upsert_singleton_text_relation(
-            subject_concept_id=SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID,
-            predicate="hasContent",
-            text=_load_synthesiser_context_framing_prompt_seed_text(),
-            lang="en-NZ",
-            context={"jira": "JVNAUTOSCI-2350", "source": _MANAGED_BY},
-            garbage_collect=True,
-        )
-        seeded_prompt_ids.append(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID)
+    for prompt_spec in _PROMPT_SPECS:
+        prompt_id = prompt_spec.concept_id
+        if force_prompt_seed or not prompt_concept_has_content(prompt_id):
+            upsert_singleton_text_relation(
+                subject_concept_id=prompt_id,
+                predicate="hasContent",
+                text=_load_prompt_seed_text(prompt_id),
+                lang="en-NZ",
+                context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+                garbage_collect=True,
+            )
+            seeded_prompt_ids.append(prompt_id)
 
     report = dict(report)
     errors_by_target = dict(report.get("errors_by_target") or {})
-    missing_content_prompt_ids = list(report.get("missing_content_prompt_ids") or [])
-    if prompt_concept_has_content(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID, None)
+    missing_content_prompt_ids = list(
+        report.get("missing_content_prompt_ids") or []
+    )
+    validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+    for prompt_spec in _PROMPT_SPECS:
+        prompt_id = prompt_spec.concept_id
+        if not prompt_concept_has_content(prompt_id):
+            continue
+        errors_by_target.pop(prompt_id, None)
         missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
+            item for item in missing_content_prompt_ids if item != prompt_id
         ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_CONTEXT_ADJUDICATION_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_SELECTOR_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _SELECTOR_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _SELECTOR_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_SELECTOR_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(_NARRATION_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_NARRATION_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _NARRATION_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _NARRATION_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_NARRATION_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_RECOVERY_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _RECOVERY_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _RECOVERY_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_MISSING_TOOL_RETRY_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if _TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(_TOOL_CALL_REPAIR_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(
-        WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
-    ):
-        errors_by_target.pop(
-            WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID,
-            None,
-        )
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if (
-            WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
-            not in validated_prompt_ids
-        ):
-            validated_prompt_ids.append(
-                WORKFLOW_STEP_STRUCTURED_OUTPUT_BACKFILL_PROMPT_CONCEPT_ID
-            )
-        report["validated_prompt_ids"] = validated_prompt_ids
-    if prompt_concept_has_content(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID):
-        errors_by_target.pop(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID, None)
-        missing_content_prompt_ids = [
-            prompt_id
-            for prompt_id in missing_content_prompt_ids
-            if prompt_id != SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID
-        ]
-        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
-        if SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID not in validated_prompt_ids:
-            validated_prompt_ids.append(SYNTHESISER_CONTEXT_FRAMING_PROMPT_CONCEPT_ID)
-        report["validated_prompt_ids"] = validated_prompt_ids
+        if prompt_id not in validated_prompt_ids:
+            validated_prompt_ids.append(prompt_id)
 
+    report["validated_prompt_ids"] = validated_prompt_ids
     report["errors_by_target"] = errors_by_target
     report["missing_content_prompt_ids"] = missing_content_prompt_ids
-    report["counts"] = {
-        "created_prompts": len(report.get("created_prompt_ids") or []),
-        "validated_prompts": len(report.get("validated_prompt_ids") or []),
-        "missing_content_prompts": len(missing_content_prompt_ids),
-        "linked_workflows": len(report.get("linked_workflow_ids") or []),
-        "errors": len(errors_by_target),
-    }
+    report["support_bootstraps"] = support_bootstraps
     report["source"] = _SOURCE_TAG
     report["managed_by"] = _MANAGED_BY
     report["seeded_prompt_ids"] = seeded_prompt_ids
     report["seeded_prompt_count"] = len(seeded_prompt_ids)
+    report["counts"] = {
+        "created_prompts": len(report.get("created_prompt_ids") or []),
+        "validated_prompts": len(validated_prompt_ids),
+        "missing_content_prompts": len(missing_content_prompt_ids),
+        "linked_workflows": len(report.get("linked_workflow_ids") or []),
+        "errors": len(errors_by_target),
+    }
     support_bootstrap_success = all(
         bool(value.get("success"))
         for value in support_bootstraps.values()
@@ -640,7 +234,7 @@ def bootstrap_canonical_conversation_turn_workflows(
     *,
     force_republish: bool = False,
 ) -> dict[str, Any]:
-    """Publish and validate the canonical conversation-turn workflow family."""
+    """Publish explicit support workflows; never a universal turn wrapper."""
 
     prompt_support = _ensure_conversation_turn_prompt_support(
         force_prompt_seed=bool(force_republish),
@@ -662,7 +256,9 @@ def bootstrap_canonical_conversation_turn_workflows(
         "publication": publication.get("publication"),
         "typed_workflow_ids": publication.get("typed_workflow_ids") or [],
         "typed_step_ids": publication.get("typed_step_ids") or [],
-        "validation_by_workflow_id": publication.get("validation_by_workflow_id") or {},
+        "validation_by_workflow_id": (
+            publication.get("validation_by_workflow_id") or {}
+        ),
     }
 
 

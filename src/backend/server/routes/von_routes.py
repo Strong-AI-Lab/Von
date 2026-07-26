@@ -36,7 +36,6 @@ from ...workflows.workflow_listing_service import (
 )
 from ...workflows.durable.turn_execution_runtime_support import (
     coerce_user_visible_response_text,
-    strip_completion_ledger_suffix,
 )
 from ...languagemodels.llm_interface import (
     _extract_ollama_model_id,
@@ -47,13 +46,15 @@ from ...languagemodels.llm_interface import (
     get_active_model_name,
     get_llm_client,
 )
-from ...integrations.internal_mcp import (
+from ...services.request_progress_service import (
     CancellationRequested,
     ProgressTracker,
-    ToolCallParsingError,
 )
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
+from ...services.adaptive_turn_service import (
+    execute_adaptive_turn,
+)
 from ...services.background_task_service import background_task_registry
 from ...services.workflow_payload_store import is_workflow_payload_blob_ref
 from ...services.live_request_load import (
@@ -71,8 +72,6 @@ from ...services.window_session_context_service import (
     get_effective_context,
 )
 from ...services.settings_service import (
-    get_internal_mcp_max_tool_invocations,
-    get_internal_mcp_tool_batch_cap,
     get_show_tool_use_during_thinking,
     get_buttonify_model_enabled,
     resolve_llm_setting,
@@ -87,14 +86,10 @@ from ...services.feature_flags import (
 from ...services.chat_concept_reference_service import (
     build_context_concept_reference_metadata,
 )
-from ...services.agent_test_replay_mode_service import (
-    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
-)
 from ...services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
     enforce_buttonify_prompt_contract,
     parse_buttonify_options_json_with_telemetry,
-    sanitise_buttonify_options_with_telemetry,
 )
 from ...services.prompt_template_service import PromptTemplateService
 from ...services.display_elements_service import (
@@ -136,7 +131,6 @@ from ...services.turn_timing_telemetry_service import (
 )
 from ...services.turn_execution_record_service import (
     build_search_tool_evidence,
-    build_turn_execution_record,
     build_workflow_routing_diagnostics,
 )
 from ...services.python_decision_authority_service import (
@@ -144,15 +138,7 @@ from ...services.python_decision_authority_service import (
     build_stage_authority_summary,
 )
 from ...workflows import (
-    CHAT_BUTTONIFY_WORKFLOW_ID,
-    CHAT_NARRATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-    WorkflowExecutionTrace,
-    insert_workflow_execution_trace,
-)
-from ...workflows.conversation_turn_stage_model import (
-    build_conversation_turn_stage_model_snapshot,
-    build_conversation_turn_stage_path,
 )
 from ...workflows.llm_call_telemetry import (
     stamp_llm_call_timestamps as _stamp_llm_call_timestamps,
@@ -160,17 +146,14 @@ from ...workflows.llm_call_telemetry import (
 from .generate_route_support import (
     SCREEN_BACKFILL_STAGE_CONCEPT_ID,
     SCREEN_BACKFILL_STAGE_PROMPT_IDS,
-    _GenerateConversationTurnInstanceState,
     _build_presenter_screen_backfill_authority_gate_event,
     _build_presenter_screen_backfill_context,
     _build_generate_error_body,
     _build_generate_error_debug_info,
     _build_generate_success_body,
-    _finalise_generate_conversation_turn_instance,
     _invoke_presenter_screen_backfill_prompt,
     _normalise_prompt_concept_ids,
     _persist_generate_turn_messages,
-    _submit_generate_conversation_turn_instance,
 )
 
 # NOTE: Previous relative template_folder path ('../../frontend/...') was incorrect.
@@ -1195,9 +1178,10 @@ def _serialise_tool_progress_state(
         )
 
     workflow_stage_path = _extract_workflow_stage_path_from_progress(payload)
-    if workflow_stage_path is None:
-        workflow_stage_path = _build_live_workflow_stage_path(payload)
-    payload["workflow_stage_path"] = workflow_stage_path
+    if workflow_stage_path is not None:
+        payload["workflow_stage_path"] = workflow_stage_path
+    else:
+        payload.pop("workflow_stage_path", None)
     diagnostic_events = [
         cast(dict[str, Any], entry)
         for entry in payload.get("diagnostic_events", [])
@@ -2165,38 +2149,6 @@ def _canonicalise_live_runtime_stage(stage: Any) -> str | None:
     return clean_stage
 
 
-def _normalise_live_runtime_stage_sequence(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-
-    runtime_stages: list[str] = []
-    last_stage_normalised: str | None = None
-    for item in value:
-        canonical_stage = _canonicalise_live_runtime_stage(item)
-        if not canonical_stage:
-            continue
-        canonical_stage_normalised = canonical_stage.strip().lower()
-        if canonical_stage_normalised == last_stage_normalised:
-            continue
-        runtime_stages.append(canonical_stage)
-        last_stage_normalised = canonical_stage_normalised
-    return runtime_stages
-
-
-def _append_live_runtime_stage(runtime_stages: list[str], stage: Any) -> list[str]:
-    canonical_stage = _canonicalise_live_runtime_stage(stage)
-    if not canonical_stage:
-        return list(runtime_stages)
-
-    normalised_candidate = canonical_stage.strip().lower()
-    if runtime_stages:
-        last_stage = _progress_str(runtime_stages[-1])
-        if last_stage and last_stage.strip().lower() == normalised_candidate:
-            return list(runtime_stages)
-
-    return [*runtime_stages, canonical_stage]
-
-
 def _normalise_live_stage_summary_map(
     value: Any,
 ) -> dict[str, dict[str, Any]]:
@@ -2212,60 +2164,6 @@ def _normalise_live_stage_summary_map(
             key: item for key, item in raw_summary.items() if isinstance(key, str)
         }
     return summary_map
-
-
-def _build_live_workflow_stage_path_from_runtime_stages(
-    runtime_stages: list[str], workflow_id: str | None
-) -> dict[str, Any]:
-    return build_conversation_turn_stage_path(
-        runtime_stages=runtime_stages,
-        workflow_id=workflow_id,
-        selected_workflow_id=workflow_id,
-    )
-
-
-def _build_live_workflow_stage_path(
-    state: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    if not isinstance(state, Mapping):
-        return build_conversation_turn_stage_path(
-            runtime_stages=(),
-            workflow_id=None,
-            selected_workflow_id=None,
-        )
-
-    runtime_stages = _normalise_live_runtime_stage_sequence(
-        state.get("_workflow_runtime_stages")
-    )
-
-    if not runtime_stages:
-        diagnostic_events_raw = state.get("diagnostic_events")
-        diagnostic_events = (
-            [
-                cast(dict[str, Any], entry)
-                for entry in diagnostic_events_raw
-                if isinstance(entry, dict)
-            ]
-            if isinstance(diagnostic_events_raw, list)
-            else []
-        )
-        runtime_stages = []
-        for entry in diagnostic_events:
-            runtime_stages = _append_live_runtime_stage(
-                runtime_stages,
-                _progress_str(entry.get("phase")) or _progress_str(entry.get("stage")),
-            )
-
-    current_stage = _canonicalise_live_runtime_stage(
-        _progress_str(state.get("phase")) or _progress_str(state.get("stage"))
-    )
-    if current_stage:
-        runtime_stages = _append_live_runtime_stage(runtime_stages, current_stage)
-    selected_workflow_id = _progress_str(state.get("selected_workflow_id"))
-    return _build_live_workflow_stage_path_from_runtime_stages(
-        runtime_stages,
-        selected_workflow_id,
-    )
 
 
 def _normalise_progress_events_from_diagnostic_events(
@@ -3021,8 +2919,6 @@ def _extract_workflow_stage_path_from_progress(
         return None
 
     path = [dict(entry) for entry in raw_path if isinstance(entry, Mapping)]
-    if not path:
-        return None
 
     stage_path = dict(raw_stage_path)
     stage_path["path"] = path
@@ -3754,15 +3650,9 @@ def _build_turn_execution_mcp_access(
     namespace: str | None,
     history_owner_user_id: str | None,
     organisation_concept_id: str | None,
-    workflow_routing: Mapping[str, Any] | None = None,
-    aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
-    selected_workflow_trace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from ...services.conversation_scope_binding_service import (
         build_conversation_scope_binding,
-    )
-    from ...services.turn_execution_diagnostics_service import (
-        build_workflow_execution_trace_mcp_access_refs,
     )
 
     def _tool_call_descriptor(
@@ -3821,137 +3711,7 @@ def _build_turn_execution_mcp_access(
             purpose="Fetch the stored transcript segments and embedded debug payloads for this session.",
         )
 
-    workflow_trace_payload: dict[str, Any] = {}
-    if isinstance(workflow_routing, Mapping):
-        workflow_trace_payload["workflow_routing"] = dict(workflow_routing)
-    if isinstance(selected_workflow_trace, Mapping):
-        workflow_trace_payload["selected_workflow_trace"] = dict(
-            selected_workflow_trace
-        )
-    if isinstance(aux_llm_calls, Sequence) and not isinstance(
-        aux_llm_calls, (str, bytes, bytearray)
-    ):
-        workflow_trace_payload["aux_llm_calls"] = [
-            dict(entry) for entry in aux_llm_calls if isinstance(entry, Mapping)
-        ]
-    workflow_traces = build_workflow_execution_trace_mcp_access_refs(
-        workflow_trace_payload
-    )
-    if workflow_traces:
-        access["workflow_execution_traces"] = workflow_traces
-        primary_trace = next(
-            (
-                trace
-                for trace in workflow_traces
-                if trace.get("trace_role") == "selected_workflow"
-            ),
-            workflow_traces[0],
-        )
-        primary_access = primary_trace.get("mcp_access")
-        if isinstance(primary_access, Mapping):
-            access["workflow_get_execution_trace"] = dict(primary_access)
-
     return access
-
-
-def _build_model_resolution_summary(
-    aux_llm_calls: list[dict[str, Any]] | None,
-) -> dict[str, Any] | None:
-    """JVNAUTOSCI-2373: aggregate per-stage model fallback telemetry.
-
-    Walks `workflow_model_policy_stage` aux entries and surfaces:
-    - dead-candidate cache contents (skipped per stage, with reasons)
-    - per-stage requested vs effective model
-    - count of attempts that were skipped due to prior-turn failures
-
-    Also emits ``user_settings_warning`` when a candidate originating from
-    user-settings (``active_llm`` source) was classified dead, since that
-    is the user-visible "your selected model is broken" signal.
-    """
-    if not isinstance(aux_llm_calls, list):
-        return None
-
-    stage_entries: list[dict[str, Any]] = []
-    skipped_summary: dict[tuple[str | None, str | None], dict[str, Any]] = {}
-    total_skipped = 0
-    user_settings_dead: list[dict[str, Any]] = []
-
-    for entry in aux_llm_calls:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("type") != "workflow_model_policy_stage":
-            continue
-        stage_name = entry.get("stage")
-        requested_model = entry.get("requested_model")
-        effective_model = entry.get("effective_model")
-        model_source = entry.get("model_source")
-        skipped = entry.get("skipped_candidates")
-        skipped_list = skipped if isinstance(skipped, list) else []
-        stage_entries.append(
-            {
-                "stage": stage_name,
-                "requested_model": requested_model,
-                "effective_model": effective_model,
-                "model_source": model_source,
-                "fallback_used": bool(entry.get("fallback_used")),
-                "fallback_attempt_count": entry.get("fallback_attempt_count"),
-                "skipped_candidate_count": len(skipped_list),
-            }
-        )
-        for sk in skipped_list:
-            if not isinstance(sk, dict):
-                continue
-            total_skipped += 1
-            key = (sk.get("provider"), sk.get("model"))
-            existing = skipped_summary.get(key)
-            if existing is None:
-                skipped_summary[key] = {
-                    "provider": sk.get("provider"),
-                    "model": sk.get("model"),
-                    "host": sk.get("host"),
-                    "failure_class": sk.get("failure_class"),
-                    "failure_kind": sk.get("failure_kind"),
-                    "source": sk.get("source"),
-                    "skipped_in_stages": [stage_name] if stage_name else [],
-                }
-            else:
-                stages_list = existing.setdefault("skipped_in_stages", [])
-                if stage_name and stage_name not in stages_list:
-                    stages_list.append(stage_name)
-            if sk.get("source") == "active_llm":
-                user_settings_dead.append(
-                    {
-                        "provider": sk.get("provider"),
-                        "model": sk.get("model"),
-                        "failure_class": sk.get("failure_class"),
-                    }
-                )
-
-    if not stage_entries:
-        return None
-
-    summary: dict[str, Any] = {
-        "stages": stage_entries,
-        "dead_candidates": list(skipped_summary.values()),
-        "total_skipped_attempts": total_skipped,
-    }
-    if user_settings_dead:
-        seen: set[tuple[Any, Any]] = set()
-        unique: list[dict[str, Any]] = []
-        for item in user_settings_dead:
-            key = (item.get("provider"), item.get("model"))
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(item)
-        summary["user_settings_warning"] = {
-            "message": (
-                "Your selected default model is currently unavailable; "
-                "Von used a fallback model for this turn."
-            ),
-            "dead_active_llm_candidates": unique,
-        }
-    return summary
 
 
 def _build_turn_execution_diagnostics(
@@ -3960,39 +3720,137 @@ def _build_turn_execution_diagnostics(
     prompt_text: str | None,
     elapsed_ms: float | int | None = None,
     tool_progress_state: dict[str, Any] | None = None,
-    workflow_discovery: dict[str, Any] | None = None,
-    workflow_routing: dict[str, Any] | None = None,
     generated_at_utc: str | None = None,
     llm_calls: list[dict[str, Any]] | None = None,
     aux_llm_calls: list[dict[str, Any]] | None = None,
     tool_invocations: Sequence[Mapping[str, Any]] | None = None,
     timing_spans: Sequence[Mapping[str, Any]] | None = None,
     response_transformations: Mapping[str, Any] | None = None,
-    critic_verdict: Mapping[str, Any] | None = None,
-    completion_gate_verdict: Mapping[str, Any] | None = None,
     mcp_access: Mapping[str, Any] | None = None,
+    **_legacy_controller_fields: Any,
 ) -> dict[str, Any]:
-    code_version_details = get_runtime_code_version_info()
+    """Build observational diagnostics for a direct adaptive turn.
 
+    Workflow, selector, critic, and completion-gate keyword arguments remain
+    accepted for the shared error-support callback, but are deliberately not
+    projected into an ordinary-turn record.
+    """
+
+    code_version_details = get_runtime_code_version_info()
     prompt_preview = (
         prompt_text[:_TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT]
         if isinstance(prompt_text, str)
         else None
     )
-
-    latest_progress = (
+    raw_latest_progress = (
         dict(tool_progress_state) if isinstance(tool_progress_state, dict) else None
+    )
+    neutral_progress_fields = (
+        "status",
+        "stage",
+        "phase",
+        "phase_label",
+        "request_id",
+        "goal_label",
+        "liveness_state",
+        "liveness_reason",
+        "stall_detected",
+        "waiting_threshold_sec",
+        "stall_threshold_sec",
+        "activity_idle_ms",
+        "stage_idle_ms",
+        "elapsed_ms",
+        "subtask",
+        "tool",
+        "batch_size",
+        "result_summary",
+        "success",
+        "error",
+        "error_class",
+        "failure_kind",
+        "ordinary_turn_terminal_status",
+        "sequence_no",
+        "at_utc",
+        "tool_history",
+        "tool_call_count",
+        "tool_success_count",
+        "tool_failure_count",
+        "tool_pending_count",
+        "tool_call_start_count",
+        "tool_call_end_count",
+        "timing_spans",
+    )
+    latest_progress = (
+        {
+            key: raw_latest_progress[key]
+            for key in neutral_progress_fields
+            if key in raw_latest_progress
+        }
+        if isinstance(raw_latest_progress, dict)
+        else None
     )
 
     diagnostic_events: list[dict[str, Any]] = []
-    if isinstance(latest_progress, dict):
-        raw_events = latest_progress.get("diagnostic_events")
+    if isinstance(raw_latest_progress, dict):
+        raw_events = raw_latest_progress.get("diagnostic_events")
         if isinstance(raw_events, list):
+            neutral_event_fields = (
+                "at_utc",
+                "status",
+                "event_kind",
+                "stage",
+                "phase",
+                "phase_label",
+                "sequence_no",
+                "goal_label",
+                "liveness_state",
+                "idle_ms",
+                "activity_idle_ms",
+                "subtask",
+                "workflow_task",
+                "tool",
+                "call_id",
+                "batch_size",
+                "result_summary",
+                "duration_ms",
+                "model",
+                "success",
+                "error",
+                "error_class",
+                "failure_kind",
+            )
             diagnostic_events = [
-                cast(dict[str, Any], entry)
+                {
+                    key: entry[key]
+                    for key in neutral_event_fields
+                    if key in entry
+                }
                 for entry in raw_events
                 if isinstance(entry, dict)
             ][-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
+    if isinstance(latest_progress, dict):
+        latest_progress["diagnostic_events"] = diagnostic_events
+        if isinstance(raw_latest_progress, dict):
+            raw_phase_history = raw_latest_progress.get("phase_history")
+            if isinstance(raw_phase_history, list):
+                latest_progress["phase_history"] = [
+                    {
+                        key: entry[key]
+                        for key in (
+                            "phase",
+                            "stage",
+                            "phaseLabel",
+                            "phase_label",
+                            "stage_label",
+                            "timestamp",
+                            "at_utc",
+                            "sequence_no",
+                        )
+                        if key in entry
+                    }
+                    for entry in raw_phase_history
+                    if isinstance(entry, dict)
+                ][-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
 
     effective_elapsed = _progress_number(elapsed_ms)
     if effective_elapsed is None and isinstance(latest_progress, dict):
@@ -4000,29 +3858,6 @@ def _build_turn_execution_diagnostics(
     elapsed_ms_value = (
         int(max(0.0, effective_elapsed)) if effective_elapsed is not None else None
     )
-
-    workflow_payload = workflow_discovery
-    if workflow_payload is None and isinstance(latest_progress, dict):
-        progress_workflow = latest_progress.get("workflow_discovery")
-        if isinstance(progress_workflow, dict):
-            workflow_payload = dict(progress_workflow)
-    workflow_routing_payload = (
-        workflow_routing if isinstance(workflow_routing, dict) else None
-    )
-    if workflow_routing_payload is None and isinstance(latest_progress, dict):
-        progress_workflow_routing = latest_progress.get("workflow_routing")
-        if isinstance(progress_workflow_routing, dict):
-            workflow_routing_payload = dict(progress_workflow_routing)
-
-    routing_aux_llm_calls = aux_llm_calls if isinstance(aux_llm_calls, list) else None
-    if routing_aux_llm_calls is None and isinstance(latest_progress, dict):
-        progress_routing_aux = latest_progress.get("workflow_routing_aux")
-        if isinstance(progress_routing_aux, list):
-            routing_aux_llm_calls = [
-                cast(dict[str, Any], entry)
-                for entry in progress_routing_aux
-                if isinstance(entry, dict)
-            ]
 
     effective_request_id = _progress_str(request_id)
     if effective_request_id is None and isinstance(latest_progress, dict):
@@ -4032,32 +3867,26 @@ def _build_turn_execution_diagnostics(
         latest_progress,
         diagnostic_events=diagnostic_events,
     )
-    runtime_stages = [entry.get("phase") for entry in phase_history]
-    selected_workflow_id = (
-        _progress_str(latest_progress.get("selected_workflow_id"))
-        if isinstance(latest_progress, dict)
-        else None
+    progress_events = _build_progress_events_from_phase_history(
+        phase_history,
+        latest_progress=latest_progress,
     )
-    workflow_stage_path = _extract_workflow_stage_path_from_progress(latest_progress)
-    if workflow_stage_path is None:
-        workflow_stage_path = build_conversation_turn_stage_path(
-            runtime_stages=runtime_stages,
-            workflow_id=selected_workflow_id,
-            selected_workflow_id=selected_workflow_id,
-        )
+    activity_history = _build_activity_history_from_phase_history(
+        phase_history,
+        stage_diagnostics=[],
+        latest_progress=latest_progress,
+    )
+
     llm_call_entries = [
         cast(dict[str, Any], entry)
         for entry in (llm_calls or [])
         if isinstance(entry, dict)
     ]
-    stage_authority_llm_entries: list[dict[str, Any]] = []
-    if isinstance(routing_aux_llm_calls, list):
-        stage_authority_llm_entries.extend(
-            cast(dict[str, Any], entry)
-            for entry in routing_aux_llm_calls
-            if isinstance(entry, dict)
-        )
-    stage_authority_llm_entries.extend(llm_call_entries)
+    auxiliary_entries = [
+        cast(dict[str, Any], entry)
+        for entry in (aux_llm_calls or [])
+        if isinstance(entry, dict)
+    ]
     tool_observation_summary = derive_tool_observations_from_diagnostic_events(
         diagnostic_events,
         limit=_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
@@ -4072,16 +3901,17 @@ def _build_turn_execution_diagnostics(
         for entry in (tool_observation_summary.get("tool_history") or [])
         if isinstance(entry, dict)
     ]
-    extra_timing_spans = _extract_turn_timing_spans_from_payload(latest_progress)
-    if isinstance(timing_spans, Sequence) and not isinstance(
-        timing_spans, (str, bytes, bytearray)
-    ):
-        extra_timing_spans = merge_timing_spans(extra_timing_spans, timing_spans)
     tool_invocation_entries = [
         cast(Mapping[str, Any], entry)
         for entry in (tool_invocations or [])
         if isinstance(entry, Mapping)
     ]
+
+    extra_timing_spans = _extract_turn_timing_spans_from_payload(latest_progress)
+    if isinstance(timing_spans, Sequence) and not isinstance(
+        timing_spans, (str, bytes, bytearray)
+    ):
+        extra_timing_spans = merge_timing_spans(extra_timing_spans, timing_spans)
     turn_timing_trace = build_turn_timing_trace(
         request_id=effective_request_id,
         phase_history=phase_history,
@@ -4102,40 +3932,10 @@ def _build_turn_execution_diagnostics(
         ),
         turn_timing_trace,
     )
-    stage_diagnostics = _build_turn_execution_stage_diagnostics(
-        diagnostic_events=diagnostic_events,
-        workflow_stage_path=workflow_stage_path,
-        tool_history=tool_history,
-        tool_observation_summary=tool_observation_summary,
-        workflow_discovery=workflow_payload,
-        latest_progress=latest_progress,
-        aux_llm_calls=stage_authority_llm_entries,
-        response_transformations=response_transformations,
-        critic_verdict=critic_verdict,
-        completion_gate_verdict=completion_gate_verdict,
-    )
-    progress_events = _build_progress_events_from_phase_history(
-        phase_history,
-        latest_progress=latest_progress,
-    )
-    activity_history = _build_activity_history_from_phase_history(
-        phase_history,
-        stage_diagnostics=stage_diagnostics,
-        latest_progress=latest_progress,
-    )
-    workflow_routing_diagnostics = build_workflow_routing_diagnostics(
-        workflow_discovery=workflow_payload,
-        workflow_routing=workflow_routing_payload,
-        turn_execution_diagnostics={
-            "latest_progress": latest_progress,
-            "phase_history": phase_history,
-            "workflow_stage_path": workflow_stage_path,
-        },
-        aux_llm_calls=routing_aux_llm_calls,
-    )
 
     return {
         "schema_version": "turn_execution_diagnostics.v1",
+        "record_kind": "observational",
         "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
         "request_id": effective_request_id,
         "code_version": _progress_str(code_version_details.get("version")),
@@ -4165,40 +3965,16 @@ def _build_turn_execution_diagnostics(
         "tool_call_end_count": int(
             _progress_number(tool_observation_summary.get("tool_call_end_count")) or 0
         ),
-        "workflow_discovery": workflow_payload,
-        "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "llm_calls": llm_call_entries,
+        "aux_llm_calls": auxiliary_entries,
         "turn_timing_trace": turn_timing_trace,
-        "aux_llm_calls": (
-            [
-                cast(dict[str, Any], entry)
-                for entry in routing_aux_llm_calls
-                if isinstance(entry, dict)
-            ]
-            if isinstance(routing_aux_llm_calls, list)
-            else []
-        ),
-        "critic_verdict": (
-            dict(critic_verdict) if isinstance(critic_verdict, Mapping) else None
-        ),
-        "completion_gate": (
-            dict(completion_gate_verdict)
-            if isinstance(completion_gate_verdict, Mapping)
-            else None
-        ),
         "response_transformations": (
             dict(response_transformations)
             if isinstance(response_transformations, Mapping)
             else None
         ),
-        "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
-        "workflow_stage_path": workflow_stage_path,
-        "stage_diagnostics": stage_diagnostics,
         "timing_breakdown": timing_breakdown,
         "mcp_access": (dict(mcp_access) if isinstance(mcp_access, Mapping) else None),
-        "model_resolution_summary": _build_model_resolution_summary(
-            routing_aux_llm_calls
-        ),
     }
 
 
@@ -5360,6 +5136,18 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         existing = _TOOL_PROGRESS.get(key)
         if not isinstance(existing, dict):
             existing = {}
+        else:
+            existing_status = (
+                (_progress_str(existing.get("status")) or "").strip().lower()
+            )
+            existing_phase = (
+                (_progress_str(existing.get("phase")) or "").strip().lower()
+            )
+            if (
+                existing_status in _TOOL_PROGRESS_TERMINAL_STATUSES
+                or existing_phase in _TOOL_PROGRESS_TERMINAL_PHASES
+            ):
+                return
 
         safe_update = dict(update or {})
         status = _progress_str(safe_update.get("status")) or _progress_str(
@@ -5563,14 +5351,6 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         }
         liveness = _derive_progress_liveness(merged, now_epoch=now_epoch)
 
-        runtime_stages = _normalise_live_runtime_stage_sequence(
-            existing.get("_workflow_runtime_stages")
-        )
-        runtime_stages = _append_live_runtime_stage(
-            runtime_stages,
-            _progress_str(merged.get("phase")) or _progress_str(merged.get("stage")),
-        )
-        merged["_workflow_runtime_stages"] = runtime_stages
         phase_history = _normalise_phase_history_entries(existing.get("_phase_history"))
         phase_history = _append_preserved_phase_history_entry(
             phase_history,
@@ -5583,12 +5363,6 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             sequence_no=sequence_no,
         )
         merged["_phase_history"] = phase_history
-        merged["workflow_stage_path"] = (
-            _build_live_workflow_stage_path_from_runtime_stages(
-                runtime_stages,
-                _progress_str(merged.get("selected_workflow_id")),
-            )
-        )
 
         existing_events = merged.get("diagnostic_events")
         if not isinstance(existing_events, list):
@@ -6464,13 +6238,13 @@ def get_task_status(task_id: str):
     return jsonify(_json_safe_response_payload(status.to_dict())), 200
 
 
-def _serialise_background_orchestrator_result(result: Any) -> dict[str, Any]:
-    """Return a stable background-task payload for OrchestratorResult values.
+def _serialise_background_turn_result(result: Any) -> dict[str, Any]:
+    """Return a stable background-task payload for adaptive turn results.
 
-    Background `/von/generate` calls should preserve the same workflow-routing
-    and workflow-execution telemetry that the synchronous route exposes under
-    `llm_debug`, so long-running UI flows can be validated without relying on a
-    single open HTTP request.
+    Background `/von/generate` calls preserve the same model and read-tool
+    observations as the synchronous route, so long-running UI flows can be
+    validated without relying on a single open HTTP request. Optional legacy
+    fields are read only when serialising an older in-memory result.
     """
 
     tool_invocations = (
@@ -6513,10 +6287,12 @@ def _serialise_background_orchestrator_result(result: Any) -> dict[str, Any]:
     if hasattr(result, "llm_usage"):
         serialised["llm_usage"] = result.llm_usage
         llm_debug["llm_usage"] = result.llm_usage
-    orchestrator_duration_ms = getattr(result, "orchestrator_duration_ms", None)
-    if isinstance(orchestrator_duration_ms, (int, float)):
-        serialised["orchestrator_duration_ms"] = float(orchestrator_duration_ms)
-        llm_debug["orchestrator_duration_ms"] = float(orchestrator_duration_ms)
+    duration_ms = getattr(result, "duration_ms", None)
+    if not isinstance(duration_ms, (int, float)):
+        duration_ms = getattr(result, "orchestrator_duration_ms", None)
+    if isinstance(duration_ms, (int, float)):
+        serialised["duration_ms"] = float(duration_ms)
+        llm_debug["duration_ms"] = float(duration_ms)
     if hasattr(result, "render_plan") and isinstance(result.render_plan, dict):
         render_plan = dict(result.render_plan)
         serialised["render_plan"] = render_plan
@@ -6545,6 +6321,13 @@ def _normalise_background_generate_result(result: Any) -> dict[str, Any]:
     if status_code >= 400:
         raise RuntimeError(
             f"/von/generate background execution failed with status {status_code}: "
+            f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+        )
+    if payload.get("success") is False:
+        terminal_status = _progress_str(payload.get("terminal_status")) or "failed"
+        raise RuntimeError(
+            "/von/generate background execution returned non-success "
+            f"{terminal_status}: "
             f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
         )
     return _json_safe_response_payload(payload)
@@ -6757,7 +6540,7 @@ def get_task_result(task_id: str):
             409,
         )
 
-    # Serialise OrchestratorResult if that's what we have
+    # Serialise a route-compatible adaptive or historical turn result.
     result = status.result
     if hasattr(result, "response_text"):
         return (
@@ -6765,7 +6548,7 @@ def get_task_result(task_id: str):
                 _json_safe_response_payload(
                     {
                         "task_id": task_id,
-                        "result": _serialise_background_orchestrator_result(result),
+                        "result": _serialise_background_turn_result(result),
                     }
                 )
             ),
@@ -7015,6 +6798,10 @@ def _serialise_tool_invocations_for_turn_execution_record(
                 transport_metadata
             )
 
+        evidence = raw_invocation.get("evidence")
+        if isinstance(evidence, Mapping):
+            entry["evidence"] = _sanitise_diagnostic_export_payload(evidence)
+
         for key in (
             "effective_payload",
             "payload",
@@ -7028,89 +6815,6 @@ def _serialise_tool_invocations_for_turn_execution_record(
         serialised.append(entry)
 
     return serialised
-
-
-def _reconstruct_tool_messages_from_invocations(
-    tool_invocations: Any,
-    *,
-    orchestrator: Any = None,
-) -> list[dict[str, str]]:
-    """Best-effort presenter fallback when ``extra_messages`` are missing.
-
-    The authoritative route path is still ``OrchestratorResult.extra_messages``.
-    When that list is unexpectedly empty but executed invocations are present,
-    rebuild tool-style messages so presenter backfill can remain grounded in the
-    actual tool outcomes rather than synthesising a false no-tool narrative.
-    """
-
-    if not isinstance(tool_invocations, list):
-        return []
-
-    formatter = getattr(orchestrator, "_format_tool_result", None)
-    reconstructed: list[dict[str, str]] = []
-    for raw_invocation in tool_invocations:
-        if not isinstance(raw_invocation, Mapping):
-            continue
-
-        tool_name = raw_invocation.get("tool") or raw_invocation.get("method")
-        if not isinstance(tool_name, str) or not tool_name.strip():
-            continue
-
-        raw_status = raw_invocation.get("status")
-        error_text = raw_invocation.get("error")
-        status = (
-            "error"
-            if isinstance(raw_status, str) and raw_status.strip().lower() == "error"
-            else "ok"
-        )
-        payload = raw_invocation.get("effective_payload")
-        if payload is None:
-            payload = raw_invocation.get("result")
-        duration_ms = raw_invocation.get("duration_ms")
-        if not isinstance(duration_ms, (int, float)):
-            duration_ms = None
-
-        if callable(formatter):
-            try:
-                content = formatter(
-                    tool_name.strip(),
-                    payload,
-                    duration_ms,
-                    status,
-                    error_text if isinstance(error_text, str) else None,
-                )
-            except Exception:
-                content = None
-            if isinstance(content, str) and content.strip():
-                reconstructed.append({"role": "tool", "content": content})
-                continue
-
-        fallback_payload: dict[str, Any] = {
-            "tool": tool_name.strip(),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-        if status == "ok":
-            fallback_payload["payload"] = payload
-        if isinstance(error_text, str) and error_text.strip():
-            fallback_payload["error"] = error_text.strip()
-        reconstructed.append(
-            {"role": "tool", "content": json.dumps(fallback_payload, default=str)}
-        )
-
-    return reconstructed
-
-
-def _truncate_debug_payload(raw: str | None, max_chars: int = 4000) -> str | None:
-    """Limit rejected tool payloads before surfacing them in LLM debug info."""
-    if raw is None:
-        return None
-
-    payload = raw if isinstance(raw, str) else str(raw)
-    if len(payload) <= max_chars:
-        return payload
-
-    return payload[:max_chars] + f"\n... [truncated {len(payload) - max_chars} chars]"
 
 
 def _limit_context_size(context: list[dict], max_messages: int = 20) -> list[dict]:
@@ -7387,117 +7091,6 @@ def _normalise_workflow_routing_payload(
     return None
 
 
-def _latest_turn_completion_gate(aux_calls: Any) -> dict[str, Any] | None:
-    if not isinstance(aux_calls, (list, tuple)):
-        return None
-
-    for entry in reversed(aux_calls):
-        if not isinstance(entry, Mapping):
-            continue
-        call_type = entry.get("type")
-        if (
-            not isinstance(call_type, str)
-            or call_type.strip() != "turn_completion_gate"
-        ):
-            continue
-
-        decision = _progress_str(entry.get("decision"))
-        decision_reason = _progress_str(entry.get("decision_reason"))
-        requires_follow_up = bool(entry.get("requires_follow_up", False))
-        safe_to_claim_completion = bool(
-            entry.get("safe_to_claim_completion", not requires_follow_up)
-        )
-        blocking_effect_ids_raw = entry.get("blocking_effect_ids")
-        blocking_effect_ids: list[str] = []
-        if isinstance(blocking_effect_ids_raw, list):
-            for item in blocking_effect_ids_raw:
-                effect_id = _progress_str(item)
-                if effect_id:
-                    blocking_effect_ids.append(effect_id)
-        blocking_failure_codes_raw = entry.get("blocking_failure_codes")
-        blocking_failure_codes: list[str] = []
-        if isinstance(blocking_failure_codes_raw, list):
-            for item in blocking_failure_codes_raw:
-                failure_code = _progress_str(item)
-                if failure_code:
-                    blocking_failure_codes.append(failure_code)
-        unresolved_preconditions_raw = entry.get("unresolved_preconditions")
-        unresolved_preconditions = (
-            [
-                dict(item)
-                for item in unresolved_preconditions_raw
-                if isinstance(item, Mapping)
-            ]
-            if isinstance(unresolved_preconditions_raw, list)
-            else []
-        )
-        evidence_payload_raw = entry.get("evidence_payload")
-        evidence_payload = (
-            dict(evidence_payload_raw)
-            if isinstance(evidence_payload_raw, Mapping)
-            else None
-        )
-
-        return {
-            "decision": decision,
-            "decision_reason": decision_reason,
-            "requires_follow_up": requires_follow_up,
-            "safe_to_claim_completion": safe_to_claim_completion,
-            "blocking_effect_ids": blocking_effect_ids,
-            "blocking_failure_codes": blocking_failure_codes,
-            "unresolved_preconditions": unresolved_preconditions,
-            "evidence_payload": evidence_payload,
-        }
-
-    return None
-
-
-def _build_terminal_tool_progress_payload(
-    *,
-    request_id: str,
-    aux_calls: Any,
-    completion_gate: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    completion_gate = (
-        dict(completion_gate)
-        if isinstance(completion_gate, Mapping)
-        else _latest_turn_completion_gate(aux_calls)
-    )
-    requires_follow_up = bool(
-        completion_gate.get("requires_follow_up", False)
-        if isinstance(completion_gate, dict)
-        else False
-    )
-    safe_to_claim_completion = bool(
-        completion_gate.get("safe_to_claim_completion", not requires_follow_up)
-        if isinstance(completion_gate, dict)
-        else True
-    )
-    progress_success = bool(safe_to_claim_completion and not requires_follow_up)
-    terminal_status = "completed" if progress_success else "follow_up_required"
-    terminal_label = "Complete" if progress_success else "Follow-up required"
-
-    payload: dict[str, Any] = {
-        "status": terminal_status,
-        "stage": terminal_status,
-        "phase_label": terminal_label,
-        "request_id": request_id,
-        "success": progress_success,
-        "completion_gate_requires_follow_up": requires_follow_up,
-        "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
-        "orchestrator_status": terminal_status,
-    }
-    if isinstance(completion_gate, dict):
-        payload["completion_gate_decision"] = completion_gate.get("decision")
-        payload["completion_gate_decision_reason"] = completion_gate.get(
-            "decision_reason"
-        )
-        blocking_effect_ids = completion_gate.get("blocking_effect_ids")
-        if isinstance(blocking_effect_ids, list):
-            payload["completion_gate_blocking_effect_ids"] = list(blocking_effect_ids)
-    return payload
-
-
 def _build_request_initialising_tool_progress_payload(
     *,
     request_id: str,
@@ -7616,10 +7209,14 @@ def _finalise_llm_debug_info(
     actor_concept_id: str | None = None,
     user_id: str | None,
     org_id: str | None,
-    workflow_discovery: dict[str, Any] | None = None,
-    workflow_routing: Any = None,
-    method_catalogue: Mapping[str, Any] | None = None,
+    **_legacy_controller_fields: Any,
 ) -> dict[str, Any]:
+    """Finalise an observational ordinary-turn record.
+
+    Historical controller keyword arguments remain accepted for error-record
+    read-back compatibility, but cannot veto or rewrite the model's result.
+    """
+
     if not isinstance(llm_debug_info, dict):
         return llm_debug_info
 
@@ -7681,17 +7278,6 @@ def _finalise_llm_debug_info(
                 tool_observation_ledger
             )
 
-    workflow_discovery_payload = workflow_discovery
-    if workflow_discovery_payload is None:
-        raw_discovery = llm_debug_info.get("workflow_discovery")
-        if isinstance(raw_discovery, dict):
-            workflow_discovery_payload = dict(raw_discovery)
-
-    workflow_routing_payload = _normalise_workflow_routing_payload(workflow_routing)
-    if workflow_routing_payload is None:
-        raw_routing = llm_debug_info.get("workflow_routing")
-        workflow_routing_payload = _normalise_workflow_routing_payload(raw_routing)
-
     resolved_actor_concept_id = actor_concept_id
     if (
         not isinstance(resolved_actor_concept_id, str)
@@ -7700,6 +7286,8 @@ def _finalise_llm_debug_info(
         raw_actor_concept_id = llm_debug_info.get("actor_concept_id")
         if isinstance(raw_actor_concept_id, str) and raw_actor_concept_id.strip():
             resolved_actor_concept_id = raw_actor_concept_id.strip()
+        elif isinstance(user_id, str) and user_id.strip():
+            resolved_actor_concept_id = user_id.strip()
         elif isinstance(namespace, str) and namespace.strip():
             resolved_actor_concept_id = namespace.strip()
         else:
@@ -7707,149 +7295,86 @@ def _finalise_llm_debug_info(
     if isinstance(resolved_actor_concept_id, str) and resolved_actor_concept_id.strip():
         llm_debug_info["actor_concept_id"] = resolved_actor_concept_id
 
-    try:
-        turn_execution_record = build_turn_execution_record(
-            request_id=llm_debug_info.get("request_id"),
-            session_id=session_id,
-            namespace=namespace,
-            actor_concept_id=resolved_actor_concept_id,
-            user_id=user_id,
-            org_id=org_id,
-            prompt_text=prompt_text,
-            response_text=(
-                response_text
-                if isinstance(response_text, str)
-                else llm_debug_info.get("response")
-            ),
-            interaction_timestamp_utc=llm_debug_info.get("interaction_timestamp_utc"),
-            workflow_discovery=workflow_discovery_payload,
-            workflow_routing=workflow_routing_payload,
-            tool_invocations=turn_record_tool_invocations_payload,
-            search_evidence=search_evidence_payload,
-            turn_execution_diagnostics=(
-                llm_debug_info.get("turn_execution_diagnostics")
-                if isinstance(llm_debug_info.get("turn_execution_diagnostics"), dict)
-                else None
-            ),
-            aux_llm_calls=aux_llm_calls_payload,
-            llm_calls=(
-                llm_debug_info.get("llm_interaction", {}).get("calls")
-                if isinstance(llm_debug_info.get("llm_interaction"), dict)
-                and isinstance(
-                    llm_debug_info.get("llm_interaction", {}).get("calls"), list
-                )
-                else (
-                    llm_debug_info.get("llm_calls")
-                    if isinstance(llm_debug_info.get("llm_calls"), list)
-                    else []
-                )
-            ),
-            selected_workflow_trace=(
-                llm_debug_info.get("selected_workflow_trace")
-                if isinstance(llm_debug_info.get("selected_workflow_trace"), dict)
-                else None
-            ),
-            critic_verdict=(
-                llm_debug_info.get("critic_verdict")
-                if isinstance(llm_debug_info.get("critic_verdict"), dict)
-                else None
-            ),
-            completion_gate_verdict=(
-                llm_debug_info.get("completion_gate_verdict")
-                if isinstance(llm_debug_info.get("completion_gate_verdict"), dict)
-                else None
-            ),
-            completion_report=(
-                llm_debug_info.get("completion_report")
-                if isinstance(llm_debug_info.get("completion_report"), dict)
-                else None
-            ),
-            required_tool_obligation_ledger=(
-                llm_debug_info.get("required_tool_obligation_ledger")
-                if isinstance(
-                    llm_debug_info.get("required_tool_obligation_ledger"), dict
-                )
-                else None
-            ),
-            tool_observation_ledger=(
-                tool_observation_ledger
-                if int(tool_observation_ledger.get("observation_count") or 0) > 0
-                else None
-            ),
-            method_catalogue=(
-                method_catalogue
-                if isinstance(method_catalogue, Mapping)
-                else (
-                    llm_debug_info.get("method_catalogue")
-                    if isinstance(llm_debug_info.get("method_catalogue"), Mapping)
-                    else None
-                )
-            ),
-            workflow_failure_evidence=llm_debug_info,
+    llm_interaction_payload = (
+        llm_debug_info.get("llm_interaction")
+        if isinstance(llm_debug_info.get("llm_interaction"), Mapping)
+        else {}
+    )
+    llm_calls_payload = (
+        llm_interaction_payload.get("calls")
+        if isinstance(llm_interaction_payload.get("calls"), list)
+        else (
+            llm_debug_info.get("llm_calls")
+            if isinstance(llm_debug_info.get("llm_calls"), list)
+            else []
         )
-        llm_debug_info["turn_execution_record"] = turn_execution_record
-        terminal_outcome_receipt = turn_execution_record.get("terminal_outcome_receipt")
-        terminal_outcome_receipt_validation = turn_execution_record.get(
-            "terminal_outcome_receipt_validation"
-        )
-        if isinstance(terminal_outcome_receipt, Mapping):
-            llm_debug_info["terminal_outcome_receipt"] = dict(terminal_outcome_receipt)
-            llm_debug_info["terminal_outcome_receipt_validation"] = (
-                dict(terminal_outcome_receipt_validation)
-                if isinstance(terminal_outcome_receipt_validation, Mapping)
-                else {}
-            )
-            tool_observation_ledger = build_tool_observation_ledger(
-                existing_ledger=tool_observation_ledger,
-                terminal_outcome_receipt=terminal_outcome_receipt,
-                terminal_outcome_receipt_validation=(
-                    terminal_outcome_receipt_validation
-                    if isinstance(terminal_outcome_receipt_validation, Mapping)
-                    else None
-                ),
-            )
-            llm_debug_info["tool_observation_ledger"] = dict(tool_observation_ledger)
-            diagnostics_payload = llm_debug_info.get("turn_execution_diagnostics")
-            if isinstance(diagnostics_payload, dict):
-                diagnostics_payload["terminal_outcome_receipt"] = dict(
-                    terminal_outcome_receipt
-                )
-                diagnostics_payload["terminal_outcome_receipt_validation"] = (
-                    dict(terminal_outcome_receipt_validation)
-                    if isinstance(terminal_outcome_receipt_validation, Mapping)
-                    else {}
-                )
-                diagnostics_payload["tool_observation_ledger"] = dict(
-                    tool_observation_ledger
-                )
-        routing_diagnostics = turn_execution_record.get("workflow_routing_diagnostics")
-        if isinstance(routing_diagnostics, Mapping):
-            llm_debug_info["workflow_routing_diagnostics"] = dict(routing_diagnostics)
-            diagnostics_payload = llm_debug_info.get("turn_execution_diagnostics")
-            if isinstance(diagnostics_payload, dict):
-                diagnostics_payload["workflow_routing_diagnostics"] = dict(
-                    routing_diagnostics
-                )
-        completion_gate = turn_execution_record.get("completion_gate")
-        if isinstance(completion_gate, Mapping):
-            raw_completion_gate_verdict = llm_debug_info.get("completion_gate_verdict")
-            if isinstance(raw_completion_gate_verdict, Mapping):
-                llm_debug_info["raw_completion_gate_verdict"] = dict(
-                    raw_completion_gate_verdict
-                )
-            llm_debug_info["completion_gate"] = dict(completion_gate)
-            llm_debug_info["completion_gate_verdict"] = dict(completion_gate)
-            diagnostics_payload = llm_debug_info.get("turn_execution_diagnostics")
-            if isinstance(diagnostics_payload, dict):
-                diagnostics_payload["completion_gate"] = dict(completion_gate)
-    except Exception as exc:
-        try:
-            current_app.logger.warning(
-                "[turn_execution_record] Failed to build turn execution record: %s",
-                exc,
-            )
-        except Exception:
-            pass
+    )
+    evidence_index: list[dict[str, Any]] = []
+    for entry in reversed(aux_llm_calls_payload):
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("type") != "adaptive_turn_evidence_index":
+            continue
+        raw_evidence = entry.get("evidence")
+        if isinstance(raw_evidence, list):
+            evidence_index = [
+                dict(item) for item in raw_evidence if isinstance(item, Mapping)
+            ]
+        break
+
+    final_response_text = (
+        response_text
+        if isinstance(response_text, str)
+        else str(llm_debug_info.get("response") or "")
+    )
+    terminal_status = _progress_str(
+        llm_interaction_payload.get("ordinary_turn_terminal_status")
+    ) or "not_reported"
+    turn_execution_record: dict[str, Any] = {
+        "schema_version": "turn_execution_record.observational.v1",
+        "record_kind": "observational",
+        "request_id": llm_debug_info.get("request_id"),
+        "session_id": session_id,
+        "interaction_timestamp_utc": llm_debug_info.get(
+            "interaction_timestamp_utc"
+        ),
+        "actor": {
+            "actor_concept_id": resolved_actor_concept_id,
+            "user_concept_id": user_id,
+            "organisation_concept_id": org_id,
+            "namespace": namespace,
+        },
+        "terminal_status": terminal_status,
+        "response": {
+            "present": bool(final_response_text.strip()),
+            "character_count": len(final_response_text),
+            "sha256": (
+                hashlib.sha256(final_response_text.encode("utf-8")).hexdigest()
+                if final_response_text
+                else None
+            ),
+        },
+        "llm_calls": [dict(item) for item in llm_calls_payload if isinstance(item, Mapping)],
+        "tool_invocations": [
+            dict(item)
+            for item in turn_record_tool_invocations_payload
+            if isinstance(item, Mapping)
+        ],
+        "tool_observation_ledger": (
+            dict(tool_observation_ledger)
+            if int(tool_observation_ledger.get("observation_count") or 0) > 0
+            else None
+            ),
+            "search_evidence": list(search_evidence_payload or []),
+            "evidence_index": evidence_index,
+            "turn_execution_diagnostics": (
+                dict(diagnostics_payload)
+                if isinstance(diagnostics_payload, Mapping)
+            else None
+        ),
+        "code_version": code_version_details,
+    }
+    llm_debug_info["turn_execution_record"] = turn_execution_record
 
     llm_debug_info["turn_output_health"] = build_turn_output_health(llm_debug_info)
     llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
@@ -9480,108 +9005,6 @@ def _build_tool_messages_prompt_blob(
     return blob
 
 
-def _is_prompt_introspection_question(text: str) -> bool:
-    lowered = (text or "").strip().lower()
-    if not lowered:
-        return False
-    triggers = (
-        "what is my user prompt",
-        "what's my user prompt",
-        "what is my system prompt",
-        "what's my system prompt",
-        "what prompt is active",
-        "which prompt is active",
-        "tell me what my user prompt is",
-        "tell me what my system prompt is",
-    )
-    return any(t in lowered for t in triggers)
-
-
-def _is_tool_introspection_question(text: str) -> bool:
-    lowered = (text or "").strip().lower()
-    if not lowered:
-        return False
-    triggers = (
-        "what tools do you have",
-        "what tools can you",
-        "what tools can i",
-        "list tools",
-        "show tools",
-        "available tools",
-        "tool list",
-        "mcp tools",
-        "what can you do",
-        "what capabilities do you have",
-    )
-    return any(t in lowered for t in triggers)
-
-
-def _is_rag_status_question(text: str) -> bool:
-    lowered = (text or "").strip().lower()
-    if not lowered:
-        return False
-    triggers = (
-        "rag status",
-        "what is my rag status",
-        "is rag enabled",
-        "is rag on",
-        "rag enabled",
-        "rag on",
-        "rag working",
-        "rag isolation",
-    )
-    return any(t in lowered for t in triggers)
-
-
-def _format_tool_inventory(methods: dict) -> str:
-    # Deterministic plain-text listing; keep stable ordering.
-    if not isinstance(methods, dict) or not methods:
-        return "No internal MCP tools are registered."
-
-    # Group by category
-    buckets: dict[str, list[tuple[str, str]]] = {}
-    for name, meta in methods.items():
-        if not isinstance(name, str):
-            continue
-        meta_dict = meta if isinstance(meta, dict) else {}
-
-        category: str = "other"
-        category_value = meta_dict.get("category")
-        if isinstance(category_value, str) and category_value.strip():
-            category = category_value.strip()
-
-        desc: str = ""
-        desc_value = meta_dict.get("description")
-        if isinstance(desc_value, str):
-            desc = desc_value.strip()
-
-        buckets.setdefault(category, []).append((name, desc))
-
-    lines: list[str] = []
-    lines.append("Internal MCP tools currently registered:")
-    for category in sorted(buckets.keys()):
-        lines.append("")
-        lines.append(f"- {category}:")
-        for name, desc in sorted(buckets[category], key=lambda x: x[0]):
-            if desc:
-                lines.append(f"  - {name}: {desc}")
-            else:
-                lines.append(f"  - {name}")
-    lines.append("")
-    lines.append(
-        "Note: Some tools (especially RAG) require a user namespace to avoid cross-user data leakage."
-    )
-    return "\n".join(lines)
-
-
-def _deterministic_introspection_enabled() -> bool:
-    try:
-        flag_value = os.getenv("VON_DETERMINISTIC_INTROSPECTION", "0")
-        return str(flag_value).strip().lower() in {"1", "true", "yes", "on"}
-    except Exception:
-        return False
-
-
 def _build_chat_history_context_kwargs(
     *,
     namespace: str | None,
@@ -9902,569 +9325,6 @@ def _ensure_generate_conversation_session(
         session["session_id"] = str(uuid.uuid4())
     session.modified = True
     return str(session["session_id"]), None, False
-
-
-def _maybe_handle_prompt_introspection_fastpath(
-    *,
-    prompt_text: str,
-    user_concept_id: str,
-    user_namespace: str | None,
-    org_concept_id: str | None,
-    role_in_org: str | None,
-    history_user_id: str | None,
-    session_id: str,
-    dynamic_instructions: str | None = None,
-    auxiliary_system_prompt: str | None = None,
-    user_prompt_debug: dict,
-    context: list[dict],
-    interaction_timestamp_utc: str,
-    model_name: str,
-    request_start_perf: float,
-    request_id: str | None = None,
-    progress_scope_key: str | None = None,
-):
-    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-    import json as _json
-
-    prompt_namespace = user_namespace or user_concept_id
-    if dynamic_instructions is None and isinstance(auxiliary_system_prompt, str):
-        dynamic_instructions = auxiliary_system_prompt
-
-    tool_messages: list[dict] = []
-    tool_invocations: list[dict] = []
-
-    response_text = None
-    used_tool = False
-
-    if gateway is not None and getattr(gateway, "enabled", False):
-        try:
-            tool_result = gateway.invoke(
-                "chat_get_prompt_context",
-                {
-                    "namespace": prompt_namespace,
-                    "include_content": True,
-                    "max_chars": 5000,
-                },
-            )
-            payload = tool_result.payload
-            duration_ms = getattr(tool_result, "duration_ms", None)
-            used_tool = True
-            tool_messages = [
-                {
-                    "role": "tool",
-                    "content": _json.dumps(
-                        {
-                            "tool": "chat_get_prompt_context",
-                            "status": "ok",
-                            "duration_ms": duration_ms,
-                            "payload": payload,
-                        },
-                        default=str,
-                    ),
-                }
-            ]
-            tool_invocations = [
-                {
-                    "tool": "chat_get_prompt_context",
-                    "payload": {
-                        "namespace": prompt_namespace,
-                        "include_content": True,
-                        "max_chars": 5000,
-                    },
-                    "duration_ms": duration_ms,
-                    "direct_user_call": False,
-                }
-            ]
-
-            if isinstance(payload, dict) and payload.get("success"):
-                prompt_ids = payload.get("prompt_concept_ids") or []
-                prompt_text_value = payload.get("prompt_text") or ""
-                if not isinstance(prompt_text_value, str):
-                    prompt_text_value = str(prompt_text_value)
-                prompt_text_value = prompt_text_value.strip()
-                if not prompt_text_value:
-                    response_text = (
-                        "No user-specific system prompt text is currently available for your account. "
-                        "(The prompt linkage exists but no content was returned.)"
-                    )
-                else:
-                    response_text = (
-                        "Here is your current user-specific system prompt (from Vontology).\n\n"
-                        f"Prompt concept IDs: {prompt_ids}\n\n"
-                        f"{prompt_text_value}"
-                    )
-            else:
-                response_text = (
-                    "I could not retrieve your user-specific prompt context via internal tools. "
-                    f"Result: {payload}"
-                )
-        except Exception as exc:
-            current_app.logger.warning(
-                "[mcp_orchestrator] Prompt introspection tool failed: %s", exc
-            )
-
-    # Fallback: use already-loaded prompt fragments (no tool required)
-    if response_text is None:
-        prompt_ids = (
-            user_prompt_debug.get("prompt_concept_ids")
-            if isinstance(user_prompt_debug, dict)
-            else []
-        )
-        if not isinstance(prompt_ids, list):
-            prompt_ids = []
-        prompt_text_value = dynamic_instructions or ""
-        prompt_text_value = (
-            prompt_text_value.strip()
-            if isinstance(prompt_text_value, str)
-            else str(prompt_text_value)
-        )
-        if not prompt_text_value:
-            response_text = "No user-specific system prompt is currently active (no prompt content was loaded from Vontology)."
-        else:
-            response_text = (
-                "Here is your current user-specific system prompt (from Vontology).\n\n"
-                f"Prompt concept IDs: {prompt_ids}\n\n"
-                f"{prompt_text_value}"
-            )
-
-    # Store messages in history/context, matching the direct-tool-call pattern.
-    if history_user_id:
-        _add_chat_history_message(
-            user_id=history_user_id,
-            session_id=session_id,
-            message={
-                "role": "user",
-                "content": prompt_text,
-                "author_user_id": user_concept_id,
-            },
-            namespace=prompt_namespace,
-            organisation_concept_id=org_concept_id,
-            role_in_org=role_in_org,
-        )
-    for tool_msg in _truncate_large_tool_results(
-        tool_messages, max_tool_content_chars=5000
-    ):
-        if history_user_id:
-            _add_chat_history_message(
-                user_id=history_user_id,
-                session_id=session_id,
-                message=tool_msg,
-                namespace=prompt_namespace,
-                organisation_concept_id=org_concept_id,
-                role_in_org=role_in_org,
-            )
-
-    current_app.config["CONTEXT"] = _limit_context_size(
-        current_app.config.get("CONTEXT", []), max_messages=20
-    )
-
-    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
-    context_stats = _calculate_context_stats(context)
-    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
-    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
-    tool_progress_snapshot = _snapshot_tool_progress_for_request(
-        progress_scope_key, request_id
-    )
-    turn_execution_diagnostics = _build_turn_execution_diagnostics(
-        request_id=request_id,
-        prompt_text=prompt_text,
-        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
-        tool_progress_state=tool_progress_snapshot,
-    )
-
-    llm_debug_info = {
-        "interaction_timestamp_utc": interaction_timestamp_utc,
-        "request_id": request_id,
-        "model": model_name,
-        "llm_interaction": {
-            "requested_model": model_name,
-            "orchestrator_used": False,
-            "duration_ms": None,
-            "usage": None,
-            "calls": [],
-            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
-        },
-        "messages": current_turn_messages,
-        "response": response_text,
-        "user_prompt": user_prompt_debug,
-        "context_stats": {
-            "sent_to_llm": context_stats,
-            "stored_context": current_context_stats,
-        },
-        "tool_stats": tool_stats,
-        "tool_invocations": tool_invocations,
-        "prompt_introspection_fastpath": {"used_tool": used_tool, "enabled": True},
-        "fastpath": {
-            "name": "prompt_introspection",
-            "bypassed_llm": True,
-            "used_tool": used_tool,
-            "enabled": True,
-        },
-        "turn_execution_diagnostics": turn_execution_diagnostics,
-    }
-    llm_debug_info = _finalise_llm_debug_info(
-        llm_debug_info=llm_debug_info,
-        prompt_text=prompt_text,
-        response_text=response_text,
-        session_id=session_id,
-        namespace=prompt_namespace,
-        user_id=history_user_id or user_concept_id,
-        org_id=org_concept_id,
-    )
-
-    if history_user_id:
-        _add_chat_history_message(
-            user_id=history_user_id,
-            session_id=session_id,
-            message={"role": "assistant", "content": response_text},
-            llm_debug_data=llm_debug_info,
-            namespace=prompt_namespace,
-            organisation_concept_id=org_concept_id,
-            role_in_org=role_in_org,
-        )
-
-    return jsonify(
-        {
-            "response": response_text,
-            "fastpath": {
-                "name": "prompt_introspection",
-                "bypassed_llm": True,
-                "used_tool": used_tool,
-            },
-            "llm_debug": llm_debug_info,
-        }
-    )
-
-
-def _maybe_handle_tool_inventory_fastpath(
-    *,
-    prompt_text: str,
-    user_concept_id: str | None,
-    user_namespace: str | None,
-    org_concept_id: str | None,
-    role_in_org: str | None,
-    history_user_id: str | None,
-    session_id: str,
-    context: list[dict],
-    interaction_timestamp_utc: str,
-    model_name: str,
-    request_start_perf: float,
-    user_prompt_debug: dict,
-    request_id: str | None = None,
-    progress_scope_key: str | None = None,
-):
-    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-    prompt_namespace = user_namespace or user_concept_id
-
-    response_text = None
-    used_tool = False
-    methods_snapshot = None
-
-    if gateway is not None and getattr(gateway, "enabled", False):
-        try:
-            methods_snapshot = gateway.describe_methods()
-            used_tool = True
-            response_text = _format_tool_inventory(methods_snapshot)
-        except Exception as exc:
-            response_text = (
-                f"Could not retrieve tool inventory from the internal gateway: {exc}"
-            )
-    else:
-        response_text = ()
-
-    current_turn_messages = [{"role": "user", "content": prompt_text}]
-    context_stats = _calculate_context_stats(context)
-    current_context_stats = _calculate_context_stats(
-        current_app.config.get("CONTEXT", [])
-    )
-    tool_progress_snapshot = _snapshot_tool_progress_for_request(
-        progress_scope_key, request_id
-    )
-    turn_execution_diagnostics = _build_turn_execution_diagnostics(
-        request_id=request_id,
-        prompt_text=prompt_text,
-        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
-        tool_progress_state=tool_progress_snapshot,
-    )
-
-    llm_debug_info = {
-        "interaction_timestamp_utc": interaction_timestamp_utc,
-        "request_id": request_id,
-        "model": model_name,
-        "llm_interaction": {
-            "requested_model": model_name,
-            "orchestrator_used": False,
-            "duration_ms": None,
-            "usage": None,
-            "calls": [],
-            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
-        },
-        "messages": current_turn_messages,
-        "response": response_text,
-        "user_prompt": user_prompt_debug,
-        "context_stats": {
-            "sent_to_llm": context_stats,
-            "stored_context": current_context_stats,
-        },
-        "tool_stats": None,
-        "tool_invocations": (
-            [
-                {
-                    "tool": "gateway.describe_methods",
-                    "payload": {},
-                    "duration_ms": None,
-                    "direct_user_call": False,
-                    "ok": bool(methods_snapshot is not None),
-                }
-            ]
-            if used_tool
-            else []
-        ),
-        "fastpath": {
-            "name": "tool_inventory",
-            "bypassed_llm": True,
-            "used_tool": used_tool,
-            "enabled": True,
-        },
-        "turn_execution_diagnostics": turn_execution_diagnostics,
-    }
-    llm_debug_info = _finalise_llm_debug_info(
-        llm_debug_info=llm_debug_info,
-        prompt_text=prompt_text,
-        response_text=(
-            response_text if isinstance(response_text, str) else str(response_text)
-        ),
-        session_id=session_id,
-        namespace=prompt_namespace,
-        user_id=history_user_id or user_concept_id,
-        org_id=org_concept_id,
-        method_catalogue=(
-            methods_snapshot if isinstance(methods_snapshot, dict) else None
-        ),
-    )
-
-    if history_user_id:
-        _add_chat_history_message(
-            user_id=history_user_id,
-            session_id=session_id,
-            message={
-                "role": "user",
-                "content": prompt_text,
-                "author_user_id": user_concept_id,
-            },
-            namespace=prompt_namespace,
-            organisation_concept_id=org_concept_id,
-            role_in_org=role_in_org,
-        )
-        _add_chat_history_message(
-            user_id=history_user_id,
-            session_id=session_id,
-            message={"role": "assistant", "content": response_text},
-            llm_debug_data=llm_debug_info,
-            namespace=prompt_namespace,
-            organisation_concept_id=org_concept_id,
-            role_in_org=role_in_org,
-        )
-    else:
-        stored_context = current_app.config.get("CONTEXT", [])
-        stored_context.append({"role": "user", "content": prompt_text})
-        stored_context.append({"role": "assistant", "content": response_text})
-        current_app.config["CONTEXT"] = _limit_context_size(
-            stored_context, max_messages=20
-        )
-
-    current_app.config["CONTEXT"] = _limit_context_size(
-        current_app.config.get("CONTEXT", []), max_messages=20
-    )
-
-    return jsonify(
-        {
-            "response": response_text,
-            "fastpath": {
-                "name": "tool_inventory",
-                "bypassed_llm": True,
-                "used_tool": used_tool,
-            },
-            "llm_debug": llm_debug_info,
-        }
-    )
-
-
-def _maybe_handle_rag_status_fastpath(
-    *,
-    prompt_text: str,
-    user_concept_id: str,
-    user_namespace: str | None,
-    org_concept_id: str | None,
-    role_in_org: str | None,
-    history_user_id: str | None,
-    session_id: str,
-    context: list[dict],
-    interaction_timestamp_utc: str,
-    model_name: str,
-    request_start_perf: float,
-    user_prompt_debug: dict,
-    request_id: str | None = None,
-    progress_scope_key: str | None = None,
-):
-    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-    import json as _json
-
-    rag_namespace = user_namespace or user_concept_id
-
-    tool_messages: list[dict] = []
-    tool_invocations: list[dict] = []
-    used_tool = False
-    response_text = None
-
-    if gateway is not None and getattr(gateway, "enabled", False):
-        try:
-            tool_result = gateway.invoke(
-                "rag_get_status",
-                {"namespace": rag_namespace},
-            )
-            payload = tool_result.payload
-            duration_ms = getattr(tool_result, "duration_ms", None)
-            used_tool = True
-
-            tool_messages = [
-                {
-                    "role": "tool",
-                    "content": _json.dumps(
-                        {
-                            "tool": "rag_get_status",
-                            "status": "ok",
-                            "duration_ms": duration_ms,
-                            "payload": payload,
-                        },
-                        default=str,
-                    ),
-                }
-            ]
-            tool_invocations = [
-                {
-                    "tool": "rag_get_status",
-                    "payload": {"namespace": rag_namespace},
-                    "duration_ms": duration_ms,
-                    "direct_user_call": False,
-                }
-            ]
-
-            response_text = (
-                "Here is your current RAG status (server-truth):\n\n"
-                + _json.dumps(payload, indent=2, default=str)
-            )
-        except Exception as exc:
-            response_text = f"I could not retrieve RAG status via internal tools: {exc}"
-    else:
-        response_text = "Internal MCP gateway is disabled; RAG status is unavailable."
-
-    # Persist messages in history/context.
-    if history_user_id:
-        _add_chat_history_message(
-            user_id=history_user_id,
-            session_id=session_id,
-            message={
-                "role": "user",
-                "content": prompt_text,
-                "author_user_id": user_concept_id,
-            },
-            namespace=rag_namespace,
-            organisation_concept_id=org_concept_id,
-            role_in_org=role_in_org,
-        )
-    for tool_msg in _truncate_large_tool_results(
-        tool_messages, max_tool_content_chars=5000
-    ):
-        if history_user_id:
-            _add_chat_history_message(
-                user_id=history_user_id,
-                session_id=session_id,
-                message=tool_msg,
-                namespace=rag_namespace,
-                organisation_concept_id=org_concept_id,
-                role_in_org=role_in_org,
-            )
-
-    current_app.config["CONTEXT"] = _limit_context_size(
-        current_app.config.get("CONTEXT", []), max_messages=20
-    )
-
-    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
-    context_stats = _calculate_context_stats(context)
-    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
-    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
-    tool_progress_snapshot = _snapshot_tool_progress_for_request(
-        progress_scope_key, request_id
-    )
-    turn_execution_diagnostics = _build_turn_execution_diagnostics(
-        request_id=request_id,
-        prompt_text=prompt_text,
-        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
-        tool_progress_state=tool_progress_snapshot,
-    )
-
-    llm_debug_info = {
-        "interaction_timestamp_utc": interaction_timestamp_utc,
-        "request_id": request_id,
-        "model": model_name,
-        "llm_interaction": {
-            "requested_model": model_name,
-            "orchestrator_used": False,
-            "duration_ms": None,
-            "usage": None,
-            "calls": [],
-            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
-        },
-        "messages": current_turn_messages,
-        "response": response_text,
-        "user_prompt": user_prompt_debug,
-        "context_stats": {
-            "sent_to_llm": context_stats,
-            "stored_context": current_context_stats,
-        },
-        "tool_stats": tool_stats,
-        "tool_invocations": tool_invocations,
-        "fastpath": {
-            "name": "rag_status",
-            "bypassed_llm": True,
-            "used_tool": used_tool,
-            "enabled": True,
-        },
-        "turn_execution_diagnostics": turn_execution_diagnostics,
-    }
-    llm_debug_info = _finalise_llm_debug_info(
-        llm_debug_info=llm_debug_info,
-        prompt_text=prompt_text,
-        response_text=response_text,
-        session_id=session_id,
-        namespace=rag_namespace,
-        user_id=history_user_id or user_concept_id,
-        org_id=org_concept_id,
-    )
-
-    if history_user_id:
-        _add_chat_history_message(
-            user_id=history_user_id,
-            session_id=session_id,
-            message={"role": "assistant", "content": response_text},
-            llm_debug_data=llm_debug_info,
-            namespace=rag_namespace,
-            organisation_concept_id=org_concept_id,
-            role_in_org=role_in_org,
-        )
-
-    return jsonify(
-        {
-            "response": response_text,
-            "fastpath": {
-                "name": "rag_status",
-                "bypassed_llm": True,
-                "used_tool": used_tool,
-            },
-            "llm_debug": llm_debug_info,
-        }
-    )
 
 
 @von_bp.route("/onboard_new_member", methods=["POST"])
@@ -10891,30 +9751,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             background_task_id = candidate_background_task_id
 
     presenter_mode_requested = bool(data.get("presenter_mode"))
-    raw_agent_test_selector_replay_mode = data.get(
-        AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY
-    )
-    agent_test_selector_replay_mode = (
-        raw_agent_test_selector_replay_mode.strip()
-        if isinstance(raw_agent_test_selector_replay_mode, str)
-        and raw_agent_test_selector_replay_mode.strip()
-        else None
-    )
-
-    # JVNAUTOSCI-2130: Forward the thinking-card display mode so the orchestrator
-    # can produce a partial-progress summary (instead of the canned "couldn't
-    # complete that request" fallback) when the user has explicitly opted into
-    # expert/debug detail.
-    _raw_thinking_card_mode = data.get("thinking_card_mode")
-    if isinstance(_raw_thinking_card_mode, str):
-        _normalised_thinking_card_mode = _raw_thinking_card_mode.strip().lower()
-        if _normalised_thinking_card_mode in {"default", "expert", "debug"}:
-            thinking_card_mode = _normalised_thinking_card_mode
-        else:
-            thinking_card_mode = "default"
-    else:
-        thinking_card_mode = "default"
-
     raw_workflow_launch_inputs = data.get("workflow_inputs")
     if raw_workflow_launch_inputs is None:
         raw_workflow_launch_inputs = data.get("workflow_launch_inputs")
@@ -10944,7 +9780,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     request_start_perf = time.perf_counter()
     turn_timing_recorder = TurnTimingRecorder(request_id=request_id)
-    workflow_discovery_result = None
     progress_heartbeat_stop_event: threading.Event | None = None
     progress_heartbeat_thread: threading.Thread | None = None
     interaction_timestamp_utc = (
@@ -10969,6 +9804,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     def _emit_generate_progress(update: Mapping[str, Any] | None) -> None:
         payload = dict(update) if isinstance(update, Mapping) else {"status": "unknown"}
         payload.setdefault("request_id", request_id)
+        payload.setdefault("record_kind", "observational")
 
         if background_task_id is not None:
             try:
@@ -11099,72 +9935,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             400,
         )
 
-    if request_gmail_profile:
-        from ...integrations.google.gmail_service import list_profile_ids_from_env
-
-        available_profiles = list_profile_ids_from_env()
-        if not available_profiles:
-            return (
-                jsonify(
-                    {
-                        "error": "gmail_profiles_not_configured",
-                        "detail": "No Gmail profiles are configured on the server.",
-                    }
-                ),
-                400,
-            )
-        if request_gmail_profile not in available_profiles:
-            return (
-                jsonify(
-                    {
-                        "error": "unknown_gmail_profile",
-                        "detail": "gmail_profile is not configured on the server.",
-                        "available_profiles": available_profiles,
-                    }
-                ),
-                400,
-            )
-
-    request_turn_memory_context = None
-    request_turn_memory_context_raw = data.get("turn_memory_context")
-    if isinstance(request_turn_memory_context_raw, Mapping):
-        request_turn_memory_context = dict(request_turn_memory_context_raw)
-    elif request_turn_memory_context_raw is not None:
-        return (
-            jsonify(
-                {
-                    "error": "invalid_turn_memory_context",
-                    "detail": "turn_memory_context must be an object.",
-                }
-            ),
-            400,
-        )
-
-    request_turn_expected_outcome_contract = None
-    request_turn_expected_outcome_contract_raw = data.get(
-        "turn_expected_outcome_contract"
-    )
-    if request_turn_expected_outcome_contract_raw is None:
-        request_turn_expected_outcome_contract_raw = data.get(
-            "turn_expected_outcome_contract_state"
-        )
-    if isinstance(request_turn_expected_outcome_contract_raw, Mapping):
-        request_turn_expected_outcome_contract = {
-            str(key): value
-            for key, value in request_turn_expected_outcome_contract_raw.items()
-            if isinstance(key, str)
-        }
-    elif request_turn_expected_outcome_contract_raw is not None:
-        return (
-            jsonify(
-                {
-                    "error": "invalid_turn_expected_outcome_contract",
-                    "detail": "turn_expected_outcome_contract must be an object.",
-                }
-            ),
-            400,
-        )
-
     _emit_context_setup_progress(
         subtask="flask session user lookup",
         result_summary="Reading authenticated user id from the Flask session.",
@@ -11219,6 +9989,62 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         effective = {}
 
     _check_background_cancellation("authentication context")
+
+    from ...integrations.google.gmail_service import list_profile_ids_from_env
+    from ...services.mail_profile_resource_vontology_service import (
+        resolve_authorised_gmail_profile_for_user,
+    )
+
+    authorised_gmail_profile: str | None = None
+    if user_concept_id:
+        gmail_authority = resolve_authorised_gmail_profile_for_user(
+            user_concept_id=user_concept_id,
+            requested_profile_id=request_gmail_profile,
+        )
+        resolved_profile = gmail_authority.get("profile_id")
+        if gmail_authority.get("success") and isinstance(resolved_profile, str):
+            configured_profiles = set(list_profile_ids_from_env())
+            if resolved_profile in configured_profiles:
+                authorised_gmail_profile = resolved_profile
+            elif request_gmail_profile:
+                return (
+                    jsonify(
+                        {
+                            "error": "authorised_gmail_profile_unavailable",
+                            "detail": (
+                                "The requested Gmail profile is authorised for "
+                                "this actor but is not configured in this runtime."
+                            ),
+                        }
+                    ),
+                    503,
+                )
+        elif request_gmail_profile:
+            return (
+                jsonify(
+                    {
+                        "error": "gmail_profile_not_authorised",
+                        "detail": (
+                            "The requested Gmail profile is not represented as "
+                            "authorised for the authenticated actor."
+                        ),
+                    }
+                ),
+                403,
+            )
+    elif request_gmail_profile:
+        return (
+            jsonify(
+                {
+                    "error": "gmail_profile_authentication_required",
+                    "detail": (
+                        "Selecting a Gmail profile requires an authenticated actor."
+                    ),
+                }
+            ),
+            401,
+        )
+    request_gmail_profile = authorised_gmail_profile
 
     try:
         request_workflow_launch_inputs = (
@@ -11518,14 +10344,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             _check_background_cancellation("early user-message persist")
 
     if progress_updates_enabled:
-        try:
-            max_calls = int(get_internal_mcp_max_tool_invocations())
-        except Exception:
-            max_calls = 0
-        try:
-            batch_cap = int(get_internal_mcp_tool_batch_cap())
-        except Exception:
-            batch_cap = 4
         _emit_generate_progress(
             {
                 "status": "thinking",
@@ -11540,9 +10358,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "Preparing prompt context and workflow inputs for the turn."
                 ),
                 "tool_calls_done": 0,
-                "tool_calls_cap": max_calls,
-                "tool_calls_remaining": max(0, max_calls),
-                "tool_batch_cap": batch_cap,
             },
         )
     elif not show_tool_use_progress:
@@ -11770,66 +10585,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             user_prompt_debug["screen_prompt_source"] = screen_prompt_source
             user_prompt_debug["screen_prompt_chars"] = len(screen_prompt_text)
 
-        deterministic_introspection_enabled = _deterministic_introspection_enabled()
-
-        if deterministic_introspection_enabled and user_concept_id:
-            if _is_prompt_introspection_question(prompt_text):
-                return _maybe_handle_prompt_introspection_fastpath(
-                    prompt_text=prompt_text,
-                    user_concept_id=user_concept_id,
-                    user_namespace=user_namespace,
-                    org_concept_id=org_concept_id,
-                    role_in_org=role_in_org,
-                    history_user_id=history_user_id,
-                    session_id=session_id,
-                    auxiliary_system_prompt=dynamic_instructions,
-                    user_prompt_debug=user_prompt_debug,
-                    context=context,
-                    interaction_timestamp_utc=interaction_timestamp_utc,
-                    model_name=model_name or "unknown",
-                    request_start_perf=request_start_perf,
-                    request_id=request_id,
-                    progress_scope_key=progress_scope_key,
-                )
-
-            if _is_rag_status_question(prompt_text):
-                return _maybe_handle_rag_status_fastpath(
-                    prompt_text=prompt_text,
-                    user_concept_id=user_concept_id,
-                    user_namespace=user_namespace,
-                    org_concept_id=org_concept_id,
-                    role_in_org=role_in_org,
-                    history_user_id=history_user_id,
-                    session_id=session_id,
-                    context=context,
-                    interaction_timestamp_utc=interaction_timestamp_utc,
-                    model_name=model_name or "unknown",
-                    request_start_perf=request_start_perf,
-                    user_prompt_debug=user_prompt_debug,
-                    request_id=request_id,
-                    progress_scope_key=progress_scope_key,
-                )
-
-        if deterministic_introspection_enabled and _is_tool_introspection_question(
-            prompt_text
-        ):
-            return _maybe_handle_tool_inventory_fastpath(
-                prompt_text=prompt_text,
-                user_concept_id=user_concept_id,
-                user_namespace=user_namespace,
-                org_concept_id=org_concept_id,
-                role_in_org=role_in_org,
-                history_user_id=history_user_id,
-                session_id=session_id,
-                context=context,
-                interaction_timestamp_utc=interaction_timestamp_utc,
-                model_name=model_name or "unknown",
-                request_start_perf=request_start_perf,
-                user_prompt_debug=user_prompt_debug,
-                request_id=request_id,
-                progress_scope_key=progress_scope_key,
-            )
-
         authenticated_user_context_id = (
             user_concept_id.strip()
             if isinstance(user_concept_id, str) and user_concept_id.strip()
@@ -11897,8 +10652,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "content"
                     ] = f"{existing_system} | {' | '.join(system_message_parts)}"
 
-        # Ensure user-specific system prompt is included even when the orchestrator
-        # is disabled/unavailable.
+        # Represented actor-specific behaviour remains ordinary model context;
+        # it is independent of the retired universal controller.
         if dynamic_instructions:
             user_prompt_message = {
                 "role": "system",
@@ -11909,6 +10664,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 enhanced_context.insert(0, user_prompt_message)
             else:
                 enhanced_context.insert(1, user_prompt_message)
+
+        if request_workflow_launch_inputs:
+            enhanced_context.append(
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "schema_version": "von_turn_inputs.v1",
+                            "type": "authorised_turn_inputs",
+                            "trust_boundary": "user_supplied_data",
+                            "inputs": request_workflow_launch_inputs,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                }
+            )
 
         # ---------------------------------------------------------
         # JVNAUTOSCI-894: Presenter-mode response protocol
@@ -11994,19 +10767,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             }
             enhanced_context.insert(0, presenter_protocol_message)
 
-        # Log the enhanced context being sent to the model for debugging
+        context_role_counts: dict[str, int] = {}
+        context_content_chars = 0
+        for message in enhanced_context:
+            role = str(message.get("role") or "unknown").strip() or "unknown"
+            context_role_counts[role] = context_role_counts.get(role, 0) + 1
+            content = message.get("content")
+            if isinstance(content, str):
+                context_content_chars += len(content)
         current_app.logger.info(
-            f"Enhanced context being sent to model: {len(enhanced_context)} messages"
+            "Enhanced context summary: messages=%d roles=%s content_chars=%d",
+            len(enhanced_context),
+            context_role_counts,
+            context_content_chars,
         )
-        for i, msg in enumerate(enhanced_context):
-            current_app.logger.info(
-                "Message %s: role=%s, content_preview=%s...",
-                i,
-                msg.get("role"),
-                _safe_log_preview(msg.get("content", ""), limit=100),
-            )
 
-        orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
         gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
         tool_messages: list[dict[str, str]] = []
 
@@ -12047,88 +10822,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "tool_results_included_in_prompt": False,
         }
         auxiliary_llm_calls: list[dict[str, Any]] = []
-        workflow_continuation_context: dict[str, Any] | None = None
-        workflow_discovery_query = prompt_text
-        try:
-            from ...services.workflow_continuation_service import (
-                assess_prompt_for_workflow_continuation,
-                build_workflow_continuation_routing_prompt,
-                get_session_workflow_continuation_context,
-            )
-
-            workflow_continuation_context = get_session_workflow_continuation_context(
-                session_id=session_id,
-                namespace=user_namespace,
-                user_id=history_user_id,
-            )
-            if isinstance(workflow_continuation_context, Mapping):
-                apply_decision = assess_prompt_for_workflow_continuation(
-                    prompt=prompt_text,
-                    continuation_context=workflow_continuation_context,
-                )
-                apply_reason = str(apply_decision.get("reason") or "").strip() or None
-                apply_signals = [
-                    str(item).strip()
-                    for item in (apply_decision.get("matched_signals") or [])
-                    if str(item).strip()
-                ]
-                try:
-                    continuation_decision_source = (
-                        str(apply_decision.get("decision_source") or "").strip()
-                        or "workflow_state_check"
-                    )
-                    auxiliary_llm_calls.append(
-                        annotate_python_decision_event(
-                            {
-                                "type": "workflow_continuation_decision",
-                                "stage": "workflow_dispatch",
-                                "applies": bool(apply_decision.get("applies", False)),
-                                "reason": apply_reason,
-                                "signals": list(apply_signals),
-                                "session_id": workflow_continuation_context.get(
-                                    "session_id"
-                                ),
-                                "selected_workflow_id": workflow_continuation_context.get(
-                                    "selected_workflow_id"
-                                ),
-                            },
-                            stage="workflow_dispatch",
-                            component="workflow_continuation_service",
-                            function="assess_prompt_for_workflow_continuation",
-                            decision_class="continuation_classifier",
-                            decision_source=continuation_decision_source,
-                            changed_outcome=bool(apply_decision.get("applies", False)),
-                            reason_code=apply_reason,
-                        )
-                    )
-                except Exception:
-                    pass
-                workflow_continuation_context = dict(workflow_continuation_context)
-                workflow_continuation_context["applied"] = bool(
-                    apply_decision.get("applies", False)
-                )
-                workflow_continuation_context["apply_reason"] = (
-                    str(apply_decision.get("reason") or "").strip() or None
-                )
-                workflow_continuation_context["apply_signals"] = list(apply_signals)
-                if bool(workflow_continuation_context.get("applied")):
-                    workflow_discovery_query = (
-                        build_workflow_continuation_routing_prompt(
-                            prompt=prompt_text,
-                            continuation_context=workflow_continuation_context,
-                        )
-                    )
-        except Exception as exc:
-            current_app.logger.debug(
-                "[WORKFLOW_CONTINUATION] Context lookup skipped: %s",
-                exc,
-            )
-            workflow_continuation_context = None
-            workflow_discovery_query = prompt_text
-
         progress_goal_label = _build_progress_goal_label(
             prompt_text=prompt_text,
-            continuation_context=workflow_continuation_context,
+            continuation_context=None,
         )
         if show_tool_use_progress and progress_goal_label:
             _emit_generate_progress(
@@ -12142,491 +10838,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
 
         # ---------------------------------------------------------
-        # Tool-backed RAG counts (avoid KA vs chat-history confusion)
-        # ---------------------------------------------------------
-        # We bypass the LLM for simple factual questions about indexed sessions,
-        # because the assistant can otherwise confuse:
-        # - interaction sessions (KA sessions) vs
-        # - chat history sessions.
-        def _is_rag_counts_question(text: str) -> bool:
-            lowered = (text or "").strip().lower()
-            if not lowered:
-                return False
-
-            # Keep this intentionally narrow to avoid hijacking normal chat.
-            count_triggers = (
-                "how many",
-                "count",
-                "number of",
-            )
-            domain_triggers = (
-                "indexed",
-                "rag",
-            )
-            chat_triggers = (
-                "chat session",
-                "chat sessions",
-                "chat history",
-            )
-            ka_triggers = (
-                "ka",
-                "interaction session",
-                "interaction sessions",
-            )
-
-            has_count = any(t in lowered for t in count_triggers)
-            has_domain = any(t in lowered for t in domain_triggers)
-            refers_chat = any(t in lowered for t in chat_triggers)
-            refers_ka = any(t in lowered for t in ka_triggers)
-
-            # Examples:
-            # - "How many indexed chat sessions can you see?"
-            # - "How many chat history sessions are indexed?"
-            # - "How many KA sessions are indexed?"
-            return has_count and has_domain and (refers_chat or refers_ka)
-
-        if (
-            user_concept_id
-            and user_namespace
-            and gateway is not None
-            and getattr(gateway, "enabled", False)
-            and _is_rag_counts_question(prompt_text)
-        ):
-            import json as _json
-
-            user_id_for_history: str | None = history_user_id or user_concept_id
-
-            tool_invocations = []
-            try:
-                tool_result = gateway.invoke(
-                    "rag_get_status",
-                    {"namespace": user_namespace, "detail": 1},
-                )
-                payload = tool_result.payload
-                duration_ms = getattr(tool_result, "duration_ms", None)
-
-                tool_payload = _json.dumps(
-                    {
-                        "tool": "rag_get_status",
-                        "status": "ok",
-                        "duration_ms": duration_ms,
-                        "payload": payload,
-                    },
-                    default=str,
-                )
-                tool_messages = [{"role": "tool", "content": tool_payload}]
-                tool_invocations = [
-                    {
-                        "tool": "rag_get_status",
-                        "payload": {"namespace": user_namespace, "detail": 1},
-                        "duration_ms": duration_ms,
-                        "direct_user_call": False,
-                    }
-                ]
-
-                # Summarise counts in a way that makes the KA vs chat distinction explicit.
-                rs = payload if isinstance(payload, dict) else {}
-                ka_indexed = rs.get("indexed")
-                ch_sessions = rs.get("chat_history_sessions_in_namespace")
-                if ch_sessions is None:
-                    ch_sessions = rs.get("chat_history_sessions")
-
-                ch_details = rs.get("chat_history_session_details")
-                fully_indexed = None
-                any_indexed = None
-                if isinstance(ch_details, list) and ch_details:
-
-                    def _as_int(value):
-                        try:
-                            return int(value)
-                        except Exception:
-                            return 0
-
-                    fully_indexed = 0
-                    any_indexed = 0
-                    for row in ch_details:
-                        if not isinstance(row, dict):
-                            continue
-                        missing = _as_int(row.get("messages_missing_index"))
-                        ok = _as_int(row.get("rag_indexed_success"))
-                        fail = _as_int(row.get("rag_indexed_failed"))
-                        indexed_total = row.get("messages_indexed_total")
-                        indexed_total_int = (
-                            _as_int(indexed_total)
-                            if indexed_total is not None
-                            else (ok + fail)
-                        )
-
-                        if indexed_total_int > 0:
-                            any_indexed += 1
-                        if missing <= 0:
-                            fully_indexed += 1
-
-                parts = []
-                parts.append(
-                    f"Chat history sessions (in namespace): {ch_sessions if ch_sessions is not None else '—'}"
-                )
-                if any_indexed is not None:
-                    parts.append(
-                        f"Chat history sessions with any indexed messages: {any_indexed}"
-                    )
-                if fully_indexed is not None:
-                    parts.append(
-                        f"Chat history sessions fully indexed (missing=0): {fully_indexed}"
-                    )
-                parts.append(
-                    f"KA interaction sessions indexed: {ka_indexed if ka_indexed is not None else '—'}"
-                )
-
-                response_text = (
-                    "Here are the server-truth counts (RAG status), keeping chat history separate from KA interaction sessions:\n\n"
-                    + "\n".join(f"- {p}" for p in parts)
-                )
-            except Exception as exc:
-                response_text = (
-                    f"I could not retrieve RAG status via internal tools: {exc}"
-                )
-                tool_messages = []
-
-            # Persist messages in history/context.
-            # NOTE: User message already persisted early (JVNAUTOSCI-1423).
-            # Fallback: persist here if early persist failed.
-            if not _user_message_persisted_early and user_id_for_history:
-                _add_chat_history_message(
-                    user_id=user_id_for_history,
-                    session_id=session_id,
-                    message={
-                        "role": "user",
-                        "content": prompt_text,
-                        "author_user_id": user_concept_id,
-                    },
-                    namespace=user_namespace,
-                    organisation_concept_id=org_concept_id,
-                    role_in_org=role_in_org,
-                    skip_rag_indexing=True,
-                )
-            for tool_msg in _truncate_large_tool_results(
-                tool_messages, max_tool_content_chars=5000
-            ):
-                if user_id_for_history:
-                    _add_chat_history_message(
-                        user_id=user_id_for_history,
-                        session_id=session_id,
-                        message=tool_msg,
-                        namespace=user_namespace,
-                        organisation_concept_id=org_concept_id,
-                        role_in_org=role_in_org,
-                        skip_rag_indexing=True,
-                    )
-            current_app.config["CONTEXT"] = _limit_context_size(
-                current_app.config["CONTEXT"], max_messages=20
-            )
-
-            context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(
-                current_app.config["CONTEXT"]
-            )
-            tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
-            tool_progress_snapshot = _snapshot_tool_progress_for_request(
-                progress_scope_key, request_id
-            )
-            turn_execution_diagnostics = _build_turn_execution_diagnostics(
-                request_id=request_id,
-                prompt_text=prompt_text,
-                elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
-                tool_progress_state=tool_progress_snapshot,
-            )
-
-            llm_debug_info = {
-                "interaction_timestamp_utc": interaction_timestamp_utc,
-                "request_id": request_id,
-                "model": model_name,
-                "llm_interaction": {
-                    "requested_model": model_name,
-                    "orchestrator_used": False,
-                    "duration_ms": None,
-                    "usage": None,
-                    "calls": [],
-                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                    * 1000.0,
-                },
-                "messages": (
-                    [{"role": "user", "content": prompt_text}] + tool_messages
-                ),
-                "response": response_text,
-                "user_prompt": user_prompt_debug,
-                "context_stats": {
-                    "sent_to_llm": context_stats,
-                    "stored_context": current_context_stats,
-                },
-                "tool_stats": tool_stats,
-                "tool_invocations": tool_invocations,
-                "fastpath": {
-                    "name": "rag_counts",
-                    "bypassed_llm": True,
-                    "used_tool": bool(tool_messages),
-                    "enabled": True,
-                },
-                "turn_execution_diagnostics": turn_execution_diagnostics,
-            }
-            llm_debug_info = _finalise_llm_debug_info(
-                llm_debug_info=llm_debug_info,
-                prompt_text=prompt_text,
-                response_text=response_text,
-                session_id=session_id,
-                namespace=user_namespace,
-                user_id=user_id_for_history or user_concept_id,
-                org_id=org_concept_id,
-            )
-
-            if user_id_for_history:
-                _add_chat_history_message(
-                    user_id=user_id_for_history,
-                    session_id=session_id,
-                    message={"role": "assistant", "content": response_text},
-                    llm_debug_data=llm_debug_info,
-                    namespace=user_namespace,
-                    organisation_concept_id=org_concept_id,
-                    role_in_org=role_in_org,
-                    skip_rag_indexing=True,
-                )
-
-            return jsonify(
-                {
-                    "response": response_text,
-                    "fastpath": {
-                        "name": "rag_counts",
-                        "bypassed_llm": True,
-                        "used_tool": bool(tool_messages),
-                    },
-                    "llm_debug": llm_debug_info,
-                }
-            )
-
-        # ---------------------------------------------------------
-        # Optional debug mode: allow user-issued tool calls
-        # ---------------------------------------------------------
-        # This is disabled by default because it bypasses the LLM's behavioural
-        # guardrails. When enabled, only read-category tools are permitted.
-        allow_user_tool_calls = os.getenv(
-            "VON_INTERNAL_MCP_ALLOW_USER_TOOL_CALLS", "0"
-        ).lower() in {"1", "true"}
-        if allow_user_tool_calls and orchestrator is not None and gateway is not None:
-            try:
-                direct_request = orchestrator._extract_json_blob(prompt_text)  # type: ignore[attr-defined]
-            except ToolCallParsingError:
-                direct_request = None
-
-            if direct_request and isinstance(direct_request, dict):
-                action = direct_request.get("action")
-                tool_name = direct_request.get("tool")
-                payload = direct_request.get("payload") or {}
-
-                if (
-                    action == "call_tool"
-                    and isinstance(tool_name, str)
-                    and isinstance(payload, dict)
-                ):
-                    try:
-                        meta = gateway.describe_methods().get(tool_name)  # type: ignore[union-attr]
-                        category = (
-                            meta.get("category") if isinstance(meta, dict) else None
-                        )
-                    except Exception:
-                        category = None
-
-                    if category != "read":
-                        response_text = (
-                            "Direct tool calls are restricted to read-only tools. "
-                            "Ask Von normally if you need write actions."
-                        )
-                        tool_invocations = []
-                    else:
-                        # Direct tool-call mode should not mutate payloads except for
-                        # Gmail profile convenience (namespace injection can break
-                        # strict schemas like Jira tools).
-                        if tool_name.startswith("gmail_"):
-                            if request_gmail_profile and not payload.get("profile"):
-                                payload["profile"] = request_gmail_profile
-                            payload.pop("namespace", None)
-
-                        try:
-                            result = gateway.invoke(tool_name, payload)  # type: ignore[union-attr]
-                            tool_payload = orchestrator._format_tool_result(
-                                tool_name, result.payload, result.duration_ms, "ok"
-                            )  # type: ignore[attr-defined]
-                            response_text = tool_payload
-                            tool_messages = [{"role": "tool", "content": tool_payload}]
-                            tool_invocations = [
-                                {
-                                    "tool": tool_name,
-                                    "payload": dict(payload),
-                                    "direct_user_call": True,
-                                }
-                            ]
-                        except Exception as exc:
-                            tool_payload = orchestrator._format_tool_result(
-                                tool_name, None, None, "error", str(exc)
-                            )  # type: ignore[attr-defined]
-                            response_text = tool_payload
-                            tool_messages = [{"role": "tool", "content": tool_payload}]
-                            tool_invocations = [
-                                {
-                                    "tool": tool_name,
-                                    "payload": dict(payload),
-                                    "error": str(exc),
-                                    "direct_user_call": True,
-                                }
-                            ]
-
-                    # Skip LLM generation for direct tool calls
-                    # NOTE: User message already persisted early (JVNAUTOSCI-1423).
-                    if history_user_id:
-                        # Fallback: persist here if early persist failed.
-                        if not _user_message_persisted_early:
-                            _add_chat_history_message(
-                                user_id=history_user_id,
-                                session_id=session_id,
-                                message={
-                                    "role": "user",
-                                    "content": prompt_text,
-                                    "author_user_id": user_concept_id,
-                                },
-                                namespace=user_namespace,
-                                organisation_concept_id=org_concept_id,
-                                role_in_org=role_in_org,
-                                skip_rag_indexing=True,
-                            )
-                        for tool_msg in _truncate_large_tool_results(
-                            tool_messages, max_tool_content_chars=5000
-                        ):
-                            _add_chat_history_message(
-                                user_id=history_user_id,
-                                session_id=session_id,
-                                message=tool_msg,
-                                namespace=user_namespace,
-                                organisation_concept_id=org_concept_id,
-                                role_in_org=role_in_org,
-                                skip_rag_indexing=True,
-                            )
-                    else:
-                        current_app.config["CONTEXT"].append(
-                            {"role": "user", "content": prompt_text}
-                        )
-                        for tool_msg in _truncate_large_tool_results(
-                            tool_messages, max_tool_content_chars=5000
-                        ):
-                            current_app.config["CONTEXT"].append(tool_msg)
-                        current_app.config["CONTEXT"].append(
-                            {"role": "assistant", "content": response_text}
-                        )
-
-                    current_app.config["CONTEXT"] = _limit_context_size(
-                        current_app.config["CONTEXT"], max_messages=20
-                    )
-
-                    # Return immediately with debug info
-                    current_turn_messages = [
-                        {"role": "user", "content": prompt_text}
-                    ] + tool_messages
-                    context_stats = _calculate_context_stats(enhanced_context)
-                    current_context_stats = _calculate_context_stats(
-                        current_app.config["CONTEXT"]
-                    )
-                    tool_stats = (
-                        _calculate_tool_stats(tool_messages) if tool_messages else None
-                    )
-                    tool_progress_snapshot = _snapshot_tool_progress_for_request(
-                        progress_scope_key, request_id
-                    )
-                    turn_execution_diagnostics = _build_turn_execution_diagnostics(
-                        request_id=request_id,
-                        prompt_text=prompt_text,
-                        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
-                        tool_progress_state=tool_progress_snapshot,
-                    )
-
-                    llm_debug_info = {
-                        "interaction_timestamp_utc": interaction_timestamp_utc,
-                        "request_id": request_id,
-                        "model": model_name,
-                        "llm_interaction": {
-                            "requested_model": model_name,
-                            "orchestrator_used": False,
-                            "duration_ms": None,
-                            "usage": None,
-                            "calls": [],
-                            "server_elapsed_ms": (
-                                time.perf_counter() - request_start_perf
-                            )
-                            * 1000.0,
-                        },
-                        "messages": current_turn_messages,
-                        "response": response_text,
-                        "user_prompt": user_prompt_debug,
-                        "namespace_report": namespace_report,
-                        "context_stats": {
-                            "sent_to_llm": context_stats,
-                            "stored_context": current_context_stats,
-                        },
-                        "tool_stats": tool_stats,
-                        "tool_invocations": tool_invocations,
-                        "aux_llm_calls": [],
-                        "response_transformations": (
-                            build_response_transformation_telemetry_payload(
-                                request_id=request_id
-                            )
-                        ),
-                        "turn_execution_diagnostics": turn_execution_diagnostics,
-                    }
-                    llm_debug_info = _finalise_llm_debug_info(
-                        llm_debug_info=llm_debug_info,
-                        prompt_text=prompt_text,
-                        response_text=response_text,
-                        session_id=session_id,
-                        namespace=user_namespace,
-                        user_id=history_user_id or user_concept_id,
-                        org_id=org_concept_id,
-                    )
-
-                    if history_user_id:
-                        _add_chat_history_message(
-                            user_id=history_user_id,
-                            session_id=session_id,
-                            message={"role": "assistant", "content": response_text},
-                            llm_debug_data=llm_debug_info,
-                            namespace=user_namespace,
-                            organisation_concept_id=org_concept_id,
-                            role_in_org=role_in_org,
-                            skip_rag_indexing=True,
-                        )
-
-                    rag_trace["tools_invoked"] = [
-                        inv.get("tool")
-                        for inv in tool_invocations
-                        if isinstance(inv, dict) and isinstance(inv.get("tool"), str)
-                    ]
-                    rag_trace["retrieval_attempted"] = False
-                    rag_trace["retrieval_attempt_reason"] = "direct_tool_call"
-
-                    return jsonify(
-                        {
-                            "response": response_text,
-                            "llm_debug": llm_debug_info,
-                            "rag_trace": rag_trace,
-                        }
-                    )
-
         llm_interaction: dict = {
             "requested_model": model_name,
             "requested_model_parameters": requested_model_parameters or None,
-            "orchestrator_used": orchestrator is not None,
+            "orchestrator_used": False,
+            "ordinary_turn_engine": "direct_adaptive_turn",
             "duration_ms": None,
             "usage": None,
             "calls": [],
         }
         render_plan_debug: dict[str, Any] | None = None
-        workflow_routing_info: dict[str, Any] | None = None
 
         def _infer_provider(model_id: str | None) -> str | None:
             if not isinstance(model_id, str):
@@ -12711,334 +10932,95 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             _emit_generate_progress(payload)
 
         tool_invocations: list[dict[str, Any]] = []
-        conversation_turn_instance_state = _GenerateConversationTurnInstanceState()
+        progress_tracker = None
+        if progress_updates_enabled:
 
-        orchestrator_result = None
-        orchestrator_input_context = enhanced_context
-        if orchestrator is None:
-            response_text = _handle_orchestrator_missing_fallback(
-                llm_client=llm_client,
-                model_name=model_name,
-                prompt_text=prompt_text,
-                enhanced_context=enhanced_context,
-                request_id=request_id,
-                gateway=gateway,
-                auxiliary_llm_calls=auxiliary_llm_calls,
-                llm_interaction=llm_interaction,
-                model_parameters=requested_model_parameters or None,
-            )
-        else:
-            try:
-                current_app.logger.info(
-                    "[NAMESPACE] Calling orchestrator.run() with user_namespace=%s",
-                    user_namespace,
-                )
-                try:
-                    orchestrator.configure_execution_caps(
-                        max_tool_invocations=get_internal_mcp_max_tool_invocations(),
-                        tool_batch_cap=get_internal_mcp_tool_batch_cap(),
-                    )
-                except Exception:
-                    # Defensive: never fail the request due to settings refresh.
-                    pass
+            def _progress_update(info: dict[str, Any]) -> None:
+                payload = dict(info) if isinstance(info, dict) else {"status": "unknown"}
+                payload.setdefault("request_id", request_id)
+                payload.setdefault("goal_label", progress_goal_label)
+                _emit_generate_progress(payload)
 
-                # JVNAUTOSCI-1038: Create request-scoped progress tracker
-                progress_tracker = None
-                if progress_updates_enabled:
-
-                    def _progress_update(info: dict[str, Any]) -> None:
-                        payload = (
-                            dict(info)
-                            if isinstance(info, dict)
-                            else {"status": "unknown"}
-                        )
-                        payload.setdefault("request_id", request_id)
-                        _emit_generate_progress(payload)
-
-                    progress_tracker = ProgressTracker(
-                        callback=_progress_update,
-                        cancellation_checker=(
-                            _is_background_cancellation_requested
-                            if background_task_id is not None
-                            else None
-                        ),
-                        task_id=background_task_id,
-                    )
-
-                if progress_updates_enabled:
-                    _emit_generate_progress(
-                        {
-                            "status": "orchestrator_start",
-                            "stage": "workflow_dispatch_prepare",
-                            "phase": "workflow_dispatch_prepare",
-                            "phase_label": "Preparing workflow dispatch",
-                            "subtask": "Prepare routing policy and context",
-                            "result_summary": "Preparing workflow dispatch",
-                            "goal_label": progress_goal_label,
-                            "request_id": request_id,
-                        },
-                    )
-
-                if progress_updates_enabled:
-                    _emit_generate_progress(
-                        {
-                            "status": "thinking",
-                            "stage": "workflow_dispatch_prepare",
-                            "phase": "workflow_dispatch_prepare",
-                            "phase_label": "Preparing workflow dispatch",
-                            "subtask": "conversation turn instance telemetry",
-                            "result_summary": "Recording conversation-turn workflow telemetry before supervised execution.",
-                            "goal_label": progress_goal_label,
-                            "request_id": request_id,
-                        },
-                    )
-                _check_background_cancellation("conversation turn instance telemetry")
-                _submit_generate_conversation_turn_instance(
-                    state=conversation_turn_instance_state,
-                    auxiliary_llm_calls=auxiliary_llm_calls,
-                    session_id=session_id,
-                    request_id=request_id,
-                    user_namespace=user_namespace,
-                    user_concept_id=user_concept_id,
-                    org_concept_id=org_concept_id,
-                    namespace_source=namespace_source,
-                    presenter_mode_requested=presenter_mode_requested,
-                    request_gmail_profile=request_gmail_profile,
-                    request_language=request_language,
-                    requested_model=model_name,
-                    requested_model_parameters=requested_model_parameters,
-                    requested_client_type=explicit_client_type,
-                    agent_test_selector_replay_mode=agent_test_selector_replay_mode,
-                    prompt_text=prompt_text,
-                    workflow_discovery_result=workflow_discovery_result,
-                    workflow_continuation_context=workflow_continuation_context,
-                    workflow_launch_inputs=request_workflow_launch_inputs,
-                    get_instance_manager_fn=get_instance_manager,
-                    submit_verified_workflow_instance_fn=submit_verified_workflow_instance,
-                    background_task_id=background_task_id,
-                    logger=current_app.logger,
-                )
-                if progress_updates_enabled:
-                    _emit_generate_progress(
-                        {
-                            "status": "thinking",
-                            "stage": "workflow_dispatch_prepare",
-                            "phase": "workflow_dispatch_prepare",
-                            "phase_label": "Preparing workflow dispatch",
-                            "subtask": "supervised orchestrator entry",
-                            "result_summary": "Entering supervised conversation-turn execution.",
-                            "goal_label": progress_goal_label,
-                            "request_id": request_id,
-                        },
-                    )
-                _check_background_cancellation("supervised orchestrator entry")
-
-                # JVNAUTOSCI-1768: Consolidated entry point. Discovery now happens inside the workflow.
-                orchestrator_start_perf = time.perf_counter()
-                orchestrator_input_context = list(context or [])
-                orchestrator_result = orchestrator.execute_conversation_turn_supervised(
-                    prompt=prompt_text,
-                    context=orchestrator_input_context,
-                    llm_client=llm_client,
-                    model=model_name,
-                    model_parameters=requested_model_parameters or None,
-                    user_namespace=user_namespace,
-                    gmail_profile=request_gmail_profile,
-                    auxiliary_system_prompt=dynamic_instructions,
-                    preferred_language=request_language,
-                    progress_tracker=progress_tracker,
-                    conversation_session_id=session_id,
-                    turn_id=request_id,
-                    workflow_continuation_context=workflow_continuation_context,
-                    workflow_launch_inputs=request_workflow_launch_inputs,
-                    user_concept_id=user_concept_id,
-                    org_concept_id=org_concept_id,
-                    turn_memory_context=request_turn_memory_context,
-                    turn_expected_outcome_contract=request_turn_expected_outcome_contract,
-                    agent_test_selector_replay_mode=agent_test_selector_replay_mode,
-                    thinking_card_mode=thinking_card_mode,
-                )
-                llm_interaction["duration_ms"] = (
-                    time.perf_counter() - orchestrator_start_perf
-                ) * 1000.0
-                llm_interaction["calls"] = list(
-                    getattr(orchestrator_result, "llm_calls", [])
-                )
-                llm_interaction["usage"] = getattr(
-                    orchestrator_result, "llm_usage", None
-                )
-                llm_interaction["orchestrator_duration_ms"] = getattr(
-                    orchestrator_result, "orchestrator_duration_ms", None
-                )
-                response_text = orchestrator_result.response_text
-                tool_messages = [
-                    dict(msg) for msg in orchestrator_result.extra_messages
-                ]
-                tool_invocations = list(orchestrator_result.tool_invocations)
-                if not tool_messages and tool_invocations:
-                    tool_messages = _reconstruct_tool_messages_from_invocations(
-                        tool_invocations,
-                        orchestrator=orchestrator,
-                    )
-                orchestrator_auxiliary_llm_calls = list(
-                    getattr(orchestrator_result, "aux_llm_calls", [])
-                )
-                if orchestrator_auxiliary_llm_calls:
-                    auxiliary_llm_calls.extend(orchestrator_auxiliary_llm_calls)
-                raw_render_plan = getattr(orchestrator_result, "render_plan", None)
-                if isinstance(raw_render_plan, dict):
-                    render_plan_debug = dict(raw_render_plan)
-                workflow_discovery_raw = getattr(
-                    orchestrator_result, "workflow_discovery_result", None
-                )
-                if not isinstance(workflow_discovery_raw, Mapping):
-                    selected_workflow_trace_raw = getattr(
-                        orchestrator_result, "selected_workflow_trace", None
-                    )
-                    if isinstance(selected_workflow_trace_raw, Mapping):
-                        trace_workflow_discovery = selected_workflow_trace_raw.get(
-                            "workflow_discovery_result"
-                        )
-                        if isinstance(trace_workflow_discovery, Mapping):
-                            workflow_discovery_raw = trace_workflow_discovery
-                workflow_discovery_result = (
-                    dict(workflow_discovery_raw)
-                    if isinstance(workflow_discovery_raw, Mapping)
+            progress_tracker = ProgressTracker(
+                callback=_progress_update,
+                cancellation_checker=(
+                    _is_background_cancellation_requested
+                    if background_task_id is not None
                     else None
-                )
-                if workflow_discovery_result is None:
-                    # Self-describing telemetry: if discovery never reached the
-                    # route, stamp a sentinel origin so diagnostics surface the
-                    # missing payload instead of all-empty defaults that look
-                    # indistinguishable from a real empty discovery.
-                    workflow_discovery_result = {
-                        "discovery_payload_origin": (
-                            "missing_from_orchestrator_result"
-                        ),
-                    }
-                workflow_routing_raw = getattr(
-                    orchestrator_result, "workflow_routing", None
-                )
-                workflow_routing_info = _normalise_workflow_routing_payload(
-                    workflow_routing_raw
-                )
-
-                invoked_tools = []
-                for inv in tool_invocations:
-                    if not isinstance(inv, dict):
-                        continue
-                    name = inv.get("tool") or inv.get("method")
-                    if isinstance(name, str) and name:
-                        invoked_tools.append(name)
-
-                rag_trace["tools_invoked"] = invoked_tools
-                rag_trace["retrieval_attempted"] = (
-                    "search_knowledge_base" in invoked_tools
-                )
-                if rag_trace["retrieval_attempted"]:
-                    rag_trace["retrieval_attempt_reason"] = "tool_invoked"
-                else:
-                    rag_trace["retrieval_attempt_reason"] = (
-                        "no_rag_retrieval_tool_invoked"
-                        if user_concept_id
-                        else "not_authenticated"
-                    )
-                rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
-
-                if show_tool_use_progress:
-                    _emit_generate_progress(
-                        {
-                            "status": "orchestrator_end",
-                            "stage": "orchestrator_end",
-                            "phase_label": "Finishing orchestrator",
-                            "request_id": request_id,
-                        },
-                    )
-            except ToolCallParsingError as exc:
-                current_app.logger.warning(
-                    "[mcp_orchestrator] Invalid tool request payload: %s", exc
-                )
-                response_text = (
-                    "Tool call was not executed due to an MCP serialisation error. "
-                    f"({exc})\n\n"
-                    "Please try again. If this keeps happening, copy the LLM debug output so we can reproduce it."
-                )
-                rejected_tool_call = _truncate_debug_payload(
-                    getattr(exc, "raw_response", None)
-                )
-                tool_messages = []
-                tool_invocations = [
-                    {
-                        "tool": "__tool_call_parse_error__",
-                        "payload": (
-                            {"raw_tool_call": rejected_tool_call}
-                            if rejected_tool_call is not None
-                            else {}
-                        ),
-                        "error": str(exc),
-                    }
-                ]
-
-                if show_tool_use_progress:
-                    _emit_generate_progress(
-                        {
-                            "status": "error",
-                            "phase": "error",
-                            "phase_label": "Error",
-                            "request_id": request_id,
-                            "error": str(exc),
-                        },
-                    )
-
-        completion_gate_summary = _latest_turn_completion_gate(auxiliary_llm_calls)
-        completion_gate_blocks_response_reuse = False
-        if isinstance(response_text, str) and isinstance(
-            completion_gate_summary, Mapping
-        ):
-            gate_requires_follow_up = bool(
-                completion_gate_summary.get("requires_follow_up", False)
+                ),
+                task_id=background_task_id,
             )
-            gate_safe_to_claim_completion = bool(
-                completion_gate_summary.get(
-                    "safe_to_claim_completion", not gate_requires_follow_up
-                )
-            )
-            completion_gate_blocks_response_reuse = (
-                gate_requires_follow_up or not gate_safe_to_claim_completion
-            )
-            if gate_safe_to_claim_completion and not gate_requires_follow_up:
-                response_text = strip_completion_ledger_suffix(response_text)
+
+        _check_background_cancellation("direct adaptive turn entry")
+        adaptive_turn_started = time.perf_counter()
+        adaptive_input_context = enhanced_context
+        adaptive_turn_result = execute_adaptive_turn(
+            gateway=gateway,
+            prompt=prompt_text,
+            context=adaptive_input_context,
+            llm_client=llm_client,
+            model=model_name,
+            model_parameters=requested_model_parameters or None,
+            user_namespace=user_namespace,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            trusted_argument_values=(
+                {"gmail_profile": request_gmail_profile}
+                if request_gmail_profile
+                else None
+            ),
+            progress_tracker=progress_tracker,
+            turn_id=request_id,
+        )
+        llm_interaction["duration_ms"] = (
+            time.perf_counter() - adaptive_turn_started
+        ) * 1000.0
+        llm_interaction["calls"] = list(adaptive_turn_result.llm_calls)
+        llm_interaction["usage"] = adaptive_turn_result.llm_usage
+        llm_interaction["ordinary_turn_terminal_status"] = (
+            adaptive_turn_result.terminal_status
+        )
+        adaptive_terminal_status = str(
+            adaptive_turn_result.terminal_status or "completed"
+        )
+        adaptive_success = adaptive_terminal_status == "completed"
+        response_text = adaptive_turn_result.response_text
+        tool_messages = [dict(msg) for msg in adaptive_turn_result.extra_messages]
+        tool_invocations = list(adaptive_turn_result.tool_invocations)
+        auxiliary_llm_calls.extend(adaptive_turn_result.aux_llm_calls)
+        raw_render_plan = adaptive_turn_result.render_plan
+        if isinstance(raw_render_plan, dict):
+            render_plan_debug = dict(raw_render_plan)
+
+        invoked_tools = [
+            str(inv.get("tool"))
+            for inv in tool_invocations
+            if isinstance(inv, Mapping)
+            and isinstance(inv.get("tool"), str)
+            and str(inv.get("tool")).strip()
+        ]
+        rag_trace["tools_invoked"] = invoked_tools
+        rag_trace["retrieval_attempted"] = any(
+            name
+            in {
+                "context_search",
+                "qna_search",
+                "search_concepts",
+                "search_knowledge_base",
+            }
+            for name in invoked_tools
+        )
+        rag_trace["retrieval_attempt_reason"] = (
+            "read_capability_invoked"
+            if invoked_tools
+            else ("no_read_capability_invoked" if user_concept_id else "not_authenticated")
+        )
+        rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
 
         presenter_channels = _extract_presenter_channels(response_text)
-        if completion_gate_blocks_response_reuse and isinstance(
-            presenter_channels, dict
-        ):
-            presenter_channels = {
-                key: value
-                for key, value in presenter_channels.items()
-                if key != "screen"
-            }
-
-        # A supervised response is progress, not a terminal task result.  Keep
-        # polling clients active until the Turn Execution Record and canonical
-        # receipt projection have been assembled below.  The progress stream
-        # already exposes ``orchestrator_result_ready`` without claiming that
-        # terminal evidence is final.
         current_turn_messages = [{"role": "user", "content": prompt_text}]
         if tool_messages:
             current_turn_messages.extend(tool_messages)
-        selected_workflow_trace_payload = (
-            dict(raw_selected_workflow_trace)
-            if isinstance(
-                raw_selected_workflow_trace := getattr(
-                    orchestrator_result,
-                    "selected_workflow_trace",
-                    None,
-                ),
-                Mapping,
-            )
-            else None
-        )
         serialised_tool_invocations = _serialise_tool_invocations_for_llm_debug(
             tool_invocations
         )
@@ -13207,8 +11189,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     write confidently, return False.
                     """
 
-                    import json
-
                     for message in messages:
                         if message.get("role") != "tool":
                             continue
@@ -13313,7 +11293,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     and not response_candidate_duplicates_spoken
                     and not response_candidate_tool_dump
                     and not response_candidate_internal_status
-                    and not completion_gate_blocks_response_reuse
                 ):
                     screen_candidate = response_candidate.strip()
                     screen_backfill_source = "response_text"
@@ -13371,32 +11350,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 response_candidate_duplicates_spoken=bool(
                                     response_candidate_duplicates_spoken
                                 ),
-                                completion_gate=(
-                                    completion_gate_summary
-                                    if isinstance(completion_gate_summary, Mapping)
-                                    else None
-                                ),
                                 workflow_execution_summary=(
                                     workflow_execution_summary_for_backfill
-                                ),
-                                response_candidate_blocked_by_completion_gate=(
-                                    completion_gate_blocks_response_reuse
                                 ),
                             )
 
                             synthesis_response, screen_model_used = (
                                 _invoke_presenter_screen_backfill_prompt(
-                                    orchestrator=orchestrator,
                                     llm_client=llm_client,
                                     represented_screen_prompt=represented_screen_prompt,
                                     context_messages=screen_context_messages,
                                     context_telemetry=screen_context_telemetry,
                                     model_name=model_name,
-                                    request_language=request_language,
-                                    user_concept_id=user_concept_id,
-                                    org_concept_id=org_concept_id,
-                                    llm_calls_log=llm_interaction["calls"],
-                                    auxiliary_llm_calls=auxiliary_llm_calls,
                                     record_stage_llm_call=_record_stage_llm_call,
                                     emit_stage_progress=_emit_stage_progress,
                                     infer_provider=_infer_provider,
@@ -13486,13 +11451,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 possible_inappropriate_python_code_use=True,
                             )
                         )
-
-                if (
-                    not screen_candidate
-                    and not allow_llm_screen_synthesis
-                    and completion_gate_blocks_response_reuse
-                ):
-                    screen_backfill_source = "represented_screen_prompt_disabled"
 
                 if screen_candidate:
                     if screen_fence_compat_enabled:
@@ -13711,221 +11669,138 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         else str(response_text)
                     )
 
-                narration_data = {
-                    "presenter_mode_requested": presenter_mode_requested,
-                    "screen_text": screen_text,
-                    "user_prompt": prompt_text,
-                    "narration_prompt_text": narration_prompt_text,
-                    "narration_prompt_ids": [
-                        frag.get("concept_id")
-                        for frag in (narration_prompt_fragments or [])
-                        if isinstance(frag, dict)
-                    ],
-                    "presenter_channels": (
+                # Include a small client-reported timing hint for narration generation.
+                # (Non-authoritative; used only for guidance.)
+                timing_hint = None
+                try:
+                    from ...services.client_capabilities_service import (
+                        get_client_capabilities_snapshot,
+                    )
+
+                    snapshot = get_client_capabilities_snapshot()
+                    speech = (
+                        snapshot.get("speech_synthesis")
+                        if isinstance(snapshot, dict)
+                        else None
+                    )
+                    speech = speech if isinstance(speech, dict) else {}
+                    raw_settings = speech.get("settings")
+                    settings = (
+                        raw_settings if isinstance(raw_settings, dict) else {}
+                    )
+
+                    preferred = settings.get("preferred_speaking_seconds")
+                    maximum = settings.get("max_speaking_seconds")
+
+                    try:
+                        preferred_int = (
+                            int(preferred) if preferred is not None else None
+                        )
+                    except Exception:
+                        preferred_int = None
+
+                    try:
+                        maximum_int = int(maximum) if maximum is not None else None
+                    except Exception:
+                        maximum_int = None
+
+                    if preferred_int is not None:
+                        preferred_int = max(1, min(preferred_int, 600))
+                    if maximum_int is not None:
+                        maximum_int = max(1, min(maximum_int, 600))
+
+                    effective_preferred = preferred_int
+                    if preferred_int is not None and maximum_int is not None:
+                        effective_preferred = min(preferred_int, maximum_int)
+
+                    if effective_preferred is not None or maximum_int is not None:
+                        timing_hint = (
+                            "Speech timing hint (client-reported, non-authoritative): "
+                            f"preferred_speaking_seconds={effective_preferred!r}, "
+                            f"max_speaking_seconds={maximum_int!r}. "
+                            "Aim for about preferred_speaking_seconds seconds and do not exceed max_speaking_seconds."
+                        )
+                except Exception:
+                    timing_hint = None
+
+                narration_system = (
+                    "You are Von. Produce a short talk track for text-to-speech. "
+                    "Return ONLY one block: <spoken>...</spoken>. "
+                    "Do not include <screen>. Do not include code blocks. "
+                    "Use New Zealand English spelling."
+                    + ("\n\n" + timing_hint if timing_hint else "")
+                    + (
+                        "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+                        + narration_prompt_text
+                        if narration_prompt_text
+                        else ""
+                    )
+                )
+
+                narration_user = (
+                    "User message:\n"
+                    f"{prompt_text}\n\n"
+                    "On-screen content (do not read verbatim if long; summarise):\n"
+                    f"{screen_text}\n"
+                )
+
+                narration_response = _llm_generate_spoken_backfill(
+                    llm_client,
+                    narration_system,
+                    narration_user,
+                    model_name,
+                    requested_model_parameters or None,
+                )
+                spoken_backfill_source = "llm_synthesis"
+                spoken_backfill_model_id = model_name
+
+                spoken_fallback = _coerce_spoken_text(narration_response)
+                if not spoken_fallback:
+                    spoken_fallback = _coerce_spoken_text(screen_text)
+                    spoken_from_screen_text = bool(spoken_fallback)
+                    if spoken_from_screen_text:
+                        spoken_backfill_source = "screen_text_fallback"
+
+                if spoken_fallback:
+                    base_channels = (
                         dict(presenter_channels)
                         if isinstance(presenter_channels, dict)
                         else {}
-                    ),
-                }
-
-                narration_trace = None
-                narration_trace_store = None
-                narration_trace_enabled = os.getenv(
-                    "VON_WORKFLOWS_TRACE_ENABLED", "0"
-                ).lower() in {"1", "true"}
-                if narration_trace_enabled:
-                    try:
-                        narration_trace = WorkflowExecutionTrace(
-                            workflow_id=CHAT_NARRATION_WORKFLOW_ID
-                        )
-                        narration_trace.user_namespace = user_namespace
-                        narration_trace_store = insert_workflow_execution_trace
-                    except Exception:
-                        narration_trace = None
-                        narration_trace_store = None
-                        narration_trace_enabled = False
-
-                workflow_result = None
-                if orchestrator is not None:
-                    workflow_result = orchestrator.execute_workflow(
-                        CHAT_NARRATION_WORKFLOW_ID,
-                        data=narration_data,
-                        llm_client=llm_client,
-                        model=model_name,
-                        user_namespace=user_namespace,
-                        auxiliary_system_prompt=dynamic_instructions,
-                        trace=narration_trace,
                     )
-
-                if workflow_result is not None:
-                    spoken_backfill_source = "workflow"
-                    channels = workflow_result.data.get(
-                        "presenter_channels", presenter_channels
-                    )
-                    if isinstance(channels, dict) and channels:
-                        presenter_channels = channels
-                        workflow_spoken = channels.get("spoken")
-                        if isinstance(workflow_spoken, str) and workflow_spoken.strip():
-                            spoken_backfill_applied = True
-                    if narration_trace_enabled and narration_trace is not None:
-                        try:
-                            if workflow_result.completed:
-                                narration_trace.finish_completed()
-                            elif workflow_result.error:
-                                narration_trace.finish_failed(workflow_result.error)
-                        except Exception:
-                            pass
-                        if narration_trace_store is not None:
-                            try:
-                                stored_exec = narration_trace_store(
-                                    narration_trace.to_storage_document()
-                                )
-                                auxiliary_llm_calls.append(
-                                    {
-                                        "type": "workflow_execution_trace",
-                                        "path": "narration",
-                                        "workflow_id": CHAT_NARRATION_WORKFLOW_ID,
-                                        "execution_id": narration_trace.execution_id,
-                                        "stored": bool(stored_exec),
-                                        "status": narration_trace.status,
-                                    }
-                                )
-                            except Exception:
-                                pass
-                else:
-                    # Include a small client-reported timing hint for narration generation.
-                    # (Non-authoritative; used only for guidance.)
-                    timing_hint = None
-                    try:
-                        from ...services.client_capabilities_service import (
-                            get_client_capabilities_snapshot,
-                        )
-
-                        snapshot = get_client_capabilities_snapshot()
-                        speech = (
-                            snapshot.get("speech_synthesis")
-                            if isinstance(snapshot, dict)
-                            else None
-                        )
-                        speech = speech if isinstance(speech, dict) else {}
-                        raw_settings = speech.get("settings")
-                        settings = (
-                            raw_settings if isinstance(raw_settings, dict) else {}
-                        )
-
-                        preferred = settings.get("preferred_speaking_seconds")
-                        maximum = settings.get("max_speaking_seconds")
-
-                        try:
-                            preferred_int = (
-                                int(preferred) if preferred is not None else None
-                            )
-                        except Exception:
-                            preferred_int = None
-
-                        try:
-                            maximum_int = int(maximum) if maximum is not None else None
-                        except Exception:
-                            maximum_int = None
-
-                        if preferred_int is not None:
-                            preferred_int = max(1, min(preferred_int, 600))
-                        if maximum_int is not None:
-                            maximum_int = max(1, min(maximum_int, 600))
-
-                        effective_preferred = preferred_int
-                        if preferred_int is not None and maximum_int is not None:
-                            effective_preferred = min(preferred_int, maximum_int)
-
-                        if effective_preferred is not None or maximum_int is not None:
-                            timing_hint = (
-                                "Speech timing hint (client-reported, non-authoritative): "
-                                f"preferred_speaking_seconds={effective_preferred!r}, "
-                                f"max_speaking_seconds={maximum_int!r}. "
-                                "Aim for about preferred_speaking_seconds seconds and do not exceed max_speaking_seconds."
-                            )
-                    except Exception:
-                        timing_hint = None
-
-                    narration_system = (
-                        "You are Von. Produce a short talk track for text-to-speech. "
-                        "Return ONLY one block: <spoken>...</spoken>. "
-                        "Do not include <screen>. Do not include code blocks. "
-                        "Use New Zealand English spelling."
-                        + ("\n\n" + timing_hint if timing_hint else "")
-                        + (
-                            "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
-                            + narration_prompt_text
-                            if narration_prompt_text
-                            else ""
-                        )
-                    )
-
-                    narration_user = (
-                        "User message:\n"
-                        f"{prompt_text}\n\n"
-                        "On-screen content (do not read verbatim if long; summarise):\n"
-                        f"{screen_text}\n"
-                    )
-
-                    narration_response = _llm_generate_spoken_backfill(
-                        llm_client,
-                        narration_system,
-                        narration_user,
-                        model_name,
-                        requested_model_parameters or None,
-                    )
-                    spoken_backfill_source = "llm_synthesis"
-                    spoken_backfill_model_id = model_name
-
-                    spoken_fallback = _coerce_spoken_text(narration_response)
-                    if not spoken_fallback:
-                        spoken_fallback = _coerce_spoken_text(screen_text)
-                        spoken_from_screen_text = bool(spoken_fallback)
-                        if spoken_from_screen_text:
-                            spoken_backfill_source = "screen_text_fallback"
-
-                    if spoken_fallback:
-                        base_channels = (
-                            dict(presenter_channels)
-                            if isinstance(presenter_channels, dict)
-                            else {}
-                        )
-                        if not completion_gate_blocks_response_reuse:
-                            base_channels["screen"] = screen_text
-                        base_channels["spoken"] = spoken_fallback
-                        existing_format = base_channels.get("format")
-                        # Preserve formats that describe *how the screen* was produced.
-                        # For normal tagged responses, surface that narration was added.
-                        if existing_format == "tool_results_fallback_v1":
-                            base_channels["format"] = existing_format
-                        elif (
-                            has_tool_messages
-                            and isinstance(existing_format, str)
-                            and existing_format.startswith("screen_backfill_")
-                        ):
-                            base_channels["format"] = existing_format
-                        elif (
-                            not has_tool_messages
-                            and isinstance(existing_format, str)
-                            and existing_format.startswith("screen_backfill_")
-                        ):
-                            base_channels["format"] = "narration_fallback_v1"
-                        elif (
-                            spoken_backfill_second_pass_reason
-                            == "missing_presenter_channels"
-                        ):
-                            base_channels["format"] = "narration_fallback_v1"
-                        elif (
-                            spoken_from_screen_text
-                            and isinstance(existing_format, str)
-                            and existing_format.startswith("screen_backfill_")
-                        ):
-                            base_channels["format"] = existing_format
-                        else:
-                            base_channels["format"] = "narration_fallback_v1"
-                        presenter_channels = base_channels
-                        spoken_backfill_applied = True
+                    base_channels["screen"] = screen_text
+                    base_channels["spoken"] = spoken_fallback
+                    existing_format = base_channels.get("format")
+                    # Preserve formats that describe *how the screen* was produced.
+                    # For normal tagged responses, surface that narration was added.
+                    if existing_format == "tool_results_fallback_v1":
+                        base_channels["format"] = existing_format
+                    elif (
+                        has_tool_messages
+                        and isinstance(existing_format, str)
+                        and existing_format.startswith("screen_backfill_")
+                    ):
+                        base_channels["format"] = existing_format
+                    elif (
+                        not has_tool_messages
+                        and isinstance(existing_format, str)
+                        and existing_format.startswith("screen_backfill_")
+                    ):
+                        base_channels["format"] = "narration_fallback_v1"
+                    elif (
+                        spoken_backfill_second_pass_reason
+                        == "missing_presenter_channels"
+                    ):
+                        base_channels["format"] = "narration_fallback_v1"
+                    elif (
+                        spoken_from_screen_text
+                        and isinstance(existing_format, str)
+                        and existing_format.startswith("screen_backfill_")
+                    ):
+                        base_channels["format"] = existing_format
+                    else:
+                        base_channels["format"] = "narration_fallback_v1"
+                    presenter_channels = base_channels
+                    spoken_backfill_applied = True
             except Exception as exc:
                 # Defensive: never fail the request just because narration generation failed.
                 spoken_backfill_error_class = type(exc).__name__
@@ -14011,8 +11886,19 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     response_text = screen_text_value.strip()
 
         if tool_invocations:
+            tool_names = sorted(
+                {
+                    str(invocation.get("tool")).strip()
+                    for invocation in tool_invocations
+                    if isinstance(invocation, Mapping)
+                    and isinstance(invocation.get("tool"), str)
+                    and str(invocation.get("tool")).strip()
+                }
+            )
             current_app.logger.info(
-                "[mcp_orchestrator] Tool invocations: %s", tool_invocations
+                "[adaptive_turn] Read capability summary: count=%d tools=%s",
+                len(tool_invocations),
+                tool_names,
             )
 
         render_plan_for_display = (
@@ -14103,23 +11989,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             spoken_backfill_second_pass_reason=spoken_backfill_second_pass_reason,
         )
 
-        # Calculate context statistics for visibility.
-        # If the internal orchestrator is enabled, it augments and trims the context
-        # before sending it to the LLM, so report stats for the *actual* sent context.
+        # Calculate context statistics for the context given to the adaptive turn.
         sent_context_for_stats = enhanced_context
-        if orchestrator is not None:
-            build_augmented = getattr(orchestrator, "_build_augmented_context", None)
-            if callable(build_augmented):
-                try:
-                    sent_context_for_stats = build_augmented(
-                        orchestrator_input_context,
-                        user_namespace=user_namespace,
-                        auxiliary_system_prompt=dynamic_instructions,
-                        user_concept_id=user_concept_id,
-                        org_concept_id=org_concept_id,
-                    )
-                except Exception:
-                    sent_context_for_stats = enhanced_context
 
         sent_context_stats_messages: list[dict] = enhanced_context
         if isinstance(sent_context_for_stats, list):
@@ -14138,7 +12009,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_started_perf = time.perf_counter()
         buttonify_options: list[str] = []
         buttonify_meta: dict[str, Any] | None = None
-        buttonify_workflow_contract: dict[str, Any] | None = None
         agent_test_instance = str(
             os.getenv("VON_AGENT_TEST_INSTANCE") or ""
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -14146,17 +12016,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_enabled = (
             buttonify_setting_enabled and not skip_buttonify and not agent_test_instance
         )
-        buttonify_allowed = (
-            not current_app.testing
-            and not os.getenv("PYTEST_CURRENT_TEST")
-            and (
-                orchestrator is None or hasattr(orchestrator, "_run_llm_with_fallbacks")
-            )
-        )
-        buttonify_workflow_available = bool(
-            orchestrator is not None
-            and hasattr(orchestrator, "execute_workflow")
-            and hasattr(orchestrator, "_run_llm_with_fallbacks")
+        buttonify_allowed = not current_app.testing and not os.getenv(
+            "PYTEST_CURRENT_TEST"
         )
         buttonify_model_used = model_name
         buttonify_source = "none"
@@ -14168,7 +12029,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_error_class = None
         buttonify_suppression_reason = None
         buttonify_model_attempted = False
-        buttonify_workflow_used = False
         buttonify_filtering_boundary: dict[str, Any] | None = None
 
         if skip_buttonify:
@@ -14192,179 +12052,79 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     },
                 )
 
-            if buttonify_workflow_available:
-                buttonify_workflow_used = True
-                buttonify_workflow_result = None
-                policy_state = None
-                registry_snapshot = None
-                try:
-                    policy_state, registry_snapshot = (
-                        orchestrator._load_workflow_model_policy(request_language)
-                    )
-                except Exception:
-                    policy_state = None
-                    registry_snapshot = None
-
-                try:
-                    buttonify_workflow_result = orchestrator.execute_workflow(
-                        CHAT_BUTTONIFY_WORKFLOW_ID,
-                        data={
-                            "screen_text": response_text,
-                            "user_prompt": prompt_text,
-                            "buttonify_enabled": buttonify_enabled,
-                            "buttonify_allowed": buttonify_allowed,
-                            "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
-                            "prefer_default_model": True,
-                            "default_model": model_name,
-                            "policy_state": policy_state,
-                            "registry_snapshot": registry_snapshot,
-                            "record_llm_call": _record_stage_llm_call,
-                            "emit_progress": _emit_stage_progress,
-                            "llm_calls_log": llm_interaction["calls"],
-                            "aux_llm_calls": auxiliary_llm_calls,
-                            "user_concept_id": user_concept_id,
-                            "org_concept_id": org_concept_id,
-                            "workflow_episode_stage": "buttonify",
-                        },
-                        llm_client=llm_client,
-                        model=model_name,
-                        user_namespace=user_namespace,
-                        auxiliary_system_prompt=dynamic_instructions,
-                        trace=None,
-                        conversation_session_id=session_id,
-                        turn_id=request_id,
-                        episode_source="chat_turn_workflow",
-                    )
-                except Exception as exc:
-                    buttonify_error_class = type(exc).__name__
-                    buttonify_workflow_result = None
-
-                workflow_payload: Mapping[str, Any] = {}
-                if buttonify_workflow_result is not None and isinstance(
-                    buttonify_workflow_result.data, Mapping
-                ):
-                    workflow_payload = buttonify_workflow_result.data
-
-                raw_options = workflow_payload.get("buttonify_options")
-                if isinstance(raw_options, list):
-                    (
-                        buttonify_options,
-                        buttonify_filtering_boundary,
-                    ) = sanitise_buttonify_options_with_telemetry(raw_options)
-
-                if isinstance(workflow_payload.get("buttonify_source"), str):
-                    buttonify_source = workflow_payload.get("buttonify_source", "none")
-                if isinstance(workflow_payload.get("buttonify_prompt_id"), str):
-                    buttonify_prompt_id = workflow_payload.get("buttonify_prompt_id")
-                buttonify_prompt_truncated = bool(
-                    workflow_payload.get("buttonify_prompt_truncated")
+            # If represented prompt content is unavailable, buttonify no-ops
+            # rather than silently falling back to code-authored prompt text.
+            buttonify_prompt = ""
+            try:
+                rendered_prompt = PromptTemplateService().render_prompt(
+                    BUTTONIFY_PROMPT_IDS,
+                    variables={
+                        "user_message": prompt_text,
+                        "assistant_response": response_text,
+                    },
+                    fallback=None,
+                    max_chars=6000,
                 )
-                if isinstance(workflow_payload.get("buttonify_prompt_available"), bool):
-                    buttonify_prompt_available = bool(
-                        workflow_payload.get("buttonify_prompt_available")
-                    )
-                if isinstance(workflow_payload.get("buttonify_prompt_error"), str):
-                    buttonify_prompt_error = workflow_payload.get(
-                        "buttonify_prompt_error"
-                    )
-                if isinstance(workflow_payload.get("buttonify_status"), str):
-                    buttonify_status = workflow_payload.get("buttonify_status", "no_op")
-                if isinstance(workflow_payload.get("buttonify_error_class"), str):
-                    buttonify_error_class = workflow_payload.get(
-                        "buttonify_error_class"
-                    )
-                if isinstance(workflow_payload.get("buttonify_model_used"), str):
-                    buttonify_model_used = workflow_payload.get("buttonify_model_used")
-                buttonify_model_attempted = bool(
-                    workflow_payload.get("buttonify_model_attempted")
-                )
-                if isinstance(
-                    workflow_payload.get("buttonify_suppression_reason"), str
-                ):
-                    buttonify_suppression_reason = workflow_payload.get(
-                        "buttonify_suppression_reason"
-                    )
-                contract_payload = workflow_payload.get(
-                    "output_transformation_contract"
-                )
-                if isinstance(contract_payload, Mapping):
-                    buttonify_workflow_contract = dict(contract_payload)
+            except Exception as exc:
+                rendered_prompt = None
+                buttonify_prompt_error = type(exc).__name__
 
+            if rendered_prompt is not None:
+                buttonify_prompt = enforce_buttonify_prompt_contract(
+                    rendered_prompt.text
+                )
+                buttonify_prompt_id = rendered_prompt.prompt_id
+                buttonify_prompt_truncated = rendered_prompt.truncated
+                buttonify_prompt_available = True
             else:
-                # Keep deterministic behaviour when workflow execution is not available.
-                # If Vontology prompt content is unavailable, buttonify must no-op
-                # rather than silently falling back to code prompt text.
-                buttonify_prompt = ""
-                try:
-                    rendered_prompt = PromptTemplateService().render_prompt(
-                        BUTTONIFY_PROMPT_IDS,
-                        variables={
-                            "user_message": prompt_text,
-                            "assistant_response": response_text,
-                        },
-                        fallback=None,
-                        max_chars=6000,
-                    )
-                except Exception as exc:
-                    rendered_prompt = None
-                    buttonify_prompt_error = type(exc).__name__
+                buttonify_prompt_available = False
+                if not buttonify_prompt_error:
+                    buttonify_prompt_error = "prompt_not_found_or_unavailable"
+                buttonify_suppression_reason = "buttonify_prompt_unavailable"
 
-                if rendered_prompt is not None:
-                    buttonify_prompt = enforce_buttonify_prompt_contract(
-                        rendered_prompt.text
-                    )
-                    buttonify_prompt_id = rendered_prompt.prompt_id
-                    buttonify_prompt_truncated = rendered_prompt.truncated
-                    buttonify_prompt_available = True
+            if buttonify_prompt_available and not buttonify_options:
+                buttonify_response = None
+                if _contains_openai_quota_error(response_text):
+                    buttonify_suppression_reason = "quota_exhausted"
                 else:
-                    buttonify_prompt_available = False
-                    if not buttonify_prompt_error:
-                        buttonify_prompt_error = "prompt_not_found_or_unavailable"
-                    buttonify_suppression_reason = "buttonify_prompt_unavailable"
+                    buttonify_model_attempted = True
+                    llm_start = time.perf_counter()
+                    try:
+                        buttonify_response = _llm_generate_buttonify(
+                            llm_client,
+                            buttonify_prompt,
+                            buttonify_model_used,
+                            requested_model_parameters or None,
+                        )
+                        _record_stage_llm_call(
+                            call_type="llm.generate",
+                            model_name=buttonify_model_used,
+                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                            usage=None,
+                            note="Buttonify quick-reply extraction (workflow unavailable).",
+                            stage="buttonify",
+                            prompt={
+                                "text": buttonify_prompt,
+                                "char_count": len(buttonify_prompt),
+                                "is_truncated": False,
+                            },
+                            response={
+                                "text": str(buttonify_response),
+                                "char_count": len(str(buttonify_response)),
+                                "is_truncated": False,
+                            },
+                        )
+                    except Exception as exc:
+                        buttonify_error_class = type(exc).__name__
+                        if _contains_openai_quota_error(exc):
+                            buttonify_suppression_reason = "quota_exhausted"
+                        buttonify_response = None
 
-                if buttonify_prompt_available and not buttonify_options:
-                    buttonify_response = None
-                    if _contains_openai_quota_error(response_text):
-                        buttonify_suppression_reason = "quota_exhausted"
-                    else:
-                        buttonify_model_attempted = True
-                        llm_start = time.perf_counter()
-                        try:
-                            buttonify_response = _llm_generate_buttonify(
-                                llm_client,
-                                buttonify_prompt,
-                                buttonify_model_used,
-                                requested_model_parameters or None,
-                            )
-                            _record_stage_llm_call(
-                                call_type="llm.generate",
-                                model_name=buttonify_model_used,
-                                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                                usage=None,
-                                note="Buttonify quick-reply extraction (workflow unavailable).",
-                                stage="buttonify",
-                                prompt={
-                                    "text": buttonify_prompt,
-                                    "char_count": len(buttonify_prompt),
-                                    "is_truncated": False,
-                                },
-                                response={
-                                    "text": str(buttonify_response),
-                                    "char_count": len(str(buttonify_response)),
-                                    "is_truncated": False,
-                                },
-                            )
-                        except Exception as exc:
-                            buttonify_error_class = type(exc).__name__
-                            if _contains_openai_quota_error(exc):
-                                buttonify_suppression_reason = "quota_exhausted"
-                            buttonify_response = None
-
-                    (
-                        buttonify_options,
-                        buttonify_filtering_boundary,
-                    ) = parse_buttonify_options_json_with_telemetry(buttonify_response)
-                    buttonify_source = "llm" if buttonify_options else "none"
+                (
+                    buttonify_options,
+                    buttonify_filtering_boundary,
+                ) = parse_buttonify_options_json_with_telemetry(buttonify_response)
+                buttonify_source = "llm" if buttonify_options else "none"
 
             if buttonify_source == "llm":
                 buttonify_status = "success"
@@ -14390,15 +12150,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "prompt_truncated": buttonify_prompt_truncated,
                 "prompt_available": buttonify_prompt_available,
                 "prompt_error": buttonify_prompt_error,
-                "workflow_used": buttonify_workflow_used,
-                "workflow_available": buttonify_workflow_available,
+                "workflow_used": False,
+                "workflow_available": False,
             }
             if isinstance(buttonify_filtering_boundary, Mapping):
                 buttonify_meta["filtering_boundary"] = dict(
                     buttonify_filtering_boundary
                 )
-            if buttonify_workflow_contract is not None:
-                buttonify_meta["workflow_contract"] = buttonify_workflow_contract
 
         buttonify_latency_ms = (time.perf_counter() - buttonify_started_perf) * 1000.0
         record_response_transformation_event(
@@ -14493,12 +12251,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # Capture a compact summary of the tool catalogue that the agent was shown.
         # This improves trace transparency without storing the full system prompt.
         tool_catalogue_summary = None
-        method_catalogue_snapshot = None
         if gateway is not None:
             try:
                 methods_snapshot = gateway.describe_methods()
                 if isinstance(methods_snapshot, dict):
-                    method_catalogue_snapshot = methods_snapshot
                     method_names = sorted(
                         [
                             name
@@ -14507,9 +12263,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         ]
                     )
                     try:
-                        import hashlib
-                        import json
-
                         digest = hashlib.sha256(
                             json.dumps(
                                 method_names,
@@ -14529,16 +12282,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     }
             except Exception:
                 tool_catalogue_summary = None
-
-        try:
-            applied_max_tool_invocations = int(get_internal_mcp_max_tool_invocations())
-        except Exception:
-            applied_max_tool_invocations = None
-
-        try:
-            applied_tool_batch_cap = int(get_internal_mcp_tool_batch_cap())
-        except Exception:
-            applied_tool_batch_cap = None
 
         if show_tool_use_progress:
             response_finalising_payload = (
@@ -14580,9 +12323,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 namespace=user_namespace,
                 history_owner_user_id=history_user_id,
                 organisation_concept_id=org_concept_id,
-                workflow_routing=workflow_routing_info,
-                aux_llm_calls=auxiliary_llm_calls,
-                selected_workflow_trace=selected_workflow_trace_payload,
             )
         with turn_timing_recorder.span(
             stage_id="response_finalising",
@@ -14594,8 +12334,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 prompt_text=prompt_text,
                 elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
                 tool_progress_state=tool_progress_snapshot,
-                workflow_discovery=workflow_discovery_result,
-                workflow_routing=workflow_routing_info,
                 llm_calls=llm_interaction["calls"],
                 aux_llm_calls=auxiliary_llm_calls,
                 tool_invocations=tool_invocations,
@@ -14606,65 +12344,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     and isinstance(response_transformations, Mapping)
                     else None
                 ),
-                critic_verdict=(
-                    dict(raw_critic_verdict)
-                    if isinstance(
-                        raw_critic_verdict := getattr(
-                            orchestrator_result,
-                            "critic_verdict",
-                            None,
-                        ),
-                        Mapping,
-                    )
-                    else None
-                ),
-                completion_gate_verdict=(
-                    dict(raw_completion_gate_verdict)
-                    if isinstance(
-                        raw_completion_gate_verdict := getattr(
-                            orchestrator_result,
-                            "completion_gate_verdict",
-                            None,
-                        ),
-                        Mapping,
-                    )
-                    else None
-                ),
                 mcp_access=turn_execution_mcp_access,
             )
-        diagnostics_routing = turn_execution_diagnostics.get(
-            "workflow_routing_diagnostics"
-        )
-        diagnostics_dispatch = (
-            diagnostics_routing.get("dispatch")
-            if isinstance(diagnostics_routing, Mapping)
-            and isinstance(diagnostics_routing.get("dispatch"), Mapping)
-            else {}
-        )
-        try:
-            diagnostics_unsatisfied_required_tools = int(
-                diagnostics_dispatch.get(
-                    "required_tool_obligation_unsatisfied_count",
-                    0,
-                )
-                or 0
-            )
-        except (TypeError, ValueError):
-            diagnostics_unsatisfied_required_tools = 0
-        if (
-            isinstance(response_text, str)
-            and diagnostics_dispatch
-            and not diagnostics_dispatch.get("required_effects_unresolved_effect_ids")
-            and diagnostics_unsatisfied_required_tools == 0
-        ):
-            response_text = strip_completion_ledger_suffix(response_text)
-
-        workflow_use_episodes = [
-            entry
-            for entry in auxiliary_llm_calls
-            if isinstance(entry, dict)
-            and str(entry.get("type", "")).strip() == "workflow_use_episode"
-        ]
         turn_record_tool_invocations = (
             _serialise_tool_invocations_for_turn_execution_record(tool_invocations)
         )
@@ -14698,11 +12379,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     if gateway is not None
                     else False
                 ),
-                "orchestrator_present": orchestrator is not None,
-                "execution_caps": {
-                    "max_tool_invocations": applied_max_tool_invocations,
-                    "tool_batch_cap": applied_tool_batch_cap,
-                },
+                "orchestrator_present": False,
                 "tool_use_progress": {
                     "enabled": show_tool_use_progress,
                     "request_id": request_id,
@@ -14725,51 +12402,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "turn_execution_record_tool_invocations": turn_record_tool_invocations,
             "search_evidence": search_evidence,
             "aux_llm_calls": auxiliary_llm_calls,
-            "workflow_use_episodes": workflow_use_episodes,
             "buttonify": buttonify_meta,
             "response_transformations": response_transformations,
-            # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
-            "workflow_discovery": workflow_discovery_result,
-            "workflow_routing": workflow_routing_info,
             "display_elements": display_elements_contract,
             "turn_execution_diagnostics": turn_execution_diagnostics,
-            "selected_workflow_trace": selected_workflow_trace_payload,
-            "critic_verdict": (
-                dict(raw_critic_verdict)
-                if isinstance(
-                    raw_critic_verdict := getattr(
-                        orchestrator_result,
-                        "critic_verdict",
-                        None,
-                    ),
-                    dict,
-                )
-                else None
-            ),
-            "completion_gate_verdict": (
-                dict(raw_completion_gate_verdict)
-                if isinstance(
-                    raw_completion_gate_verdict := getattr(
-                        orchestrator_result,
-                        "completion_gate_verdict",
-                        None,
-                    ),
-                    dict,
-                )
-                else None
-            ),
-            "completion_report": (
-                dict(raw_completion_report)
-                if isinstance(
-                    raw_completion_report := getattr(
-                        orchestrator_result,
-                        "completion_report",
-                        None,
-                    ),
-                    dict,
-                )
-                else None
-            ),
         }
         llm_debug_info["turn_output_health"] = build_turn_output_health(llm_debug_info)
         if isinstance(render_plan_debug, dict):
@@ -14788,9 +12424,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 namespace=user_namespace,
                 user_id=history_user_id or user_concept_id,
                 org_id=org_concept_id,
-                workflow_discovery=workflow_discovery_result,
-                workflow_routing=workflow_routing_info,
-                method_catalogue=method_catalogue_snapshot,
             )
 
         def _refresh_llm_debug_timing_payload(debug_payload: dict[str, Any]) -> None:
@@ -14879,39 +12512,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             refresh_llm_debug_timing_fn=_refresh_llm_debug_timing_payload,
         )
 
-        with turn_timing_recorder.span(
-            stage_id="response_finalising",
-            operation_kind="durable_instance_finalisation",
-            operation_name="finalise_conversation_turn_instance",
-        ):
-            _finalise_generate_conversation_turn_instance(
-                state=conversation_turn_instance_state,
-                auxiliary_llm_calls=auxiliary_llm_calls,
-                session_id=session_id,
-                request_id=request_id,
-                user_namespace=user_namespace,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-                presenter_mode_requested=presenter_mode_requested,
-                completed=True,
-                final_state="completed",
-                debug_payload=llm_debug_info,
-                logger=current_app.logger,
-            )
-        _refresh_llm_debug_timing_payload(llm_debug_info)
-
         if progress_updates_enabled:
-            turn_record_completion_gate = None
-            turn_execution_record = llm_debug_info.get("turn_execution_record")
-            if isinstance(turn_execution_record, Mapping):
-                raw_gate = turn_execution_record.get("completion_gate")
-                if isinstance(raw_gate, Mapping):
-                    turn_record_completion_gate = raw_gate
-            final_progress_payload = _build_terminal_tool_progress_payload(
-                request_id=request_id,
-                aux_calls=auxiliary_llm_calls,
-                completion_gate=turn_record_completion_gate,
-            )
+            final_progress_payload = {
+                "status": "completed" if adaptive_success else "error",
+                "stage": "completed" if adaptive_success else "error",
+                "phase": "completed" if adaptive_success else "error",
+                "phase_label": "Complete" if adaptive_success else "Incomplete",
+                "request_id": request_id,
+                "success": adaptive_success,
+                "ordinary_turn_terminal_status": adaptive_terminal_status,
+                "result_summary": (
+                    "The direct adaptive turn produced a response."
+                    if adaptive_success
+                    else "The direct adaptive turn returned an honest non-success."
+                ),
+            }
             final_progress_payload["timing_spans"] = turn_timing_recorder.spans()
             with turn_timing_recorder.span(
                 stage_id="response_finalising",
@@ -14937,6 +12552,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 created_conversation_session_name=created_conversation_session_name,
                 created_conversation_session=created_conversation_session,
                 response_text=response_text,
+                success=adaptive_success,
+                terminal_status=adaptive_terminal_status,
                 presenter_channels=(
                     presenter_channels if isinstance(presenter_channels, dict) else None
                 ),
@@ -14945,14 +12562,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 rag_trace=rag_trace,
             )
         )
-        _mark_background_generate_completed_if_ready(
-            background_task_id=background_task_id,
-            result_body=final_success_body,
-            request_id=request_id,
-            session_id=session_id,
-            user_id=history_user_id or user_concept_id,
-            response_text=response_text,
-        )
+        if adaptive_success:
+            _mark_background_generate_completed_if_ready(
+                background_task_id=background_task_id,
+                result_body=final_success_body,
+                request_id=request_id,
+                session_id=session_id,
+                user_id=history_user_id or user_concept_id,
+                response_text=response_text,
+            )
         return jsonify(final_success_body)
     except CancellationRequested:
         if progress_updates_enabled:
@@ -15006,25 +12624,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             progress_scope_key if "progress_scope_key" in locals() else None,
             request_id if "request_id" in locals() else None,
         )
-        error_workflow_discovery = (
-            workflow_discovery_result
-            if (
-                "workflow_discovery_result" in locals()
-                and isinstance(workflow_discovery_result, dict)
-            )
-            else None
-        )
         error_elapsed_ms = (
             (time.perf_counter() - request_start_perf) * 1000.0
             if "request_start_perf" in locals()
-            else None
-        )
-        error_workflow_routing = (
-            workflow_routing_info
-            if (
-                "workflow_routing_info" in locals()
-                and isinstance(workflow_routing_info, dict)
-            )
             else None
         )
         error_debug_info = _build_generate_error_debug_info(
@@ -15051,8 +12653,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 else None
             ),
             error_tool_progress_snapshot=error_tool_progress_snapshot,
-            error_workflow_discovery=error_workflow_discovery,
-            error_workflow_routing=error_workflow_routing,
+            error_workflow_discovery=None,
+            error_workflow_routing=None,
             auxiliary_llm_calls=(
                 auxiliary_llm_calls
                 if "auxiliary_llm_calls" in locals()
@@ -15084,38 +12686,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 if isinstance(error_tool_progress_snapshot, Mapping)
                 else None
             ),
-        )
-        _finalise_generate_conversation_turn_instance(
-            state=(
-                conversation_turn_instance_state
-                if "conversation_turn_instance_state" in locals()
-                and isinstance(
-                    conversation_turn_instance_state,
-                    _GenerateConversationTurnInstanceState,
-                )
-                else _GenerateConversationTurnInstanceState()
-            ),
-            auxiliary_llm_calls=(
-                auxiliary_llm_calls
-                if "auxiliary_llm_calls" in locals()
-                and isinstance(auxiliary_llm_calls, list)
-                else []
-            ),
-            session_id=session_id if "session_id" in locals() else "",
-            request_id=request_id if "request_id" in locals() else "",
-            user_namespace=user_namespace if "user_namespace" in locals() else None,
-            user_concept_id=user_concept_id if "user_concept_id" in locals() else None,
-            org_concept_id=org_concept_id if "org_concept_id" in locals() else None,
-            presenter_mode_requested=(
-                presenter_mode_requested
-                if "presenter_mode_requested" in locals()
-                else False
-            ),
-            completed=False,
-            final_state="generate_exception",
-            debug_payload=error_debug_info,
-            error=str(e),
-            logger=current_app.logger,
         )
         return (
             jsonify(
@@ -18697,136 +16267,6 @@ def get_my_organisations():
     except Exception as e:
         print(f"Error getting organisations: {e}")
         return jsonify({"error": str(e)}), 500
-
-
-def _handle_orchestrator_missing_fallback(
-    llm_client,
-    model_name,
-    prompt_text,
-    enhanced_context,
-    request_id,
-    gateway,
-    auxiliary_llm_calls,
-    llm_interaction,
-    model_parameters=None,
-) -> str:
-    """Handle orchestrator missing fallback."""
-    import time
-    from typing import Mapping, cast
-    from ...integrations.internal_mcp.orchestrator import (
-        InternalMCPChatOrchestrator,
-    )
-
-    # Heuristic for provider inference if needed
-    def _infer_provider(model: str | None) -> str:
-        if not model:
-            return "unknown"
-        if "gpt" in model.lower():
-            return "openai"
-        if "claude" in model.lower():
-            return "anthropic"
-        if "gemini" in model.lower():
-            return "google"
-        return "unknown"
-
-    orchestrator_status = (
-        current_app.config.get("INTERNAL_MCP_ORCHESTRATOR_STATUS") or {}
-    )
-    orch_state = orchestrator_status.get("state", "unknown")
-    current_app.logger.warning(
-        "[ORCHESTRATOR_FALLBACK] orchestrator is None "
-        "(state=%s); falling back to direct LLM generate for request_id=%s",
-        orch_state,
-        request_id,
-    )
-    auxiliary_llm_calls.append(
-        {
-            "type": "orchestrator_unavailable_fallback",
-            "orchestrator_state": orch_state,
-            "orchestrator_status_error": orchestrator_status.get("error"),
-        }
-    )
-
-    method_catalogue_for_fallback = None
-    if gateway is not None and hasattr(gateway, "describe_methods"):
-        try:
-            described = gateway.describe_methods()
-            if isinstance(described, Mapping):
-                method_catalogue_for_fallback = described
-        except Exception:
-            method_catalogue_for_fallback = None
-
-    fallback_requirement_state = (
-        InternalMCPChatOrchestrator._derive_prompt_tool_requirements(
-            prompt_text,
-            method_catalogue=method_catalogue_for_fallback,
-            context_messages=enhanced_context,
-        )
-    )
-    unavailable_required_tools = list(
-        fallback_requirement_state.get("unavailable_required_tools") or []
-    )
-    if unavailable_required_tools:
-        auxiliary_llm_calls.append(
-            annotate_python_decision_event(
-                {
-                    "type": "prompt_tool_requirements_preflight",
-                    "stage": "fallback_direct_llm",
-                    "required_tools": list(
-                        cast(
-                            list[str],
-                            fallback_requirement_state.get("required_tools") or [],
-                        )
-                    ),
-                    "unavailable_required_tools": list(unavailable_required_tools),
-                },
-                stage="fallback_direct_llm",
-                component="internal_mcp_orchestrator",
-                function="_derive_prompt_tool_requirements",
-                decision_class="prompt_requirement_inference",
-                decision_source="explicit_identifier_parse",
-                changed_outcome=True,
-                reason_code="explicit_prompt_tool_unavailable_in_fallback",
-                possible_inappropriate_python_code_use=False,
-            )
-        )
-    llm_start_perf = time.perf_counter()
-    generate_kwargs = {"context": enhanced_context, "model": model_name}
-    if isinstance(model_parameters, Mapping) and model_parameters:
-        generate_kwargs["llm_params"] = dict(model_parameters)
-        fallback_entry_model_parameters = dict(model_parameters)
-    else:
-        fallback_entry_model_parameters = None
-    response_text = llm_client.generate(prompt_text, **generate_kwargs)
-    llm_interaction["duration_ms"] = (time.perf_counter() - llm_start_perf) * 1000.0
-    fallback_entry = {
-        "type": "llm.generate",
-        "model": model_name,
-        "provider": _infer_provider(model_name),
-        "duration_ms": llm_interaction["duration_ms"],
-        "usage": None,
-        "workflow": "von_generate",
-        "stage": "fallback_direct_llm",
-        "prompt": {
-            "text": prompt_text,
-            "char_count": len(prompt_text) if isinstance(prompt_text, str) else 0,
-            "is_truncated": False,
-        },
-        "request": {"context": enhanced_context},
-        "response": {
-            "text": str(response_text),
-            "char_count": len(str(response_text)),
-            "is_truncated": False,
-        },
-    }
-    if fallback_entry_model_parameters:
-        fallback_entry["model_parameters"] = fallback_entry_model_parameters
-    _stamp_llm_call_timestamps(
-        fallback_entry,
-        duration_ms=llm_interaction["duration_ms"],
-    )
-    llm_interaction["calls"] = [fallback_entry]
-    return response_text
 
 
 def _perform_legacy_spoken_backfill(

@@ -23,6 +23,33 @@ from mcp import types as mcp_types
 logger = logging.getLogger(__name__)
 
 
+def summarise_mcp_tool_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Describe argument structure for logs without copying argument values."""
+
+    shapes: Dict[str, str] = {}
+    keys = sorted(str(key)[:80] for key in arguments)[:32]
+    for key in keys:
+        value = arguments.get(key)
+        if isinstance(value, str):
+            shapes[key] = f"string:{len(value)}"
+        elif isinstance(value, (bytes, bytearray)):
+            shapes[key] = f"bytes:{len(value)}"
+        elif isinstance(value, dict):
+            shapes[key] = f"object:{len(value)}"
+        elif isinstance(value, (list, tuple, set)):
+            shapes[key] = f"array:{len(value)}"
+        elif value is None:
+            shapes[key] = "null"
+        else:
+            shapes[key] = type(value).__name__
+    return {
+        "argument_count": len(arguments),
+        "keys": keys,
+        "shapes": shapes,
+        "keys_truncated": len(arguments) > len(keys),
+    }
+
+
 @dataclass
 class MCPCallTelemetry:
     """Telemetry for an MCP tool call."""
@@ -280,10 +307,10 @@ class MCPStdIOClient:
         params = self._build_server_params()
 
         logger.info(
-            "%s Calling tool %s with arguments %s",
+            "%s Calling tool %s with argument_shape=%s",
             self._config.log_tag,
             tool_name,
-            arguments,
+            summarise_mcp_tool_arguments(arguments),
         )
 
         start_time = time.perf_counter()

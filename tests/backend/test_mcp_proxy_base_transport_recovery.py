@@ -11,6 +11,7 @@ from src.backend.integrations.internal_mcp.mcp_proxy_base import (
     MCPServerConfig,
     MCPStdIOClient,
     MCPToolClientError,
+    summarise_mcp_tool_arguments,
 )
 
 
@@ -288,3 +289,22 @@ def test_list_tools_surfaces_leaf_exception_message_from_exception_group(monkeyp
 
     assert client.error_count == 1
     assert client.call_count == 0
+def test_argument_log_summary_does_not_copy_values() -> None:
+    secret_query = "private research question"
+    summary = summarise_mcp_tool_arguments(
+        {
+            "query": secret_query,
+            "urls": ["https://private.example.test/document"],
+            "options": {"token": "also-private"},
+        }
+    )
+
+    rendered = repr(summary)
+    assert secret_query not in rendered
+    assert "private.example.test" not in rendered
+    assert "also-private" not in rendered
+    assert summary["shapes"] == {
+        "options": "object:1",
+        "query": f"string:{len(secret_query)}",
+        "urls": "array:1",
+    }

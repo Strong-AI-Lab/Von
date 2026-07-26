@@ -2,6 +2,8 @@
 import pytest
 from flask import Flask
 
+from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
+
 
 class _StubLLM:
     def __init__(self):
@@ -14,6 +16,10 @@ class _StubLLM:
 
 @pytest.fixture()
 def app(monkeypatch):
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_von_generate_user_prompt")
+
+    from src.backend.server.routes import von_routes
     from src.backend.server.routes.von_routes import von_bp
 
     llm = _StubLLM()
@@ -22,9 +28,37 @@ def app(monkeypatch):
         "src.backend.server.routes.von_routes.get_llm_client",
         lambda **_kwargs: llm,
     )
+
+    def _execute_adaptive_turn(**kwargs):
+        llm.calls.append(
+            {
+                "prompt": kwargs["prompt"],
+                "context": list(kwargs["context"]),
+                "model": kwargs["model"],
+                "user_concept_id": kwargs["user_concept_id"],
+                "org_concept_id": kwargs["org_concept_id"],
+                "user_namespace": kwargs["user_namespace"],
+            }
+        )
+        return AdaptiveTurnResult(
+            response_text="ok",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+        )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.execute_adaptive_turn",
+        _execute_adaptive_turn,
+    )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
         lambda *args, **kwargs: "test-model",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_generate_requested_model",
+        lambda *_args, **_kwargs: ("test-model", None, {}),
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
@@ -33,6 +67,11 @@ def app(monkeypatch):
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_buttonify_model_enabled",
         lambda: False,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_display_elements_screen_fence_compat_enabled",
+        lambda **_kwargs: True,
     )
 
     monkeypatch.setattr(
@@ -71,6 +110,33 @@ def app(monkeypatch):
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
         lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._ensure_generate_conversation_session",
+        lambda **kwargs: (
+            kwargs.get("request_conversation_session_id")
+            or (
+                kwargs.get("effective_context", {}).get("chat_session_id")
+                if isinstance(kwargs.get("effective_context"), dict)
+                else None
+            )
+            or "test-session",
+            None,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes.PromptTemplateService,
+        "resolve_prompt_text",
+        lambda *_args, **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.mail_profile_resource_vontology_service.resolve_authorised_gmail_profile_for_user",
+        lambda **_kwargs: {
+            "success": False,
+            "reason_code": "default_mail_profile_not_represented",
+            "profile_id": None,
+        },
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.build_context_concept_reference_metadata",

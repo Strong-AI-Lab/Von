@@ -114,7 +114,8 @@ def build_workflow_surface_capability_matrix(
                 "intended_usage": (
                     "Vontology concept/text operations for external IDE agents; "
                     "durable workflow tools are exposed directly, while chat "
-                    "introspection tools remain internal-only."
+                    "introspection tools remain internal-only and delegated chat "
+                    "is adaptive and read-only."
                 ),
                 "tool_availability": stdio_availability,
                 "delegated_entrypoints": ["von_chat_run"],
@@ -145,7 +146,7 @@ def classify_stdio_missing_tool(tool_name: str | None) -> dict[str, Any] | None:
         "docs_reference": matrix["docs_reference"],
         "suggestions": [
             f"'{requested_tool}' is not exposed by the vontology MCP stdio server.",
-            "Use 'von_chat_run' for delegated workflow access from this stdio surface.",
+            "Use 'von_chat_run' for adaptive read-only assistance from this stdio surface.",
             "For direct workflow/introspection calls, use the internal MCP gateway.",
             f"See {matrix['docs_reference']} for per-surface tool availability.",
         ],

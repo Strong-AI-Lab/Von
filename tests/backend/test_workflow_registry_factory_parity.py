@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
-from src.backend.workflows.definitions import CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+from src.backend.workflows.definitions import TOOL_CALLING_WORKFLOW_ID
 from src.backend.workflows.workflow_registry import WorkflowRegistration, WorkflowRegistry
 from src.backend.workflows.durable import registry_factory
 
@@ -679,11 +679,11 @@ def test_agent_test_registry_uses_repo_seed_without_vontology_discovery(monkeypa
     )
 
     registry = registry_factory.build_workflow_registry_read_only()
-    registration = registry.get_registration(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID)
+    registration = registry.get_registration(TOOL_CALLING_WORKFLOW_ID)
 
     assert registration is not None
     assert registration.source == "repo_seed_agent_test"
-    assert registration.definition.workflow_id == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    assert registration.definition.workflow_id == TOOL_CALLING_WORKFLOW_ID
 
 
 def test_supported_durable_workflow_actions_include_executor_and_mcp_surfaces(

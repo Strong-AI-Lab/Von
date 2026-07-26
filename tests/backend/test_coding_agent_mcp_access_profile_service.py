@@ -40,8 +40,8 @@ def test_access_profile_enables_writes_for_noncanonical_local_db(monkeypatch) ->
     assert (
         payload["shared_authority_write_policy"]["write_category_tools_allowed"] is True
     )
-    assert payload["von_chat_run_policy"]["default_allow_writes"] is True
-    assert payload["von_chat_run_policy"]["default_dry_run"] is False
+    assert payload["von_chat_run_policy"]["default_allow_writes"] is False
+    assert payload["von_chat_run_policy"]["default_dry_run"] is True
 
 
 def test_access_profile_blocks_canonical_primary_without_explicit_approval(
@@ -88,6 +88,8 @@ def test_access_profile_enables_test_isolated_writes_without_targeting_primary_d
         payload["shared_authority_write_policy"]["write_category_tools_allowed"] is True
     )
     assert payload["environment"]["configured_database_name"] == "test_von_db"
+    assert payload["von_chat_run_policy"]["default_allow_writes"] is False
+    assert payload["von_chat_run_policy"]["default_dry_run"] is True
 
 
 def test_access_profile_allows_canonical_primary_writes_after_explicit_approval(

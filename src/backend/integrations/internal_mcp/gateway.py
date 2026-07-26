@@ -86,6 +86,15 @@ class MethodDefinition:
     timeout_sec: float | None = None
     description: str | None = None
     write_guardrail: Mapping[str, Any] | None = None
+    ordinary_turn_public: bool = False
+    # Evidence-backed authority/effect exception only. This must not encode
+    # request relevance, preferred routing, or a prescribed solution path.
+    ordinary_turn_excluded_reason: str | None = None
+    # Map capability arguments to values resolved by the trusted entry point.
+    ordinary_turn_trusted_argument_bindings: Mapping[str, str] | None = None
+    # Evidence-backed option-level boundary. The model cannot see or override
+    # these values on an ordinary turn; keep the rest of the capability usable.
+    ordinary_turn_fixed_arguments: Mapping[str, Any] | None = None
 
     def resolved_timeout(self, transport: InternalMCPTransport) -> float | None:
         if self.timeout_sec is not None:
@@ -184,6 +193,26 @@ class MethodCatalogue:
                 "write_guardrail": (
                     dict(definition.write_guardrail)
                     if isinstance(definition.write_guardrail, Mapping)
+                    else None
+                ),
+                "ordinary_turn_public": definition.ordinary_turn_public,
+                "ordinary_turn_excluded_reason": (
+                    definition.ordinary_turn_excluded_reason
+                ),
+                "ordinary_turn_trusted_argument_bindings": (
+                    dict(definition.ordinary_turn_trusted_argument_bindings)
+                    if isinstance(
+                        definition.ordinary_turn_trusted_argument_bindings,
+                        Mapping,
+                    )
+                    else None
+                ),
+                "ordinary_turn_fixed_arguments": (
+                    dict(definition.ordinary_turn_fixed_arguments)
+                    if isinstance(
+                        definition.ordinary_turn_fixed_arguments,
+                        Mapping,
+                    )
                     else None
                 ),
                 "input_schema": self._summarise_schema(definition.input_schema),
@@ -293,7 +322,11 @@ class InternalMCPGateway:
             yield
 
     def invoke(
-        self, method_name: str, payload: Optional[MutableMapping[str, Any]] = None
+        self,
+        method_name: str,
+        payload: Optional[MutableMapping[str, Any]] = None,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> TransportResult:
         if not self._enabled:
             raise GatewayDisabledError("Internal MCP gateway is disabled.")
@@ -413,6 +446,7 @@ class InternalMCPGateway:
                         timeout_sec=timeout,
                         category=definition.category,
                         advisory_timeout_sec=advisory_timeout,
+                        deadline_monotonic=deadline_monotonic,
                         log_tag=self._log_tag,
                     )
             finally:

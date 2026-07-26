@@ -14,6 +14,7 @@ from src.backend.languagemodels.structured_tool_calling import (
     LLMContinuation,
     LLMClientConfig,
     StructuredToolCapabilityRejectedError,
+    StructuredToolContextLimitError,
     StructuredToolProtocolError,
     ToolDefinition,
     ToolResult,
@@ -78,6 +79,16 @@ class _ToolCallLineageError(RuntimeError):
             "param": "input",
             "code": None,
         }
+    }
+
+
+class _ContextLengthError(RuntimeError):
+    status_code = 400
+    body = {
+        "message": "Request context is too large.",
+        "type": "invalid_request_error",
+        "param": "input",
+        "code": "context_length_exceeded",
     }
 
 
@@ -915,6 +926,47 @@ def test_provider_tool_call_lineage_rejection_is_typed_and_never_surface_falls_b
     assert exc_info.value.decision["provider_error_param"] == "input"
 
 
+def test_exact_provider_context_length_code_becomes_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "deployment-context-limited"
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    provider_error = _ContextLengthError("Request context is too large.")
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[provider_error],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    with pytest.raises(StructuredToolContextLimitError) as exc_info:
+        asyncio.run(
+            client.generate_with_tools(
+                prompt="Inspect the available evidence.",
+                available_tools=[_tool("lookup")],
+            )
+        )
+
+    assert len(captured["responses"]) == 1
+    assert captured["chat"] == []
+    error = exc_info.value
+    assert error.failure_kind == "structured_tool_context_limit_exceeded"
+    assert error.retryable is False
+    assert error.retryable_after_context_change is True
+    assert error.requires_material_context_change is True
+    assert error.decision["failure_kind"] == "provider_context_length_exceeded"
+    assert error.decision["provider_status_code"] == 400
+    assert error.decision["provider_error_code"] == "context_length_exceeded"
+    assert error.decision["provider_error_param"] == "input"
+    assert error.__cause__ is provider_error
+
+
 def test_responses_continuation_emits_exact_call_outputs_and_reasoning_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1343,6 +1395,58 @@ def test_advertised_chat_to_responses_fallback_uses_pristine_surface_parameters(
     assert result.transport_metadata["advertised_surface_attempts"] == [
         "chat_completions",
         "responses",
+    ]
+
+
+def test_advertised_surface_attempts_share_one_request_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.languagemodels.structured_tool_calling.providers import (
+        openai_client as provider_module,
+    )
+
+    model = "gpt-5.6-deadline-fallback"
+    _install_profiles(
+        monkeypatch,
+        _registry_profiles(
+            _chat_profile(),
+            _responses_profile(capability="supported"),
+        ),
+    )
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[_text_response(model=model)],
+        chat_response=_CapabilityError(
+            "Function tools are not supported; use /v1/responses."
+        ),
+    )
+    monotonic_values = iter((100.0, 100.0, 104.0))
+    monkeypatch.setattr(
+        provider_module,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Use the tool",
+            available_tools=[_tool()],
+            llm_params={"request_timeout_seconds": 10},
+        )
+    )
+
+    assert result.text_response == "ok"
+    assert captured["client_options"] == [
+        {"timeout": 10.0, "max_retries": 0},
+        {"timeout": 6.0, "max_retries": 0},
     ]
 
 
@@ -2315,7 +2419,6 @@ def test_responses_request_timeout_is_transport_option_not_model_parameter(
             prompt="Use the tool if needed.",
             available_tools=[_tool()],
             llm_params={
-                "reasoning_effort": "none",
                 "request_timeout_seconds": 17,
             },
         )
@@ -2325,7 +2428,12 @@ def test_responses_request_timeout_is_transport_option_not_model_parameter(
     assert "timeout" not in request
     assert "request_timeout_seconds" not in request
     assert "timeout_seconds" not in request
-    assert captured["client_options"] == [{"timeout": 17.0, "max_retries": 0}]
+    assert len(captured["client_options"]) == 1
+    assert captured["client_options"][0]["max_retries"] == 0
+    assert captured["client_options"][0]["timeout"] == pytest.approx(
+        17.0,
+        abs=0.1,
+    )
 
 
 def test_explicitly_unsupported_profile_raises_typed_error_before_request(
