@@ -36,6 +36,7 @@ from src.backend.languagemodels.structured_tool_calling.types import (
 )
 from src.backend.security.access_control import override_current_actor
 from src.backend.services.turn_evidence_store import (
+    EVIDENCE_SLICE_SCHEMA_VERSION,
     TrustedTurnScope,
     TurnEvidenceStore,
 )
@@ -56,6 +57,7 @@ _DEFAULT_OUTER_TOOL_WORKERS = 8
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
+_CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_read_capabilities.v1"
 
 @dataclass(frozen=True)
 class AdaptiveTurnResult:
@@ -103,6 +105,7 @@ def _compact_evidence_envelope(
     envelope: Mapping[str, Any],
     *,
     max_bytes: int,
+    preview_max_chars: int = _MODEL_EVIDENCE_PREVIEW_MAX_CHARS,
 ) -> dict[str, Any]:
     """Keep an evidence handle useful while sharing a bounded preview budget."""
 
@@ -117,14 +120,28 @@ def _compact_evidence_envelope(
         "call_id",
         "status",
         "trust_boundary",
+        "success",
+        "error_code",
         "sha256",
+        "source_sha256",
         "size_bytes",
+        "source_size_bytes",
         "char_count",
         "content_type",
         "value_kind",
         "preview_format",
         "preview_truncated",
         "available_selectors",
+        "selector",
+        "content_format",
+        "selected_value_kind",
+        "selected_value_shape",
+        "returned_chars",
+        "returned_match_count",
+        "total_chars",
+        "has_more",
+        "next_offset",
+        "provenance",
         "turn_id",
     ):
         if key not in envelope:
@@ -137,7 +154,7 @@ def _compact_evidence_envelope(
         return compact
 
     remaining = max(0, int(max_bytes) - len(_json_bytes(compact)) - 32)
-    preview_limit = min(_MODEL_EVIDENCE_PREVIEW_MAX_CHARS, remaining)
+    preview_limit = min(max(0, int(preview_max_chars)), remaining)
     if preview_limit > 0:
         compact["preview"] = preview[:preview_limit]
         compact["preview_truncated"] = bool(
@@ -152,6 +169,7 @@ def _compact_evidence_index(
     max_bytes: int = _MODEL_EVIDENCE_INDEX_MAX_BYTES,
     base_offset: int = 0,
     total_count: int | None = None,
+    preview_max_chars: int = _MODEL_EVIDENCE_PREVIEW_MAX_CHARS,
 ) -> list[dict[str, Any]]:
     """Return a bounded handle index, recording any omitted older entries."""
 
@@ -170,6 +188,7 @@ def _compact_evidence_index(
         compact = _compact_evidence_envelope(
             envelope,
             max_bytes=item_budget,
+            preview_max_chars=preview_max_chars,
         )
         candidate_size = len(_json_bytes(compact)) + (1 if compacted else 0)
         if candidate_size > remaining_bytes:
@@ -201,11 +220,264 @@ def _compact_evidence_index(
     return compacted
 
 
+def _capability_schema_reference(
+    capability: Mapping[str, Any],
+    *,
+    include_metadata: bool,
+    schema_exceeds_model_context: bool = False,
+) -> dict[str, Any]:
+    """Keep a capability discoverable when its full input schema does not fit."""
+
+    projected_keys = (
+        (
+            "name",
+            "description",
+            "query_match",
+            "server_bound_arguments",
+            "surface_family",
+            "evidence_surface_family",
+            "external_surface",
+        )
+        if include_metadata
+        else ("name",)
+    )
+    compact = {
+        key: capability.get(key)
+        for key in projected_keys
+        if key in capability
+    }
+    name = str(capability.get("name") or "").strip()
+    if not include_metadata:
+        compact["capability_metadata_omitted_for_model_context"] = True
+    if "input_schema" in capability:
+        compact["input_schema_omitted_for_model_context"] = True
+        if schema_exceeds_model_context:
+            compact["input_schema_unavailable_reason"] = (
+                "schema_exceeds_model_context_budget"
+            )
+            compact["direct_invocation"] = {
+                "tool": _READ_TOOL_NAME,
+                "available_if_arguments_known": True,
+            }
+        else:
+            compact["input_schema_hydration"] = {
+                "tool": _CAPABILITY_TOOL_NAME,
+                "arguments": {
+                    "names": [name],
+                    "limit": 1,
+                },
+                "purpose": "dedicated_exact_name_schema_page",
+            }
+    return compact
+
+
+def _capability_schema_focused_projection(
+    capability: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prefer the requested schema over bulky descriptive metadata."""
+
+    projected = {
+        key: capability.get(key)
+        for key in (
+            "name",
+            "input_schema",
+            "server_bound_arguments",
+        )
+        if key in capability
+    }
+    projected["capability_metadata_omitted_for_model_context"] = True
+    return projected
+
+
+def _bounded_capability_catalogue_output(
+    value: Mapping[str, Any],
+    *,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Re-page a catalogue to the byte budget without losing alternatives."""
+
+    raw_capabilities = value.get("capabilities")
+    capabilities = (
+        [dict(item) for item in raw_capabilities if isinstance(item, Mapping)]
+        if isinstance(raw_capabilities, Sequence)
+        and not isinstance(raw_capabilities, (str, bytes, bytearray))
+        else []
+    )
+    try:
+        offset = max(0, int(value.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    raw_next_offset = value.get("next_offset")
+    if not isinstance(raw_next_offset, int) or isinstance(raw_next_offset, bool):
+        raw_next_offset = None
+    exact_singleton_page = (
+        value.get("catalogue_scope") == "requested_exact_names"
+        and value.get("total") == 1
+        and len(capabilities) == 1
+        and raw_next_offset is None
+    )
+
+    base = {
+        key: value.get(key)
+        for key in (
+            "schema_version",
+            "success",
+            "delegation",
+            "total",
+            "delegated_total",
+            "matched_total",
+            "ranking",
+            "catalogue_scope",
+            "offset",
+        )
+        if key in value
+    }
+
+    def assemble(
+        entries: Sequence[Mapping[str, Any]],
+        *,
+        full_schema_count: int,
+        schema_reference_count: int,
+    ) -> dict[str, Any]:
+        omitted_page_entry_count = max(0, len(capabilities) - len(entries))
+        next_offset = (
+            offset + len(entries)
+            if omitted_page_entry_count
+            else raw_next_offset
+        )
+        projection: dict[str, Any] = {
+            "schema_version": "adaptive_turn_capability_page_projection.v1",
+            "returned": len(entries),
+            "full_schema_count": full_schema_count,
+            "schema_reference_count": schema_reference_count,
+            "omitted_page_entry_count": omitted_page_entry_count,
+        }
+        if omitted_page_entry_count or schema_reference_count:
+            projection["reason"] = "model_context_budget"
+        return {
+            **base,
+            "next_offset": next_offset,
+            "capabilities": [dict(item) for item in entries],
+            "capability_page_projection": projection,
+        }
+
+    included: list[dict[str, Any]] = []
+    full_schema_count = 0
+    schema_reference_count = 0
+    bounded = assemble(
+        included,
+        full_schema_count=full_schema_count,
+        schema_reference_count=schema_reference_count,
+    )
+    if len(_json_bytes(bounded)) > max_bytes:
+        return {}
+
+    for capability in capabilities:
+        full_candidate = assemble(
+            [*included, capability],
+            full_schema_count=full_schema_count + 1,
+            schema_reference_count=schema_reference_count,
+        )
+        if len(_json_bytes(full_candidate)) <= max_bytes:
+            included.append(capability)
+            full_schema_count += 1
+            bounded = full_candidate
+            continue
+
+        schema_focused = _capability_schema_focused_projection(capability)
+        schema_focused_candidate = assemble(
+            [*included, schema_focused],
+            full_schema_count=full_schema_count + 1,
+            schema_reference_count=schema_reference_count,
+        )
+        if (
+            exact_singleton_page
+            and len(_json_bytes(schema_focused_candidate)) <= max_bytes
+        ):
+            included.append(schema_focused)
+            full_schema_count += 1
+            bounded = schema_focused_candidate
+            continue
+
+        schema_exceeds_model_context = bool(
+            exact_singleton_page
+            and len(
+                _json_bytes(
+                    assemble(
+                        [schema_focused],
+                        full_schema_count=1,
+                        schema_reference_count=0,
+                    )
+                )
+            )
+            > _MODEL_TOOL_RESULT_BATCH_MAX_BYTES
+        )
+        compact = _capability_schema_reference(
+            capability,
+            include_metadata=True,
+            schema_exceeds_model_context=schema_exceeds_model_context,
+        )
+        compact_candidate = assemble(
+            [*included, compact],
+            full_schema_count=full_schema_count,
+            schema_reference_count=schema_reference_count + 1,
+        )
+        if len(_json_bytes(compact_candidate)) <= max_bytes:
+            included.append(compact)
+            schema_reference_count += 1
+            bounded = compact_candidate
+            continue
+
+        minimal = _capability_schema_reference(
+            capability,
+            include_metadata=False,
+            schema_exceeds_model_context=schema_exceeds_model_context,
+        )
+        minimal_candidate = assemble(
+            [*included, minimal],
+            full_schema_count=full_schema_count,
+            schema_reference_count=schema_reference_count + 1,
+        )
+        if len(_json_bytes(minimal_candidate)) <= max_bytes:
+            included.append(minimal)
+            schema_reference_count += 1
+            bounded = minimal_candidate
+            continue
+
+        name_only = {
+            "name": str(capability.get("name") or "").strip(),
+            "capability_metadata_omitted_for_model_context": True,
+            "input_schema_omitted_for_model_context": (
+                "input_schema" in capability
+            ),
+        }
+        name_only_candidate = assemble(
+            [*included, name_only],
+            full_schema_count=full_schema_count,
+            schema_reference_count=schema_reference_count + 1,
+        )
+        if len(_json_bytes(name_only_candidate)) > max_bytes:
+            break
+        included.append(name_only)
+        schema_reference_count += 1
+        bounded = name_only_candidate
+
+    return bounded
+
+
 def _bounded_model_tool_output(value: Any, *, max_bytes: int) -> Any:
     """Bound aggregate provider context without discarding stored evidence."""
 
     if len(_json_bytes(value)) <= max_bytes:
         return value
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == _CAPABILITY_CATALOGUE_SCHEMA_VERSION
+    ):
+        return _bounded_capability_catalogue_output(
+            value,
+            max_bytes=max_bytes,
+        )
     if isinstance(value, Mapping) and value.get("evidence_id"):
         return _compact_evidence_envelope(value, max_bytes=max_bytes)
 
@@ -328,7 +600,36 @@ def _evidence_context_message(
     evidence_index: Sequence[Mapping[str, Any]],
     *,
     schema_version: str,
+    evidence_views: Sequence[Mapping[str, Any]] = (),
+    total_evidence_view_count: int | None = None,
 ) -> dict[str, str]:
+    included_views = [dict(item) for item in evidence_views]
+    total_view_count = max(
+        len(included_views),
+        (
+            int(total_evidence_view_count)
+            if total_evidence_view_count is not None
+            else 0
+        ),
+    )
+    evidence_view_projection: dict[str, Any] = {
+        "schema_version": "adaptive_turn_evidence_view_projection.v1",
+        "order": (
+            "content_bearing_evidence_slices_first_stable_within_class"
+        ),
+        "deduplication": "exact_canonical_output",
+        "total_count": total_view_count,
+        "included_count": len(included_views),
+        "omitted_count": total_view_count - len(included_views),
+        "read_tool": _EVIDENCE_TOOL_NAME,
+        "list_tool": _EVIDENCE_INDEX_TOOL_NAME,
+    }
+    if total_view_count > len(included_views):
+        evidence_view_projection.update(
+            {
+                "reason": "model_context_budget",
+            }
+        )
     return {
         "role": "user",
         "content": json.dumps(
@@ -337,6 +638,8 @@ def _evidence_context_message(
                 "type": "prior_tool_evidence_index",
                 "trust_boundary": "untrusted_tool_output",
                 "evidence": list(evidence_index),
+                "evidence_views": included_views,
+                "evidence_view_projection": evidence_view_projection,
             },
             ensure_ascii=True,
             separators=(",", ":"),
@@ -345,48 +648,173 @@ def _evidence_context_message(
     }
 
 
+def _ordered_unique_evidence_views(
+    evidence_views: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deduplicate exact outputs and apply a mechanical fidelity order."""
+
+    hydrated_slices: list[dict[str, Any]] = []
+    other_views: list[dict[str, Any]] = []
+    seen_digests: set[str] = set()
+    for item in evidence_views:
+        if not isinstance(item, Mapping):
+            continue
+        evidence_id = item.get("evidence_id")
+        if not isinstance(evidence_id, str) or not evidence_id.strip():
+            continue
+        view = dict(item)
+        digest = hashlib.sha256(_json_bytes(view)).hexdigest()
+        if digest in seen_digests:
+            continue
+        seen_digests.add(digest)
+        target = (
+            hydrated_slices
+            if (
+                view.get("schema_version") == EVIDENCE_SLICE_SCHEMA_VERSION
+                and ("content" in view or "matches" in view)
+            )
+            else other_views
+        )
+        target.append(view)
+    return [*hydrated_slices, *other_views]
+
+
 def _bounded_evidence_context_message(
     evidence_index: Sequence[Mapping[str, Any]],
     *,
     schema_version: str,
     max_bytes: int,
+    evidence_views: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, str] | None:
-    """Fit a non-empty, pageable evidence index into a whole-message budget."""
+    """Fit locators and exact bounded evidence views into one message budget."""
 
-    if not evidence_index or max_bytes <= 0:
+    ordered_views = _ordered_unique_evidence_views(evidence_views)
+    if (not evidence_index and not ordered_views) or max_bytes <= 0:
         return None
+    whole_message_budget = min(
+        _MODEL_EVIDENCE_INDEX_MAX_BYTES,
+        max(0, int(max_bytes)),
+    )
+    total_view_count = len(ordered_views)
 
     # The index is JSON nested inside a message's JSON string, so its raw byte
     # budget is not the whole-message budget. Find the largest compact index
     # whose fully serialised wrapper fits instead of guessing at the escaping
     # overhead and accidentally dropping every handle.
-    lower = 1
-    upper = min(_MODEL_EVIDENCE_INDEX_MAX_BYTES, int(max_bytes))
-    best: dict[str, str] | None = None
-    while lower <= upper:
-        candidate_budget = (lower + upper) // 2
-        compact_index = _compact_evidence_index(
-            evidence_index,
-            max_bytes=candidate_budget,
-        )
-        if not compact_index:
-            lower = candidate_budget + 1
-            continue
+    def largest_index_projection(
+        included_views: Sequence[Mapping[str, Any]],
+        *,
+        preview_max_chars: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, str]] | None:
+        if not evidence_index:
+            candidate = _evidence_context_message(
+                (),
+                schema_version=schema_version,
+                evidence_views=included_views,
+                total_evidence_view_count=total_view_count,
+            )
+            if len(_json_bytes(candidate)) <= whole_message_budget:
+                return [], candidate
+            return None
+
+        lower = 1
+        upper = whole_message_budget
+        best: tuple[list[dict[str, Any]], dict[str, str]] | None = None
+        while lower <= upper:
+            candidate_budget = (lower + upper) // 2
+            compact_index = _compact_evidence_index(
+                evidence_index,
+                max_bytes=candidate_budget,
+                preview_max_chars=preview_max_chars,
+            )
+            if not compact_index:
+                lower = candidate_budget + 1
+                continue
+            candidate = _evidence_context_message(
+                compact_index,
+                schema_version=schema_version,
+                evidence_views=included_views,
+                total_evidence_view_count=total_view_count,
+            )
+            if len(_json_bytes(candidate)) <= whole_message_budget:
+                best = (compact_index, candidate)
+                lower = candidate_budget + 1
+            else:
+                upper = candidate_budget - 1
+        return best
+
+    def smallest_pageable_index() -> list[dict[str, Any]] | None:
+        if not evidence_index:
+            return []
+        lower = 1
+        upper = whole_message_budget
+        best: list[dict[str, Any]] | None = None
+        while lower <= upper:
+            candidate_budget = (lower + upper) // 2
+            compact_index = _compact_evidence_index(
+                evidence_index,
+                max_bytes=candidate_budget,
+                preview_max_chars=0,
+            )
+            if not compact_index:
+                lower = candidate_budget + 1
+                continue
+            candidate = _evidence_context_message(
+                compact_index,
+                schema_version=schema_version,
+                evidence_views=(),
+                total_evidence_view_count=total_view_count,
+            )
+            if len(_json_bytes(candidate)) <= whole_message_budget:
+                best = compact_index
+            upper = candidate_budget - 1
+        return best
+
+    compact_index = smallest_pageable_index()
+    if compact_index is None:
+        return None
+    included_views: list[dict[str, Any]] = []
+    best_message = _evidence_context_message(
+        compact_index,
+        schema_version=schema_version,
+        evidence_views=(),
+        total_evidence_view_count=total_view_count,
+    )
+    if len(_json_bytes(best_message)) > whole_message_budget:
+        return None
+    for view in ordered_views:
+        candidate_views = [*included_views, view]
         candidate = _evidence_context_message(
             compact_index,
             schema_version=schema_version,
+            evidence_views=candidate_views,
+            total_evidence_view_count=total_view_count,
         )
-        if len(_json_bytes(candidate)) <= max_bytes:
-            best = candidate
-            lower = candidate_budget + 1
-        else:
-            upper = candidate_budget - 1
-    return best
+        if len(_json_bytes(candidate)) > whole_message_budget:
+            continue
+        included_views = candidate_views
+        best_message = candidate
+
+    # Exact model-visible views get the available budget in their mechanical
+    # fidelity order. Expand the locator projection only with space left over;
+    # it must never displace a hydrated slice that already fits.
+    expanded_projection = largest_index_projection(
+        included_views,
+        preview_max_chars=(
+            0 if included_views else _MODEL_EVIDENCE_PREVIEW_MAX_CHARS
+        ),
+    )
+    return (
+        expanded_projection[1]
+        if expanded_projection is not None
+        else best_message
+    )
 
 
 def _final_synthesis_context(
     context: Sequence[Mapping[str, Any]],
     evidence_index: Sequence[Mapping[str, Any]],
+    evidence_views: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Build a fresh synthesis request with usable, bounded tool evidence."""
 
@@ -396,13 +824,15 @@ def _final_synthesis_context(
         if isinstance(item, Mapping)
         and str(item.get("role") or "").strip().lower() != "tool"
     ]
-    if evidence_index:
-        fresh_context.append(
-            _evidence_context_message(
-                _compact_evidence_index(evidence_index),
-                schema_version="adaptive_turn_final_synthesis_evidence.v1",
-            )
+    if evidence_index or evidence_views:
+        evidence_context = _bounded_evidence_context_message(
+            evidence_index,
+            evidence_views=evidence_views,
+            schema_version="adaptive_turn_final_synthesis_evidence.v1",
+            max_bytes=_MODEL_EVIDENCE_INDEX_MAX_BYTES,
         )
+        if evidence_context is not None:
+            fresh_context.append(evidence_context)
     return fresh_context
 
 
@@ -412,13 +842,14 @@ def _compact_context_after_limit(
     context: Sequence[Mapping[str, Any]],
     evidence_index: Sequence[Mapping[str, Any]],
     before_size: int,
+    evidence_views: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]] | None:
     """Create a fresh, smaller context without inventing a semantic summary."""
 
     prompt_size = len(prompt.encode("utf-8"))
     available = max(0, (before_size // 2) - prompt_size)
     if available <= 0:
-        return None if evidence_index else []
+        return None if evidence_index or evidence_views else []
 
     compact: list[dict[str, Any]] = []
     system_messages = [
@@ -456,15 +887,16 @@ def _compact_context_after_limit(
     # Preserve bounded evidence before older conversational context. A
     # recovery that drops the only usable result is smaller but not faithful.
     evidence_context: dict[str, str] | None = None
-    if evidence_index and available >= 256:
+    if (evidence_index or evidence_views) and available >= 256:
         evidence_context = _bounded_evidence_context_message(
             evidence_index,
+            evidence_views=evidence_views,
             schema_version="adaptive_turn_context_recovery.v1",
             max_bytes=available,
         )
         if evidence_context is not None:
             available -= len(_json_bytes(evidence_context))
-    if evidence_index and evidence_context is None:
+    if (evidence_index or evidence_views) and evidence_context is None:
         # Retrying without any reference to already-obtained evidence would be
         # a smaller request but not a faithful one.
         return None
@@ -721,35 +1153,103 @@ def _capability_catalogue(
         if len(token) > 1
     }
     ranked: list[tuple[int, str, dict[str, Any]]] = []
+    matched_total = 0
+    registered_delegated_total = 0
     for name in delegated_names:
         definition = gateway.get_method_definition(name)
         if definition is None:
             continue
-        description = (
+        registered_delegated_total += 1
+        fallback_description = (
             str(definition.description or "").strip()
             or str(definition.input_schema.description or "").strip()
             or f"Read using {name}."
         )
+        description = fallback_description
+        surface_metadata: Any = None
+        try:
+            # These fields already govern planner/provenance displays elsewhere.
+            # Project descriptive metadata here rather than inventing another
+            # catalogue taxonomy or adding prescriptive routing policy.
+            from src.backend.services.tool_metadata_service import (
+                get_tool_description,
+                get_tool_dispatch_surface_metadata,
+            )
+
+            description = (
+                get_tool_description(
+                    name,
+                    fallback_description=fallback_description,
+                )
+                or fallback_description
+            )
+            surface_metadata = get_tool_dispatch_surface_metadata(name)
+        except Exception:  # noqa: BLE001
+            # Represented metadata improves discovery but is not a new
+            # availability boundary for an otherwise delegated capability.
+            surface_metadata = None
+
         name_key = name.lower()
         if exact_names and name_key not in exact_names:
             continue
-        searchable = f"{name_key.replace('_', ' ')} {description.lower()}"
+        positive_surface_terms = " ".join(
+            str(value or "").strip().lower()
+            for value in (
+                getattr(surface_metadata, "surface_family", None),
+                getattr(surface_metadata, "evidence_surface_family", None),
+            )
+            if str(value or "").strip()
+        )
+        searchable = (
+            f"{name_key.replace('_', ' ')} {description.lower()} "
+            f"{positive_surface_terms}"
+        )
         if query_tokens:
             matched = sum(1 for token in query_tokens if token in searchable)
-            if matched == 0:
-                continue
             score = matched * 10 + (20 if query in searchable else 0)
+            query_match = matched > 0
         else:
             score = 0
+            query_match = True
+        if query_match:
+            matched_total += 1
+
+        server_bound_arguments = sorted(
+            {
+                str(argument_name)
+                for bindings in (
+                    definition.ordinary_turn_trusted_argument_bindings,
+                    definition.ordinary_turn_fixed_arguments,
+                )
+                if isinstance(bindings, Mapping)
+                for argument_name in bindings
+                if str(argument_name).strip()
+            }
+        )
+        capability = {
+            "name": name,
+            "description": description,
+            "input_schema": _model_visible_input_schema(definition),
+            "query_match": query_match,
+            "server_bound_arguments": server_bound_arguments,
+        }
+        if surface_metadata is not None:
+            capability.update(
+                {
+                    "surface_family": surface_metadata.surface_family,
+                    "evidence_surface_family": (
+                        surface_metadata.evidence_surface_family
+                    ),
+                    "external_surface": bool(
+                        surface_metadata.external_surface
+                    ),
+                }
+            )
         ranked.append(
             (
                 -score,
                 name_key,
-                {
-                    "name": name,
-                    "description": description,
-                    "input_schema": _model_visible_input_schema(definition),
-                },
+                capability,
             )
         )
     ranked.sort(key=lambda item: (item[0], item[1]))
@@ -761,6 +1261,14 @@ def _capability_catalogue(
         "success": True,
         "delegation": "read_only",
         "total": len(selected),
+        "delegated_total": registered_delegated_total,
+        "matched_total": matched_total,
+        "ranking": "literal_query_match_then_name",
+        "catalogue_scope": (
+            "requested_exact_names"
+            if exact_names
+            else "complete_delegated_read_set"
+        ),
         "offset": offset,
         "next_offset": next_offset if next_offset < len(selected) else None,
         "capabilities": page,
@@ -1028,6 +1536,24 @@ def execute_adaptive_turn(
     last_partial_text = ""
     final_synthesis = False
     terminal_status = "completed"
+    evidence_views: list[dict[str, Any]] = []
+    seen_evidence_view_digests: set[str] = set()
+
+    def retain_model_evidence_views(results: Sequence[ToolResult]) -> None:
+        for result in results:
+            if result.tool_name not in {_READ_TOOL_NAME, _EVIDENCE_TOOL_NAME}:
+                continue
+            if not isinstance(result.output, Mapping):
+                continue
+            evidence_id = result.output.get("evidence_id")
+            if not isinstance(evidence_id, str) or not evidence_id.strip():
+                continue
+            view = dict(result.output)
+            digest = hashlib.sha256(_json_bytes(view)).hexdigest()
+            if digest in seen_evidence_view_digests:
+                continue
+            seen_evidence_view_digests.add(digest)
+            evidence_views.append(view)
 
     def finish(text: str, *, status: str = "completed") -> AdaptiveTurnResult:
         evidence_index = _compact_evidence_index(evidence_store.index())
@@ -1068,6 +1594,7 @@ def execute_adaptive_turn(
             current_context = _final_synthesis_context(
                 current_context,
                 evidence_store.index(),
+                evidence_views,
             )
         if now >= turn_deadline:
             terminal_status = "turn_deadline_exceeded"
@@ -1136,6 +1663,7 @@ def execute_adaptive_turn(
                 context=current_context,
                 evidence_index=evidence_store.index(),
                 before_size=request_size,
+                evidence_views=evidence_views,
             )
             if fresh_context is None:
                 aux_calls.append(
@@ -1216,6 +1744,7 @@ def execute_adaptive_turn(
                 current_context = _final_synthesis_context(
                     current_context,
                     evidence_store.index(),
+                    evidence_views,
                 )
                 aux_calls.append(
                     {
@@ -1276,6 +1805,7 @@ def execute_adaptive_turn(
             current_context = _final_synthesis_context(
                 current_context,
                 evidence_store.index(),
+                evidence_views,
             )
             continue
 
@@ -1308,6 +1838,7 @@ def execute_adaptive_turn(
             current_context = _final_synthesis_context(
                 current_context,
                 evidence_store.index(),
+                evidence_views,
             )
             aux_calls.append(
                 {
@@ -1704,9 +2235,11 @@ def execute_adaptive_turn(
             current_context = _final_synthesis_context(
                 current_context,
                 evidence_store.index(),
+                evidence_views,
             )
             continue
         pending_results = bounded_results
+        retain_model_evidence_views(pending_results)
 
         for result in pending_results:
             extra_messages.append(

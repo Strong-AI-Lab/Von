@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -77,8 +78,28 @@ class OpenAIClient(LLMClient):
             kwargs["api_key"] = config.api_key
         if config.base_url:
             kwargs["base_url"] = config.base_url
-        self._client = openai.AsyncOpenAI(**kwargs)
-        self._sync_client = openai.OpenAI(**kwargs)
+        self._client_kwargs = kwargs
+        self._client: Any | None = None
+
+    async def aclose(self) -> None:
+        """Close a lazily-created native-async client on its owning loop."""
+
+        client = self._client
+        self._client = None
+        await self._close_request_client(client)
+
+    @staticmethod
+    async def _close_request_client(client: Any) -> None:
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if not callable(close):
+            close = getattr(client, "aclose", None)
+        if not callable(close):
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
     async def generate_with_tools(
         self,
@@ -92,6 +113,11 @@ class OpenAIClient(LLMClient):
             self._validate_input_schema(tool)
 
         request_kwargs = dict(kwargs)
+        request_client_base = request_kwargs.pop("_request_client", None)
+        if request_client_base is None:
+            if self._client is None:
+                self._client = openai.AsyncOpenAI(**self._client_kwargs)
+            request_client_base = self._client
         request_model = request_kwargs.pop("model", None) or self.config.model
         raw_llm_params = request_kwargs.pop("llm_params", None)
         llm_params, request_timeout_seconds = split_request_timeout_from_llm_params(
@@ -147,7 +173,7 @@ class OpenAIClient(LLMClient):
             selected_decision: StructuredToolTransportDecision,
         ) -> LLMResponse:
             selected_request_kwargs = dict(request_kwargs)
-            request_client = self._client
+            request_client = request_client_base
             if request_deadline_monotonic is not None:
                 remaining_seconds = request_deadline_monotonic - monotonic()
                 if remaining_seconds <= 0.0:
@@ -156,7 +182,7 @@ class OpenAIClient(LLMClient):
                     )
                 # Disable SDK retries and give each represented surface attempt
                 # only the time left in the one caller-owned request budget.
-                request_client = self._client.with_options(
+                request_client = request_client_base.with_options(
                     timeout=remaining_seconds,
                     max_retries=0,
                 )
@@ -605,20 +631,31 @@ class OpenAIClient(LLMClient):
         system_message: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(
-                self.generate_with_tools(
+        # This adapter is routinely constructed once per synchronous model
+        # request. Keep its async HTTP client inside the same one-shot loop and
+        # close it before that loop goes away; otherwise httpx may later try to
+        # finalise a connection on an already-closed loop.
+        async def _run_request() -> LLMResponse:
+            request_client = openai.AsyncOpenAI(**self._client_kwargs)
+            try:
+                return await self.generate_with_tools(
                     prompt,
                     available_tools,
                     context,
                     system_message,
+                    _request_client=request_client,
                     **kwargs,
                 )
-            )
-        finally:
-            loop.close()
+            finally:
+                try:
+                    await self._close_request_client(request_client)
+                except Exception as exc:  # pragma: no cover - defensive cleanup
+                    self.logger.warning(
+                        "OpenAI structured-tool client cleanup failed: %s",
+                        type(exc).__name__,
+                    )
+
+        return asyncio.run(_run_request())
 
     def _build_chat_messages(
         self,

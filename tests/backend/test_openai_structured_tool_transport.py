@@ -188,6 +188,102 @@ def _install_fake_openai(
     return captured
 
 
+def test_sync_calls_close_each_async_client_before_its_loop_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.languagemodels.structured_tool_calling.providers import (
+        openai_client as provider_module,
+    )
+
+    model = "loop-owned-responses-model"
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    lifecycles: list[dict[str, Any]] = []
+
+    class LoopBoundClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            lifecycle: dict[str, Any] = {}
+            lifecycles.append(lifecycle)
+            self.responses = types.SimpleNamespace(create=self._create)
+            self.chat = types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=self._create)
+            )
+            self._lifecycle = lifecycle
+
+        def with_options(self, **_kwargs: Any) -> "LoopBoundClient":
+            return self
+
+        async def _create(self, **_kwargs: Any) -> Any:
+            self._lifecycle["request_loop"] = asyncio.get_running_loop()
+            return _text_response(
+                model=model,
+                text="loop-safe",
+                response_id=f"resp_{len(lifecycles)}",
+            )
+
+        async def close(self) -> None:
+            self._lifecycle["close_loop"] = asyncio.get_running_loop()
+            self._lifecycle["closed_before_loop_close"] = not (
+                self._lifecycle["close_loop"].is_closed()
+            )
+
+    monkeypatch.setattr(provider_module.openai, "AsyncOpenAI", LoopBoundClient)
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    first = client.generate_with_tools_sync("first", [_tool()])
+    second = client.generate_with_tools_sync("second", [_tool()])
+
+    assert first.text_response == second.text_response == "loop-safe"
+    assert len(lifecycles) == 2
+    assert all(
+        item["request_loop"] is item["close_loop"]
+        and item["closed_before_loop_close"] is True
+        and item["close_loop"].is_closed()
+        for item in lifecycles
+    )
+
+
+def test_sync_client_constructor_failure_still_closes_the_one_shot_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.languagemodels.structured_tool_calling.providers import (
+        openai_client as provider_module,
+    )
+
+    constructor_loops: list[asyncio.AbstractEventLoop] = []
+
+    def fail_client_construction(**_kwargs: Any) -> Any:
+        constructor_loops.append(asyncio.get_running_loop())
+        raise RuntimeError("simulated client construction failure")
+
+    monkeypatch.setattr(
+        provider_module.openai,
+        "AsyncOpenAI",
+        fail_client_construction,
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model="constructor-failure-model",
+            provider="openai",
+            api_key="test-key",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="simulated client construction failure"):
+        client.generate_with_tools_sync("test", [])
+
+    assert len(constructor_loops) == 1
+    assert constructor_loops[0].is_closed()
+    with pytest.raises(RuntimeError):
+        asyncio.get_event_loop()
+
+
 def test_chat_completions_continuation_replays_assistant_call_before_tool_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

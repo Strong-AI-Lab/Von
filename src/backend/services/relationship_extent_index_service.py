@@ -532,7 +532,6 @@ def relationship_extent_index_ready() -> bool:
         return cached_ready
 
     ready = False
-    explicit_unready_state = False
     try:
         with timeout(RELATIONSHIP_EXTENT_READINESS_TIMEOUT_SECONDS):
             settings = get_application_settings_collection()
@@ -549,17 +548,6 @@ def relationship_extent_index_ready() -> bool:
                     )
                     if value.get("status") == "ready" and state_is_current:
                         ready = True
-                    elif value.get("status") in {
-                        "degraded",
-                        "failed",
-                        "rebuilding",
-                    }:
-                        explicit_unready_state = state_is_current
-
-            if not ready and not explicit_unready_state:
-                coll = get_relationship_extent_index_collection()
-                if coll is not None:
-                    ready = coll.find_one({}, {"_id": 1}) is not None
     except Exception as exc:
         logger.warning(
             "[relationship_extent_index] readiness_query_failed error_type=%s",

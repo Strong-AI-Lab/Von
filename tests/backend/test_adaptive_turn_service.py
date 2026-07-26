@@ -4,6 +4,8 @@ import json
 import time
 from typing import Any
 
+import pytest
+
 from src.backend.integrations.internal_mcp.gateway import (
     InternalMCPGateway,
     MethodCatalogue,
@@ -27,6 +29,7 @@ from src.backend.services.adaptive_turn_service import (
     _capability_catalogue,
     _compact_context_after_limit,
     _compact_evidence_index,
+    _final_synthesis_context,
     _json_bytes,
     _trusted_tool_payload,
     execute_adaptive_turn,
@@ -240,6 +243,108 @@ class _LateResponseClient(_SequenceClient):
         return super().generate_with_tools(prompt, available_tools, **kwargs)
 
 
+class _HydrationDeadlineClient:
+    def __init__(
+        self,
+        clock: _ManualClock,
+        *,
+        native_continuation: bool,
+        research_deadline: float,
+    ) -> None:
+        self.clock = clock
+        self.native_continuation = native_continuation
+        self.research_deadline = research_deadline
+        self.calls: list[dict[str, Any]] = []
+        self.received_evidence_outputs: list[dict[str, Any]] = []
+
+    def _continuation(self, response_id: str) -> LLMContinuation | None:
+        if not self.native_continuation:
+            return None
+        return LLMContinuation(
+            provider="test",
+            api_surface="responses",
+            model="test-model",
+            response_id=response_id,
+        )
+
+    def _latest_tool_output(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if self.native_continuation:
+            tool_results = kwargs.get("tool_results")
+            assert isinstance(tool_results, list)
+            assert len(tool_results) == 1
+            assert isinstance(tool_results[0], ToolResult)
+            assert isinstance(tool_results[0].output, dict)
+            return dict(tool_results[0].output)
+
+        context = kwargs.get("context")
+        assert isinstance(context, list)
+        tool_messages = [
+            item
+            for item in context
+            if isinstance(item, dict) and item.get("role") == "tool"
+        ]
+        assert tool_messages
+        output = json.loads(tool_messages[-1]["content"])
+        assert isinstance(output, dict)
+        return output
+
+    def generate_with_tools(
+        self,
+        prompt: str,
+        available_tools: list[Any],
+        **kwargs: Any,
+    ) -> LLMResponse:
+        call_number = len(self.calls)
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "available_tools": list(available_tools),
+                **kwargs,
+            }
+        )
+        if call_number == 0:
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_read_capability",
+                        call_id="call-source-evidence",
+                        payload={
+                            "name": "general_read",
+                            "arguments": {"query": "find the source"},
+                        },
+                    )
+                ],
+                continuation=self._continuation("response-source"),
+            )
+        if call_number == 1:
+            envelope = self._latest_tool_output(kwargs)
+            self.received_evidence_outputs.append(envelope)
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_read_evidence",
+                        call_id="call-hydrated-evidence",
+                        payload={
+                            "evidence_id": envelope["evidence_id"],
+                            "json_pointer": "/record/z_summary",
+                            "max_chars": 4_000,
+                        },
+                    )
+                ],
+                continuation=self._continuation("response-hydration"),
+            )
+        if call_number == 2:
+            hydrated_slice = self._latest_tool_output(kwargs)
+            self.received_evidence_outputs.append(hydrated_slice)
+            self.clock.now = self.research_deadline + 0.5
+            raise TimeoutError("research request ended after receiving hydration")
+        return LLMResponse(
+            text_response="The final answer uses the explicitly hydrated evidence."
+        )
+
+
 def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     client = _SequenceClient(LLMResponse(text_response="A useful answer."))
     gateway = _gateway(lambda **_kwargs: {"success": True})
@@ -350,6 +455,518 @@ def test_server_bound_capability_argument_is_not_model_visible() -> None:
     assert set(input_schema["properties"]) == {"query"}
     assert "profile" not in input_schema.get("required", [])
     assert "x-von-argument-aliases" not in input_schema
+
+
+def test_capability_query_ranks_without_eliminating_the_delegated_set(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.tool_metadata_service import (
+        ToolDispatchSurfaceMetadata,
+    )
+
+    catalogue = MethodCatalogue()
+    for name, description, bound_arguments in (
+        (
+            "internal_record_search",
+            "Search Von internal records.",
+            {"actor_id": "actor"},
+        ),
+        (
+            "public_web_search",
+            "Search current public web sources.",
+            None,
+        ),
+    ):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda **_kwargs: {"success": True},
+                input_schema=Schema(
+                    optional={
+                        "query": str,
+                        "actor_id": (str, type(None)),
+                    },
+                    allow_unknown=False,
+                ),
+                category="read",
+                description=description,
+                ordinary_turn_trusted_argument_bindings=bound_arguments,
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda name: ToolDispatchSurfaceMetadata(
+            surface_family=(
+                "web" if name == "public_web_search" else "represented_records"
+            ),
+            evidence_surface_family=(
+                "web" if name == "public_web_search" else "represented_records"
+            ),
+            external_surface=name == "public_web_search",
+        ),
+    )
+
+    unmatched_query = _capability_catalogue(
+        gateway,
+        ("internal_record_search", "public_web_search"),
+        {"query": "unrepresented vocabulary"},
+    )
+    assert unmatched_query["total"] == 2
+    assert unmatched_query["delegated_total"] == 2
+    assert unmatched_query["matched_total"] == 0
+    assert unmatched_query["catalogue_scope"] == "complete_delegated_read_set"
+    assert [item["name"] for item in unmatched_query["capabilities"]] == [
+        "internal_record_search",
+        "public_web_search",
+    ]
+    assert all(
+        item["query_match"] is False
+        for item in unmatched_query["capabilities"]
+    )
+
+    web_query = _capability_catalogue(
+        gateway,
+        ("internal_record_search", "public_web_search"),
+        {"query": "web"},
+    )
+    assert web_query["matched_total"] == 1
+    assert [item["name"] for item in web_query["capabilities"]] == [
+        "public_web_search",
+        "internal_record_search",
+    ]
+    public_web, internal = web_query["capabilities"]
+    assert public_web["surface_family"] == "web"
+    assert public_web["external_surface"] is True
+    assert internal["surface_family"] == "represented_records"
+    assert internal["external_surface"] is False
+    assert internal["server_bound_arguments"] == ["actor_id"]
+    assert "actor_id" not in internal["input_schema"]["properties"]
+
+
+def test_capability_metadata_failure_does_not_remove_delegated_reads(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+
+    gateway = _gateway(lambda **_kwargs: {"success": True})
+
+    def fail_metadata(*_args, **_kwargs):
+        raise RuntimeError("represented metadata unavailable")
+
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        fail_metadata,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        fail_metadata,
+    )
+
+    result = _capability_catalogue(
+        gateway,
+        ("general_read",),
+        {"query": "unmatched vocabulary"},
+    )
+
+    assert result["total"] == 1
+    assert result["matched_total"] == 0
+    assert result["capabilities"][0]["name"] == "general_read"
+    assert result["capabilities"][0]["description"] == (
+        "Read arbitrary general evidence."
+    )
+
+
+def test_capability_page_budget_preserves_every_alternative_and_cursor(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.tool_metadata_service import (
+        ToolDispatchSurfaceMetadata,
+    )
+
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: ToolDispatchSurfaceMetadata(
+            surface_family="research",
+            evidence_surface_family="research",
+            external_surface=False,
+        ),
+    )
+    catalogue = MethodCatalogue()
+    capability_names = [f"research_search_{index:02d}" for index in range(20)]
+    for index, name in enumerate(capability_names):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda **_kwargs: {"success": True},
+                input_schema=Schema(
+                    optional={
+                        "actor_id": (str, type(None)),
+                        **{
+                            f"field_{field}_{index}": str
+                            for field in range(30)
+                        },
+                    },
+                    allow_unknown=False,
+                ),
+                category="read",
+                description=(
+                    "Search research material. " + ("description " * 30)
+                ),
+                ordinary_turn_trusted_argument_bindings={
+                    "actor_id": "actor",
+                },
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+
+    first_raw_page = _capability_catalogue(
+        gateway,
+        capability_names,
+        {"query": "research", "offset": 0, "limit": 20},
+    )
+    assert len(_json_bytes(first_raw_page)) > 24_000
+
+    paired = _bound_tool_results_for_model(
+        [
+            ToolResult(
+                call_id=f"catalogue-{index}",
+                tool_name="turn_read_capabilities",
+                output=first_raw_page,
+                status="ok",
+            )
+            for index in range(2)
+        ]
+    )
+    assert paired is not None
+    assert all(item.output.get("capabilities") for item in paired)
+    assert all(
+        item.output["next_offset"] == len(item.output["capabilities"])
+        for item in paired
+    )
+    assert (
+        len(
+            _json_bytes(
+                [
+                    {
+                        "call_id": item.call_id,
+                        "tool_name": item.tool_name,
+                        "status": item.status,
+                        "output": item.output,
+                    }
+                    for item in paired
+                ]
+            )
+        )
+        <= 24_000
+    )
+
+    seen_names: list[str] = []
+    schema_references: list[dict[str, Any]] = []
+    offset: int | None = 0
+    while offset is not None:
+        raw_page = _capability_catalogue(
+            gateway,
+            capability_names,
+            {"query": "research", "offset": offset, "limit": 20},
+        )
+        bounded_results = _bound_tool_results_for_model(
+            [
+                ToolResult(
+                    call_id=f"catalogue-page-{offset}",
+                    tool_name="turn_read_capabilities",
+                    output=raw_page,
+                    status="ok",
+                )
+            ]
+        )
+        assert bounded_results is not None
+        bounded = bounded_results[0].output
+        assert len(_json_bytes(bounded)) <= 24_000
+        entries = bounded["capabilities"]
+        assert entries
+        assert [item["name"] for item in entries] == capability_names[
+            offset : offset + len(entries)
+        ]
+        seen_names.extend(item["name"] for item in entries)
+        schema_references.extend(
+            item
+            for item in entries
+            if item.get("input_schema_omitted_for_model_context") is True
+        )
+        next_offset = bounded["next_offset"]
+        if next_offset is not None:
+            assert next_offset == offset + len(entries)
+        offset = next_offset
+
+    assert seen_names == capability_names
+    assert schema_references
+    reference = schema_references[0]
+    assert reference["description"].startswith("Search research material.")
+    assert reference["surface_family"] == "research"
+    assert reference["evidence_surface_family"] == "research"
+    assert reference["external_surface"] is False
+    assert reference["server_bound_arguments"] == ["actor_id"]
+    assert reference["input_schema_hydration"] == {
+        "tool": "turn_read_capabilities",
+        "arguments": {
+            "names": [reference["name"]],
+            "limit": 1,
+        },
+        "purpose": "dedicated_exact_name_schema_page",
+    }
+
+    exact_page = _capability_catalogue(
+        gateway,
+        capability_names,
+        {"names": [reference["name"]], "limit": 1},
+    )
+    exact_bounded = _bound_tool_results_for_model(
+        [
+            ToolResult(
+                call_id="exact-schema",
+                tool_name="turn_read_capabilities",
+                output=exact_page,
+                status="ok",
+            )
+        ]
+    )
+    assert exact_bounded is not None
+    assert "input_schema" in exact_bounded[0].output["capabilities"][0]
+
+
+def test_single_oversized_capability_remains_visible_as_schema_reference(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.tool_metadata_service import (
+        ToolDispatchSurfaceMetadata,
+    )
+
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: ToolDispatchSurfaceMetadata(
+            surface_family="knowledge_base",
+            evidence_surface_family="knowledge_base",
+            external_surface=False,
+        ),
+    )
+    name = "oversized_general_read"
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name=name,
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(
+                optional={
+                    "actor_id": (str, type(None)),
+                    **{
+                        f"field_{index}": str
+                        for index in range(2_000)
+                    },
+                },
+                allow_unknown=False,
+            ),
+            category="read",
+            description="Read a broad represented record.",
+            ordinary_turn_trusted_argument_bindings={"actor_id": "actor"},
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+
+    raw = _capability_catalogue(
+        gateway,
+        (name,),
+        {"names": [name], "limit": 1},
+    )
+    assert len(_json_bytes(raw)) > 24_000
+    bounded_results = _bound_tool_results_for_model(
+        [
+            ToolResult(
+                call_id="oversized-schema",
+                tool_name="turn_read_capabilities",
+                output=raw,
+                status="ok",
+            )
+        ]
+    )
+
+    assert bounded_results is not None
+    bounded = bounded_results[0].output
+    assert len(_json_bytes(bounded)) <= 24_000
+    assert bounded["next_offset"] is None
+    assert bounded["capability_page_projection"] == {
+        "schema_version": "adaptive_turn_capability_page_projection.v1",
+        "returned": 1,
+        "full_schema_count": 0,
+        "schema_reference_count": 1,
+        "omitted_page_entry_count": 0,
+        "reason": "model_context_budget",
+    }
+    assert len(bounded["capabilities"]) == 1
+    compact = bounded["capabilities"][0]
+    assert compact["name"] == name
+    assert compact["description"] == "Read a broad represented record."
+    assert compact["surface_family"] == "knowledge_base"
+    assert compact["evidence_surface_family"] == "knowledge_base"
+    assert compact["external_surface"] is False
+    assert compact["server_bound_arguments"] == ["actor_id"]
+    assert "input_schema" not in compact
+    assert compact["input_schema_omitted_for_model_context"] is True
+    assert "input_schema_hydration" not in compact
+    assert compact["input_schema_unavailable_reason"] == (
+        "schema_exceeds_model_context_budget"
+    )
+    assert compact["direct_invocation"] == {
+        "tool": "turn_invoke_read_capability",
+        "available_if_arguments_known": True,
+    }
+
+
+def test_bulky_capability_metadata_falls_back_without_hiding_the_schema(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.tool_metadata_service import (
+        ToolDispatchSurfaceMetadata,
+    )
+
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: ToolDispatchSurfaceMetadata(
+            surface_family="knowledge_base",
+            evidence_surface_family="knowledge_base",
+            external_surface=False,
+        ),
+    )
+    name = "metadata_heavy_read"
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name=name,
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(
+                optional={
+                    "actor_id": (str, type(None)),
+                    "query": str,
+                },
+                allow_unknown=False,
+            ),
+            category="read",
+            description="Read represented records. " + ("metadata " * 4_000),
+            ordinary_turn_trusted_argument_bindings={"actor_id": "actor"},
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+
+    raw = _capability_catalogue(
+        gateway,
+        (name,),
+        {"limit": 20},
+    )
+    bounded_results = _bound_tool_results_for_model(
+        [
+            ToolResult(
+                call_id="bulky-metadata",
+                tool_name="turn_read_capabilities",
+                output=raw,
+                status="ok",
+            )
+        ]
+    )
+
+    assert bounded_results is not None
+    bounded = bounded_results[0].output
+    assert len(_json_bytes(bounded)) <= 24_000
+    assert bounded["next_offset"] is None
+    assert bounded["capability_page_projection"]["returned"] == 1
+    assert bounded["capability_page_projection"][
+        "schema_reference_count"
+    ] == 1
+    compact = bounded["capabilities"][0]
+    assert compact == {
+        "name": name,
+        "capability_metadata_omitted_for_model_context": True,
+        "input_schema_omitted_for_model_context": True,
+        "input_schema_hydration": {
+            "tool": "turn_read_capabilities",
+            "arguments": {
+                "names": [name],
+                "limit": 1,
+            },
+            "purpose": "dedicated_exact_name_schema_page",
+        },
+    }
+
+    exact = _capability_catalogue(
+        gateway,
+        (name,),
+        {"names": [name], "limit": 1},
+    )
+    exact_results = _bound_tool_results_for_model(
+        [
+            ToolResult(
+                call_id="bulky-metadata-exact",
+                tool_name="turn_read_capabilities",
+                output=exact,
+                status="ok",
+            )
+        ]
+    )
+    assert exact_results is not None
+    exact_capability = exact_results[0].output["capabilities"][0]
+    assert exact_capability["name"] == name
+    assert exact_capability[
+        "capability_metadata_omitted_for_model_context"
+    ] is True
+    assert exact_capability["server_bound_arguments"] == ["actor_id"]
+    assert set(exact_capability["input_schema"]["properties"]) == {"query"}
+    assert "input_schema_hydration" not in exact_capability
 
 
 def test_fixed_ordinary_turn_arguments_narrow_only_unsafe_options() -> None:
@@ -493,6 +1110,144 @@ def test_evidence_page_resumes_at_first_globally_omitted_handle() -> None:
         total_count=400,
     )
     assert resumed[0]["evidence_id"] == f"ev-{next_offset}-{'e' * 512}"
+
+
+def test_fresh_evidence_projection_prioritises_hydrated_slices_mechanically() -> None:
+    evidence_index = [
+        {
+            "schema_version": "turn_evidence_envelope.v1",
+            "evidence_id": f"ev-{index}",
+            "tool_name": "general_read",
+            "call_id": f"call-{index}",
+            "status": "ok",
+            "sha256": f"{index:064x}",
+            "provenance": {"source": f"source-{index}"},
+            "preview": f"preview-{index}-" + ("p" * 1_100),
+            "preview_truncated": True,
+        }
+        for index in range(16)
+    ]
+    envelope_views = [dict(item) for item in evidence_index]
+    hydrated_slices = [
+        {
+            "schema_version": "turn_evidence_slice.v1",
+            "success": True,
+            "evidence_id": f"ev-{12 + index}",
+            "tool_name": "general_read",
+            "call_id": f"call-{12 + index}",
+            "trust_boundary": "untrusted_tool_output",
+            "source_sha256": f"{12 + index:064x}",
+            "provenance": {"source": f"source-{12 + index}"},
+            "selector": {
+                "json_pointer": f"/records/{index}/summary",
+                "offset": 0,
+                "max_chars": 5_200,
+            },
+            "content": f"hydrated-{index}-" + ("h" * 5_000),
+            "content_format": "text",
+            "returned_chars": 5_011,
+            "has_more": False,
+        }
+        for index in range(4)
+    ]
+
+    context = _final_synthesis_context(
+        [],
+        evidence_index,
+        [
+            *envelope_views,
+            hydrated_slices[0],
+            hydrated_slices[1],
+            dict(hydrated_slices[0]),
+            hydrated_slices[2],
+            hydrated_slices[3],
+        ],
+    )
+
+    assert len(context) == 1
+    assert len(_json_bytes(context[0])) <= 24_000
+    payload = json.loads(context[0]["content"])
+    included_views = payload["evidence_views"]
+    included_slices = [
+        item
+        for item in included_views
+        if item["schema_version"] == "turn_evidence_slice.v1"
+    ]
+    assert included_slices == hydrated_slices
+    first_envelope = next(
+        (
+            index
+            for index, item in enumerate(included_views)
+            if item["schema_version"] == "turn_evidence_envelope.v1"
+        ),
+        len(included_views),
+    )
+    assert all(
+        item["schema_version"] == "turn_evidence_slice.v1"
+        for item in included_views[:first_envelope]
+    )
+    assert included_slices[0]["selector"]["json_pointer"] == (
+        "/records/0/summary"
+    )
+    assert included_slices[0]["source_sha256"] == f"{12:064x}"
+    assert included_slices[0]["provenance"] == {"source": "source-12"}
+
+    projection = payload["evidence_view_projection"]
+    assert projection["order"] == (
+        "content_bearing_evidence_slices_first_stable_within_class"
+    )
+    assert projection["total_count"] == len(envelope_views) + len(hydrated_slices)
+    assert projection["included_count"] == len(included_views)
+    assert projection["omitted_count"] > 0
+    assert projection["reason"] == "model_context_budget"
+    assert "next_offset" not in projection
+    assert payload["evidence"]
+    assert projection["read_tool"] == "turn_read_evidence"
+    assert projection["list_tool"] == "turn_list_evidence"
+
+
+def test_oversized_early_slice_does_not_suppress_a_later_fitting_slice() -> None:
+    evidence_index = [
+        {
+            "schema_version": "turn_evidence_envelope.v1",
+            "evidence_id": f"ev-{index}",
+            "tool_name": "general_read",
+            "call_id": f"call-{index}",
+            "status": "ok",
+        }
+        for index in range(2)
+    ]
+    oversized_slice = {
+        "schema_version": "turn_evidence_slice.v1",
+        "success": True,
+        "evidence_id": "ev-0",
+        "source_sha256": "a" * 64,
+        "selector": {"json_pointer": "/large"},
+        "content": "x" * 23_500,
+    }
+    later_slice = {
+        "schema_version": "turn_evidence_slice.v1",
+        "success": True,
+        "evidence_id": "ev-1",
+        "source_sha256": "b" * 64,
+        "selector": {"json_pointer": "/corrective"},
+        "content": "A later corrective slice.",
+    }
+
+    context = _final_synthesis_context(
+        [],
+        evidence_index,
+        [oversized_slice, later_slice],
+    )
+
+    payload = json.loads(context[0]["content"])
+    assert len(_json_bytes(context[0])) <= 24_000
+    assert payload["evidence_views"] == [later_slice]
+    projection = payload["evidence_view_projection"]
+    assert projection["total_count"] == 2
+    assert projection["included_count"] == 1
+    assert projection["omitted_count"] == 1
+    assert projection["reason"] == "model_context_budget"
 
 
 def test_tool_result_correlation_shell_overflow_has_no_oversized_fallback() -> None:
@@ -720,6 +1475,72 @@ def test_context_limit_recovery_keeps_a_pageable_evidence_reference() -> None:
     )
 
 
+def test_context_limit_recovery_keeps_exact_hydrated_evidence_view() -> None:
+    evidence_index = [
+        {
+            "schema_version": "turn_evidence_envelope.v1",
+            "evidence_id": "ev-hydrated",
+            "tool_name": "general_read",
+            "call_id": "call-hydrated",
+            "status": "ok",
+            "sha256": "a" * 64,
+            "provenance": {"source": "represented-document"},
+            "preview": "preview-only",
+        }
+    ]
+    hydrated_slice = {
+        "schema_version": "turn_evidence_slice.v1",
+        "success": True,
+        "evidence_id": "ev-hydrated",
+        "tool_name": "general_read",
+        "call_id": "call-hydrated",
+        "trust_boundary": "untrusted_tool_output",
+        "source_sha256": "a" * 64,
+        "source_size_bytes": 50_000,
+        "provenance": {"source": "represented-document"},
+        "selector": {
+            "json_pointer": "/project/summary",
+            "offset": 0,
+            "max_chars": 4_000,
+        },
+        "content": "The explicitly selected project summary.",
+        "content_format": "text",
+        "returned_chars": 40,
+        "has_more": False,
+    }
+
+    compact = _compact_context_after_limit(
+        prompt="Answer from the selected evidence.",
+        context=[
+            {
+                "role": "tool",
+                "content": "an obsolete provider-specific tool transcript",
+            }
+        ],
+        evidence_index=evidence_index,
+        evidence_views=[hydrated_slice],
+        before_size=60_000,
+    )
+
+    assert compact is not None
+    assert len(compact) == 1
+    assert compact[0]["role"] == "user"
+    assert len(_json_bytes(compact[0])) <= 24_000
+    payload = json.loads(compact[0]["content"])
+    assert payload["schema_version"] == "adaptive_turn_context_recovery.v1"
+    assert payload["evidence_views"] == [hydrated_slice]
+    assert payload["evidence"][0]["evidence_id"] == "ev-hydrated"
+    assert payload["evidence_views"][0]["source_sha256"] == "a" * 64
+    assert payload["evidence_views"][0]["selector"] == {
+        "json_pointer": "/project/summary",
+        "offset": 0,
+        "max_chars": 4_000,
+    }
+    assert payload["evidence_views"][0]["provenance"] == {
+        "source": "represented-document"
+    }
+
+
 def test_context_limit_recovery_refuses_to_drop_existing_evidence() -> None:
     compact = _compact_context_after_limit(
         prompt="x" * 20_000,
@@ -900,9 +1721,105 @@ def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -
     )
     assert evidence_payload["trust_boundary"] == "untrusted_tool_output"
     assert evidence_payload["evidence"][0]["call_id"] == "call-final-evidence"
-    assert "usable evidence" in evidence_payload["evidence"][0]["preview"]
+    assert evidence_payload["evidence_views"][0]["call_id"] == (
+        "call-final-evidence"
+    )
+    assert "usable evidence" in evidence_payload["evidence_views"][0]["preview"]
+    assert evidence_payload["evidence_view_projection"] == {
+        "schema_version": "adaptive_turn_evidence_view_projection.v1",
+        "order": "content_bearing_evidence_slices_first_stable_within_class",
+        "deduplication": "exact_canonical_output",
+        "total_count": 1,
+        "included_count": 1,
+        "omitted_count": 0,
+        "read_tool": "turn_read_evidence",
+        "list_tool": "turn_list_evidence",
+    }
     assert raw_tail not in evidence_context["content"]
     assert len(evidence_context["content"]) < 10_000
+
+
+@pytest.mark.parametrize(
+    "native_continuation",
+    [True, False],
+    ids=["native-continuation", "stateless-context"],
+)
+def test_final_reset_carries_exact_hydrated_evidence_for_provider_styles(
+    native_continuation: bool,
+) -> None:
+    started = time.monotonic()
+    research_deadline = started + 8.0
+    clock = _ManualClock(started)
+    client = _HydrationDeadlineClient(
+        clock,
+        native_continuation=native_continuation,
+        research_deadline=research_deadline,
+    )
+    raw_tail = "z" * 50_000
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "record": {
+                    "a_raw": raw_tail,
+                    "z_summary": (
+                        "The specifically hydrated result survives a fresh request."
+                    ),
+                },
+            }
+        ),
+        prompt="Research the record and answer.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=f"turn-hydration-{'native' if native_continuation else 'stateless'}",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.response_text == (
+        "The final answer uses the explicitly hydrated evidence."
+    )
+    assert len(client.calls) == 4
+    assert len(client.received_evidence_outputs) == 2
+    delivered_envelope, delivered_slice = client.received_evidence_outputs
+    assert delivered_envelope["schema_version"] == "turn_evidence_envelope.v1"
+    assert delivered_slice["schema_version"] == "turn_evidence_slice.v1"
+    assert delivered_slice["content"] == (
+        "The specifically hydrated result survives a fresh request."
+    )
+
+    final_call = client.calls[-1]
+    assert "continuation" not in final_call
+    assert "tool_results" not in final_call
+    assert {
+        tool.name for tool in final_call["available_tools"]
+    } == {"turn_list_evidence", "turn_read_evidence"}
+    assert len(final_call["context"]) == 1
+    evidence_message = final_call["context"][0]
+    assert evidence_message["role"] == "user"
+    assert "z" * 5_000 not in evidence_message["content"]
+    assert len(_json_bytes(evidence_message)) <= 24_000
+    payload = json.loads(evidence_message["content"])
+    assert payload["evidence_views"] == [
+        delivered_slice,
+        delivered_envelope,
+    ]
+    retained_slice = payload["evidence_views"][0]
+    assert retained_slice["selector"] == {
+        "json_pointer": "/record/z_summary",
+        "offset": 0,
+        "max_chars": 4_000,
+    }
+    assert retained_slice["source_sha256"] == delivered_envelope["sha256"]
+    assert retained_slice["provenance"] == delivered_envelope["provenance"]
+    assert payload["evidence_view_projection"]["total_count"] == 2
+    assert payload["evidence_view_projection"]["omitted_count"] == 0
 
 
 def test_many_read_results_share_one_model_context_budget() -> None:

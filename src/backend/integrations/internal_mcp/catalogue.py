@@ -71,14 +71,20 @@ def _run_async_compat(async_fn):
 
     import asyncio
     import concurrent.futures
+    import contextvars
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(async_fn())
 
+    caller_context = contextvars.copy_context()
+
+    def _run_in_worker():
+        return asyncio.run(async_fn())
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(lambda: asyncio.run(async_fn())).result()
+        return executor.submit(caller_context.run, _run_in_worker).result()
 
 
 def _get_vontology_tree(**kwargs):
@@ -33897,14 +33903,14 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "offset": (int, type(None)),
                 },
                 allow_unknown=True,
-                description="Search tasks with Jira-like rich filtering.",
+                description="Search Von internal tasks with rich filtering.",
             ),
             output_schema=task_search_output_schema,
             category="read",
             description=(
-                "Search Von tasks with rich filters (status, assignee, creator, report-to, "
-                "labels, planning metadata, category/source semantics, hierarchy, date ranges, "
-                "dependency state) to support Jira-like triage and planning."
+                "Search Von's internal task store with rich filters (status, assignee, "
+                "creator, report-to, labels, planning metadata, category/source semantics, "
+                "hierarchy, date ranges, and dependency state)."
             ),
         ),
         MethodDefinition(

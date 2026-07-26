@@ -141,6 +141,50 @@ def test_relationship_extent_readiness_has_total_deadline_and_fails_closed(
     ]
 
 
+def test_relationship_extent_readiness_requires_explicit_complete_state(
+    monkeypatch,
+):
+    from src.backend.services import relationship_extent_index_service as service
+
+    client = mongomock.MongoClient()
+    index = client.db.relationship_extent_index
+    settings = client.db.application_settings
+    index.insert_one(
+        {
+            "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+            "relation_id": "one-incrementally-written-row",
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "get_relationship_extent_index_collection",
+        lambda: index,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_application_settings_collection",
+        lambda: settings,
+    )
+
+    assert service.relationship_extent_index_ready() is False
+    assert service.query_relationship_extent_index(
+        target_value="#V#missing-from-partial-index"
+    ) == ([], -1)
+
+    settings.insert_one(
+        {
+            "setting_name": service.RELATIONSHIP_EXTENT_INDEX_STATE_SETTING,
+            "value": {
+                "status": "ready",
+                "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+            },
+        }
+    )
+    service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
+
+    assert service.relationship_extent_index_ready() is True
+
+
 def test_relationship_extent_query_cursor_and_count_share_total_deadline(
     monkeypatch,
 ):
@@ -500,6 +544,16 @@ def test_relationship_extent_index_materialises_dynamic_incoming_rows(monkeypatc
 
     assert result["success"] is True
     assert result["inserted"] == 2
+    settings.insert_one(
+        {
+            "setting_name": service.RELATIONSHIP_EXTENT_INDEX_STATE_SETTING,
+            "value": {
+                "status": "ready",
+                "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+            },
+        }
+    )
+    service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
 
     rows, used_index = service.incoming_dynamic_extent_rows_for_target("#V#target")
 
