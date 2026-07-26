@@ -571,6 +571,105 @@ class TestLLMClientBaseValidation:
         assert function_payload["parameters"]["additionalProperties"] is False
         assert "x-von-argument-aliases" not in function_payload["parameters"]
 
+    def test_tool_definition_to_dict_stricts_recursively_closed_schema(self):
+        """Closed objects remain strict through arrays and composition branches."""
+        config = LLMClientConfig(model="gpt-4")
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        client = OpenAIClient(config)
+        payload = client._tool_definition_to_dict(
+            ToolDefinition(
+                name="nested_lookup",
+                description="Run a nested lookup.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "filters": {
+                            "type": "array",
+                            "items": {
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "object",
+                                        "properties": {},
+                                        "required": [],
+                                        "additionalProperties": False,
+                                    },
+                                ]
+                            },
+                        }
+                    },
+                    "required": ["filters"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+        assert payload["function"]["strict"] is True
+
+    def test_tool_definition_to_dict_does_not_strict_unsupported_schema(self):
+        """A closed schema still stays non-strict outside the known-safe subset."""
+        config = LLMClientConfig(model="gpt-4")
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        client = OpenAIClient(config)
+        payload = client._tool_definition_to_dict(
+            ToolDefinition(
+                name="conditional_lookup",
+                description="Run a conditional lookup.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "allOf": [{"type": "string"}],
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+        assert "strict" not in payload["function"]
+
+    @pytest.mark.parametrize(
+        "item_schema",
+        ({}, {"description": "Unconstrained."}, {"type": "made-up"}),
+    )
+    def test_tool_definition_to_dict_does_not_strict_invalid_nested_schema(
+        self, item_schema
+    ):
+        """Unconstrained or invalid nested schemas remain usable as non-strict."""
+        config = LLMClientConfig(model="gpt-4")
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        client = OpenAIClient(config)
+        payload = client._tool_definition_to_dict(
+            ToolDefinition(
+                name="generic_list",
+                description="Accept a generic list.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "values": {
+                            "type": "array",
+                            "items": item_schema,
+                        }
+                    },
+                    "required": ["values"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+        assert "strict" not in payload["function"]
+
     def test_tool_definition_to_dict_does_not_strict_optional_schema(self):
         """Optional arguments stay closed but avoid provider strict mode."""
         config = LLMClientConfig(model="gpt-4")

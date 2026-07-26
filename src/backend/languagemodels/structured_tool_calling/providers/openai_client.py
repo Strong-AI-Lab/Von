@@ -914,6 +914,7 @@ class OpenAIClient(LLMClient):
     ) -> Dict[str, Any]:
         chat_tool = self._tool_definition_to_dict(tool)
         function = dict(chat_tool["function"])
+        function.setdefault("strict", False)
         return {"type": "function", **function}
 
     @staticmethod

@@ -578,6 +578,30 @@ def test_arbitrary_model_responses_profile_selects_responses_and_flat_schema(
     )
 
 
+def test_responses_serialises_actual_adaptive_tools_with_explicit_strictness() -> None:
+    from src.backend.services.adaptive_turn_service import _tool_definitions
+
+    client = OpenAIClient(
+        LLMClientConfig(
+            model="deployment-blue-42",
+            provider="openai",
+            api_key="test-key",
+        )
+    )
+    tools = [
+        client._tool_definition_to_responses_dict(tool)
+        for tool in _tool_definitions()
+    ]
+    read_tool = next(
+        tool for tool in tools if tool["name"] == "turn_invoke_read_capability"
+    )
+    assert read_tool["strict"] is False
+    assert (
+        read_tool["parameters"]["properties"]["arguments"]["additionalProperties"]
+        is True
+    )
+
+
 def test_responses_maps_reasoning_effort_and_disables_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
