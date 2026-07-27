@@ -877,6 +877,9 @@ def _create_concepts(**kwargs):
     from ...services.create_concepts_parent_resolution_service import (
         resolve_parent_for_create_concepts,
     )
+    from ...services.relationship_extent_index_service import (
+        defer_relationship_extent_index_sync,
+    )
 
     parent_id: str | None = kwargs.get("parent_id")
     concepts = kwargs.get("concepts", [])
@@ -1092,95 +1095,101 @@ def _create_concepts(**kwargs):
         )
 
     results = []
-    for concept_data in concepts:
-        # This is both the batch boundary and the safe cancellation point after
-        # the preceding concept's complete logical write bundle.
-        raise_if_internal_mcp_cancelled()
-        if not isinstance(concept_data, dict):
-            results.append({"error": "Concept must be an object", "data": concept_data})
-            continue
+    with defer_relationship_extent_index_sync():
+        for concept_data in concepts:
+            # This is both the batch boundary and the safe cancellation point after
+            # the preceding concept's complete logical write bundle.
+            raise_if_internal_mcp_cancelled()
+            if not isinstance(concept_data, dict):
+                results.append(
+                    {"error": "Concept must be an object", "data": concept_data}
+                )
+                continue
 
-        name = concept_data.get("name")
-        kind = (concept_data.get("kind") or "type").strip().lower()
+            name = concept_data.get("name")
+            kind = (concept_data.get("kind") or "type").strip().lower()
 
-        if not name:
-            results.append(
-                {"error": "Concept missing required 'name' field", "data": concept_data}
+            if not name:
+                results.append(
+                    {
+                        "error": "Concept missing required 'name' field",
+                        "data": concept_data,
+                    }
+                )
+                continue
+
+            # Map kind to create_as_instance parameter
+            if kind == "individual":
+                kind = "instance"
+
+            if kind == "predicate":
+                create_as_instance = True
+                parent_id_for_concept = PREDICATE_TYPE_ID
+            else:
+                create_as_instance = kind == "instance"
+                parent_id_for_concept = validated_parent_id
+
+            duplicate_match = find_existing_concept_for_create_concepts(
+                concept_name=str(name),
+                kind=kind,
+                parent_id_for_concept=parent_id_for_concept,
+                preferred_language="en-NZ",
+                allow_duplicate_instances=allow_duplicate_instances,
+                duplicate_resolution_mode=(
+                    _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                    if canonical_id_only
+                    else None
+                ),
             )
-            continue
+            if duplicate_match is not None:
+                result = build_duplicate_prevented_create_concepts_result(
+                    requested_name=str(name),
+                    requested_kind=kind,
+                    existing_concept_id=duplicate_match.existing_concept_id,
+                    guard_scope=duplicate_match.guard_scope,
+                    match_source=duplicate_match.match_source,
+                )
+                result["concept_id"] = duplicate_match.existing_concept_id
+                results.append(result)
+                continue
 
-        # Map kind to create_as_instance parameter
-        if kind == "individual":
-            kind = "instance"
-
-        if kind == "predicate":
-            create_as_instance = True
-            parent_id_for_concept = PREDICATE_TYPE_ID
-        else:
-            create_as_instance = kind == "instance"
-            parent_id_for_concept = validated_parent_id
-
-        duplicate_match = find_existing_concept_for_create_concepts(
-            concept_name=str(name),
-            kind=kind,
-            parent_id_for_concept=parent_id_for_concept,
-            preferred_language="en-NZ",
-            allow_duplicate_instances=allow_duplicate_instances,
-            duplicate_resolution_mode=(
-                _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
-                if canonical_id_only
-                else None
-            ),
-        )
-        if duplicate_match is not None:
-            result = build_duplicate_prevented_create_concepts_result(
-                requested_name=str(name),
-                requested_kind=kind,
-                existing_concept_id=duplicate_match.existing_concept_id,
-                guard_scope=duplicate_match.guard_scope,
-                match_source=duplicate_match.match_source,
+            # Duplicate preflights are read-only and may consume the entire
+            # transport budget. Never start an insert after cancellation.
+            raise_if_internal_mcp_cancelled()
+            result = create_vontology_concept(
+                parent_id=parent_id_for_concept,
+                new_concept_name=name,
+                create_as_instance=create_as_instance,
+                description=concept_data.get("description"),
+                notes=concept_data.get("notes"),
+                created_by_concept_id=actor_user_id,
+                organisation_concept_id=actor_org_id,
+                event_namespace=namespace,
+                visibility_scope_mode=scope_mode,
             )
-            result["concept_id"] = duplicate_match.existing_concept_id
+            # Enrich result with the requested name for traceability and surface
+            # the canonical created concept_id at a stable top-level key so UI
+            # summaries can reliably name what was created.
+            result["requested_name"] = name
+            result["requested_kind"] = kind
+            concept_id_value = result.get("concept_id")
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                nested_concept = result.get("concept")
+                if isinstance(nested_concept, dict):
+                    nested_id = nested_concept.get("concept_id")
+                    if isinstance(nested_id, str) and nested_id.strip():
+                        concept_id_value = nested_id
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                canonical_id = result.get("canonical_concept_id")
+                if isinstance(canonical_id, str) and canonical_id.strip():
+                    concept_id_value = canonical_id
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                existing_id = result.get("existing_concept_id")
+                if isinstance(existing_id, str) and existing_id.strip():
+                    concept_id_value = existing_id
+            if isinstance(concept_id_value, str) and concept_id_value.strip():
+                result["concept_id"] = concept_id_value.strip()
             results.append(result)
-            continue
-
-        # Duplicate preflights are read-only and may consume the entire
-        # transport budget. Never start an insert after cancellation.
-        raise_if_internal_mcp_cancelled()
-        result = create_vontology_concept(
-            parent_id=parent_id_for_concept,
-            new_concept_name=name,
-            create_as_instance=create_as_instance,
-            description=concept_data.get("description"),
-            notes=concept_data.get("notes"),
-            created_by_concept_id=actor_user_id,
-            organisation_concept_id=actor_org_id,
-            event_namespace=namespace,
-            visibility_scope_mode=scope_mode,
-        )
-        # Enrich result with the requested name for traceability and surface
-        # the canonical created concept_id at a stable top-level key so UI
-        # summaries can reliably name what was created.
-        result["requested_name"] = name
-        result["requested_kind"] = kind
-        concept_id_value = result.get("concept_id")
-        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-            nested_concept = result.get("concept")
-            if isinstance(nested_concept, dict):
-                nested_id = nested_concept.get("concept_id")
-                if isinstance(nested_id, str) and nested_id.strip():
-                    concept_id_value = nested_id
-        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-            canonical_id = result.get("canonical_concept_id")
-            if isinstance(canonical_id, str) and canonical_id.strip():
-                concept_id_value = canonical_id
-        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-            existing_id = result.get("existing_concept_id")
-            if isinstance(existing_id, str) and existing_id.strip():
-                concept_id_value = existing_id
-        if isinstance(concept_id_value, str) and concept_id_value.strip():
-            result["concept_id"] = concept_id_value.strip()
-        results.append(result)
 
     # Count different outcome types for summary
     successful = sum(1 for r in results if isinstance(r, dict) and r.get("success"))

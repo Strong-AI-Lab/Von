@@ -410,6 +410,7 @@ _bind_imports(
         "_chat_history_get_debug_entry",
         "_chat_history_get_segments",
         "_conversation_telemetry_get_locator",
+        "_mongo_query_diagnostics_report",
         "_turn_execution_get",
         "_turn_execution_get_diagnostics",
         "_turn_execution_get_live_progress",

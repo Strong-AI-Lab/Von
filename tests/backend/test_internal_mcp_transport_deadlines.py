@@ -25,6 +25,7 @@ def _gateway_for(
     handler,
     transport: InternalMCPTransport,
     category: str = "read",
+    output_schema: Schema | None = None,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -32,7 +33,7 @@ def _gateway_for(
             name=method_name,
             handler=handler,
             input_schema=Schema(required={}, optional={}, allow_unknown=False),
-            output_schema=None,
+            output_schema=output_schema,
             category=category,
         )
     )
@@ -284,7 +285,7 @@ def test_expired_write_deadline_reports_that_no_mutation_started() -> None:
     assert result.timeout_phase == "pre_dispatch"
     assert result.payload["error_code"] == "tool_timeout"
     assert result.payload["retryable"] is True
-    assert "mutation_outcome" not in result.payload
+    assert result.payload["mutation_outcome"] == "not_started"
     assert handler_called.is_set() is False
     assert executor.diagnostics()["submitted_count"] == 0
 
@@ -350,8 +351,280 @@ def test_write_timeout_is_explicitly_indeterminate_and_not_retryable() -> None:
     ]
 
 
+def test_dispatched_write_reports_one_bounded_late_completion_observation() -> None:
+    observations = []
+    observation_seen = Event()
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.03,
+        write_advisory_timeout_sec=0.01,
+    )
+
+    def _handler():
+        while not internal_mcp_cancellation_requested():
+            time.sleep(0.002)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_ids": ["#V#late_created"],
+            "api_key": "must-not-leave-the-transport-worker",
+            "large_detail": "x" * 100_000,
+        }
+
+    def _observe(observation) -> None:
+        observations.append(observation)
+        observation_seen.set()
+
+    gateway = _gateway_for(
+        method_name="synthetic_observed_slow_write",
+        handler=_handler,
+        transport=transport,
+        category="write",
+    )
+
+    result = gateway.invoke(
+        "synthetic_observed_slow_write",
+        {},
+        late_completion_observer=_observe,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.payload["mutation_outcome"] == "unknown"
+    assert result.payload["late_result_policy"] == "observe_out_of_band"
+    assert result.telemetry_metadata()["late_result_policy"] == "observe_out_of_band"
+    assert observation_seen.wait(timeout=1.0)
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation["execution_id"] == result.execution_id
+    assert observation["method_name"] == "synthetic_observed_slow_write"
+    assert observation["category"] == "write"
+    assert observation["outcome"] == "late_success"
+    assert observation["payload"]["effect_status"] == "succeeded"
+    assert observation["payload"]["changed"] is True
+    assert observation["payload"]["_truncated"] is True
+    assert observation["payload_truncated"] is True
+    assert observation["output_schema_validation"] == "indeterminate_truncated"
+    assert observation["output_schema_valid"] is None
+
+    time.sleep(0.02)
+    assert len(observations) == 1
+    diagnostics = transport.get_diagnostics()
+    assert diagnostics["late_completion_count"] == 1
+    assert diagnostics["late_completions"][0]["observer_notified"] is True
+    assert diagnostics["late_completions"][0]["payload_discarded"] is False
+
+
+def test_queued_write_timeout_reports_not_started_and_never_observes() -> None:
+    blocker_started = Event()
+    release_blocker = Event()
+    write_handler_called = Event()
+    observations = []
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.5,
+        write_timeout_sec=0.03,
+        read_advisory_timeout_sec=0.1,
+        write_advisory_timeout_sec=0.01,
+        handler_executor=executor,
+    )
+
+    def _blocker():
+        blocker_started.set()
+        assert release_blocker.wait(timeout=1.0)
+        return {"success": True}
+
+    blocker_gateway = _gateway_for(
+        method_name="synthetic_queue_blocker",
+        handler=_blocker,
+        transport=transport,
+    )
+    blocker_results = []
+    blocker_thread = Thread(
+        target=lambda: blocker_results.append(
+            blocker_gateway.invoke("synthetic_queue_blocker", {})
+        )
+    )
+    blocker_thread.start()
+    assert blocker_started.wait(timeout=1.0)
+
+    def _queued_write():
+        write_handler_called.set()
+        return {"success": True, "changed": True}
+
+    write_gateway = _gateway_for(
+        method_name="synthetic_queued_observed_write",
+        handler=_queued_write,
+        transport=transport,
+        category="write",
+    )
+    result = write_gateway.invoke(
+        "synthetic_queued_observed_write",
+        {},
+        late_completion_observer=observations.append,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.timeout_phase == "queue"
+    assert result.payload["timeout_phase"] == "queue"
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.payload["retryable"] is True
+    assert result.payload["mutation_outcome"] == "not_started"
+    assert result.payload["late_result_policy"] == "discard_from_turn"
+    assert result.telemetry_metadata()["late_result_policy"] == "discard_from_turn"
+    assert write_handler_called.is_set() is False
+    assert observations == []
+
+    release_blocker.set()
+    blocker_thread.join(timeout=1.0)
+    assert blocker_thread.is_alive() is False
+    assert blocker_results and blocker_results[0].outcome == "completed"
+
+    completion_deadline = time.monotonic() + 1.0
+    while (
+        executor.diagnostics()["completed_count"] < 2
+        and time.monotonic() < completion_deadline
+    ):
+        time.sleep(0.002)
+
+    assert executor.diagnostics()["completed_count"] == 2
+    assert write_handler_called.is_set() is False
+    assert observations == []
+    assert transport.get_diagnostics()["late_completion_count"] == 0
+
+
+def test_gateway_marks_invalid_late_write_output_as_indeterminate_evidence() -> None:
+    observations = []
+    observation_seen = Event()
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.03,
+        write_advisory_timeout_sec=0.01,
+    )
+
+    def _handler():
+        while not internal_mcp_cancellation_requested():
+            time.sleep(0.002)
+        return {"success": True, "effect_status": 7}
+
+    def _observe(observation) -> None:
+        observations.append(observation)
+        observation_seen.set()
+
+    gateway = _gateway_for(
+        method_name="synthetic_invalid_late_write",
+        handler=_handler,
+        transport=transport,
+        category="write",
+        output_schema=Schema(
+            required={"success": bool, "effect_status": str},
+            optional={},
+            allow_unknown=False,
+        ),
+    )
+    result = gateway.invoke(
+        "synthetic_invalid_late_write",
+        {},
+        late_completion_observer=_observe,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.payload["mutation_outcome"] == "unknown"
+    assert observation_seen.wait(timeout=1.0)
+    assert len(observations) == 1
+    assert observations[0]["output_schema_validation"] == "invalid"
+    assert observations[0]["output_schema_valid"] is False
+    assert "effect_status" in observations[0]["output_schema_error"]
+
+
+def test_read_late_completion_is_discarded_even_when_observer_is_supplied() -> None:
+    observations = []
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.03,
+        read_advisory_timeout_sec=0.01,
+    )
+
+    def _handler():
+        while not internal_mcp_cancellation_requested():
+            time.sleep(0.002)
+        return {"success": True, "late_payload": "discard me"}
+
+    gateway = _gateway_for(
+        method_name="synthetic_observer_ignored_for_read",
+        handler=_handler,
+        transport=transport,
+    )
+    result = gateway.invoke(
+        "synthetic_observer_ignored_for_read",
+        {},
+        late_completion_observer=observations.append,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.payload["late_result_policy"] == "discard_from_turn"
+    deadline = time.monotonic() + 1.0
+    diagnostics = transport.get_diagnostics()
+    while diagnostics["late_completion_count"] < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+        diagnostics = transport.get_diagnostics()
+    assert observations == []
+    assert diagnostics["late_completions"][0]["payload_discarded"] is True
+    assert diagnostics["late_completions"][0]["observer_notified"] is False
+
+
+def test_late_completion_observer_failure_does_not_kill_bounded_worker() -> None:
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=2)
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.03,
+        write_advisory_timeout_sec=0.01,
+        handler_executor=executor,
+    )
+
+    def _late_handler():
+        while not internal_mcp_cancellation_requested():
+            time.sleep(0.002)
+        return {"success": True, "changed": True}
+
+    gateway = _gateway_for(
+        method_name="synthetic_observer_failure_write",
+        handler=_late_handler,
+        transport=transport,
+        category="write",
+    )
+
+    result = gateway.invoke(
+        "synthetic_observer_failure_write",
+        {},
+        late_completion_observer=lambda _observation: (_ for _ in ()).throw(
+            RuntimeError("observer failed")
+        ),
+    )
+    assert result.outcome == "timed_out"
+
+    deadline = time.monotonic() + 1.0
+    diagnostics = transport.get_diagnostics()
+    while diagnostics["late_completion_count"] < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+        diagnostics = transport.get_diagnostics()
+    assert diagnostics["late_completions"][0]["observer_error_type"] == "RuntimeError"
+    assert diagnostics["late_completions"][0]["payload_discarded"] is True
+
+    follow_up_gateway = _gateway_for(
+        method_name="synthetic_write_after_observer_failure",
+        handler=lambda: {"success": True, "changed": True},
+        transport=transport,
+        category="write",
+    )
+    follow_up = follow_up_gateway.invoke(
+        "synthetic_write_after_observer_failure",
+        {},
+    )
+    assert follow_up.outcome == "completed"
+    assert follow_up.payload == {"success": True, "changed": True}
+    assert executor.diagnostics()["completed_count"] >= 2
+
+
 def test_handler_pool_rejects_excess_work_instead_of_growing_unbounded() -> None:
     handler_started = Event()
+    rejected_write_started = Event()
     release_handler = Event()
     executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
     transport = InternalMCPTransport(
@@ -392,11 +665,20 @@ def test_handler_pool_rejects_excess_work_instead_of_growing_unbounded() -> None
     ):
         time.sleep(0.002)
 
-    rejected = gateway.invoke("synthetic_bounded_pool_read", {})
+    rejected_write_gateway = _gateway_for(
+        method_name="synthetic_rejected_pool_write",
+        handler=lambda: rejected_write_started.set(),
+        transport=transport,
+        category="write",
+    )
+    rejected = rejected_write_gateway.invoke("synthetic_rejected_pool_write", {})
 
     assert rejected.outcome == "saturated"
     assert rejected.payload["error_code"] == "internal_mcp_handler_pool_saturated"
     assert rejected.payload["retryable"] is True
+    assert rejected.payload["mutation_outcome"] == "not_started"
+    assert rejected.payload["recovery_affordances"][0]["action_type"] == "bounded_retry"
+    assert rejected_write_started.is_set() is False
     assert executor.diagnostics()["worker_count"] == 1
     assert executor.diagnostics()["queue_capacity"] == 1
     assert executor.diagnostics()["rejected_count"] == 1

@@ -10991,6 +10991,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         adaptive_success = adaptive_terminal_status == "completed"
         response_text = adaptive_turn_result.response_text
+        effect_finality_fallback = bool(
+            adaptive_turn_result.effect_finality_fallback
+        )
         tool_messages = [dict(msg) for msg in adaptive_turn_result.extra_messages]
         tool_invocations = list(adaptive_turn_result.tool_invocations)
         auxiliary_llm_calls.extend(adaptive_turn_result.aux_llm_calls)
@@ -11023,7 +11026,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
 
-        presenter_channels = _extract_presenter_channels(response_text)
+        presenter_channels = (
+            {
+                "screen": response_text,
+                "spoken": response_text,
+                "format": "effect_finality_fallback_v1",
+            }
+            if presenter_mode_requested and effect_finality_fallback
+            else _extract_presenter_channels(response_text)
+        )
         current_turn_messages = [{"role": "user", "content": prompt_text}]
         if tool_messages:
             current_turn_messages.extend(tool_messages)
@@ -11053,7 +11064,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             default=True
         )
 
-        if presenter_mode_requested:
+        if presenter_mode_requested and not effect_finality_fallback:
             screen_tag_present = _presenter_tag_present(response_text, "screen")
             screen_backfill_screen_tag_present = screen_tag_present
             required_screen_json_fence = _extract_required_screen_json_fence(
@@ -11497,6 +11508,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if not presenter_mode_requested:
             screen_backfill_status = "skipped"
             screen_backfill_suppression_reason = "presenter_mode_disabled"
+        elif effect_finality_fallback:
+            screen_backfill_status = "skipped"
+            screen_backfill_suppression_reason = "effect_finality_literal"
         elif not needs_screen_backfill:
             screen_backfill_status = "skipped"
             screen_backfill_suppression_reason = "not_required"
@@ -11818,6 +11832,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if not presenter_mode_requested:
             spoken_backfill_status = "skipped"
             spoken_backfill_suppression_reason = "presenter_mode_disabled"
+        elif effect_finality_fallback:
+            spoken_backfill_status = "skipped"
+            spoken_backfill_suppression_reason = "effect_finality_literal"
         elif not needs_spoken_backfill:
             spoken_backfill_status = "skipped"
             spoken_backfill_suppression_reason = "not_required"

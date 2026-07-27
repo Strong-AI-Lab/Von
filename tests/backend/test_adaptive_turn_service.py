@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from threading import Event
 from typing import Any
 
 import pytest
@@ -12,7 +13,10 @@ from src.backend.integrations.internal_mcp.gateway import (
     MethodDefinition,
 )
 from src.backend.integrations.internal_mcp.schemas import Schema
-from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+from src.backend.integrations.internal_mcp.transport import (
+    InternalMCPTransport,
+    internal_mcp_cancellation_requested,
+)
 from src.backend.languagemodels.structured_tool_calling.types import (
     LLMContinuation,
     LLMResponse,
@@ -203,6 +207,7 @@ def _effect_gateway(
     handler: Any,
     *,
     write_timeout_sec: float = 1.0,
+    effect_output_schema: Schema | None = None,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -223,6 +228,7 @@ def _effect_gateway(
                 name=name,
                 handler=lambda _name=name, **kwargs: handler(_name, kwargs),
                 input_schema=Schema(allow_unknown=True),
+                output_schema=effect_output_schema,
                 category="write",
                 ordinary_turn_effect=True,
                 ordinary_turn_mutation_subject_argument=subject_argument,
@@ -315,6 +321,26 @@ class _LateResponseClient(_SequenceClient):
         **kwargs: Any,
     ) -> LLMResponse:
         self.clock.now = self.late_at
+        return super().generate_with_tools(prompt, available_tools, **kwargs)
+
+
+class _TimedSequenceClient(_SequenceClient):
+    def __init__(
+        self,
+        clock: _ManualClock,
+        *timed_responses: tuple[float, Any],
+    ) -> None:
+        super().__init__(*(item[1] for item in timed_responses))
+        self.clock = clock
+        self.response_times = [item[0] for item in timed_responses]
+
+    def generate_with_tools(
+        self,
+        prompt: str,
+        available_tools: list[Any],
+        **kwargs: Any,
+    ) -> LLMResponse:
+        self.clock.now = self.response_times[len(self.calls)]
         return super().generate_with_tools(prompt, available_tools, **kwargs)
 
 
@@ -736,6 +762,332 @@ def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
     assert invoked == ["add_relationship"]
     assert result.tool_invocations[0]["effect_status"] == "succeeded"
     assert result.tool_invocations[0]["changed"] is True
+
+
+def test_terminal_model_failure_cannot_claim_no_change_after_effect() -> None:
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="I have not changed anything.",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="effect-before-model-failure",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "A real represented concept"}]
+                        },
+                    },
+                )
+            ],
+        ),
+        TimeoutError("final model call failed"),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            lambda _name, _arguments: {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+            }
+        ),
+        prompt="Represent this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="effect-before-model-failure",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "model_error"
+    assert result.effect_finality_fallback is True
+    assert "will not claim that nothing changed" in result.response_text
+    assert "I have not changed anything" not in result.response_text
+    assert result.tool_invocations[0]["effect_status"] == "succeeded"
+    assert result.tool_invocations[0]["changed"] is True
+
+
+def test_post_handler_output_validation_failure_is_indeterminate() -> None:
+    committed: list[str] = []
+
+    def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        committed.append("#V#committed_before_invalid_receipt")
+        return {"success": True}
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="I have not changed anything.",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invalid-receipt-after-commit",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "Committed before invalid receipt"}]
+                        },
+                    },
+                )
+            ],
+        ),
+        TimeoutError("final model call failed"),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            handler,
+            effect_output_schema=Schema(
+                required={"success": bool, "changed": bool},
+                allow_unknown=True,
+            ),
+        ),
+        prompt="Represent this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="invalid-receipt-after-commit",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert committed == ["#V#committed_before_invalid_receipt"]
+    assert result.terminal_status == "model_error"
+    assert result.effect_finality_fallback is True
+    assert "will not claim that nothing changed" in result.response_text
+    assert result.tool_invocations[0]["effect_status"] == "indeterminate"
+    assert result.tool_invocations[0]["changed"] is None
+
+
+@pytest.mark.parametrize(
+    ("answer_reserve", "effect_finished_at", "expected_tool_names"),
+    [
+        (
+            0.0,
+            8.1,
+            {"turn_list_evidence", "turn_read_evidence"},
+        ),
+        (2.0, 8.5, set()),
+    ],
+    ids=["evidence-capable-final", "answer-only-final"],
+)
+def test_effect_removes_false_draft_from_fresh_final_context(
+    answer_reserve: float,
+    effect_finished_at: float,
+    expected_tool_names: set[str],
+) -> None:
+    started = time.monotonic()
+    clock = _ManualClock(started)
+
+    def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        clock.now = started + effect_finished_at
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+        }
+
+    false_draft = "I have not changed anything."
+    client = _SequenceClient(
+        LLMResponse(
+            text_response=false_draft,
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id=f"effect-before-{answer_reserve}",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "A represented concept"}]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The represented concept was created."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Represent this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=f"effect-draft-{answer_reserve}",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        final_answer_reserve_seconds=answer_reserve,
+        clock=clock,
+    )
+
+    assert result.response_text == "The represented concept was created."
+    assert len(client.calls) == 2
+    final_call = client.calls[1]
+    assert {
+        tool.name for tool in final_call["available_tools"]
+    } == expected_tool_names
+    assert not any(
+        item.get("role") == "assistant" and item.get("content") == false_draft
+        for item in final_call["context"]
+    )
+    assert false_draft not in json.dumps(final_call["context"])
+
+
+def test_post_effect_draft_remains_available_to_answer_only_recovery() -> None:
+    started = time.monotonic()
+    clock = _ManualClock(started)
+    useful_draft = "USEFUL POST-EFFECT DRAFT"
+
+    def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        clock.now = started + 8.1
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="I have not changed anything.",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="effect-before-useful-draft",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "A represented concept"}]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=useful_draft,
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_list_evidence",
+                    call_id="list-after-effect",
+                    payload={},
+                )
+            ],
+        ),
+        TimeoutError("evidence-capable synthesis failed"),
+        LLMResponse(text_response="Recovered from the useful draft."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Represent this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="post-effect-draft",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        final_answer_reserve_seconds=1,
+        clock=clock,
+    )
+
+    assert result.response_text == "Recovered from the useful draft."
+    answer_only_call = client.calls[-1]
+    assert answer_only_call["available_tools"] == []
+    assert any(
+        item.get("role") == "assistant" and item.get("content") == useful_draft
+        for item in answer_only_call["context"]
+    )
+
+
+def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import turn_execution_record_service
+
+    release_handler = Event()
+    observation_persisted = Event()
+    persisted: list[dict[str, Any]] = []
+
+    def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        while not internal_mcp_cancellation_requested():
+            time.sleep(0.001)
+        assert release_handler.wait(timeout=1.0)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_ids": ["#V#late_real_concept"],
+        }
+
+    def append_observation(**kwargs: Any) -> dict[str, Any]:
+        persisted.append(dict(kwargs))
+        observation_persisted.set()
+        return {"updated": True}
+
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "append_late_effect_observation",
+        append_observation,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="late-effect",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "A late real concept"}]
+                        },
+                    },
+                )
+            ],
+        ),
+        TimeoutError("model failed after the effect timeout"),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, write_timeout_sec=0.02),
+        prompt="Represent this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="late-effect-request",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.effect_finality_fallback is True
+    assert result.tool_invocations[0]["effect_status"] == "indeterminate"
+    assert "1 indeterminate" in result.response_text
+
+    release_handler.set()
+    assert observation_persisted.wait(timeout=1.0)
+    assert len(persisted) == 1
+    durable = persisted[0]
+    assert durable["request_id"] == "late-effect-request"
+    assert durable["effect_id"] == result.tool_invocations[0]["effect_id"]
+    assert durable["observation"]["effect_status"] == "succeeded"
+    assert durable["observation"]["changed"] is True
+    # The already returned turn remains an honest point-in-time snapshot.
+    assert result.tool_invocations[0]["effect_status"] == "indeterminate"
 
 
 @pytest.mark.parametrize(
@@ -2196,12 +2548,340 @@ def test_research_deadline_failure_preserves_final_synthesis_reserve() -> None:
     assert {
         tool.name for tool in client.calls[1]["available_tools"]
     } == {"turn_list_evidence", "turn_read_evidence"}
+    assert result.llm_calls[1]["mode"] == "evidence_capable"
     recovery = next(
         item
         for item in result.aux_llm_calls
         if item.get("type") == "adaptive_turn_research_deadline_recovery"
     )
     assert recovery["action"] == "fresh_final_synthesis_from_available_evidence"
+
+
+def test_final_answer_checkpoint_preempts_repeated_evidence_cycles() -> None:
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (6.0, TimeoutError("research deadline")),
+        (
+            6.4,
+            LLMResponse(
+                text_response="A useful draft based on the evidence page.",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_list_evidence",
+                        call_id="list-before-checkpoint",
+                        payload={"offset": 0, "limit": 20},
+                    )
+                ]
+            ),
+        ),
+        (
+            8.0,
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_list_evidence",
+                        call_id="list-at-checkpoint",
+                        payload={"offset": 0, "limit": 20},
+                    )
+                ]
+            ),
+        ),
+        (8.2, LLMResponse(text_response="The protected final answer.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Research, then answer.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-answer-checkpoint",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=4,
+        final_answer_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.response_text == "The protected final answer."
+    assert [call["mode"] for call in result.llm_calls] == [
+        "research",
+        "evidence_capable",
+        "evidence_capable",
+        "answer_only",
+    ]
+    assert [tool.name for tool in client.calls[1]["available_tools"]] == [
+        "turn_read_evidence",
+        "turn_list_evidence",
+    ]
+    assert client.calls[-1]["available_tools"] == []
+    assert client.calls[-1]["llm_params"]["request_timeout_seconds"] == 2.0
+    final_context = client.calls[-1]["context"]
+    assert final_context[0] == {
+        "role": "assistant",
+        "content": "A useful draft based on the evidence page.",
+    }
+    evidence_contexts = [
+        json.loads(item["content"])
+        for item in final_context
+        if item.get("role") == "user"
+        and isinstance(item.get("content"), str)
+        and item["content"].startswith("{")
+    ]
+    assert len(evidence_contexts) == 1
+    assert evidence_contexts[0]["evidence_views"][0]["schema_version"] == (
+        "adaptive_turn_evidence_index_page.v1"
+    )
+    assert not any(
+        item.get("call_id") == "list-at-checkpoint"
+        for item in result.tool_invocations
+    )
+    checkpoint = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+    )
+    assert checkpoint["reason"] == "late_evidence_result"
+    assert checkpoint["effective_answer_reserve_seconds"] == 2.0
+    assert checkpoint["reserve_clamped"] is False
+
+
+def test_final_evidence_failure_recovers_to_answer_only() -> None:
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (6.0, TimeoutError("research deadline")),
+        (6.5, TimeoutError("evidence-capable final call failed")),
+        (6.6, LLMResponse(text_response="Answered from retained evidence.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Answer despite a final evidence-call failure.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-final-evidence-failure",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=4,
+        final_answer_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.response_text == "Answered from retained evidence."
+    assert client.calls[1]["available_tools"]
+    assert client.calls[2]["available_tools"] == []
+    assert result.llm_calls[1]["status"] == "failed"
+    checkpoint = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+    )
+    assert checkpoint["reason"] == "evidence_call_failed"
+    assert checkpoint["remaining_ms"] == 3_500.0
+
+
+def test_final_evidence_overrun_records_actual_remaining_answer_time() -> None:
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (6.0, TimeoutError("research deadline")),
+        (
+            9.5,
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_list_evidence",
+                        call_id="late-list",
+                        payload={"offset": 0, "limit": 20},
+                    )
+                ],
+            ),
+        ),
+        (9.6, LLMResponse(text_response="Answered in the actual time left.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Finish from the available evidence.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-final-evidence-overrun",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=4,
+        final_answer_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.response_text == "Answered in the actual time left."
+    assert client.calls[-1]["llm_params"]["request_timeout_seconds"] == 0.5
+    checkpoint = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+    )
+    assert checkpoint["reason"] == "late_evidence_result"
+    assert checkpoint["remaining_ms"] == 500.0
+    assert result.llm_calls[1]["status"] == "late_result_discarded"
+
+
+def test_small_final_reserve_is_a_recorded_answer_only_checkpoint() -> None:
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (8.0, TimeoutError("research model deadline")),
+        (8.5, LLMResponse(text_response="A bounded answer.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Answer within the caller's small reserve.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-small-final-reserve",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        final_answer_reserve_seconds=20,
+        clock=clock,
+    )
+
+    assert result.response_text == "A bounded answer."
+    assert len(client.calls) == 2
+    assert client.calls[1]["available_tools"] == []
+    assert client.calls[1]["llm_params"]["request_timeout_seconds"] == 2.0
+    checkpoint = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+    )
+    assert checkpoint["reason"] == "direct_final_entry"
+    assert checkpoint["requested_answer_reserve_seconds"] == 20.0
+    assert checkpoint["effective_answer_reserve_seconds"] == 2.0
+    assert checkpoint["evidence_capable_reserve_seconds"] == 0.0
+    assert checkpoint["reserve_clamped"] is True
+
+
+def test_answer_checkpoint_can_be_enabled_from_candidate_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "VON_ADAPTIVE_TURN_FINAL_ANSWER_RESERVE_SEC",
+        "1.5",
+    )
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (8.0, TimeoutError("research model deadline")),
+        (8.5, LLMResponse(text_response="A late evidence-capable draft.")),
+        (8.6, LLMResponse(text_response="The candidate answer.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Exercise the candidate allocation seam.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-env-answer-checkpoint",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.response_text == "The candidate answer."
+    assert client.calls[1]["llm_params"]["request_timeout_seconds"] == 0.5
+    assert {
+        tool.name for tool in client.calls[1]["available_tools"]
+    } == {"turn_list_evidence", "turn_read_evidence"}
+    assert client.calls[2]["available_tools"] == []
+    checkpoint = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+    )
+    assert checkpoint["effective_answer_reserve_seconds"] == 1.5
+    assert checkpoint["reserve_clamped"] is False
+
+
+def test_final_evidence_tools_remain_available_before_answer_checkpoint() -> None:
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (6.0, TimeoutError("research deadline")),
+        (
+            6.5,
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_list_evidence",
+                        call_id="list-final-evidence",
+                        payload={"offset": 0, "limit": 20},
+                    )
+                ]
+            ),
+        ),
+        (6.6, LLMResponse(text_response="Answered before the checkpoint.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Use final evidence only if it helps.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-final-evidence-window",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=4,
+        final_answer_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.response_text == "Answered before the checkpoint."
+    assert {
+        tool.name for tool in client.calls[1]["available_tools"]
+    } == {"turn_list_evidence", "turn_read_evidence"}
+    assert result.tool_invocations[0]["call_id"] == "list-final-evidence"
+    assert not any(
+        item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+        for item in result.aux_llm_calls
+    )
+
+
+def test_answer_checkpoint_can_be_disabled_for_an_adaptive_caller() -> None:
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (6.0, TimeoutError("research deadline")),
+        (9.0, LLMResponse(text_response="The caller retained adaptive time.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Use the final interval adaptively.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-disabled-answer-checkpoint",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=4,
+        final_answer_reserve_seconds=0,
+        clock=clock,
+    )
+
+    assert result.response_text == "The caller retained adaptive time."
+    assert {
+        tool.name for tool in client.calls[1]["available_tools"]
+    } == {"turn_list_evidence", "turn_read_evidence"}
+    assert client.calls[1]["llm_params"]["request_timeout_seconds"] == 4.0
+    assert not any(
+        item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+        for item in result.aux_llm_calls
+    )
 
 
 def test_model_result_returned_after_turn_deadline_is_discarded() -> None:

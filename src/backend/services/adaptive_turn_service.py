@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,10 @@ _LOCAL_TOOL_NAMES = {
 }
 _DEFAULT_TURN_BUDGET_SECONDS = 180.0
 _DEFAULT_FINAL_RESERVE_SECONDS = 30.0
+# The answer checkpoint is an experimental allocation seam, disabled unless a
+# candidate environment or caller supplies a value. It is not Von's theory of
+# how much thought a task deserves.
+_DEFAULT_FINAL_ANSWER_RESERVE_SECONDS = 0.0
 _DEFAULT_OUTER_TOOL_WORKERS = 8
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
@@ -76,6 +81,7 @@ class AdaptiveTurnResult:
     render_plan: Mapping[str, Any] | None = None
     terminal_status: str = "completed"
     evidence_index: Sequence[Mapping[str, Any]] = ()
+    effect_finality_fallback: bool = False
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -92,6 +98,14 @@ def _positive_int_env(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return int(default)
     return value if value > 0 else int(default)
+
+
+def _non_negative_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    return value if value >= 0.0 else float(default)
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -663,7 +677,17 @@ def _ordered_unique_evidence_views(
         if not isinstance(item, Mapping):
             continue
         evidence_id = item.get("evidence_id")
-        if not isinstance(evidence_id, str) or not evidence_id.strip():
+        is_index_page = (
+            item.get("schema_version")
+            == "adaptive_turn_evidence_index_page.v1"
+        )
+        if (
+            not is_index_page
+            and (
+                not isinstance(evidence_id, str)
+                or not evidence_id.strip()
+            )
+        ):
             continue
         view = dict(item)
         digest = hashlib.sha256(_json_bytes(view)).hexdigest()
@@ -818,6 +842,8 @@ def _final_synthesis_context(
     context: Sequence[Mapping[str, Any]],
     evidence_index: Sequence[Mapping[str, Any]],
     evidence_views: Sequence[Mapping[str, Any]] = (),
+    *,
+    draft_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build a fresh synthesis request with usable, bounded tool evidence."""
 
@@ -827,6 +853,14 @@ def _final_synthesis_context(
         if isinstance(item, Mapping)
         and str(item.get("role") or "").strip().lower() != "tool"
     ]
+    clean_draft = draft_text.strip() if isinstance(draft_text, str) else ""
+    if clean_draft:
+        fresh_context.append(
+            {
+                "role": "assistant",
+                "content": clean_draft,
+            }
+        )
     if evidence_index or evidence_views:
         evidence_context = _bounded_evidence_context_message(
             evidence_index,
@@ -1024,6 +1058,7 @@ def _scope_message(
     *,
     delegated_count: int,
     final_synthesis: bool,
+    answer_only: bool = False,
 ) -> str:
     actor = scope.user_concept_id or "unauthenticated"
     organisation = scope.organisation_concept_id or "none"
@@ -1048,7 +1083,14 @@ def _scope_message(
         "identifiers and delegated reads to inspect canonical state before "
         "claiming that a representation persisted."
     )
-    if final_synthesis:
+    if answer_only:
+        message += (
+            "\n- The answer-only checkpoint has been reached. Answer now from the "
+            "bounded evidence already present in the request. Do not request "
+            "tools or new external capabilities. State material limitations "
+            "instead of filling evidence gaps."
+        )
+    elif final_synthesis:
         message += (
             "\n- The research deadline has ended. Answer now from the evidence "
             "already obtained. You may list or hydrate existing evidence, but "
@@ -1531,6 +1573,28 @@ def _effect_status(
     return "failed" if bool(getattr(transport_result, "timed_out", False)) else "succeeded"
 
 
+def _late_effect_observation_state(
+    observation: Mapping[str, Any],
+) -> tuple[str, bool | None]:
+    """Interpret a validated late handler observation without claiming read-back."""
+
+    if observation.get("outcome") != "late_success":
+        return "indeterminate", None
+    if observation.get("output_schema_valid") is False:
+        return "indeterminate", None
+    if observation.get("output_schema_validation") == "indeterminate_truncated":
+        return "indeterminate", None
+    payload = observation.get("payload")
+    effect_status = _effect_status(payload, transport_result=None)
+    changed = (
+        payload.get("changed")
+        if isinstance(payload, Mapping)
+        and isinstance(payload.get("changed"), bool)
+        else (False if effect_status == "failed" else None)
+    )
+    return effect_status, changed
+
+
 def _error_payload(code: str, message: str, *, retryable: bool = False) -> dict[str, Any]:
     return {
         "success": False,
@@ -1583,6 +1647,7 @@ def execute_adaptive_turn(
     turn_id: str | None = None,
     turn_budget_seconds: float | None = None,
     final_synthesis_reserve_seconds: float | None = None,
+    final_answer_reserve_seconds: float | None = None,
     clock: Any = time.monotonic,
 ) -> AdaptiveTurnResult:
     """Run one ordinary turn without a selector, master workflow, critic, or gate."""
@@ -1604,6 +1669,14 @@ def execute_adaptive_turn(
             _DEFAULT_FINAL_RESERVE_SECONDS,
         )
     )
+    requested_final_answer_reserve = float(
+        final_answer_reserve_seconds
+        if final_answer_reserve_seconds is not None
+        else _non_negative_float_env(
+            "VON_ADAPTIVE_TURN_FINAL_ANSWER_RESERVE_SEC",
+            _DEFAULT_FINAL_ANSWER_RESERVE_SECONDS,
+        )
+    )
     if turn_budget <= 0.0:
         raise ValueError("turn_budget_seconds must be positive")
     if not 0.0 < final_reserve < turn_budget:
@@ -1611,8 +1684,15 @@ def execute_adaptive_turn(
             "final_synthesis_reserve_seconds must be positive and smaller than "
             "turn_budget_seconds"
         )
+    if requested_final_answer_reserve < 0.0:
+        raise ValueError("final_answer_reserve_seconds must be non-negative")
+    final_answer_reserve = min(
+        requested_final_answer_reserve,
+        final_reserve,
+    )
     turn_deadline = started + turn_budget
     research_deadline = turn_deadline - final_reserve
+    final_answer_deadline = turn_deadline - final_answer_reserve
 
     scope = TrustedTurnScope(
         user_concept_id=user_concept_id,
@@ -1653,18 +1733,151 @@ def execute_adaptive_turn(
     seen_request_digests: set[str] = set()
     last_partial_text = ""
     final_synthesis = False
+    answer_only = False
+    final_context_base: list[dict[str, Any]] | None = None
     terminal_status = "completed"
     evidence_views: list[dict[str, Any]] = []
     seen_evidence_view_digests: set[str] = set()
+    effect_state_lock = threading.RLock()
+    effect_states: dict[str, dict[str, Any]] = {}
+    effect_state_generation = 0
+    last_partial_effect_generation = 0
+
+    def remember_effect_state(
+        effect_id: str,
+        *,
+        phase: int,
+        effect_status: str,
+        changed: bool | None,
+        execution_id: str | None = None,
+        late_observation: Mapping[str, Any] | None = None,
+        evidence_id: str | None = None,
+    ) -> None:
+        nonlocal effect_state_generation
+        with effect_state_lock:
+            existing = effect_states.get(effect_id)
+            if existing is not None and int(existing.get("phase") or 0) > phase:
+                return
+            state = {
+                "phase": phase,
+                "effect_status": effect_status,
+                "changed": changed,
+                "execution_id": execution_id,
+                "evidence_id": evidence_id,
+            }
+            if late_observation is not None:
+                state["late_observation"] = {
+                    key: late_observation.get(key)
+                    for key in (
+                        "schema_version",
+                        "execution_id",
+                        "method_name",
+                        "outcome",
+                        "observed_at_utc",
+                        "output_schema_validation",
+                        "output_schema_valid",
+                        "output_schema_error",
+                        "payload_truncated",
+                    )
+                    if key in late_observation
+                }
+            effect_states[effect_id] = state
+            effect_state_generation += 1
+
+    def late_effect_observer(
+        *,
+        effect_id: str,
+        call_id: str,
+        capability_name: str,
+    ):
+        def observe(observation: Mapping[str, Any]) -> None:
+            observed = dict(observation)
+            effect_status, changed = _late_effect_observation_state(observed)
+            payload = observed.get("payload")
+            evidence_value = (
+                payload
+                if observed.get("outcome") == "late_success"
+                else {
+                    "success": False,
+                    "error_code": "late_effect_handler_error",
+                    "error": observed.get("error"),
+                    "mutation_outcome": "unknown",
+                }
+            )
+            envelope = evidence_store.record(
+                capability_name,
+                call_id,
+                evidence_value,
+                provenance={
+                    "namespace": scope.namespace,
+                    "user_concept_id": scope.user_concept_id,
+                    "organisation_concept_id": scope.organisation_concept_id,
+                    "effect_id": effect_id,
+                    "effect_status": effect_status,
+                    "late_completion": True,
+                    "execution_id": observed.get("execution_id"),
+                    "output_schema_validation": observed.get(
+                        "output_schema_validation"
+                    ),
+                },
+                status=effect_status,
+            )
+            execution_id = str(observed.get("execution_id") or "").strip() or None
+            remember_effect_state(
+                effect_id,
+                phase=1,
+                effect_status=effect_status,
+                changed=changed,
+                execution_id=execution_id,
+                late_observation=observed,
+                evidence_id=envelope.evidence_id,
+            )
+            if not turn_id or not execution_id:
+                return
+            from src.backend.services.turn_execution_record_service import (
+                submit_late_effect_observation,
+            )
+
+            submit_late_effect_observation(
+                request_id=turn_id,
+                effect_id=effect_id,
+                execution_id=execution_id,
+                observation={
+                    **observed,
+                    "call_id": call_id,
+                    "capability_name": capability_name,
+                    "effect_status": effect_status,
+                    "changed": changed,
+                },
+                user_id=scope.user_concept_id,
+                namespace=scope.namespace,
+                org_id=scope.organisation_concept_id,
+            )
+
+        return observe
 
     def retain_model_evidence_views(results: Sequence[ToolResult]) -> None:
         for result in results:
-            if result.tool_name not in {_INVOKE_TOOL_NAME, _EVIDENCE_TOOL_NAME}:
+            if result.tool_name not in {
+                _INVOKE_TOOL_NAME,
+                _EVIDENCE_TOOL_NAME,
+                _EVIDENCE_INDEX_TOOL_NAME,
+            }:
                 continue
             if not isinstance(result.output, Mapping):
                 continue
             evidence_id = result.output.get("evidence_id")
-            if not isinstance(evidence_id, str) or not evidence_id.strip():
+            is_index_page = (
+                result.output.get("schema_version")
+                == "adaptive_turn_evidence_index_page.v1"
+            )
+            if (
+                not is_index_page
+                and (
+                    not isinstance(evidence_id, str)
+                    or not evidence_id.strip()
+                )
+            ):
                 continue
             view = dict(result.output)
             digest = hashlib.sha256(_json_bytes(view)).hexdigest()
@@ -1674,6 +1887,89 @@ def execute_adaptive_turn(
             evidence_views.append(view)
 
     def finish(text: str, *, status: str = "completed") -> AdaptiveTurnResult:
+        with effect_state_lock:
+            effect_snapshot = {
+                effect_id: dict(state)
+                for effect_id, state in effect_states.items()
+            }
+        reconciled_invocations: list[dict[str, Any]] = []
+        for raw_invocation in tool_invocations:
+            invocation = dict(raw_invocation)
+            effect_id = invocation.get("effect_id")
+            state = (
+                effect_snapshot.get(effect_id)
+                if isinstance(effect_id, str)
+                else None
+            )
+            if isinstance(state, Mapping):
+                invocation["effect_status"] = state.get("effect_status")
+                invocation["changed"] = state.get("changed")
+                if state.get("execution_id"):
+                    invocation["execution_id"] = state.get("execution_id")
+                if state.get("evidence_id"):
+                    invocation["late_evidence_id"] = state.get("evidence_id")
+                if isinstance(state.get("late_observation"), Mapping):
+                    invocation["late_completion"] = dict(
+                        state["late_observation"]
+                    )
+            reconciled_invocations.append(invocation)
+
+        relevant_effects = [
+            state
+            for state in effect_snapshot.values()
+            if (
+                state.get("effect_status") in {"partial", "indeterminate"}
+                or state.get("changed") is True
+                or (
+                    state.get("effect_status") == "succeeded"
+                    and state.get("changed") is None
+                )
+            )
+        ]
+        effect_finality_fallback = status != "completed" and bool(relevant_effects)
+        if effect_finality_fallback:
+            status_counts = {
+                effect_status: sum(
+                    1
+                    for state in relevant_effects
+                    if state.get("effect_status") == effect_status
+                )
+                for effect_status in (
+                    "succeeded",
+                    "partial",
+                    "failed",
+                    "indeterminate",
+                )
+            }
+            count_text = ", ".join(
+                f"{count} {effect_status}"
+                for effect_status, count in status_counts.items()
+                if count
+            )
+            if not count_text:
+                count_text = (
+                    f"{len(relevant_effects)} receipt"
+                    f"{'s' if len(relevant_effects) != 1 else ''} "
+                    "with unresolved status"
+                )
+            text = (
+                "That turn did not finish cleanly. Its effect receipts currently "
+                f"report {count_text}. A handler receipt is not canonical "
+                "read-back, so I will not claim that nothing changed. Inspect "
+                "the represented state before retrying any effect whose outcome "
+                "is unknown."
+            )
+            aux_calls.append(
+                {
+                    "type": "adaptive_turn_effect_finality_fallback",
+                    "schema_version": (
+                        "adaptive_turn_effect_finality_fallback.v1"
+                    ),
+                    "terminal_status": status,
+                    "effect_count": len(relevant_effects),
+                    "status_counts": status_counts,
+                }
+            )
         evidence_index = _compact_evidence_index(evidence_store.index())
         aux_calls.append(
             {
@@ -1687,7 +1983,7 @@ def execute_adaptive_turn(
         return AdaptiveTurnResult(
             response_text=text,
             extra_messages=tuple(extra_messages),
-            tool_invocations=tuple(tool_invocations),
+            tool_invocations=tuple(reconciled_invocations),
             aux_llm_calls=tuple(aux_calls),
             llm_calls=tuple(llm_calls),
             llm_usage=(
@@ -1700,20 +1996,104 @@ def execute_adaptive_turn(
             duration_ms=max(0.0, (clock() - started) * 1000.0),
             terminal_status=status,
             evidence_index=tuple(evidence_index),
+            effect_finality_fallback=effect_finality_fallback,
+        )
+
+    def synthesis_draft_text() -> str:
+        """Retain only a draft based on the latest observed effect state."""
+
+        with effect_state_lock:
+            if last_partial_effect_generation != effect_state_generation:
+                return ""
+            return last_partial_text
+
+    def enter_final_synthesis() -> None:
+        nonlocal final_synthesis
+        nonlocal answer_only
+        nonlocal continuation
+        nonlocal pending_results
+        nonlocal current_context
+        nonlocal final_context_base
+        if final_context_base is None:
+            final_context_base = [
+                dict(item)
+                for item in current_context
+                if isinstance(item, Mapping)
+                and str(item.get("role") or "").strip().lower() != "tool"
+            ]
+        final_synthesis = True
+        answer_only = False
+        continuation = None
+        pending_results = []
+        current_context = _final_synthesis_context(
+            final_context_base,
+            evidence_store.index(),
+            evidence_views,
+            draft_text=synthesis_draft_text(),
+        )
+
+    def enter_answer_only(reason: str) -> None:
+        nonlocal final_synthesis
+        nonlocal answer_only
+        nonlocal continuation
+        nonlocal pending_results
+        nonlocal current_context
+        nonlocal final_context_base
+        if answer_only:
+            return
+        if final_context_base is None:
+            final_context_base = [
+                dict(item)
+                for item in current_context
+                if isinstance(item, Mapping)
+                and str(item.get("role") or "").strip().lower() != "tool"
+            ]
+        final_synthesis = True
+        answer_only = True
+        continuation = None
+        pending_results = []
+        current_context = _final_synthesis_context(
+            final_context_base,
+            evidence_store.index(),
+            evidence_views,
+            draft_text=synthesis_draft_text(),
+        )
+        aux_calls.append(
+            {
+                "type": "adaptive_turn_final_answer_reserve_entered",
+                "schema_version": (
+                    "adaptive_turn_final_answer_reserve_entered.v1"
+                ),
+                "reason": reason,
+                "requested_answer_reserve_seconds": (
+                    requested_final_answer_reserve
+                ),
+                "effective_answer_reserve_seconds": final_answer_reserve,
+                "final_synthesis_reserve_seconds": final_reserve,
+                "evidence_capable_reserve_seconds": (
+                    final_reserve - final_answer_reserve
+                ),
+                "reserve_clamped": (
+                    final_answer_reserve
+                    < requested_final_answer_reserve
+                ),
+                "remaining_ms": max(
+                    0.0,
+                    (turn_deadline - clock()) * 1000.0,
+                ),
+            }
         )
 
     while True:
         _check_cancellation(progress_tracker)
         now = clock()
         if not final_synthesis and now >= research_deadline:
-            final_synthesis = True
-            continuation = None
-            pending_results = []
-            current_context = _final_synthesis_context(
-                current_context,
-                evidence_store.index(),
-                evidence_views,
-            )
+            if now >= final_answer_deadline:
+                enter_answer_only("direct_final_entry")
+            else:
+                enter_final_synthesis()
+        elif final_synthesis and not answer_only and now >= final_answer_deadline:
+            enter_answer_only("deadline_reached")
         if now >= turn_deadline:
             terminal_status = "turn_deadline_exceeded"
             text = last_partial_text.strip() or (
@@ -1723,12 +2103,18 @@ def execute_adaptive_turn(
             return finish(text, status=terminal_status)
 
         stage = "final_synthesis" if final_synthesis else "adaptive_research"
+        mode = (
+            "answer_only"
+            if answer_only
+            else ("evidence_capable" if final_synthesis else "research")
+        )
         _emit(
             progress_tracker,
             {
                 "status": "thinking",
                 "stage": stage,
                 "phase": stage,
+                "mode": mode,
                 "phase_label": (
                     "Generating response" if final_synthesis else "Researching"
                 ),
@@ -1750,13 +2136,31 @@ def execute_adaptive_turn(
         )
         seen_request_digests.add(request_digest)
         request_started = clock()
-        stage_deadline = turn_deadline if final_synthesis else research_deadline
+        stage_deadline = (
+            turn_deadline
+            if answer_only
+            else (
+                final_answer_deadline
+                if final_synthesis
+                else research_deadline
+            )
+        )
         effective_params = dict(model_parameters or {})
         effective_params["request_timeout_seconds"] = max(
             0.001,
             stage_deadline - request_started,
         )
-        request_tools = final_synthesis_tools if final_synthesis else available_tools
+        with effect_state_lock:
+            request_effect_generation = effect_state_generation
+        request_tools = (
+            []
+            if answer_only
+            else (
+                final_synthesis_tools
+                if final_synthesis
+                else available_tools
+            )
+        )
         try:
             response: LLMResponse = llm_client.generate_with_tools(
                 "" if continuation is not None else prompt,
@@ -1767,6 +2171,7 @@ def execute_adaptive_turn(
                     scope,
                     delegated_count=len(delegated_names),
                     final_synthesis=final_synthesis,
+                    answer_only=answer_only,
                 ),
                 llm_params=effective_params,
                 **(
@@ -1779,6 +2184,21 @@ def execute_adaptive_turn(
                 ),
             )
         except StructuredToolContextLimitError as exc:
+            if final_synthesis and not answer_only:
+                aux_calls.append(
+                    {
+                        "type": "adaptive_turn_context_limit_recovery",
+                        "before_digest": request_digest,
+                        "after_digest": None,
+                        "before_bytes": request_size,
+                        "after_bytes": None,
+                        "changed": True,
+                        "reason": "answer_without_tools",
+                        "error": str(exc),
+                    }
+                )
+                enter_answer_only("evidence_call_failed")
+                continue
             fresh_context = _compact_context_after_limit(
                 prompt=prompt,
                 context=current_context,
@@ -1847,7 +2267,11 @@ def execute_adaptive_turn(
                 {
                     "type": "adaptive_turn_model_call",
                     "stage": stage,
+                    "mode": mode,
                     "model": model,
+                    "request_timeout_seconds": effective_params[
+                        "request_timeout_seconds"
+                    ],
                     "duration_ms": max(
                         0.0,
                         (call_failed_at - request_started) * 1000.0,
@@ -1858,15 +2282,14 @@ def execute_adaptive_turn(
                     "error_class": type(exc).__name__,
                 }
             )
+            if final_synthesis and not answer_only:
+                enter_answer_only("evidence_call_failed")
+                continue
             if not final_synthesis and call_failed_at >= research_deadline:
-                final_synthesis = True
-                continuation = None
-                pending_results = []
-                current_context = _final_synthesis_context(
-                    current_context,
-                    evidence_store.index(),
-                    evidence_views,
-                )
+                if call_failed_at >= final_answer_deadline:
+                    enter_answer_only("direct_final_entry")
+                else:
+                    enter_final_synthesis()
                 aux_calls.append(
                     {
                         "type": "adaptive_turn_research_deadline_recovery",
@@ -1893,7 +2316,11 @@ def execute_adaptive_turn(
                 {
                     "type": "adaptive_turn_model_call",
                     "stage": stage,
+                    "mode": mode,
                     "model": response.model or model,
+                    "request_timeout_seconds": effective_params[
+                        "request_timeout_seconds"
+                    ],
                     "duration_ms": max(
                         0.0,
                         (response_received_at - request_started) * 1000.0,
@@ -1910,24 +2337,28 @@ def execute_adaptive_turn(
                     "type": "adaptive_turn_late_model_result",
                     "schema_version": "adaptive_turn_late_model_result.v1",
                     "stage": stage,
+                    "mode": mode,
                     "late_result_policy": "discard_from_terminal_result",
                 }
             )
-            if final_synthesis or response_received_at >= turn_deadline:
+            if (
+                final_synthesis
+                and not answer_only
+                and response_received_at < turn_deadline
+            ):
+                enter_answer_only("late_evidence_result")
+                continue
+            if answer_only or response_received_at >= turn_deadline:
                 terminal_status = "turn_deadline_exceeded"
                 text = last_partial_text.strip() or (
                     "I could not produce a useful response before this turn's "
                     "elapsed-time deadline."
                 )
                 return finish(text, status=terminal_status)
-            final_synthesis = True
-            continuation = None
-            pending_results = []
-            current_context = _final_synthesis_context(
-                current_context,
-                evidence_store.index(),
-                evidence_views,
-            )
+            if response_received_at >= final_answer_deadline:
+                enter_answer_only("direct_final_entry")
+            else:
+                enter_final_synthesis()
             continue
 
         call_duration_ms = max(
@@ -1939,7 +2370,11 @@ def execute_adaptive_turn(
             {
                 "type": "adaptive_turn_model_call",
                 "stage": stage,
+                "mode": mode,
                 "model": response.model or model,
+                "request_timeout_seconds": effective_params[
+                    "request_timeout_seconds"
+                ],
                 "duration_ms": call_duration_ms,
                 "usage": dict(response.usage) if response.usage else None,
                 "status": "completed",
@@ -1951,16 +2386,13 @@ def execute_adaptive_turn(
         )
         if response.text_response.strip():
             last_partial_text = response.text_response.strip()
+            last_partial_effect_generation = request_effect_generation
         calls = list(response.tool_calls)
         if not final_synthesis and clock() >= research_deadline and calls:
-            final_synthesis = True
-            continuation = None
-            pending_results = []
-            current_context = _final_synthesis_context(
-                current_context,
-                evidence_store.index(),
-                evidence_views,
-            )
+            if clock() >= final_answer_deadline:
+                enter_answer_only("direct_final_entry")
+            else:
+                enter_final_synthesis()
             aux_calls.append(
                 {
                     "type": "adaptive_turn_research_deadline_recovery",
@@ -1970,24 +2402,55 @@ def execute_adaptive_turn(
                 }
             )
             continue
+        if (
+            final_synthesis
+            and not answer_only
+            and clock() >= final_answer_deadline
+            and calls
+        ):
+            aux_calls.append(
+                {
+                    "type": "adaptive_turn_expired_final_evidence_calls",
+                    "schema_version": (
+                        "adaptive_turn_expired_final_evidence_calls.v1"
+                    ),
+                    "discarded_tool_call_count": len(calls),
+                }
+            )
+            enter_answer_only("deadline_reached")
+            continue
         if not calls:
             if response.text_response.strip():
                 return finish(response.text_response.strip())
+            if final_synthesis and not answer_only:
+                enter_answer_only("evidence_call_failed")
+                continue
             terminal_status = "model_non_answer"
             text = last_partial_text or (
                 "The model returned neither an answer nor a capability request."
+            )
+            return finish(text, status=terminal_status)
+        if answer_only and calls:
+            terminal_status = "final_synthesis_protocol_error"
+            text = last_partial_text or (
+                "The model requested a tool during the answer-only interval."
             )
             return finish(text, status=terminal_status)
         if final_synthesis and any(
             call.tool_name not in {_EVIDENCE_INDEX_TOOL_NAME, _EVIDENCE_TOOL_NAME}
             for call in calls
         ):
-            terminal_status = "final_synthesis_protocol_error"
-            text = last_partial_text or (
-                "The model requested a new external capability after the research "
-                "deadline."
+            aux_calls.append(
+                {
+                    "type": "adaptive_turn_final_synthesis_protocol_recovery",
+                    "schema_version": (
+                        "adaptive_turn_final_synthesis_protocol_recovery.v1"
+                    ),
+                    "discarded_tool_call_count": len(calls),
+                }
             )
-            return finish(text, status=terminal_status)
+            enter_answer_only("evidence_call_failed")
+            continue
 
         continuation = response.continuation
         batch_results: list[ToolResult | None] = [None] * len(calls)
@@ -2206,7 +2669,7 @@ def execute_adaptive_turn(
             int,
             tuple[Any, Any, dict[str, Any], str, bool],
         ]:
-            index, _call, canonical_name, arguments, is_effect = item
+            index, call, canonical_name, arguments, is_effect = item
             assert gateway is not None
             definition = gateway.get_method_definition(canonical_name)
             subject_argument = (
@@ -2244,6 +2707,15 @@ def execute_adaptive_turn(
                         is_effect,
                     )
             try:
+                effect_identifier = (
+                    _effect_id(
+                        turn_id=turn_id,
+                        call_id=call.call_id,
+                        capability_name=canonical_name,
+                    )
+                    if is_effect
+                    else None
+                )
                 with override_current_actor(
                     scope.user_concept_id,
                     scope.organisation_concept_id,
@@ -2252,13 +2724,34 @@ def execute_adaptive_turn(
                         canonical_name,
                         arguments,
                         deadline_monotonic=research_deadline,
+                        late_completion_observer=(
+                            late_effect_observer(
+                                effect_id=effect_identifier,
+                                call_id=call.call_id,
+                                capability_name=canonical_name,
+                            )
+                            if effect_identifier is not None
+                            else None
+                        ),
                     )
                 raw_payload = transport_result.payload
             except SchemaValidationError as exc:
+                output_invalid = exc.stage == "output_schema"
                 raw_payload = _error_payload(
-                    "capability_arguments_invalid",
+                    (
+                        "effect_output_invalid"
+                        if output_invalid and is_effect
+                        else (
+                            "capability_output_invalid"
+                            if output_invalid
+                            else "capability_arguments_invalid"
+                        )
+                    ),
                     str(exc),
+                    retryable=output_invalid and not is_effect,
                 )
+                if output_invalid and is_effect:
+                    raw_payload["mutation_outcome"] = "unknown"
                 transport_result = None
             except Exception as exc:  # noqa: BLE001
                 raw_payload = _error_payload(
@@ -2395,6 +2888,23 @@ def execute_adaptive_turn(
                         and isinstance(raw_payload.get("changed"), bool)
                         else (False if effect_status == "failed" else None)
                     )
+                    remember_effect_state(
+                        effect_identifier,
+                        phase=0,
+                        effect_status=effect_status,
+                        changed=changed,
+                        execution_id=(
+                            str(
+                                getattr(
+                                    transport_result,
+                                    "execution_id",
+                                    "",
+                                )
+                                or ""
+                            ).strip()
+                            or None
+                        ),
+                    )
                     envelope_payload.update(
                         {
                             "effect_id": effect_identifier,
@@ -2477,11 +2987,15 @@ def execute_adaptive_turn(
                     "action": (
                         "fresh_final_synthesis_with_pageable_evidence_index"
                         if not final_synthesis
-                        else "terminal_bounded_non_success"
+                        else (
+                            "answer_from_bounded_evidence"
+                            if not answer_only
+                            else "terminal_bounded_non_success"
+                        )
                     ),
                 }
             )
-            if final_synthesis:
+            if answer_only:
                 return finish(
                     last_partial_text
                     or (
@@ -2491,14 +3005,10 @@ def execute_adaptive_turn(
                     ),
                     status="tool_result_batch_context_limit",
                 )
-            final_synthesis = True
-            continuation = None
-            pending_results = []
-            current_context = _final_synthesis_context(
-                current_context,
-                evidence_store.index(),
-                evidence_views,
-            )
+            if final_synthesis:
+                enter_answer_only("evidence_call_failed")
+            else:
+                enter_final_synthesis()
             continue
         pending_results = bounded_results
         retain_model_evidence_views(pending_results)

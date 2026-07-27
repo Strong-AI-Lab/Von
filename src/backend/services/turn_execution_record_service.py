@@ -13,6 +13,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence, cast
 
@@ -80,6 +81,7 @@ logger = logging.getLogger(__name__)
 
 TURN_EXECUTION_RECORD_SCHEMA_VERSION = "turn_execution_record.v1"
 TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION = "turn_execution_correctness.v1"
+LATE_EFFECT_OBSERVATION_SCHEMA_VERSION = "late_effect_observation.v1"
 WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION = "workflow_routing_diagnostics.v1"
 FINAL_ANSWER_SYNTHESIS_TELEMETRY_SCHEMA_VERSION = "final_answer_synthesis_telemetry.v1"
 TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
@@ -120,6 +122,16 @@ _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_STRING_CHARS = 700
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_ENTRIES = 16
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_FIELD_ENTRIES = 32
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_IDENTIFIERS = 32
+_LATE_EFFECT_OBSERVATION_MAX_ID_CHARS = 512
+_LATE_EFFECT_APPEND_WORKERS = 2
+_LATE_EFFECT_APPEND_MAX_PENDING = 32
+_LATE_EFFECT_APPEND_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_LATE_EFFECT_APPEND_WORKERS,
+    thread_name_prefix="late-effect-observation",
+)
+_LATE_EFFECT_APPEND_SLOTS = threading.BoundedSemaphore(
+    _LATE_EFFECT_APPEND_WORKERS + _LATE_EFFECT_APPEND_MAX_PENDING
+)
 _FINAL_ANSWER_PROJECTION_SECRET_KEY_PARTS = (
     "access_token",
     "api_key",
@@ -5199,10 +5211,18 @@ def _summarise_tool_invocations(
             timing_value = _safe_float(invocation.get(timing_key))
             if timing_value is not None:
                 serialised_invocation[timing_key] = timing_value
-        for identifier_key in ("call_id", "execution_id", "timeout_phase"):
+        for identifier_key in (
+            "call_id",
+            "execution_id",
+            "timeout_phase",
+            "effect_id",
+            "effect_status",
+        ):
             identifier_value = _safe_str(invocation.get(identifier_key))
             if identifier_value:
                 serialised_invocation[identifier_key] = identifier_value
+        if isinstance(invocation.get("changed"), bool):
+            serialised_invocation["changed"] = invocation.get("changed")
         if isinstance(invocation.get("advisory_budget_exceeded"), bool):
             serialised_invocation["advisory_budget_exceeded"] = invocation.get(
                 "advisory_budget_exceeded"
@@ -10451,6 +10471,10 @@ def upsert_turn_execution_record_projection(
 
     now = _now_utc()
     payload = ensure_turn_execution_record_execution_correctness(record)
+    # Late observations arrive independently after the ordinary projection was
+    # assembled.  They are append-only and must not be replaced by a later
+    # whole-turn snapshot containing no, or stale, late-observation state.
+    payload.pop("late_effect_observations", None)
     payload["request_id"] = request_id
     if _safe_str(user_id):
         payload.setdefault("user_id", _safe_str(user_id))
@@ -10507,6 +10531,187 @@ def upsert_turn_execution_record_projection(
             "reason": "mongo_error",
             "request_id": request_id,
         }
+
+
+def append_late_effect_observation(
+    *,
+    request_id: Any,
+    effect_id: Any,
+    execution_id: Any,
+    observation: Mapping[str, Any],
+    user_id: Any = None,
+    session_id: Any = None,
+    namespace: Any = None,
+    org_id: Any = None,
+) -> dict[str, Any]:
+    """Append one bounded, identity-bearing late-effect observation.
+
+    The entry is additive to the ordinary turn projection: a later full-record
+    ``$set`` upsert does not remove it.  ``$addToSet`` also makes an exact retry
+    of the same observation harmless.  The caller remains responsible for
+    interpreting a handler receipt versus canonical state.
+
+    Entries are individually bounded, but the array has no arbitrary count
+    ceiling.  Replacing this atomic idempotent append with ``$push/$slice``
+    would admit duplicates, while a read-trim-write sequence would lose
+    concurrent observations.  A per-turn retention limit should therefore use
+    an atomic pipeline or a separately indexed collection if observed growth
+    demonstrates the need.
+    """
+
+    clean_request_id = _safe_str(request_id)
+    clean_effect_id = _safe_str(effect_id)
+    clean_execution_id = _safe_str(execution_id)
+    identities = {
+        "request_id": clean_request_id,
+        "effect_id": clean_effect_id,
+        "execution_id": clean_execution_id,
+    }
+    for field_name, value in identities.items():
+        if not value:
+            return {"updated": False, "reason": f"missing_{field_name}"}
+        if len(value) > _LATE_EFFECT_OBSERVATION_MAX_ID_CHARS:
+            return {"updated": False, "reason": f"invalid_{field_name}"}
+    if not isinstance(observation, Mapping):
+        return {"updated": False, "reason": "invalid_observation"}
+
+    coll = get_turn_execution_records_collection()
+    if coll is None:
+        return {
+            "updated": False,
+            "reason": "collection_unavailable",
+            "request_id": clean_request_id,
+        }
+
+    bounded_observation = _compact_final_answer_projection_payload(
+        dict(observation),
+        max_depth=4,
+        max_items=32,
+        max_string_chars=2_000,
+    )
+    if not isinstance(bounded_observation, Mapping):
+        bounded_observation = {"value": bounded_observation}
+    bounded_observation = dict(bounded_observation)
+
+    observed_at_utc = (
+        _safe_str(bounded_observation.get("observed_at_utc"))
+        or _iso_utc(_now_utc())
+    )
+    observation_identity = "\0".join(
+        (clean_request_id, clean_effect_id, clean_execution_id)
+    )
+    observation_id = hashlib.sha256(
+        observation_identity.encode("utf-8")
+    ).hexdigest()
+    entry = dict(bounded_observation)
+    entry.update(
+        {
+            "schema_version": LATE_EFFECT_OBSERVATION_SCHEMA_VERSION,
+            "observation_id": observation_id,
+            "effect_id": clean_effect_id,
+            "execution_id": clean_execution_id,
+            "observed_at_utc": observed_at_utc,
+        }
+    )
+
+    now = _now_utc()
+    insert_payload: dict[str, Any] = {
+        "request_id": clean_request_id,
+        "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
+        "created_at_utc": _iso_utc(now),
+        "updated_at_utc": _iso_utc(now),
+        "inserted_at": now,
+    }
+    for field_name, raw_value in (
+        ("user_id", user_id),
+        ("session_id", session_id),
+        ("namespace", namespace),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            insert_payload[field_name] = clean_value
+
+    try:
+        result = _turn_execution_update_one(
+            coll,
+            {"request_id": clean_request_id},
+            {
+                "$addToSet": {"late_effect_observations": entry},
+                "$setOnInsert": insert_payload,
+            },
+            operation="append_late_effect_observation.update_one",
+            detail=clean_execution_id,
+            upsert=True,
+        )
+        appended = bool(getattr(result, "modified_count", 0) > 0)
+        inserted = getattr(result, "upserted_id", None) is not None
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        return {
+            "updated": appended or inserted,
+            "appended": appended or inserted,
+            "duplicate": matched and not appended,
+            "inserted": inserted,
+            "matched": matched,
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "execution_id": clean_execution_id,
+            "observation_id": observation_id,
+        }
+    except PyMongoError as exc:
+        logger.warning(
+            "Failed to append late effect observation for request_id=%s "
+            "effect_id=%s execution_id=%s: %s",
+            clean_request_id,
+            clean_effect_id,
+            clean_execution_id,
+            exc,
+        )
+        return {
+            "updated": False,
+            "reason": "mongo_error",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "execution_id": clean_execution_id,
+        }
+
+
+def submit_late_effect_observation(**kwargs: Any) -> bool:
+    """Queue a durable append without occupying an MCP handler worker."""
+
+    if not _LATE_EFFECT_APPEND_SLOTS.acquire(blocking=False):
+        logger.warning(
+            "Late-effect observation queue is full; request_id=%s effect_id=%s",
+            _safe_str(kwargs.get("request_id")),
+            _safe_str(kwargs.get("effect_id")),
+        )
+        return False
+
+    def _append() -> None:
+        try:
+            append_late_effect_observation(**kwargs)
+        except Exception:
+            logger.exception(
+                "Late-effect observation append failed; request_id=%s "
+                "effect_id=%s",
+                _safe_str(kwargs.get("request_id")),
+                _safe_str(kwargs.get("effect_id")),
+            )
+        finally:
+            _LATE_EFFECT_APPEND_SLOTS.release()
+
+    try:
+        _LATE_EFFECT_APPEND_EXECUTOR.submit(_append)
+    except RuntimeError:
+        _LATE_EFFECT_APPEND_SLOTS.release()
+        logger.warning(
+            "Late-effect observation executor is unavailable; request_id=%s "
+            "effect_id=%s",
+            _safe_str(kwargs.get("request_id")),
+            _safe_str(kwargs.get("effect_id")),
+        )
+        return False
+    return True
 
 
 def get_latest_turn_execution_record_projection(

@@ -7,6 +7,7 @@ from src.backend.services.turn_decision_attribution_service import (
 )
 from src.backend.services.turn_execution_record_service import (
     TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+    append_late_effect_observation,
     build_turn_execution_correctness_summary,
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
@@ -135,6 +136,162 @@ def test_timeout_transport_metadata_survives_durable_turn_record_readback(
     assert invocation["handler_elapsed_ms"] == 38.5
     assert invocation["transport_overhead_ms"] == 0.5
     assert invocation["transport"] == transport_metadata
+
+
+def test_late_effect_observation_is_bounded_idempotent_and_survives_full_upsert(
+    monkeypatch,
+) -> None:
+    class _Collection:
+        document = None
+
+        def update_one(self, _query, update, **_kwargs):
+            existed = self.document is not None
+            if self.document is None:
+                self.document = dict(update.get("$setOnInsert") or {})
+            modified = False
+            if "$set" in update:
+                for key, value in update["$set"].items():
+                    if self.document.get(key) != value:
+                        modified = True
+                    self.document[key] = value
+            for key, value in (update.get("$addToSet") or {}).items():
+                values = self.document.setdefault(key, [])
+                if value not in values:
+                    values.append(value)
+                    modified = True
+            return SimpleNamespace(
+                modified_count=1 if modified and existed else 0,
+                matched_count=1 if existed else 0,
+                upserted_id=None if existed else "late-observation-1",
+            )
+
+        def find_one(self, query, **_kwargs):
+            if not self.document:
+                return None
+            for field_name, expected in query.items():
+                if self.document.get(field_name) != expected:
+                    return None
+            return dict(self.document)
+
+    collection = _Collection()
+    import src.backend.services.turn_execution_record_service as record_service
+
+    monkeypatch.setattr(
+        record_service,
+        "get_turn_execution_records_collection",
+        lambda: collection,
+    )
+    late_observation = {
+        "schema_version": "internal_mcp_late_completion.v1",
+        "execution_id": "mcp_late_effect_1",
+        "method_name": "synthetic_effect",
+        "category": "write",
+        "outcome": "late_success",
+        "observed_at_utc": "2026-07-27T10:00:00Z",
+        "queue_duration_ms": 1.0,
+        "handler_duration_ms": 22_000.0,
+        "payload": {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_ids": ["#V#late_created"],
+            "api_key": "must-not-be-persisted",
+            "large_detail": "x" * 20_000,
+        },
+        "payload_truncated": False,
+        "payload_redacted": False,
+        "error_type": None,
+        "error": None,
+    }
+
+    first = append_late_effect_observation(
+        request_id="req-late-effect",
+        effect_id="effect-late-1",
+        execution_id="mcp_late_effect_1",
+        observation=late_observation,
+        user_id="#V#user",
+        session_id="session-late-effect",
+        namespace="#V#user@org",
+        org_id="#V#org",
+    )
+    duplicate = append_late_effect_observation(
+        request_id="req-late-effect",
+        effect_id="effect-late-1",
+        execution_id="mcp_late_effect_1",
+        observation=late_observation,
+        user_id="#V#user",
+        session_id="session-late-effect",
+        namespace="#V#user@org",
+        org_id="#V#org",
+    )
+    assert first["appended"] is True
+    assert duplicate["appended"] is False
+    assert duplicate["duplicate"] is True
+    assert collection.document is not None
+    assert len(collection.document["late_effect_observations"]) == 1
+    stored_observation = collection.document["late_effect_observations"][0]
+    assert stored_observation["effect_id"] == "effect-late-1"
+    assert stored_observation["execution_id"] == "mcp_late_effect_1"
+    assert stored_observation["payload"]["effect_status"] == "succeeded"
+    assert stored_observation["payload"]["api_key"] == "[redacted]"
+    assert len(stored_observation["payload"]["large_detail"]) == 2_003
+    assert len(json.dumps(stored_observation)) < 64_000
+    assert "source_observation_sha256" not in stored_observation
+    assert "storage_truncated" not in stored_observation
+
+    full_record = build_turn_execution_record(
+        request_id="req-late-effect",
+        session_id="session-late-effect",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Apply the bounded effect.",
+        response_text="The turn later completed.",
+        interaction_timestamp_utc="2026-07-27T10:00:01Z",
+        tool_invocations=[
+            {
+                "tool": "synthetic_effect",
+                "status": "timeout",
+                "effect_id": "effect-late-1",
+                "effect_status": "indeterminate",
+                "changed": False,
+                "execution_id": "mcp_late_effect_1",
+                "effective_payload": {
+                    "success": False,
+                    "error_code": "tool_timeout_outcome_unknown",
+                },
+            }
+        ],
+    )
+    # Even an accidentally stale whole-turn snapshot must not replace the
+    # independently appended observation.
+    full_record["late_effect_observations"] = []
+    upsert_turn_execution_record_projection(
+        record=full_record,
+        user_id="#V#user",
+        session_id="session-late-effect",
+        namespace="#V#user@org",
+        org_id="#V#org",
+    )
+    readback = get_turn_execution_record_projection(
+        request_id="req-late-effect",
+        namespace="#V#user@org",
+    )
+
+    assert readback is not None
+    assert len(readback["late_effect_observations"]) == 1
+    assert (
+        readback["late_effect_observations"][0]["observation_id"]
+        == first["observation_id"]
+    )
+    invocation = readback["execution"]["tool_invocations"][0]
+    assert invocation["effect_status"] == "indeterminate"
+    assert invocation["changed"] is False
+    assert (
+        readback["late_effect_observations"][0]["payload"]["effect_status"]
+        == "succeeded"
+    )
+    assert readback["late_effect_observations"][0]["payload"]["changed"] is True
 
 
 def test_projection_field_telemetry_preserves_bounded_collection_row_index() -> None:

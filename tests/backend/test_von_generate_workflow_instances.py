@@ -26,6 +26,8 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
         "render_plan": None,
         "extra_messages": (),
         "tool_invocations": (),
+        "terminal_status": "completed",
+        "effect_finality_fallback": False,
     }
 
     def _execute_adaptive_turn(**kwargs: Any) -> AdaptiveTurnResult:
@@ -45,7 +47,10 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
             llm_usage={"total_tokens": 7},
             duration_ms=2.0,
             render_plan=adaptive_state["render_plan"],
-            terminal_status="completed",
+            terminal_status=adaptive_state["terminal_status"],
+            effect_finality_fallback=adaptive_state[
+                "effect_finality_fallback"
+            ],
         )
 
     def _retired_outer_controller_called(*_args: Any, **_kwargs: Any) -> None:
@@ -362,6 +367,57 @@ def test_presenter_mode_projects_tagged_adaptive_answer(app: Flask) -> None:
         "screen": "A grounded on-screen answer.",
         "format": "tagged_blocks_v1",
     }
+
+
+def test_effect_finality_fallback_is_presented_literally_without_model_backfill(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+
+    fallback = (
+        "That turn did not finish cleanly. An effect remains indeterminate; "
+        "inspect represented state before retrying it."
+    )
+    adaptive_state = app.config["_ADAPTIVE_TURN_STATE"]
+    adaptive_state["response_text"] = fallback
+    adaptive_state["terminal_status"] = "model_error"
+    adaptive_state["effect_finality_fallback"] = True
+
+    def _unexpected_backfill(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("effect-finality fallback must remain literal")
+
+    monkeypatch.setattr(
+        von_routes,
+        "_invoke_presenter_screen_backfill_prompt",
+        _unexpected_backfill,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_llm_generate_spoken_backfill",
+        _unexpected_backfill,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Present the result.", "presenter_mode": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert payload["response"] == fallback
+    assert payload["response_channels"] == {
+        "spoken": fallback,
+        "screen": fallback,
+        "format": "effect_finality_fallback_v1",
+    }
+    assert (
+        payload["llm_debug"]["screen_backfill_second_pass_attempted"] is False
+    )
+    assert (
+        payload["llm_debug"]["spoken_backfill_second_pass_attempted"] is False
+    )
 
 
 def test_presenter_channel_parser_ignores_tags_inside_fenced_blocks() -> None:

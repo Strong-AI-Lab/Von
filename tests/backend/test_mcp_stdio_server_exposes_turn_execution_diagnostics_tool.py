@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -13,6 +14,27 @@ def test_mcp_stdio_server_has_turn_execution_diagnostics_handler() -> None:
     assert "conversation_telemetry_get_locator" in mcp_stdio_server._TOOL_HANDLERS
     assert "turn_execution_get_live_progress" in mcp_stdio_server._TOOL_HANDLERS
     assert "workflow_list_use_episodes" in mcp_stdio_server._TOOL_HANDLERS
+    assert "mongo_query_diagnostics_report" in mcp_stdio_server._TOOL_HANDLERS
+
+
+def test_mongo_query_diagnostics_stdio_routes_the_runtime_binding(monkeypatch) -> None:
+    from src.backend.mcp_server import mcp_stdio_server
+
+    monkeypatch.setattr(
+        mcp_stdio_server,
+        "_mongo_query_diagnostics_report",
+        lambda **_kwargs: {"success": True, "source": "stdio_runtime_binding"},
+    )
+
+    result = asyncio.run(
+        mcp_stdio_server.call_tool(
+            "mongo_query_diagnostics_report",
+            {"allow_operator_diagnostics": True},
+        )
+    )
+    payload = json.loads(result[0].text)
+
+    assert payload == {"success": True, "source": "stdio_runtime_binding"}
 
 
 def test_vontology_mcp_manifest_includes_turn_execution_diagnostics_tool() -> None:
@@ -34,3 +56,4 @@ def test_vontology_mcp_manifest_includes_turn_execution_diagnostics_tool() -> No
     assert "conversation_telemetry_get_locator" in names
     assert "turn_execution_get_live_progress" in names
     assert "workflow_list_use_episodes" in names
+    assert "mongo_query_diagnostics_report" in names
