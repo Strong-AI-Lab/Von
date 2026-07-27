@@ -927,10 +927,24 @@ class _RestrictedGateway:
         return self._gateway.enabled
 
     def describe_methods(self) -> dict[str, dict[str, Any]]:
-        return self._gateway.describe_methods()
+        methods = self._gateway.describe_methods()
+        if self._allow_writes:
+            return methods
+        return {
+            name: metadata
+            for name, metadata in methods.items()
+            if metadata.get("category") == "read"
+        }
 
     def get_method_definition(self, method_name: str) -> Any:
-        return self._gateway.get_method_definition(method_name)
+        definition = self._gateway.get_method_definition(method_name)
+        if (
+            self._allow_writes
+            or definition is None
+            or getattr(definition, "category", None) == "read"
+        ):
+            return definition
+        return None
 
     def invoke(
         self,

@@ -1,4085 +1,647 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
-import requests
 
 from scripts import run_live_kb_tool_prompt_sampler as sampler
 
 
-def _input_required_debug(
-    *,
-    observed_tools: list[str],
-    validation_valid: bool = True,
-) -> dict[str, object]:
-    receipt = {
-        "schema_version": "terminal_outcome_receipt.v1",
-        "profile_concept_id": "#V#terminal_outcome_receipt",
-        "outcome": "input_required",
-        "causal_stage": "verification",
-        "cause_code": "identity_match_ambiguous",
-        "evidence_refs": [
-            {
-                "source": "completion_report.tool_calls",
-                "locator": "get_text_relations_summary",
-                "summary": "Relation predicates and counts were discovered.",
-            }
-        ],
-        "retryability": "after_input",
+def _prompt_entry(**overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": "case-1",
+        "category": "research_assistance",
+        "complexity_class": "tool_augmented",
+        "prompt": "Find the relevant represented research.",
+        "knowledge_surfaces": ["kb"],
+        "likely_tools": ["search_knowledge_base"],
+        "requires_tool_use": True,
     }
-    return {
-        "completion_gate_verdict": {
-            "decision": "input_required",
-            "safe_to_claim_completion": False,
-            "requires_follow_up": True,
-        },
-        "critic_verdict": {
-            "verdict": "pass",
-            "terminal_outcome_receipt": receipt,
-        },
-        "terminal_outcome_receipt": receipt,
-        "terminal_outcome_receipt_validation": {
-            "schema_version": "terminal_outcome_receipt_validation.v1",
-            "present": True,
-            "valid": validation_valid,
-            "outcome": "input_required",
-            "decision_authority": "represented_llm",
-            "errors": [] if validation_valid else ["receipt_invalid"],
-        },
-        "turn_execution_diagnostics": {
-            "workflow_routing_diagnostics": {
-                "dispatch": {
-                    "selected_execution_mode": "custom_workflow",
-                    "dispatch_workflow_id": "#V#entity_representation_workflow",
-                }
-            },
-            "tool_history": [
-                {"tool": tool_name, "status": "ok"} for tool_name in observed_tools
-            ],
-        },
-    }
+    entry.update(overrides)
+    return entry
 
 
-def test_prompt_bank_payload_is_loaded_from_file() -> None:
+def _summary_kwargs(**overrides: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "prompt_entry": _prompt_entry(),
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "history_location": {
+            "source": "history_debug",
+            "session_id": "session-1",
+            "history_index": 2,
+        },
+        "generate_payload": {
+            "response": "A grounded answer.",
+            "background_task_status": {"status": "completed"},
+        },
+        "llm_debug_data": {},
+        "prompt_bank_schema_version": "live_kb_tool_prompt_bank.v3",
+        "requested_complexity_classes": ["tool_augmented"],
+        "seed": 7,
+        "requested_model": "ollama:local-model",
+        "run_environment": {"base_url": "http://127.0.0.1:5001"},
+    }
+    values.update(overrides)
+    return values
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = json.dumps(payload)
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _SequencedSession:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self.responses = list(responses)
+        self.requests: list[dict[str, Any]] = []
+
+    def request(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
+        self.requests.append({"method": method, "url": url, **kwargs})
+        if not self.responses:
+            raise AssertionError(f"unexpected request: {method} {url}")
+        return self.responses.pop(0)
+
+
+def test_prompt_bank_has_one_external_runtime_source() -> None:
     file_payload = json.loads(sampler.PROMPT_BANK_PATH.read_text(encoding="utf-8"))
+
     assert file_payload == sampler.PROMPT_BANK_PAYLOAD
-
-
-def test_write_json_output_creates_parent_directories(tmp_path) -> None:
-    output_path = tmp_path / "nested" / "replay" / "summary.json"
-
-    sampler._write_json_output(str(output_path), {"status": "ok"})
-
-    assert json.loads(output_path.read_text(encoding="utf-8")) == {"status": "ok"}
-
-
-def test_default_model_override_is_ollama_gemma4() -> None:
-    assert sampler.DEFAULT_MODEL == "gemma4:31b"
-
-
-def test_infer_provider_from_model_identifier_treats_ollama_tags_as_local() -> None:
-    assert sampler._infer_provider_from_model_identifier("gemma4:e4b") == "ollama"
-    assert (
-        sampler._infer_provider_from_model_identifier("ollama:llama3.1:8b") == "ollama"
-    )
-
-
-def test_build_local_ollama_generate_model_override_prefixes_ambiguous_gpt_oss() -> (
-    None
-):
-    assert (
-        sampler._build_local_ollama_generate_model_override("gpt-oss:20b")
-        == "ollama:gpt-oss:20b"
-    )
-    assert (
-        sampler._build_local_ollama_generate_model_override("ollama:gpt-oss:20b")
-        == "ollama:gpt-oss:20b"
-    )
-
-
-def test_parse_ollama_list_output_extracts_installed_models() -> None:
-    installed = sampler._parse_ollama_list_output(
-        """NAME              ID              SIZE      MODIFIED
-granite3.3:2b      abc123          1.5 GB    1 day ago
-gemma4:e4b         def456          4.0 GB    2 days ago
-"""
-    )
-
-    assert installed == {"granite3.3:2b", "gemma4:e4b"}
-
-
-def test_build_local_ollama_replay_model_candidates_uses_registry_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        sampler,
-        "get_model_registry_snapshot",
-        lambda: {
-            "source": "vontology_graph",
-            "models": [
-                {
-                    "model_id": "llama3:latest",
-                    "provider": "ollama",
-                    "locality": "local",
-                    "strength_rank": 30,
-                    "relative_cost_rank": 20,
-                    "concept_id": "#V#llama3_latest",
-                },
-                {
-                    "model_id": "granite3.3:2b",
-                    "provider": "ollama",
-                    "locality": "local",
-                    "strength_rank": 10,
-                    "relative_cost_rank": 10,
-                    "concept_id": "#V#granite_3_3_2b",
-                },
-            ],
-        },
-    )
-
-    candidates = sampler._build_local_ollama_replay_model_candidates(
-        requested_candidates=[],
-        installed_models={"llama3:latest", "granite3.3:2b"},
-        pull_missing_models=False,
-    )
-
-    assert [candidate["model"] for candidate in candidates] == [
-        "granite3.3:2b",
-        "llama3:latest",
-    ]
-    assert candidates[0]["catalogue_source"] == "vontology_model_registry"
-    assert candidates[0]["concept_id"] == "#V#granite_3_3_2b"
-
-
-def test_build_local_ollama_replay_model_candidates_can_pull_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pulled: list[str] = []
-
-    def fake_pull(model_name: str) -> dict[str, object]:
-        pulled.append(model_name)
-        return {"status": "ok", "model": model_name}
-
-    monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
-    monkeypatch.setattr(sampler, "_pull_ollama_model", fake_pull)
-
-    candidates = sampler._build_local_ollama_replay_model_candidates(
-        requested_candidates=["granite3.3:2b"],
-        installed_models=set(),
-        pull_missing_models=True,
-    )
-
-    assert pulled == ["granite3.3:2b"]
-    assert candidates[0]["model"] == "granite3.3:2b"
-    assert candidates[0]["pull_result"] == {"status": "ok", "model": "granite3.3:2b"}
-
-
-def test_model_policy_rejects_premium_model_without_explicit_opt_in() -> None:
-    report = sampler._build_model_policy_report(
-        requested_model_arms=[
-            {
-                "arm_id": "arm_1",
-                "label": "gpt-5.4-mini",
-                "requested_model": "gpt-5.4-mini",
-            }
-        ],
-        run_environment={"server_resolved_active_llm_model": "gemma4:26b"},
-        allow_premium_model=False,
-    )
-
-    assert report["premium_model_deviation"] is True
-    assert report["premium_model_deviation_count"] == 1
-    with pytest.raises(RuntimeError, match="local-only model execution"):
-        sampler._enforce_model_policy(report)
-
-
-def test_model_policy_allows_local_ollama_default() -> None:
-    report = sampler._build_model_policy_report(
-        requested_model_arms=[
-            {"arm_id": "arm_1", "label": "gemma4:26b", "requested_model": "gemma4:26b"}
-        ],
-        run_environment={"server_resolved_active_llm_model": "gpt-5.4-mini"},
-        allow_premium_model=False,
-    )
-
-    sampler._enforce_model_policy(report)
-    assert report["local_only_default"] is True
-    assert report["premium_model_deviation"] is False
-    assert report["arms"][0]["effective_provider"] == "ollama"
-
-
-def test_model_policy_rejects_provider_prefixed_premium_model() -> None:
-    report = sampler._build_model_policy_report(
-        requested_model_arms=[
-            {
-                "arm_id": "arm_1",
-                "label": "openai:gpt-5.4-mini",
-                "requested_model": "openai:gpt-5.4-mini",
-            }
-        ],
-        run_environment={},
-        allow_premium_model=False,
-    )
-
-    assert report["premium_model_deviation"] is True
-    assert report["arms"][0]["effective_provider"] == "openai"
-    with pytest.raises(RuntimeError, match="local-only model execution"):
-        sampler._enforce_model_policy(report)
-
-
-def test_model_policy_reports_premium_opt_in() -> None:
-    report = sampler._build_model_policy_report(
-        requested_model_arms=[
-            {
-                "arm_id": "arm_1",
-                "label": "gpt-5.4-mini",
-                "requested_model": "gpt-5.4-mini",
-            }
-        ],
-        run_environment={"server_resolved_active_llm_provider": "openai"},
-        allow_premium_model=True,
-    )
-
-    sampler._enforce_model_policy(report)
-    assert report["premium_model_allowed"] is True
-    assert report["premium_model_deviation"] is True
-
-
-def test_default_base_url_targets_agent_test_instance() -> None:
-    assert sampler.DEFAULT_BASE_URL == "http://127.0.0.1:5010"
-
-
-def test_evaluate_user_happiness_flags_dispatch_failure() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "what_papers_of_mine_do_you_know_about",
-            "prompt": "What papers of mine do you know about?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        generate_payload={
-            "response": "I don't currently have any papers of yours available from this conversation context."
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                        "dispatch_terminal_failure_reason": "workflow_not_runnable",
-                        "dispatch_terminal_failure_detail": (
-                            "Workflow '#V#tool_calling_workflow' is not runnable; instance was not created."
-                        ),
-                    }
-                },
-                "tool_history": [],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert any("Dispatch failed" in reason for reason in evaluation["reasons"])
-
-
-def test_evaluate_user_happiness_flags_unrecovered_tool_observation_error() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "arxiv_ingest",
-            "prompt": "Ingest https://arxiv.org/abs/2406.15341 into Von.",
-            "knowledge_surfaces": ["turn_context"],
-        },
-        generate_payload={
-            "response": "Linked concept: #V#write_tool_policy_workflow.",
-        },
-        llm_debug_data={
-            "tool_invocations": [
-                {
-                    "tool": "workflow_execute",
-                    "status": "error",
-                    "error_code": "workflow_not_runnable",
-                }
-            ],
-            "tool_observation_ledger": {
-                "schema_version": sampler.TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION,
-                "observations": [
-                    {
-                        "tool": "workflow_execute",
-                        "status": "error",
-                        "error_code": "workflow_not_runnable",
-                        "error": (
-                            "Workflow 'arxiv_paper_representation_ingestion' "
-                            "is not runnable; instance was not created."
-                        ),
-                    }
-                ],
-            },
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert any(
-        "Tool workflow_execute failed without a later successful observation"
-        in reason
-        for reason in evaluation["reasons"]
-    )
-
-
-def test_evaluate_user_happiness_flags_partial_completion_gate() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "recent_arxiv_listing_messages",
-            "prompt": "List six recent arXiv listing emails.",
-            "knowledge_surfaces": ["gmail", "arxiv"],
-            "likely_tools": ["gmail_list_messages", "gmail_get_message"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": "One recent arXiv listing email was found.",
-        },
-        llm_debug_data={
-            "completion_gate_verdict": {
-                "decision": "partial",
-                "safe_to_claim_completion": False,
-                "requires_follow_up": True,
-            },
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                    }
-                },
-                "tool_history": [
-                    {"tool": "gmail_list_messages", "status": "ok"},
-                ],
-            },
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert "Completion gate reported partial." in evaluation["reasons"]
-    assert (
-        "Completion gate reported safe_to_claim_completion=false."
-        in evaluation["reasons"]
-    )
-    assert "Completion gate reported requires_follow_up=true." in evaluation["reasons"]
-
-
-def test_evaluate_user_happiness_accepts_valid_typed_input_required_outcome() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "represent_named_entity_if_absent",
-            "prompt": "Represent the named entity if it is not already represented.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_concepts", "get_text_relations"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": (
-                "Two candidate records remain plausible after reading their stored "
-                "text. Please identify which record you intend before I make any "
-                "change."
-            )
-        },
-        llm_debug_data=_input_required_debug(
-            observed_tools=[
-                "search_concepts",
-                "get_text_relations_summary",
-                "get_text_relations",
-            ]
-        ),
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["verdict"] == "input_required"
-    assert evaluation["reasons"] == []
-    assert evaluation["terminal_outcome"] == {
-        "outcome": "input_required",
-        "valid_typed_input_required": True,
-        "completion_gate_consistent": True,
-        "evidence_exhaustion": {
-            "status": "complete",
-            "missing_content_tools": [],
-            "summary_tools_relied_on": ["get_text_relations_summary"],
-        },
-        "accepted": True,
-    }
-    assert "terminal_outcome=input_required" in evaluation["positive_evidence"]
-
-
-def test_evaluate_user_happiness_accepts_verified_success_receipt_and_gate() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "read_back_existing_entity",
-            "prompt": "Read back the existing represented entity.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["fetch_concept"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": (
-                "The existing entity was read back successfully from durable "
-                "Vontology state with its canonical concept ID."
-            )
-        },
-        llm_debug_data={
-            "completion_gate_verdict": {
-                "decision": "completed",
-                "safe_to_claim_completion": True,
-                "requires_follow_up": False,
-            },
-            "terminal_outcome_receipt": {
-                "schema_version": "terminal_outcome_receipt.v1",
-                "profile_concept_id": "#V#terminal_outcome_receipt",
-                "outcome": "verified_success",
-                "cause_code": None,
-            },
-            "terminal_outcome_receipt_validation": {
-                "present": True,
-                "valid": True,
-                "outcome": "verified_success",
-                "decision_authority": "represented_llm",
-            },
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "selected_workflow_id": "#V#entity_representation_workflow",
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                        "dispatch_workflow_id": "#V#entity_representation_workflow",
-                    },
-                },
-                "tool_history": [{"tool": "fetch_concept", "status": "ok"}],
-            },
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["verdict"] == "happy"
-    assert evaluation["terminal_outcome"] == {
-        "outcome": "verified_success",
-        "valid_typed_input_required": False,
-        "completion_gate_consistent": True,
-        "evidence_exhaustion": {
-            "status": "not_applicable",
-            "missing_content_tools": [],
-            "summary_tools_relied_on": [],
-        },
-        "accepted": True,
-    }
-    assert "terminal_outcome=verified_success" in evaluation["positive_evidence"]
-
-
-def test_evaluate_user_happiness_rejects_terminal_success_without_valid_receipt() -> (
-    None
-):
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "read_back_existing_entity",
-            "prompt": "Read back the existing represented entity.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["fetch_concept"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": (
-                "The existing entity was read back successfully from durable "
-                "Vontology state with its canonical concept ID."
-            ),
-            "background_task_status": {"status": "completed"},
-        },
-        llm_debug_data={
-            "completion_gate_verdict": {
-                "decision": "completed",
-                "safe_to_claim_completion": True,
-                "requires_follow_up": False,
-            },
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "selected_workflow_id": "#V#entity_representation_workflow",
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                        "dispatch_workflow_id": (
-                            "#V#entity_representation_workflow"
-                        ),
-                    },
-                },
-                "tool_history": [{"tool": "fetch_concept", "status": "ok"}],
-            },
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["terminal_outcome"]["accepted"] is False
-    assert any(
-        "Terminal outcome receipt was missing, invalid, or inconsistent"
-        in reason
-        for reason in evaluation["reasons"]
-    )
-
-
-def test_canonical_turn_record_terminal_state_precedes_stale_top_level_success() -> (
-    None
-):
-    canonical_debug = _input_required_debug(
-        observed_tools=["search_concepts", "get_text_relations"]
-    )
-    canonical_receipt = dict(
-        sampler._as_mapping(canonical_debug["terminal_outcome_receipt"])
-    )
-    canonical_validation = dict(
-        sampler._as_mapping(
-            canonical_debug["terminal_outcome_receipt_validation"]
-        )
-    )
-    canonical_gate = dict(
-        sampler._as_mapping(canonical_debug["completion_gate_verdict"])
-    )
-    stale_success_receipt = {
-        "schema_version": "terminal_outcome_receipt.v1",
-        "profile_concept_id": "#V#terminal_outcome_receipt",
-        "outcome": "verified_success",
-    }
-    canonical_debug["completion_gate_verdict"] = {
-        "decision": "completed",
-        "safe_to_claim_completion": True,
-        "requires_follow_up": False,
-    }
-    canonical_debug["terminal_outcome_receipt"] = stale_success_receipt
-    canonical_debug["terminal_outcome_receipt_validation"] = {
-        "present": True,
-        "valid": True,
-        "outcome": "verified_success",
-        "decision_authority": "represented_llm",
-    }
-    canonical_debug["turn_execution_record"] = {
-        "completion_gate": canonical_gate,
-        "terminal_outcome_receipt": canonical_receipt,
-        "terminal_outcome_receipt_validation": canonical_validation,
-    }
-
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "represent_named_entity_if_absent",
-            "prompt": "Represent the named entity if it is not already represented.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_concepts", "get_text_relations"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": (
-                "Two candidate records remain plausible after reading their stored "
-                "text. Please identify which record you intend before I make any "
-                "change."
-            ),
-            "background_task_status": {"status": "completed"},
-        },
-        llm_debug_data=canonical_debug,
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["verdict"] == "input_required"
-    assert evaluation["terminal_outcome"]["outcome"] == "input_required"
-    assert evaluation["terminal_outcome"]["accepted"] is True
-
-
-def test_evaluate_user_happiness_rejects_premature_input_required_after_summary() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "represent_named_entity_if_absent",
-            "prompt": "Represent the named entity if it is not already represented.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_concepts", "get_text_relations"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": (
-                "One candidate record may match, but I need you to confirm its "
-                "identity before I make any change."
-            )
-        },
-        llm_debug_data=_input_required_debug(
-            observed_tools=["search_concepts", "get_text_relations_summary"]
-        ),
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert evaluation["terminal_outcome"]["accepted"] is False
-    assert evaluation["terminal_outcome"]["evidence_exhaustion"] == {
-        "status": "incomplete",
-        "missing_content_tools": ["get_text_relations"],
-        "summary_tools_relied_on": ["get_text_relations_summary"],
-    }
-    assert any(
-        "stopped at discovery-summary evidence" in reason
-        and "get_text_relations" in reason
-        for reason in evaluation["reasons"]
-    )
-    assert not any(
-        "safe_to_claim_completion=false" in reason for reason in evaluation["reasons"]
-    )
-    assert not any(
-        "requires_follow_up=true" in reason for reason in evaluation["reasons"]
-    )
-
-
-def test_evaluate_user_happiness_does_not_accept_invalid_input_required_receipt() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "clarify_missing_target",
-            "prompt": "Inspect the target and ask for clarification if needed.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["get_text_relations"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": (
-                "The target remains ambiguous after inspection. Please provide a "
-                "stable identifier so the intended record can be selected."
-            )
-        },
-        llm_debug_data=_input_required_debug(
-            observed_tools=["get_text_relations"],
-            validation_valid=False,
-        ),
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert evaluation["terminal_outcome"]["valid_typed_input_required"] is False
-    assert (
-        "Completion gate reported safe_to_claim_completion=false."
-        in evaluation["reasons"]
-    )
-    assert "Completion gate reported requires_follow_up=true." in evaluation["reasons"]
-
-
-def test_evaluate_user_happiness_flags_explicit_timeout_failure_response() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "research_briefing_my_papers_recent_arxiv_and_jira",
-            "prompt": (
-                "Prepare a short research briefing for me: my represented papers, "
-                "relevant recent arXiv work, and any linked Jira tasks."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv", "jira"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv", "jira_search"],
-        },
-        generate_payload={
-            "response": (
-                "I couldn't complete that request because the authoritative "
-                "conversation-turn workflow failed. "
-                "workflow_llm_step_timeout:LLM call timed out after 45s "
-                "(stage=llm.action, model=gemma4:26b)"
-            )
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "tool_pipeline",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                    }
-                },
-                "tool_history": [
-                    {"tool": "search_knowledge_base", "success": True},
-                    {"tool": "search_arxiv", "success": True},
-                ],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert any(
-        "concrete failure or access marker" in reason.lower()
-        for reason in evaluation["reasons"]
-    )
-
-
-def test_evaluate_user_happiness_accepts_grounded_tool_answer() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "research_briefing_my_papers_recent_arxiv_and_jira",
-            "prompt": (
-                "Prepare a short research briefing for me: my represented papers, "
-                "relevant recent arXiv work, and any linked Jira tasks."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv", "jira"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv", "jira_search"],
-        },
-        generate_payload={
-            "response": (
-                "You have several represented papers on agent memory and symbolic "
-                "reasoning. Recent arXiv work continues that theme, and the linked "
-                "Jira issues are mainly about retrieval quality and paper workflows."
-            )
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "tool_pipeline",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                    }
-                },
-                "tool_history": [
-                    {"tool": "search_knowledge_base", "success": True},
-                    {"tool": "search_arxiv", "success": True},
-                    {"tool": "jira_search", "success": True},
-                ],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["verdict"] == "happy"
-    assert evaluation["observed_tools"] == [
-        "search_knowledge_base",
-        "search_arxiv",
-        "jira_search",
+    assert sampler._load_prompt_bank() == file_payload
+    assert "EMBEDDED_PROMPT_BANK_PAYLOAD" not in vars(sampler)
+
+
+def test_choose_prompt_respects_complexity_filter_and_seed() -> None:
+    bank = [
+        _prompt_entry(id="direct", complexity_class="direct_context_or_background"),
+        _prompt_entry(id="tool-a", complexity_class="tool_augmented"),
+        _prompt_entry(id="tool-b", complexity_class="tool_augmented"),
     ]
 
-
-def test_evaluate_user_happiness_flags_canonical_concept_id_near_miss() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "represented_self_facts_vs_inferences",
-            "category": "epistemic_summary",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "Tell me about myself as represented here, but separate "
-                "established facts from likely inferences."
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["fetch_concept", "get_predicate_incidence"],
-        },
-        generate_payload={
-            "response": (
-                "Based on the Vontology, here is a self-representation audit "
-                "for **#V#michael_switbrock** with established facts and likely "
-                "inferences separated below."
-            )
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                        "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
-                    }
-                },
-                "tool_history": [
-                    {"tool": "fetch_concept", "success": True},
-                    {"tool": "get_predicate_incidence", "success": True},
-                ],
-            }
-        },
-        run_environment={
-            "authenticated_user_concept_id": "#V#michael_witbrock",
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert any(
-        "Canonical concept ID mismatch" in reason and "#V#michael_switbrock" in reason
-        for reason in evaluation["reasons"]
-    )
-    fidelity = evaluation["canonical_concept_id_fidelity"]
-    assert fidelity["status"] == "failed"
-    assert fidelity["expected_concept_ids"] == ["#V#michael_witbrock"]
-    assert fidelity["observed_concept_ids"] == ["#V#michael_switbrock"]
-    assert fidelity["findings"] == [
-        {
-            "reason_code": "canonical_concept_id_mismatch",
-            "severity": "failed",
-            "expected_concept_id": "#V#michael_witbrock",
-            "observed_concept_id": "#V#michael_switbrock",
-            "edit_distance": 1,
-            "message": (
-                "Response displayed a near-miss Vontology concept ID "
-                "#V#michael_switbrock where canonical ID "
-                "#V#michael_witbrock was the expected grounded subject."
-            ),
-        }
-    ]
-
-
-def test_evaluate_user_happiness_accepts_exact_canonical_concept_id() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "represented_self_facts_vs_inferences",
-            "category": "epistemic_summary",
-            "complexity_class": "vontology_grounded",
-            "prompt": "Tell me about myself as represented here.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["fetch_concept"],
-        },
-        generate_payload={
-            "response": (
-                "The represented subject is #V#michael_witbrock: with related "
-                "paper evidence such as #V#learning_to_tell_two_spirals_apart."
-            )
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                    }
-                },
-                "tool_history": [{"tool": "fetch_concept", "success": True}],
-            }
-        },
-        run_environment={
-            "authenticated_user_concept_id": "#V#michael_witbrock",
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["canonical_concept_id_fidelity"]["status"] == "passed"
-    assert evaluation["canonical_concept_id_fidelity"]["observed_concept_ids"] == [
-        "#V#michael_witbrock",
-        "#V#learning_to_tell_two_spirals_apart",
-    ]
-    assert evaluation["canonical_concept_id_fidelity"]["findings"] == []
-
-
-def test_evaluate_user_happiness_accepts_unrelated_retrieved_concept_id() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "represented_self_facts_vs_inferences",
-            "category": "epistemic_summary",
-            "complexity_class": "vontology_grounded",
-            "prompt": "Tell me about myself as represented here.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["fetch_concept"],
-        },
-        generate_payload={
-            "response": (
-                "The answer cites represented evidence from "
-                "#V#learning_to_tell_two_spirals_apart and avoids fabricating a "
-                "subject identifier."
-            )
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                    }
-                },
-                "tool_history": [{"tool": "fetch_concept", "success": True}],
-            }
-        },
-        run_environment={
-            "authenticated_user_concept_id": "#V#michael_witbrock",
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    fidelity = evaluation["canonical_concept_id_fidelity"]
-    assert fidelity["status"] == "passed"
-    assert fidelity["expected_concept_ids"] == ["#V#michael_witbrock"]
-    assert fidelity["observed_concept_ids"] == ["#V#learning_to_tell_two_spirals_apart"]
-    assert fidelity["findings"] == []
-
-
-def test_evaluate_user_happiness_accepts_short_direct_answer() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "what_is_the_capital_of_france",
-            "category": "general_knowledge",
-            "complexity_class": "direct_context_or_background",
-            "prompt": "What is the capital of France?",
-            "knowledge_surfaces": ["background_knowledge"],
-            "likely_tools": [],
-        },
-        generate_payload={"response": "Paris."},
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "direct_response",
-                    }
-                },
-                "tool_history": [],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["verdict"] == "happy"
-    assert evaluation["reasons"] == []
-
-
-def test_evaluate_user_happiness_requires_tool_use_for_operational_prompt() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "create_von_task_for_replay_review",
-            "category": "von_task_creation",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Create a Von task for me titled 'Review replay results' with a "
-                "short description saying it came from the JVNAUTOSCI-1894 "
-                "replay programme."
-            ),
-            "knowledge_surfaces": ["turn_context", "von_tasks"],
-            "likely_tools": ["task_create"],
-            "requires_tool_use": True,
-        },
-        generate_payload={
-            "response": "I can help with that, but I would need to create the task first."
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "direct_response",
-                    }
-                },
-                "tool_history": [],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert any(
-        "required operational tool use" in reason for reason in evaluation["reasons"]
-    )
-
-
-def test_evaluate_user_happiness_flags_entity_retrieval_inability_marker() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "students_or_collaborators_and_relationships",
-            "category": "relation_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "What students or collaborators of mine are represented in the KB, "
-                "and what is my relationship to each?"
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        generate_payload={
-            "response": (
-                "I am unable to retrieve the information about your students or "
-                "collaborators because the necessary tool was not permitted for "
-                "this operation."
-            )
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                        "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
-                    }
-                },
-                "tool_history": [],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert any(
-        "concrete failure or access marker" in reason.lower()
-        for reason in evaluation["reasons"]
-    )
-
-
-def test_evaluate_user_happiness_flags_missing_workflow_required_evidence_tools() -> (
-    None
-):
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "represented_self_facts_vs_inferences",
-            "category": "epistemic_summary",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "Tell me about myself as represented here, but separate "
-                "established facts from likely inferences."
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        generate_payload={
-            "response": (
-                "The represented facts show your research network and projects."
-            )
-        },
-        llm_debug_data={
-            "tool_invocations": [{"tool": "find_relations_with_argument"}],
-            "turn_execution_record": {
-                "execution": {
-                    "workflow_required_effects_contract": {
-                        "schema_version": "workflow_required_effects_contract.v1",
-                        "contract_id": "grounded_entity_information_retrieval_evidence",
-                        "required_effects": [
-                            {
-                                "effect_id": "grounded_entity_information_evidence",
-                                "effect_type": "grounded_evidence",
-                                "required_tools": [
-                                    "get_predicate_incidence",
-                                    "find_relations_with_argument",
-                                ],
-                                "required_tools_match": "all",
-                            }
-                        ],
-                    }
-                }
-            },
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "custom_workflow",
-                        "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
-                    }
-                },
-                "tool_history": [],
-            },
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert any(
-        "workflow-authored required evidence" in reason.lower()
-        and "get_predicate_incidence" in reason
-        for reason in evaluation["reasons"]
-    )
-    assert evaluation["missing_answer_evidence"] == [
-        {
-            "effect_id": "grounded_entity_information_evidence",
-            "effect_type": "grounded_evidence",
-            "required_tools": [
-                "get_predicate_incidence",
-                "find_relations_with_argument",
-            ],
-            "missing_tools": ["get_predicate_incidence"],
-            "match": "all",
-            "requirement_source": "workflow_required_effects_contract",
-            "user_answer_required": True,
-            "reason": (
-                "Workflow-authored required evidence was not retrieved for "
-                "grounded_entity_information_evidence; missing tools: "
-                "get_predicate_incidence."
-            ),
-        }
-    ]
-
-
-def test_evaluate_user_happiness_keeps_diagnostic_only_evidence_out_of_ontology_verdict() -> (
-    None
-):
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "key_predicates_for_scientific_papers",
-            "category": "ontology_predicate_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "What are key predicates for scientific papers in Vontology?",
-            "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts", "get_predicate_incidence"],
-        },
-        generate_payload={
-            "response": (
-                "Based on Vontology predicate incidence for represented scientific "
-                "paper instances, key predicates include Has Author, Has First "
-                "Author, hasName, and hasContent."
-            )
-        },
-        llm_debug_data={
-            "tool_invocations": [
-                {"tool": "search_concepts"},
-                {"tool": "get_predicate_incidence"},
-            ],
-            "turn_execution_record": {
-                "execution": {
-                    "workflow_required_effects_contract": {
-                        "schema_version": "workflow_required_effects_contract.v1",
-                        "required_effects": [
-                            {
-                                "effect_id": "conversation_locator",
-                                "effect_type": "diagnostic_evidence",
-                                "required_tools": [
-                                    "conversation_telemetry_get_locator"
-                                ],
-                            },
-                            {
-                                "effect_id": "conversation_history",
-                                "effect_type": "diagnostic_evidence",
-                                "required_tools": [
-                                    "chat_history_get_segments",
-                                    "chat_history_get_debug_entry",
-                                ],
-                                "required_tools_match": "all",
-                            },
-                        ],
-                    }
-                }
-            },
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "tool_pipeline",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                    }
-                },
-                "tool_history": [],
-            },
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["verdict"] == "happy"
-    assert evaluation["reasons"] == []
-    assert evaluation["diagnostic_evidence_complete"] is False
-    assert len(evaluation["diagnostic_evidence_reasons"]) == 2
-    assert evaluation["missing_answer_evidence"] == []
-    assert [
-        entry["effect_id"] for entry in evaluation["missing_diagnostic_evidence"]
-    ] == ["conversation_locator", "conversation_history"]
-    assert all(
-        entry["requirement_source"] == "workflow_required_effects_contract"
-        for entry in evaluation["missing_evidence"]
-    )
-    assert all(
-        entry["user_answer_required"] is False
-        for entry in evaluation["missing_diagnostic_evidence"]
-    )
-
-
-def test_evaluate_user_happiness_flags_dispatch_missing_answer_required_tools() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "key_predicates_for_scientific_papers",
-            "category": "ontology_predicate_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "What are key predicates for scientific papers in Vontology?",
-            "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts", "get_predicate_incidence"],
-        },
-        generate_payload={
-            "response": (
-                "I couldn't complete that request because the authoritative "
-                "conversation-turn workflow did not produce a user-visible response."
-            )
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "tool_pipeline",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                        "required_effects_required_tools": [
-                            "vontology_concept_search",
-                            "fetch_concept",
-                            "get_predicate_incidence",
-                        ],
-                        "required_effects_missing_required_tools": [
-                            "get_predicate_incidence"
-                        ],
-                        "required_effects_unresolved_effect_ids": [
-                            "effect_prompt_required_evidence_get_predicate_incidence"
-                        ],
-                        "required_effects_unresolved_effect_types": [
-                            "required_evidence"
-                        ],
-                    }
-                },
-                "tool_history": [
-                    {"tool": "vontology_concept_search", "success": True},
-                    {"tool": "fetch_concept", "success": False},
-                ],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert any(
-        "concrete failure or access marker" in reason.lower()
-        for reason in evaluation["reasons"]
-    )
-    assert any(
-        entry["requirement_source"] == "workflow_dispatch_required_effects"
-        and entry["missing_tools"] == ["get_predicate_incidence"]
-        and entry["user_answer_required"] is True
-        for entry in evaluation["missing_answer_evidence"]
-    )
-
-
-def test_evaluate_user_happiness_fails_missing_diagnostic_tools_for_diagnostic_prompt() -> (
-    None
-):
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "diagnose_last_turn_telemetry",
-            "category": "turn_diagnostics",
-            "complexity_class": "tool_augmented",
-            "prompt": "Diagnose the last conversation turn telemetry.",
-            "knowledge_surfaces": ["conversation_telemetry"],
-            "likely_tools": [
-                "conversation_telemetry_get_locator",
-                "chat_history_get_segments",
-            ],
-            "requires_diagnostic_evidence": True,
-        },
-        generate_payload={
-            "response": (
-                "The previous turn appears to have selected a workflow, but the "
-                "diagnostic locator and chat history were not inspected."
-            )
-        },
-        llm_debug_data={
-            "turn_execution_record": {
-                "execution": {
-                    "workflow_required_effects_contract": {
-                        "required_effects": [
-                            {
-                                "effect_id": "conversation_locator",
-                                "effect_type": "diagnostic_evidence",
-                                "required_tools": [
-                                    "conversation_telemetry_get_locator"
-                                ],
-                            },
-                            {
-                                "effect_id": "conversation_history",
-                                "effect_type": "diagnostic_evidence",
-                                "required_tools": ["chat_history_get_segments"],
-                            },
-                        ]
-                    }
-                }
-            },
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "tool_pipeline",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                    }
-                },
-                "tool_history": [],
-            },
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert evaluation["diagnostic_evidence_complete"] is False
-    assert [entry["effect_id"] for entry in evaluation["missing_answer_evidence"]] == [
-        "conversation_locator",
-        "conversation_history",
-    ]
-    assert all(
-        entry["user_answer_required"] is True
-        for entry in evaluation["missing_diagnostic_evidence"]
-    )
-    assert any(
-        "conversation_telemetry_get_locator" in reason
-        for reason in evaluation["reasons"]
-    )
-
-
-def test_evaluate_user_happiness_accepts_grounded_empty_operational_result() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "list_my_pending_von_tasks",
-            "category": "von_task_listing",
-            "complexity_class": "tool_augmented",
-            "prompt": "List my pending Von tasks.",
-            "knowledge_surfaces": ["turn_context", "von_tasks"],
-            "likely_tools": ["task_list"],
-            "requires_tool_use": True,
-            "allows_grounded_empty_result": True,
-        },
-        generate_payload={
-            "response": "I don't currently have any pending Von tasks for you."
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "tool_pipeline",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                    }
-                },
-                "tool_history": [
-                    {"tool": "task_list", "success": True},
-                ],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is True
-    assert evaluation["verdict"] == "happy"
-    assert evaluation["reasons"] == []
-
-
-def test_evaluate_user_happiness_rejects_inventory_only_claim_of_relationship() -> None:
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "id": "what_papers_of_mine_do_you_know_about",
-            "prompt": "What papers of mine do you know about?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        generate_payload={
-            "response": "I currently have 35 of your papers stored in my system."
-        },
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "selected_execution_mode": "tool_pipeline",
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                    }
-                },
-                "tool_history": [
-                    {"tool": "list_papers", "success": True},
-                ],
-            }
-        },
-    )
-
-    assert evaluation["should_user_be_happy"] is False
-    assert evaluation["verdict"] == "unhappy"
-    assert any(
-        "inventory-only tool evidence" in reason for reason in evaluation["reasons"]
-    )
-
-
-def test_choose_prompt_respects_complexity_class_filter() -> None:
-    prompt = sampler._choose_prompt(
-        sampler.PROMPT_BANK_PAYLOAD["prompts"],
-        seed=7,
+    selected_a = sampler._choose_prompt(
+        bank,
+        seed=4,
         prompt_id=None,
-        allowed_complexity_classes=frozenset({"direct_context_or_background"}),
+        allowed_complexity_classes=frozenset({"tool_augmented"}),
+    )
+    selected_b = sampler._choose_prompt(
+        bank,
+        seed=4,
+        prompt_id=None,
+        allowed_complexity_classes=frozenset({"tool_augmented"}),
     )
 
-    assert prompt["complexity_class"] == "direct_context_or_background"
+    assert selected_a == selected_b
+    assert selected_a["id"] in {"tool-a", "tool-b"}
 
 
-def test_prompt_bank_includes_operational_task_and_message_cases() -> None:
-    prompts = sampler.PROMPT_BANK_PAYLOAD["prompts"]
-    by_id = {
-        prompt["id"]: prompt
-        for prompt in prompts
-        if isinstance(prompt, dict) and isinstance(prompt.get("id"), str)
-    }
-
-    assert by_id["create_von_task_for_replay_review"]["likely_tools"] == ["task_create"]
-    assert by_id["mark_replay_related_von_task_in_progress"]["likely_tools"] == [
-        "task_search",
-        "task_update_status",
-    ]
-    assert (
-        by_id["send_myself_a_von_message_about_replay_results"]["requires_tool_use"]
-        is True
-    )
-    assert by_id["count_my_unread_von_messages"]["allows_grounded_empty_result"] is True
-
-
-def test_prompt_bank_includes_trivial_text_relation_replay_case() -> None:
-    prompts = sampler.PROMPT_BANK_PAYLOAD["prompts"]
-    by_id = {
-        prompt["id"]: prompt
-        for prompt in prompts
-        if isinstance(prompt, dict) and isinstance(prompt.get("id"), str)
-    }
-
-    prompt = by_id["text_relations_for_michael_witbrock_concept"]
-    assert prompt["category"] == "represented_relation_lookup"
-    assert prompt["complexity_class"] == "vontology_grounded"
-    assert prompt["likely_tools"] == ["get_text_relations_summary"]
-    assert prompt["requires_tool_use"] is True
-
-
-def test_prompt_bank_includes_jira_replay_regressions() -> None:
-    prompts = sampler.PROMPT_BANK_PAYLOAD["prompts"]
-    by_id = {
-        prompt["id"]: prompt
-        for prompt in prompts
-        if isinstance(prompt, dict) and isinstance(prompt.get("id"), str)
-    }
-
-    direct_issue = by_id["tell_me_about_jvnautosci_150_in_jira"]
-    assert direct_issue["prompt"] == "Tell me about JVNAUTOSCI-150 in JIRA"
-    assert direct_issue["likely_tools"] == ["jira_get_issue"]
-    assert direct_issue["requires_tool_use"] is True
-
-    parent_subtasks = by_id["parent_and_subtasks_for_jvnautosci_150"]
-    assert parent_subtasks["likely_tools"] == ["jira_get_issue"]
-    assert parent_subtasks["category"] == "single_tool_jira_summary"
-
-    repair_task = by_id["summarise_jvnautosci_2097_tool_plan_repair_task"]
-    assert repair_task["likely_tools"] == ["jira_get_issue"]
-    assert "tool-calling failure" in repair_task["prompt"]
-
-    repair_search = by_id["which_jira_task_tracks_tool_call_repair_critic"]
-    assert repair_search["likely_tools"] == ["jira_search"]
-    assert repair_search["category"] == "single_tool_jira_search"
-
-    gmail_listing = by_id["list_last_ten_zhan_gmail_messages"]
-    assert gmail_listing["category"] == "single_tool_gmail_listing"
-    assert gmail_listing["complexity_class"] == "tool_augmented"
-    assert gmail_listing["likely_tools"] == [
-        "gmail_list_messages",
-        "gmail_get_message",
-    ]
-    assert gmail_listing["requires_tool_use"] is True
-
-    email_arxiv_titles = by_id["list_arxiv_titles_from_zhan_gmail_messages"]
-    assert email_arxiv_titles["category"] == "multi_tool_gmail_arxiv_title_lookup"
-    assert email_arxiv_titles["complexity_class"] == "tool_augmented"
-    assert email_arxiv_titles["knowledge_surfaces"] == [
-        "turn_context",
-        "gmail",
-        "arxiv",
-    ]
-    assert email_arxiv_titles["likely_tools"] == [
-        "gmail_list_messages",
-        "gmail_get_message",
-        "get_paper_metadata",
-        "search_arxiv",
-    ]
-    assert email_arxiv_titles["required_workflows"] == [
-        "#V#general_mail_review_workflow"
-    ]
-    assert email_arxiv_titles["requires_tool_use"] is True
-    assert email_arxiv_titles["allows_grounded_empty_result"] is True
-
-
-def test_run_generate_background_omits_model_when_not_requested(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen_payloads: list[dict[str, object]] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
-            return {"task_id": "task-123"}
-        if url.endswith("/von/api/task/status/task-123"):
-            return {"status": "completed"}
-        if url.endswith("/von/api/task/result/task-123"):
-            return {"result": {"response": "ok"}}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    task_id, generate_payload = sampler._run_generate_background(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        prompt="Who am I in this conversation?",
-        model=None,
-        gmail_profile=None,
-        presenter_mode=False,
-        turn_expected_outcome_contract=None,
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
+def test_model_arm_plan_records_explicit_models_without_certifying_them() -> None:
+    arms = sampler._build_model_arm_plan(
+        requested_model="ollama:small",
+        compare_models=["openai:gpt-frontier", "ollama:small"],
+        include_active_model_arm=True,
     )
 
-    assert task_id == "task-123"
-    assert generate_payload == {"response": "ok"}
-    assert seen_payloads
-    assert "model" not in seen_payloads[0]
-    assert "presenter_mode" not in seen_payloads[0]
+    assert [arm["requested_model"] for arm in arms] == [
+        None,
+        "ollama:small",
+        "openai:gpt-frontier",
+    ]
+    assert arms[2]["requested_provider"] == "openai"
+    assert all("certification" not in arm for arm in arms)
 
 
-def test_run_generate_background_can_preserve_final_status_payload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            return {"task_id": "task-123"}
-        if url.endswith("/von/api/task/status/task-123"):
-            return {
-                "status": "completed",
-                "progress_history": [
-                    {
-                        "status": "llm_call_end",
-                        "stage": "context_adjudication",
+def test_run_generate_background_sends_only_user_and_runtime_inputs() -> None:
+    session = _SequencedSession(
+        [
+            _FakeResponse({"task_id": "task-1"}, status_code=202),
+            _FakeResponse({"status": "completed"}),
+            _FakeResponse(
+                {
+                    "result": {
+                        "request_id": "request-1",
+                        "session_id": "session-1",
+                        "response": "Done.",
                     }
-                ],
-            }
-        if url.endswith("/von/api/task/result/task-123"):
-            return {"result": {"response": "ok"}}
-        raise AssertionError(f"Unexpected URL: {url}")
+                }
+            ),
+        ]
+    )
 
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    task_id, generate_payload = sampler._run_generate_background(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        prompt="Who am I in this conversation?",
-        model=None,
-        gmail_profile=None,
-        presenter_mode=False,
-        turn_expected_outcome_contract=None,
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
+    task_id, result = sampler._run_generate_background(
+        session=session,  # type: ignore[arg-type]
+        base_url="http://von.test",
+        prompt="Use your best judgement.",
+        model="openai:gpt-frontier",
+        gmail_profile="research",
+        presenter_mode=True,
+        timeout_seconds=30,
+        poll_interval_seconds=0.01,
         include_status_payload=True,
     )
 
-    assert task_id == "task-123"
-    assert generate_payload["response"] == "ok"
-    assert generate_payload["background_task_status"]["status"] == "completed"
-    assert generate_payload["background_task_status"]["progress_history"] == [
-        {"status": "llm_call_end", "stage": "context_adjudication"}
+    submitted = session.requests[0]["json"]
+    assert task_id == "task-1"
+    assert result["response"] == "Done."
+    assert submitted["prompt"] == "Use your best judgement."
+    assert submitted["model"] == "openai:gpt-frontier"
+    assert submitted["model_provider"] == "openai"
+    assert submitted["gmail_profile"] == "research"
+    assert submitted["presenter_mode"] is True
+    assert "turn_expected_outcome_contract" not in submitted
+    assert "agent_test_selector_replay_mode" not in submitted
+
+
+def test_task_result_debug_fallback_preserves_terminal_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sampler,
+        "_find_assistant_turn_history_location",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("history not settled")),
+    )
+    turn_record = {
+        "terminal_status": "completed",
+        "tool_invocations": [
+            {
+                "tool": "relation_upsert",
+                "effective_payload": {
+                    "effect_id": "effect-1",
+                    "readback": {"status": "observed"},
+                },
+            }
+        ],
+    }
+
+    location, debug = sampler._resolve_turn_debug_data(
+        session=object(),  # type: ignore[arg-type]
+        base_url="http://von.test",
+        session_id="session-1",
+        request_id="request-1",
+        response_text="Done.",
+        generate_payload={
+            "response": "Done.",
+            "turn_execution_record": turn_record,
+        },
+    )
+
+    assert location["source"] == "background_task_result"
+    assert "history not settled" in location["history_lookup_error"]
+    assert debug["turn_execution_record"] == turn_record
+
+
+def test_terminal_task_debug_enrichment_wins_without_losing_history() -> None:
+    merged = sampler._merge_history_and_task_result_debug(
+        {
+            "request_id": "request-1",
+            "history_only": {"value": 1},
+            "turn_execution_record": {"terminal_status": "running"},
+        },
+        {
+            "turn_execution_record": {
+                "terminal_status": "completed",
+                "tool_invocations": [{"tool": "search_records"}],
+            }
+        },
+    )
+
+    assert merged["history_only"] == {"value": 1}
+    assert merged["turn_execution_record"]["terminal_status"] == "completed"
+    assert merged["turn_execution_record"]["tool_invocations"] == [
+        {"tool": "search_records"}
     ]
 
 
-def test_run_generate_background_captures_late_terminal_result_after_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    status_calls = 0
-    time_values = iter([100.0, 100.1, 131.0, 131.1])
+def test_summary_preserves_effect_readback_model_timing_and_llm_calls() -> None:
+    invocation = {
+        "tool": "relation_upsert",
+        "status": "success",
+        "effective_payload": {
+            "effect_id": "effect-1",
+            "operation": "upsert_relation",
+            "readback": {
+                "status": "observed",
+                "closure_changed": False,
+            },
+        },
+    }
+    llm_call = {
+        "stage": "turn_answer",
+        "model": "openai:gpt-frontier",
+        "elapsed_ms": 812,
+    }
+    debug = {
+        "model": "openai:gpt-frontier",
+        "turn_execution_record": {
+            "terminal_status": "completed",
+            "model": "openai:gpt-frontier",
+            "tool_invocations": [invocation],
+            "llm_calls": [llm_call],
+            "timing_breakdown": {
+                "totals": {
+                    "elapsed_ms": 1234,
+                    "llm_elapsed_ms": 812,
+                    "llm_call_count": 1,
+                },
+                "llm_calls_by_stage_model": [
+                    {
+                        "stage": "turn_answer",
+                        "model": "openai:gpt-frontier",
+                        "call_count": 1,
+                    }
+                ],
+            },
+        },
+    }
 
-    def fake_time() -> float:
-        return next(time_values)
+    summary = sampler._build_summary(**_summary_kwargs(llm_debug_data=debug))
 
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        nonlocal status_calls
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            return {"task_id": "task-late"}
-        if url.endswith("/von/api/task/status/task-late"):
-            status_calls += 1
-            if status_calls == 1:
-                return {"status": "running", "progress": {"phase": "finalising"}}
-            return {
-                "status": "completed",
-                "has_result": True,
-                "completed_at": "2026-06-24T00:49:16.619509+00:00",
-            }
-        if url.endswith("/von/api/task/result/task-late"):
-            return {
-                "result": {
-                    "response": "Late grounded answer.",
-                    "llm_debug": {
-                        "turn_execution_diagnostics": {
-                            "workflow_routing_diagnostics": {}
-                        }
+    telemetry = summary["telemetry"]
+    assert summary["status"] == "ok"
+    assert telemetry["ordinary_turn_terminal_status"] == "completed"
+    assert telemetry["model"] == "openai:gpt-frontier"
+    assert telemetry["tool_invocations"] == [invocation]
+    assert telemetry["observed_tools"] == ["relation_upsert"]
+    assert telemetry["tool_count"] == 1
+    assert telemetry["tool_observation_ledger"]["observation_count"] == 1
+    assert telemetry["tool_invocations"][0]["effective_payload"]["readback"] == {
+        "status": "observed",
+        "closure_changed": False,
+    }
+    assert telemetry["timing"]["elapsed_ms"] == 1234
+    assert telemetry["timing"]["llm_elapsed_ms"] == 812
+    assert telemetry["llm_calls"] == [llm_call]
+    assert "evaluation" not in summary
+    assert "action_outcome" not in summary
+    assert "model_portfolio_evaluation" not in summary
+    assert "decision_attribution" not in summary
+    assert "selector_telemetry_completeness" not in telemetry
+
+
+def test_missing_or_non_success_completion_gate_does_not_change_collection_status() -> (
+    None
+):
+    without_gate = sampler._build_summary(**_summary_kwargs())
+    with_gate = sampler._build_summary(
+        **_summary_kwargs(
+            llm_debug_data={
+                "turn_execution_record": {
+                    "terminal_status": "completed",
+                    "completion_gate": {
+                        "status": "partial",
+                        "safe_to_claim_completion": False,
                     },
                 }
             }
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-    monkeypatch.setattr(sampler.time, "time", fake_time)
-    monkeypatch.setattr(sampler.time, "sleep", lambda _seconds: None)
-
-    task_id, generate_payload = sampler._run_generate_background(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        prompt="Tell me about JVNAUTOSCI-150 in JIRA",
-        model=None,
-        gmail_profile=None,
-        presenter_mode=False,
-        turn_expected_outcome_contract=None,
-        timeout_seconds=1.0,
-        poll_interval_seconds=0.01,
-        late_terminal_grace_seconds=0.0,
-    )
-
-    assert task_id == "task-late"
-    assert generate_payload["response"] == "Late grounded answer."
-    reconciliation = generate_payload["background_task_timeout_reconciliation"]
-    assert reconciliation["timed_out_before_budget"] is True
-    assert reconciliation["late_terminal_result_observed"] is True
-    assert reconciliation["timeout_status_payload"]["status"] == "running"
-    assert reconciliation["final_status_payload"]["status"] == "completed"
-    assert generate_payload["background_task_status"]["status"] == "completed"
-
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry={
-            "complexity_class": "direct_context_or_background",
-            "knowledge_surfaces": ["turn_context"],
-        },
-        generate_payload=generate_payload,
-        llm_debug_data=generate_payload["llm_debug"],
-    )
-    assert evaluation["should_user_be_happy"] is False
-    assert any("late terminal result" in reason for reason in evaluation["reasons"])
-
-
-def test_run_generate_background_can_request_presenter_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen_payloads: list[dict[str, object]] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
-            return {"task_id": "task-123"}
-        if url.endswith("/von/api/task/status/task-123"):
-            return {"status": "completed"}
-        if url.endswith("/von/api/task/result/task-123"):
-            return {"result": {"response": "ok"}}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    task_id, generate_payload = sampler._run_generate_background(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        prompt="Summarise this for the presenter UI",
-        model="gpt-5.4-mini",
-        gmail_profile=None,
-        presenter_mode=True,
-        turn_expected_outcome_contract=None,
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
-    )
-
-    assert task_id == "task-123"
-    assert generate_payload == {"response": "ok"}
-    assert seen_payloads
-    assert seen_payloads[0]["model"] == "gpt-5.4-mini"
-    assert seen_payloads[0]["presenter_mode"] is True
-
-
-def test_run_generate_background_sends_local_model_provider_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen_payloads: list[dict[str, object]] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
-            return {"task_id": "task-123"}
-        if url.endswith("/von/api/task/status/task-123"):
-            return {"status": "completed"}
-        if url.endswith("/von/api/task/result/task-123"):
-            return {"result": {"response": "ok"}}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    sampler._run_generate_background(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        prompt="What text relations are used with the concept for Michael Witbrock?",
-        model="gemma4:e4b",
-        gmail_profile=None,
-        presenter_mode=False,
-        turn_expected_outcome_contract=None,
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
-    )
-
-    assert seen_payloads
-    assert seen_payloads[0]["model"] == "gemma4:e4b"
-    assert seen_payloads[0]["model_provider"] == "ollama"
-    assert seen_payloads[0]["selected_model_provider"] == "ollama"
-
-
-def test_run_generate_background_can_request_gmail_profile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen_payloads: list[dict[str, object]] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
-            return {"task_id": "task-123"}
-        if url.endswith("/von/api/task/status/task-123"):
-            return {"status": "completed"}
-        if url.endswith("/von/api/task/result/task-123"):
-            return {"result": {"response": "ok"}}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    sampler._run_generate_background(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        prompt="List my last six Gmail messages with labels.",
-        model=None,
-        gmail_profile="zhan-gmail",
-        presenter_mode=False,
-        turn_expected_outcome_contract=None,
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
-    )
-
-    assert seen_payloads
-    assert seen_payloads[0]["gmail_profile"] == "zhan-gmail"
-
-
-def test_run_generate_background_sends_turn_expected_outcome_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen_payloads: list[dict[str, object]] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            seen_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
-            return {"task_id": "task-123"}
-        if url.endswith("/von/api/task/status/task-123"):
-            return {"status": "completed"}
-        if url.endswith("/von/api/task/result/task-123"):
-            return {"result": {"response": "ok"}}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    prompt_entry = {
-        "id": "tell_me_about_jvnautosci_150_in_jira",
-        "category": "single_tool_jira_summary",
-        "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
-        "knowledge_surfaces": ["turn_context", "jira"],
-        "likely_tools": ["jira_get_issue"],
-        "requires_tool_use": True,
-    }
-    contract = sampler._build_turn_expected_outcome_contract_for_prompt_entry(
-        prompt_entry
-    )
-
-    sampler._run_generate_background(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        prompt=str(prompt_entry["prompt"]),
-        model=None,
-        gmail_profile=None,
-        presenter_mode=False,
-        turn_expected_outcome_contract=contract,
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
-    )
-
-    assert seen_payloads
-    payload_contract = seen_payloads[0]["turn_expected_outcome_contract"]
-    assert isinstance(payload_contract, dict)
-    assert payload_contract["schema_version"] == "turn_expected_outcome_contract.v1"
-    assert payload_contract["required_tools"] == ["jira_get_issue"]
-    assert payload_contract["prompt_bank_entry_id"] == (
-        "tell_me_about_jvnautosci_150_in_jira"
-    )
-    assert payload_contract["knowledge_surfaces"] == ["turn_context", "jira"]
-
-
-def test_run_generate_background_empty_task_result_remains_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/generate"):
-            return {"task_id": "task-empty"}
-        if url.endswith("/von/api/task/status/task-empty"):
-            return {"status": "completed"}
-        if url.endswith("/von/api/task/result/task-empty"):
-            return {"result": {}}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    with pytest.raises(
-        sampler.BackgroundGenerateTaskError,
-        match="Background task result was empty",
-    ):
-        sampler._run_generate_background(
-            session=requests.Session(),
-            base_url="http://127.0.0.1:5000",
-            prompt="Tell me about JVNAUTOSCI-150 in JIRA",
-            model="gemma4:26b",
-            gmail_profile=None,
-            presenter_mode=False,
-            turn_expected_outcome_contract=None,
-            timeout_seconds=30.0,
-            poll_interval_seconds=0.2,
         )
-
-
-def test_resolve_turn_debug_data_uses_partial_task_result_when_history_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_find_history_location(**kwargs: object) -> dict[str, object]:
-        raise RuntimeError("history lookup absent")
-
-    monkeypatch.setattr(
-        sampler,
-        "_find_assistant_turn_history_location",
-        fake_find_history_location,
     )
 
-    history_location, llm_debug_data = sampler._resolve_turn_debug_data(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        session_id="session-task",
-        request_id="request-task",
-        response_text="Jira issue details from the completed task result.",
-        generate_payload={
-            "response_text": "Jira issue details from the completed task result.",
-            "workflow_routing": {"workflow_id": "#V#tool_calling_workflow"},
-            "tool_invocations": [{"tool": "jira_get_issue", "success": True}],
-            "model": "gemma4:26b",
-        },
-    )
-
-    assert history_location["source"] == "background_task_result"
-    assert history_location["session_id"] == "session-task"
-    assert history_location["request_id"] == "request-task"
-    assert history_location["partial_debug_payload"] is True
-    assert "workflow_routing" in history_location["diagnostic_keys"]
-    assert "history lookup absent" in history_location["history_lookup_error"]
-    assert llm_debug_data["workflow_routing"]["workflow_id"] == (
-        "#V#tool_calling_workflow"
-    )
-    assert llm_debug_data["tool_invocations"] == [
-        {"tool": "jira_get_issue", "success": True}
-    ]
-    assert llm_debug_data["replay_sampler_readback"]["source"] == (
-        "background_task_result"
-    )
-
-
-def test_resolve_turn_debug_data_prefers_terminal_task_telemetry_over_stale_history(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        sampler,
-        "_find_assistant_turn_history_location",
-        lambda **kwargs: {"session_id": "session-task", "history_index": 3},
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_fetch_turn_debug",
-        lambda **kwargs: {
-            "request_id": "request-task",
-            "history_only": {"retained": True},
-            "turn_execution_diagnostics": {
-                "schema_version": "turn_execution_diagnostics.v1",
-                "workflow_routing_diagnostics": {},
-            },
-        },
-    )
-
-    history_location, llm_debug_data = sampler._resolve_turn_debug_data(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        session_id="session-task",
-        request_id="request-task",
-        response_text="Grounded response.",
-        generate_payload={
-            "response": "Grounded response.",
-            "llm_debug": {
-                "request_id": "request-task",
-                "turn_execution_diagnostics": {
-                    "schema_version": "turn_execution_diagnostics.v1",
-                    "workflow_routing_diagnostics": {
-                        "schema_version": "workflow_routing_diagnostics.v1",
-                        "selected_workflow_id": "#V#entity_representation_workflow",
-                        "selector": {
-                            "prompt_id": "#V#chat_turn_classifier_prompt",
-                            "model_name": "gpt-5.6-luna",
-                            "response": {"text": '{"workflow_id":"#V#entity_representation_workflow"}'},
-                        },
-                    },
-                },
-            },
-        },
-    )
-
-    assert history_location == {"session_id": "session-task", "history_index": 3}
-    assert llm_debug_data["history_only"] == {"retained": True}
-    routing = llm_debug_data["turn_execution_diagnostics"][
-        "workflow_routing_diagnostics"
-    ]
-    assert routing["selected_workflow_id"] == "#V#entity_representation_workflow"
-    assert routing["selector"]["model_name"] == "gpt-5.6-luna"
-    assert sampler._selector_telemetry_completeness(routing)["complete"] is True
-
-
-def test_terminal_task_debug_merge_does_not_replace_hydrated_payload_with_blob_ref(
-) -> None:
-    hydrated = {
-        "schema_version": "workflow_routing_diagnostics.v1",
-        "selected_workflow_id": "#V#entity_representation_workflow",
+    assert without_gate["status"] == "ok"
+    assert with_gate["status"] == "ok"
+    assert with_gate["telemetry"]["terminal_observations"] == {
+        "turn_execution_record": {
+            "completion_gate": {
+                "status": "partial",
+                "safe_to_claim_completion": False,
+            }
+        }
     }
-    blob_ref = {
-        "schema_version": "debug_payload_blob_ref.v1",
-        "blob_ref": {"key": "debug/workflow-routing.json.gz"},
+    assert "terminal_observations" in without_gate["telemetry"]
+
+
+def test_summary_derives_observation_ledger_but_not_semantic_outcome() -> None:
+    summary = sampler._build_summary(
+        **_summary_kwargs(
+            llm_debug_data={
+                "tool_invocations": [
+                    {
+                        "tool": "search_records",
+                        "status": "success",
+                        "result": {"items": []},
+                    }
+                ]
+            }
+        )
+    )
+
+    ledger = summary["telemetry"]["tool_observation_ledger"]
+    assert ledger["observation_count"] == 1
+    assert ledger["observed_tools"] == ["search_records"]
+    assert "action_outcome" not in summary
+
+
+def test_summary_preserves_persisted_unrecovered_tool_failure() -> None:
+    ledger = {
+        "schema_version": sampler.TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION,
+        "observation_count": 1,
+        "observed_tools": ["gmail_list_messages"],
+        "observations": [
+            {
+                "tool": "gmail_list_messages",
+                "status": "auth_failed",
+                "error_code": "oauth_expired",
+                "error": "Authentication expired.",
+            }
+        ],
     }
+    summary = sampler._build_summary(
+        **_summary_kwargs(
+            llm_debug_data={
+                "turn_execution_record": {
+                    "terminal_status": "completed",
+                    "tool_observation_ledger": ledger,
+                }
+            }
+        )
+    )
 
-    assert sampler._merge_terminal_task_debug_value(hydrated, blob_ref) == hydrated
-    assert sampler._merge_terminal_task_debug_value(blob_ref, hydrated) == hydrated
+    assert summary["status"] == "ok"
+    assert summary["telemetry"]["tool_observation_ledger"] == ledger
+    assert summary["telemetry"]["observed_tools"] == ["gmail_list_messages"]
+    assert summary["telemetry"]["tool_count"] == 1
+    assert (
+        summary["telemetry"]["tool_observation_ledger"]["observations"][0]["error_code"]
+        == "oauth_expired"
+    )
 
 
-def test_run_generate_background_cancels_task_after_timeout(
+def test_prompt_variant_observation_is_only_built_for_explicit_variant_arm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
-    status_calls = 0
+    monkeypatch.setattr(
+        sampler.replay_experiment_observation_service,
+        "build_prompt_variant_evaluation",
+        lambda **_: calls.append("variant") or {"selected_prompt_id": "#V#variant"},
+    )
+    monkeypatch.setattr(
+        sampler.replay_experiment_observation_service,
+        "build_replay_scoring_consistency",
+        lambda **_: calls.append("consistency") or {"non_promotable": False},
+    )
 
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        nonlocal status_calls
-        url = str(args[2])
-        calls.append(url)
-        if url.endswith("/von/generate"):
-            return {"task_id": "task-stalled"}
-        if url.endswith("/von/api/task/status/task-stalled"):
-            status_calls += 1
-            if status_calls >= 2:
-                return {
-                    "status": "cancelled",
-                    "task_id": "task-stalled",
-                    "progress": {"status": "cancelled"},
-                }
-            return {
-                "status": "running",
-                "task_id": "task-stalled",
-                "progress": {"step": "llm.action"},
+    ordinary = sampler._build_summary(**_summary_kwargs(arm_metadata={"arm_id": "a"}))
+    variant = sampler._build_summary(
+        **_summary_kwargs(
+            arm_metadata={
+                "arm_id": "b",
+                "base_prompt_id": "#V#base",
+                "candidate_prompt_variant_id": "#V#variant",
             }
-        if url.endswith("/von/api/task/cancel/task-stalled"):
-            return {"success": True, "task_id": "task-stalled"}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-    monkeypatch.setattr(sampler.time, "time", iter([100.0, 101.0, 131.0]).__next__)
-    monkeypatch.setattr(sampler.time, "sleep", lambda _seconds: None)
-
-    with pytest.raises(sampler.BackgroundGenerateTaskError) as exc_info:
-        sampler._run_generate_background(
-            session=requests.Session(),
-            base_url="http://127.0.0.1:5010",
-            prompt="What text relations are used with the concept for Michael Witbrock?",
-            model="gemma4:26b",
-            gmail_profile=None,
-            presenter_mode=False,
-            turn_expected_outcome_contract=None,
-            timeout_seconds=30.0,
-            poll_interval_seconds=0.2,
         )
-
-    assert exc_info.value.task_id == "task-stalled"
-    assert exc_info.value.status_payload["status"] == "running"
-    assert exc_info.value.cancellation_payload == {
-        "success": True,
-        "task_id": "task-stalled",
-        "post_cancellation_terminal": True,
-        "post_cancellation_status_payload": {
-            "status": "cancelled",
-            "task_id": "task-stalled",
-            "progress": {"status": "cancelled"},
-        },
-    }
-    assert any(call.endswith("/von/api/task/cancel/task-stalled") for call in calls)
-
-
-def test_main_writes_single_attempt_failure_summary(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    output_path = tmp_path / "single_attempt_failure.json"
-
-    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
-    monkeypatch.setattr(
-        sampler,
-        "_load_prompt_bank",
-        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_collect_run_environment",
-        lambda **kwargs: {
-            "base_url": kwargs["base_url"],
-            "requested_model": kwargs["requested_model"],
-            "session_name": kwargs["session_name"],
-        },
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_augment_run_environment_with_server_diag",
-        lambda **kwargs: {
-            **kwargs["run_environment"],
-            "server_agent_test_instance": True,
-        },
     )
 
-    def fake_run_replay_plan(**kwargs: object) -> tuple[dict[str, object], bool]:
-        raise sampler.BackgroundGenerateTaskError(
-            "Background generate task did not complete before timeout",
-            task_id="task-stalled",
-            status_payload={"status": "running", "task_id": "task-stalled"},
-            cancellation_payload={"success": True, "task_id": "task-stalled"},
-        )
-
-    monkeypatch.setattr(sampler, "_run_replay_plan", fake_run_replay_plan)
-
-    exit_code = sampler.main(
-        [
-            "--prompt-text",
-            "What text relations are used with the concept for Michael Witbrock?",
-            "--model",
-            "gemma4:e4b",
-            "--output-json",
-            str(output_path),
-        ]
-    )
-
-    assert exit_code == 1
-    output = json.loads(capsys.readouterr().out)
-    written = json.loads(output_path.read_text(encoding="utf-8"))
-    assert output == written
-    assert written["status"] == "error"
-    assert written["conversation"]["background_task_id"] == "task-stalled"
-    failure = written["response"]["failure"]
-    assert failure["background_task"]["status_payload"]["status"] == "running"
-    assert failure["background_task"]["cancellation_payload"] == {
-        "success": True,
-        "task_id": "task-stalled",
-    }
-    assert written["action_outcome"]["outcome"] == "timeout_before_action"
-    assert written["action_outcome"]["timeout_detected"] is True
+    assert "prompt_variant_evaluation" not in ordinary
+    assert variant["prompt_variant_evaluation"]["selected_prompt_id"] == "#V#variant"
+    assert calls == ["variant", "consistency"]
 
 
-def test_action_outcome_classifies_timeout_after_tool_start() -> None:
-    summary = {
-        "status": "error",
-        "prompt": {"id": "represented_self_facts_vs_inferences"},
-        "conversation": {"background_task_id": "task-tool"},
-        "response": {
-            "text": "",
-            "failure": {
-                "type": "BackgroundGenerateTaskError",
-                "message": "Background generate task did not complete before timeout",
-                "background_task": {
-                    "task_id": "task-tool",
-                    "status_payload": {
-                        "status": "running",
-                        "progress": {
-                            "phase": "tool_execute",
-                            "stage": "tool_execute",
-                            "status": "tool_call_start",
-                            "tool": "fetch_concept",
-                        },
-                    },
-                },
+def test_multi_arm_summary_compares_raw_observations() -> None:
+    arms = [
+        {
+            "status": "ok",
+            "arm": {
+                "arm_id": "a",
+                "label": "fast",
+                "requested_model": "ollama:fast",
+            },
+            "response": {"text": "answer"},
+            "telemetry": {
+                "model": "ollama:fast",
+                "ordinary_turn_terminal_status": "completed",
+                "observed_tools": ["search_records"],
+                "tool_count": 1,
+                "timing": {"elapsed_ms": 800},
             },
         },
-        "telemetry": {},
-        "evaluation": {"reasons": ["Background generate task timed out."]},
-    }
-
-    outcome = sampler.classify_replay_action_outcome(summary)
-
-    assert outcome["outcome"] == "timeout_after_action"
-    assert outcome["observed_tools"] == ["fetch_concept"]
-    assert outcome["action_started"] is True
-
-
-def test_failed_replay_summary_projects_tool_ledger_from_timeout_progress() -> None:
-    summary = sampler._build_failed_replay_attempt_summary(
-        exc=sampler.BackgroundGenerateTaskError(
-            "Background generate task did not complete before timeout",
-            task_id="task-jira",
-            status_payload={
-                "status": "running",
-                "progress": {
-                    "phase": "tool_execute",
-                    "stage": "tool_execute",
-                    "status": "tool_invoked",
-                    "tool": "jira_get_issue",
-                    "call_id": "call-1",
-                    "result_summary": "Issue: JVNAUTOSCI-150",
-                },
+        {
+            "status": "error",
+            "arm": {
+                "arm_id": "b",
+                "label": "strong",
+                "requested_model": "openai:gpt-frontier",
             },
-            cancellation_payload={"success": True, "task_id": "task-jira"},
-        ),
-        attempt_index=1,
-        prompt_entry={
-            "id": "tell_me_about_jvnautosci_150_in_jira",
-            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
+            "response": {"text": ""},
+            "telemetry": {"requested_model": "openai:gpt-frontier"},
         },
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-        requested_model="gpt-5.4-nano",
-    )
-
-    ledger = summary["telemetry"]["tool_observation_ledger"]
-    assert ledger["schema_version"] == "tool_observation_ledger.v1"
-    assert ledger["observed_tools"] == ["jira_get_issue"]
-    assert ledger["status_counts"] == {"ok": 1}
-    assert summary["action_outcome"]["outcome"] == "timeout_after_action"
-    assert summary["action_outcome"]["tool_observations"][0]["source"] == (
-        "telemetry.tool_observation_ledger"
-    )
-
-
-def test_failed_replay_summary_projects_workflow_from_timeout_progress() -> None:
-    summary = sampler._build_failed_replay_attempt_summary(
-        exc=sampler.BackgroundGenerateTaskError(
-            "Background generate task did not complete before timeout",
-            task_id="task-workflow",
-            status_payload={
-                "status": "running",
-                "progress_history": [
-                    {
-                        "status": "workflow_step_start",
-                        "workflow_id": "#V#conversation_turn_execution_workflow",
-                    },
-                    {
-                        "phase": "selected_workflow_execution",
-                        "stage": "selected_workflow_execution",
-                        "status": "workflow_step_complete",
-                        "selected_workflow_id": "#V#tool_calling_workflow",
-                        "selected_execution_mode": "custom_workflow",
-                        "selected_workflow_execution_event": {
-                            "selected_workflow_id": "#V#tool_calling_workflow",
-                            "workflow_id": "#V#tool_calling_workflow",
-                            "selected_execution_mode": "custom_workflow",
-                        },
-                    },
-                    {
-                        "phase": "tool_execute",
-                        "stage": "tool_execute",
-                        "status": "tool_call_start",
-                        "tool": "workflow_execute",
-                        "call_id": "call-1",
-                    },
-                ],
-            },
-            cancellation_payload={"success": True, "task_id": "task-workflow"},
-        ),
-        attempt_index=1,
-        prompt_entry={
-            "id": "execute_represented_workflow",
-            "prompt": "Execute the represented workflow and read back evidence.",
-            "likely_tools": ["workflow_execute"],
-            "requires_tool_use": True,
-        },
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-        requested_model="gpt-5.4-nano",
-    )
-
-    assert summary["telemetry"]["selected_workflow_id"] == "#V#tool_calling_workflow"
-    assert summary["telemetry"]["selected_execution_mode"] == "custom_workflow"
-    assert summary["telemetry"]["workflow_projection_source"] == (
-        "background_task_progress"
-    )
-    assert summary["action_outcome"]["selected_workflow_id"] == (
-        "#V#tool_calling_workflow"
-    )
-    assert "selected_workflow_id=#V#tool_calling_workflow" in summary[
-        "action_outcome"
-    ]["evidence"]
-
-
-def test_failed_replay_summary_preserves_planned_comparison_arms() -> None:
-    summary = sampler._build_failed_replay_attempt_summary(
-        exc=sampler.BackgroundGenerateTaskError(
-            "Background generate task did not complete before timeout",
-            task_id="task-local",
-            status_payload={
-                "status": "running",
-                "progress": {"phase": "context_adjudication_decision"},
-            },
-        ),
-        attempt_index=1,
-        prompt_entry={"id": "case", "prompt": "Prompt"},
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-        requested_model="qwen3:8b",
-        requested_model_arms=[
-            {
-                "arm_id": "arm_1",
-                "label": "qwen3:8b",
-                "requested_model": "qwen3:8b",
-                "requested_provider": "ollama",
-            },
-            {
-                "arm_id": "arm_2",
-                "label": "gpt-5.4-nano",
-                "requested_model": "gpt-5.4-nano",
-                "requested_provider": "openai",
-            },
-        ],
-    )
-
-    assert summary["comparison"]["aborted_before_comparison_complete"] is True
-    assert summary["comparison"]["planned_arm_labels"] == [
-        "qwen3:8b",
-        "gpt-5.4-nano",
     ]
-    assert summary["selection"]["requested_model_arms"][1]["requested_model"] == (
-        "gpt-5.4-nano"
-    )
 
-
-def test_action_outcome_classifies_invalid_tool_arguments_from_debug_data() -> None:
-    summary = {
-        "status": "ok",
-        "prompt": {
-            "id": "one_recent_arxiv_paper",
-            "requires_tool_use": True,
-            "likely_tools": ["search_arxiv"],
-        },
-        "conversation": {"request_id": "request-arxiv"},
-        "response": {"text": "No papers were returned."},
-        "telemetry": {"observed_tools": ["search_arxiv"]},
-        "evaluation": {"reasons": []},
-    }
-    llm_debug_data = {
-        "tool_invocations": [
-            {
-                "tool": "search_arxiv",
-                "status": "ok",
-                "effective_payload": {
-                    "text": (
-                        "Input validation error: 'lastUpdatedDate' is not one of "
-                        "['relevance', 'date']"
-                    )
-                },
-            }
-        ]
-    }
-
-    outcome = sampler.classify_replay_action_outcome(
-        summary,
-        llm_debug_data=llm_debug_data,
-    )
-
-    assert outcome["outcome"] == "tool_args_invalid"
-    assert outcome["observed_tools"] == ["search_arxiv"]
-    assert any("invalid_tool_argument_signal" in item for item in outcome["evidence"])
-
-
-def test_action_outcome_classifies_empty_tool_observation() -> None:
-    summary = {
-        "status": "ok",
-        "prompt": {
-            "id": "one_recent_arxiv_paper",
-            "requires_tool_use": True,
-            "likely_tools": ["search_arxiv"],
-        },
-        "conversation": {"request_id": "request-arxiv"},
-        "response": {
-            "text": (
-                "The tool returned an empty `papers: []` result, so there is "
-                "nothing I can ground a recommendation on."
-            )
-        },
-        "telemetry": {"observed_tools": ["search_arxiv"]},
-        "evaluation": {"reasons": []},
-    }
-
-    outcome = sampler.classify_replay_action_outcome(summary)
-
-    assert outcome["outcome"] == "tool_executed_empty_observation"
-    assert outcome["observed_tools"] == ["search_arxiv"]
-
-
-def test_action_outcome_prefers_tool_observation_ledger_over_debug_inference() -> None:
-    summary = {
-        "status": "ok",
-        "prompt": {
-            "id": "one_recent_arxiv_paper",
-            "requires_tool_use": True,
-            "likely_tools": ["search_arxiv"],
-        },
-        "conversation": {"request_id": "request-arxiv"},
-        "response": {"text": "The answer text looks superficially complete."},
-        "telemetry": {
-            "tool_observation_ledger": {
-                "schema_version": "tool_observation_ledger.v1",
-                "observations": [
-                    {
-                        "source": "llm_debug.tool_invocations",
-                        "tool": "search_arxiv",
-                        "status": "empty_result",
-                        "result_summary": "No results",
-                        "result_empty": True,
-                    }
-                ],
-            }
-        },
-        "evaluation": {"reasons": []},
-    }
-    llm_debug_data = {
-        "tool_invocations": [
-            {
-                "tool": "search_arxiv",
-                "status": "ok",
-                "result_summary": "Found 1 result",
-                "effective_payload": {"items": [{"title": "Should not win"}]},
-            }
-        ]
-    }
-
-    outcome = sampler.classify_replay_action_outcome(
-        summary,
-        llm_debug_data=llm_debug_data,
-    )
-
-    assert outcome["outcome"] == "tool_executed_empty_observation"
-    assert outcome["observed_tools"] == ["search_arxiv"]
-    assert "tool_observation_ledger_status=empty_result" in outcome["evidence"]
-    assert outcome["tool_observations"][0]["source"] == (
-        "telemetry.tool_observation_ledger"
-    )
-
-
-def test_build_summary_projects_tool_observation_ledger() -> None:
-    summary = sampler._build_summary(
-        prompt_entry={
-            "id": "one_recent_arxiv_paper",
-            "category": "single_tool_arxiv",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "Recommend one recent arXiv paper.",
-            "knowledge_surfaces": ["arxiv"],
-            "likely_tools": ["search_arxiv"],
-            "requires_tool_use": True,
-        },
-        task_id="task-arxiv",
-        session_id="session-arxiv",
-        request_id="request-arxiv",
-        history_location={"history_index": 2, "session_id": "session-arxiv"},
-        generate_payload={"response": "No papers were found."},
-        llm_debug_data={
-            "tool_observation_ledger": {
-                "schema_version": "tool_observation_ledger.v1",
-                "observation_count": 1,
-                "observed_tools": ["search_arxiv"],
-                "status_counts": {"empty_result": 1},
-                "observations": [
-                    {
-                        "source": "llm_debug.tool_invocations",
-                        "tool": "search_arxiv",
-                        "status": "empty_result",
-                        "result_summary": "No results",
-                    }
-                ],
-            }
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True, "reasons": []},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_plus_single_tool"],
-        seed=17,
-        requested_model="gpt-5.4-nano",
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-    )
-
-    assert summary["telemetry"]["tool_observation_ledger"]["status_counts"] == {
-        "empty_result": 1
-    }
-    assert summary["action_outcome"]["outcome"] == "tool_executed_empty_observation"
-
-
-def test_build_summary_derives_tool_observation_ledger_from_partial_debug() -> None:
-    summary = sampler._build_summary(
-        prompt_entry={
-            "id": "tell_me_about_jvnautosci_150_in_jira",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
-            "knowledge_surfaces": ["jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        task_id="task-jira",
-        session_id="session-jira",
-        request_id="request-jira",
-        history_location={
-            "source": "background_task_result.llm_debug",
-            "partial_debug_payload": True,
-            "history_lookup_error": "Could not resolve assistant history location",
-        },
-        generate_payload={"response": "JVNAUTOSCI-150 is a Jira task."},
-        llm_debug_data={
-            "workflow_routing": {
-                "workflow_id": "#V#tool_calling_workflow",
-                "verdict": "tool_seeking",
-            },
-            "tool_invocations": [
-                {
-                    "tool": "jira_get_issue",
-                    "status": "ok",
-                    "result_summary": "Issue: JVNAUTOSCI-150",
-                    "effective_payload": {"items": [{"key": "JVNAUTOSCI-150"}]},
-                }
-            ],
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True, "reasons": []},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_plus_single_tool"],
-        seed=17,
-        requested_model="gpt-5.4-nano",
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-    )
-
-    ledger = summary["telemetry"]["tool_observation_ledger"]
-    assert ledger["schema_version"] == "tool_observation_ledger.v1"
-    assert ledger["observed_tools"] == ["jira_get_issue"]
-    assert ledger["status_counts"] == {"non_empty_result": 1}
-    assert summary["action_outcome"]["tool_observations"][0]["source"] == (
-        "telemetry.tool_observation_ledger"
-    )
-
-
-def test_build_summary_includes_action_outcome() -> None:
-    summary = sampler._build_summary(
-        prompt_entry={
-            "id": "tell_me_about_jvnautosci_150_in_jira",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
-            "knowledge_surfaces": ["jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        task_id="task-jira",
-        session_id="session-jira",
-        request_id="request-jira",
-        history_location={"history_index": 2, "session_id": "session-jira"},
-        generate_payload={"response": "JVNAUTOSCI-150 is a Jira task."},
-        llm_debug_data={
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                        "selected_execution_mode": "custom_workflow",
-                    }
-                },
-                "tool_history": [{"tool": "jira_get_issue", "status": "ok"}],
-            }
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True, "reasons": []},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_plus_single_tool"],
-        seed=17,
-        requested_model="gpt-5.4-nano",
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-    )
-
-    assert summary["action_outcome"]["outcome"] == "answer_grounded"
-    assert summary["action_outcome"]["observed_tools"] == ["jira_get_issue"]
-
-
-def test_run_local_ollama_model_probe_stops_at_first_threshold_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    requested_models: list[str] = []
-
-    @contextmanager
-    def fake_temporary_scoped_active_llm(**_kwargs: object):
-        yield {"provider": "openai", "model": "gpt-5.4-mini", "scope": "user"}
-
-    def fake_run_suite(**kwargs: object) -> dict[str, object]:
-        requested_model = str(kwargs["requested_model"])
-        requested_models.append(requested_model)
-        if requested_model == "ollama:gemma4:e4b":
-            return {
-                "status": "ok",
-                "evaluation": {
-                    "should_user_be_happy": True,
-                    "terminal_outcome": {"accepted": True},
-                },
-            }
-        return {"status": "failed", "evaluation": {"should_user_be_happy": False}}
-
-    monkeypatch.setattr(
-        sampler,
-        "_list_installed_ollama_models",
-        lambda: {"granite3.3:2b", "gemma4:e4b"},
-    )
-    monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
-    monkeypatch.setattr(
-        sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm
-    )
-    monkeypatch.setattr(sampler, "_run_sampler_subprocess_replay_suite", fake_run_suite)
-
-    summary = sampler._run_local_ollama_model_probe(
-        prompt_entry={"id": "case-1", "prompt": "What text relations are used?"},
-        base_url="http://127.0.0.1:5010",
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
-        user_concept_id="#V#michael_witbrock",
-        organisation_concept_id="university_of_auckland_strong_ai_lab",
-        session_name="probe",
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+    summary = sampler._build_multi_arm_summary(
+        prompt_entry=_prompt_entry(),
+        prompt_bank_schema_version="v3",
         requested_complexity_classes=[],
         seed=None,
-        presenter_mode=False,
-        allow_non_agent_test_server=False,
-        repeat_count=1,
-        screen_repeat_count=1,
-        attempt_process_timeout_seconds=60.0,
-        minimum_success_rate=0.95,
-        requested_candidates=["granite3.3:2b", "gemma4:e4b"],
-        pull_missing_models=False,
-        cache_path=None,
+        requested_model="ollama:fast",
+        requested_model_arms=[arm["arm"] for arm in arms],
+        run_environment={},
+        arm_summaries=arms,
     )
 
-    assert requested_models == ["ollama:granite3.3:2b", "ollama:gemma4:e4b"]
-    probe = summary["local_model_probe"]
-    assert probe["selected_model"] == "gemma4:e4b"
-    assert probe["no_local_model_succeeded"] is False
+    comparison = summary["comparison"]
+    assert summary["status"] == "partial"
+    assert comparison["collected_arm_count"] == 1
+    assert comparison["error_arm_count"] == 1
+    assert comparison["all_arms_collected"] is False
+    assert comparison["arm_observations"][0]["timing"]["elapsed_ms"] == 800
+    assert "all_should_user_be_happy" not in comparison
+    assert "model_portfolio_report" not in summary
 
 
-def test_run_local_ollama_model_probe_reports_no_working_local_model(
+def test_replay_plan_collection_success_does_not_read_semantic_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    @contextmanager
-    def fake_temporary_scoped_active_llm(**_kwargs: object):
-        yield {"provider": "openai", "model": "gpt-5.4-mini", "scope": "user"}
-
-    monkeypatch.setattr(
-        sampler, "_list_installed_ollama_models", lambda: {"granite3.3:2b"}
-    )
-    monkeypatch.setattr(sampler, "get_model_registry_snapshot", lambda: {"models": []})
-    monkeypatch.setattr(
-        sampler, "_temporary_scoped_active_llm", fake_temporary_scoped_active_llm
-    )
     monkeypatch.setattr(
         sampler,
-        "_run_sampler_subprocess_replay_suite",
-        lambda **_kwargs: {
-            "status": "failed",
+        "_run_prompt_replay_arm",
+        lambda **_: {
+            "status": "ok",
             "evaluation": {"should_user_be_happy": False},
         },
     )
 
-    summary = sampler._run_local_ollama_model_probe(
-        prompt_entry={"id": "case-1", "prompt": "What text relations are used?"},
-        base_url="http://127.0.0.1:5010",
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
-        user_concept_id="#V#michael_witbrock",
-        organisation_concept_id="university_of_auckland_strong_ai_lab",
-        session_name="probe",
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+    summary, collected = sampler._run_replay_plan(
+        prompt_entry=_prompt_entry(),
+        base_url="http://von.test",
+        requested_model="ollama:local",
+        replay_arms=[{"arm_id": "a", "requested_model": "ollama:local"}],
+        timeout_seconds=30,
+        poll_interval_seconds=0.1,
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        session_name="sample",
+        run_environment={},
+        prompt_bank_schema_version="v3",
         requested_complexity_classes=[],
         seed=None,
+        base_prompt_id=None,
+        prompt_variant_ids=[],
         presenter_mode=False,
-        allow_non_agent_test_server=False,
-        repeat_count=1,
-        screen_repeat_count=1,
-        attempt_process_timeout_seconds=60.0,
-        minimum_success_rate=0.95,
-        requested_candidates=["granite3.3:2b"],
-        pull_missing_models=False,
-        cache_path=None,
+        gmail_profile=None,
     )
 
-    assert summary["status"] == "failed"
-    probe = summary["local_model_probe"]
-    assert probe["selected_model"] is None
-    assert probe["no_local_model_succeeded"] is True
+    assert summary["status"] == "ok"
+    assert collected is True
 
 
-def test_main_runs_local_model_probe_and_writes_summary(
+def test_multi_arm_replay_preserves_partial_progress(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    output_path = tmp_path / "probe.json"
+    def run_arm(**kwargs: Any) -> dict[str, Any]:
+        arm = kwargs["arm_metadata"]
+        if arm["arm_id"] == "arm_2":
+            raise RuntimeError("model endpoint unavailable")
+        return {
+            "status": "ok",
+            "arm": dict(arm),
+            "response": {"text": "Collected."},
+            "telemetry": {
+                "model": arm["requested_model"],
+                "ordinary_turn_terminal_status": "completed",
+                "observed_tools": [],
+                "tool_count": 0,
+                "timing": {"elapsed_ms": 10},
+            },
+        }
 
-    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
-    monkeypatch.setattr(
-        sampler,
-        "_load_prompt_bank",
-        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
+    monkeypatch.setattr(sampler, "_run_prompt_replay_arm", run_arm)
+    arms = [
+        {"arm_id": "arm_1", "label": "fast", "requested_model": "ollama:fast"},
+        {
+            "arm_id": "arm_2",
+            "label": "strong",
+            "requested_model": "openai:gpt-frontier",
+        },
+    ]
+
+    summary, collected = sampler._run_replay_plan(
+        prompt_entry=_prompt_entry(),
+        base_url="http://von.test",
+        requested_model="ollama:fast",
+        replay_arms=arms,
+        timeout_seconds=30,
+        poll_interval_seconds=0.1,
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        session_name="sample",
+        run_environment={},
+        prompt_bank_schema_version="v3",
+        requested_complexity_classes=[],
+        seed=None,
+        base_prompt_id=None,
+        prompt_variant_ids=[],
+        presenter_mode=False,
+        gmail_profile=None,
     )
+
+    assert collected is False
+    assert summary["comparison"]["collected_arm_count"] == 1
+    assert summary["arms"][0]["response"]["text"] == "Collected."
+    assert summary["arms"][1]["response"]["failure"]["message"] == (
+        "model endpoint unavailable"
+    )
+
+
+def test_failed_attempt_preserves_raw_background_evidence() -> None:
+    exc = sampler.BackgroundGenerateTaskError(
+        "timed out",
+        task_id="task-1",
+        status_payload={
+            "status": "running",
+            "progress": {"phase": "tool_execute", "tool": "search_records"},
+        },
+        cancellation_payload={
+            "post_cancellation_terminal": True,
+            "post_cancellation_status_payload": {"status": "cancelled"},
+        },
+    )
+
+    summary = sampler._build_failed_replay_attempt_summary(
+        exc=exc,
+        attempt_index=1,
+        prompt_entry=_prompt_entry(),
+        run_environment={},
+        requested_model="ollama:local",
+    )
+
+    background = summary["response"]["failure"]["background_task"]
+    assert summary["status"] == "error"
+    assert background["status_payload"]["progress"]["tool"] == "search_records"
+    assert background["cancellation_payload"]["post_cancellation_terminal"] is True
+    assert summary["telemetry"]["background_task_observations"] == background
+    assert "evaluation" not in summary
+    assert "action_outcome" not in summary
+
+
+def test_repeated_summary_reports_collection_not_semantic_success() -> None:
+    summary = sampler._build_repeated_replay_summary(
+        prompt_entry=_prompt_entry(),
+        prompt_bank_schema_version="v3",
+        requested_complexity_classes=[],
+        seed=None,
+        requested_model="ollama:local",
+        requested_model_arms=[],
+        run_environment={},
+        attempt_summaries=[{"status": "ok"}, {"status": "error"}],
+        collection_count=1,
+        minimum_collection_rate=0.5,
+    )
+
+    repeat = summary["repeat"]
+    assert summary["status"] == "ok"
+    assert repeat["collected_attempt_count"] == 1
+    assert repeat["error_attempt_count"] == 1
+    assert repeat["collection_rate"] == 0.5
+    assert repeat["metric"] == "harness_collection_only_not_semantic_success"
+    assert "success_rate" not in repeat
+
+
+def test_main_exits_on_collection_status_not_old_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setattr(
         sampler,
         "_collect_run_environment",
-        lambda **kwargs: {
-            "base_url": kwargs["base_url"],
-            "requested_model": kwargs["requested_model"],
-            "session_name": kwargs["session_name"],
-        },
+        lambda **_: {"server_agent_test_instance": True},
     )
     monkeypatch.setattr(
         sampler,
         "_augment_run_environment_with_server_diag",
-        lambda **kwargs: {
-            **kwargs["run_environment"],
-            "server_agent_test_instance": True,
-        },
+        lambda **kwargs: dict(kwargs["run_environment"]),
     )
     monkeypatch.setattr(
         sampler,
-        "_run_local_ollama_model_probe",
-        lambda **_kwargs: {
-            "status": "ok",
-            "mode": "local_ollama_replay_model_probe",
-            "prompt": {"id": "case-1"},
-            "local_model_probe": {
-                "selected_model": "gemma4:e4b",
-                "no_local_model_succeeded": False,
+        "_run_replay_plan",
+        lambda **_: (
+            {
+                "status": "ok",
+                "response": {"text": "Collected."},
+                "evaluation": {"should_user_be_happy": False},
             },
-        },
+            True,
+        ),
     )
+    output_path = tmp_path / "sample.json"
 
     exit_code = sampler.main(
         [
             "--prompt-text",
-            "What text relations are used with Michael Witbrock?",
-            "--probe-local-models",
-            "--success-threshold",
-            "0.95",
+            "Use your best judgement.",
+            "--model",
+            "openai:gpt-frontier",
+            "--allow-non-agent-test-server",
             "--output-json",
             str(output_path),
         ]
     )
 
     assert exit_code == 0
-    output = json.loads(capsys.readouterr().out)
-    written = json.loads(output_path.read_text(encoding="utf-8"))
-    assert output == written
-    assert written["local_model_probe"]["selected_model"] == "gemma4:e4b"
-
-
-def test_replay_session_creation_payload_marks_sampler_chat_as_test_run() -> None:
-    payload = sampler._build_replay_session_creation_payload("Replay run")
-
-    assert payload == {
-        "session_name": "Replay run",
-        "origin_kind": "coding_agent_test",
-        "created_by_actor_concept_id": "#V#von_system",
-        "created_by_actor_type": "#V#coding_agent",
-        "is_agent_created": True,
-        "test_artifact_kind": "live_kb_tool_prompt_sampler_chat_session",
-    }
-
-
-def test_multi_arm_session_creation_payload_keeps_test_run_provenance() -> None:
-    session_name = sampler._build_arm_session_name(
-        base_session_name="Replay run",
-        arm_metadata={
-            "arm_id": "arm_2",
-            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
-            "requested_model": None,
-        },
-    )
-
-    payload = sampler._build_replay_session_creation_payload(session_name)
-
-    assert payload["session_name"] == "Replay run [arm_2:active_authenticated_model]"
-    assert payload["origin_kind"] == "coding_agent_test"
-    assert payload["is_agent_created"] is True
-    assert payload["test_artifact_kind"] == "live_kb_tool_prompt_sampler_chat_session"
-
-
-def test_establish_authenticated_session_sends_test_run_provenance(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen_create_payloads: list[dict[str, object]] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        if url.endswith("/von/api/session/set_user_concept"):
-            return {"ok": True}
-        if url.endswith("/von/api/session/set_organisation"):
-            return {"ok": True}
-        if url.endswith("/von/api/session/context"):
-            return {"user_id": "#V#michael_witbrock"}
-        if url.endswith("/von/api/session/create_chat_session"):
-            seen_create_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
-            return {"session_id": "session-123"}
-        if url.endswith("/von/reset"):
-            return {"ok": True}
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    session_id, window_session_id = sampler._establish_authenticated_session(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        user_concept_id="#V#michael_witbrock",
-        organisation_concept_id="university_of_auckland_strong_ai_lab",
-        session_name="JVNAUTOSCI-1894 live prompt sample",
-    )
-
-    assert session_id == "session-123"
-    assert window_session_id
-    assert seen_create_payloads == [
-        {
-            "session_name": "JVNAUTOSCI-1894 live prompt sample",
-            "origin_kind": "coding_agent_test",
-            "created_by_actor_concept_id": "#V#von_system",
-            "created_by_actor_type": "#V#coding_agent",
-            "is_agent_created": True,
-            "test_artifact_kind": "live_kb_tool_prompt_sampler_chat_session",
-        }
-    ]
-
-
-def test_build_model_arm_plan_includes_active_arm_and_deduplicates() -> None:
-    arms = sampler._build_model_arm_plan(
-        requested_model="gemma4:26b",
-        compare_models=["gpt-5.4-mini", "gemma4:26b", "gpt-5.4-mini"],
-        include_active_model_arm=True,
-    )
-
-    assert arms == [
-        {
-            "arm_id": "arm_1",
-            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
-            "requested_model": None,
-            "requested_provider": None,
-        },
-        {
-            "arm_id": "arm_2",
-            "label": "gemma4:26b",
-            "requested_model": "gemma4:26b",
-            "requested_provider": "ollama",
-        },
-        {
-            "arm_id": "arm_3",
-            "label": "gpt-5.4-mini",
-            "requested_model": "gpt-5.4-mini",
-            "requested_provider": "openai",
-        },
-    ]
-    assert (
-        sampler._build_arm_session_name(
-            base_session_name="Replay run",
-            arm_metadata=arms[1],
-        )
-        == "Replay run [arm_2:gemma4:26b]"
-    )
-
-
-def test_summarise_server_diag_extracts_relevant_server_fields() -> None:
-    summary = sampler._summarise_server_diag(
-        {
-            "version": "v20260610_0837_backend+g1c5361c7f89b",
-            "python_version": "3.13.12",
-            "effective_user_concept_id": "#V#michael_witbrock",
-            "header_user_concept_id": "#V#michael_witbrock",
-            "session_user_concept_id": "#V#michael_witbrock",
-            "uptime_sec": 5196.125129,
-            "durable_workflow_startup": {"ready": True},
-            "durable_workflows": {
-                "worker_running": False,
-                "scheduler_running": False,
-            },
-            "agent_test_instance": True,
-            "version_details": {
-                "git_branch": "jvnautosci-1894-replay-programme",
-                "git_commit": "abc123def456",
-                "git_short_commit": "abc123d",
-                "git_dirty": None,
-            },
-        }
-    )
-
-    assert summary["server_reported_version"] == "v20260610_0837_backend+g1c5361c7f89b"
-    assert summary["server_reported_python_version"] == "3.13.12"
-    assert summary["server_reported_git_branch"] == "jvnautosci-1894-replay-programme"
-    assert summary["server_reported_git_commit"] == "abc123def456"
-    assert summary["server_effective_user_concept_id"] == "#V#michael_witbrock"
-    assert summary["server_durable_workflow_ready"] is True
-    assert summary["server_worker_running"] is False
-    assert summary["server_agent_test_instance"] is True
-
-
-def test_augment_run_environment_with_server_diag_prefers_health_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        calls.append(url)
-        if url.endswith("/health"):
-            return {
-                "version": "v20260610_0837_backend+gabc123",
-                "agent_test_instance": True,
-                "version_details": {
-                    "git_branch": "main",
-                    "git_commit": "abc123",
-                    "git_short_commit": "abc123",
-                    "git_dirty": None,
-                },
-            }
-        raise AssertionError(f"Unexpected URL: {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    summary = sampler._augment_run_environment_with_server_diag(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        run_environment={"base_url": "http://127.0.0.1:5000"},
-    )
-
-    assert calls == ["http://127.0.0.1:5000/health"]
-    assert summary["server_metadata_source"] == "health"
-    assert summary["server_metadata_error"] is None
-    assert summary["server_reported_git_branch"] == "main"
-    assert summary["server_reported_git_commit"] == "abc123"
-
-
-def test_augment_run_environment_with_server_diag_records_lookup_error_when_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        url = str(args[2])
-        calls.append(url)
-        raise RuntimeError(f"timeout for {url}")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    summary = sampler._augment_run_environment_with_server_diag(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        run_environment={"base_url": "http://127.0.0.1:5000"},
-    )
-
-    assert calls == [
-        "http://127.0.0.1:5000/health",
-        "http://127.0.0.1:5000/diag",
-    ]
-    assert summary["server_metadata_source"] is None
-    assert "diag:" in str(summary["server_metadata_error"])
-
-
-def test_summarise_active_llm_info_extracts_relevant_fields() -> None:
-    summary = sampler._summarise_active_llm_info(
-        {
-            "provider": "openai",
-            "model": "gpt-5.4-mini",
-            "status": "ready",
-            "ping_ok": True,
-            "error": None,
-        }
-    )
-
-    assert summary["server_resolved_active_llm_provider"] == "openai"
-    assert summary["server_resolved_active_llm_model"] == "gpt-5.4-mini"
-    assert summary["server_resolved_active_llm_status"] == "ready"
-    assert summary["server_resolved_active_llm_ping_ok"] is True
-    assert summary["server_resolved_active_llm_error"] is None
-
-
-def test_augment_run_environment_with_active_llm_info_records_lookup_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
-        raise RuntimeError("llm info timeout")
-
-    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
-
-    summary = sampler._augment_run_environment_with_active_llm_info(
-        session=requests.Session(),
-        base_url="http://127.0.0.1:5000",
-        user_concept_id="#V#michael_witbrock",
-        organisation_concept_id="university_of_auckland_strong_ai_lab",
-        run_environment={"base_url": "http://127.0.0.1:5000"},
-    )
-
-    assert summary["server_resolved_active_llm_lookup_error"] == "llm info timeout"
-
-
-def test_build_summary_includes_replay_guide_metadata() -> None:
-    summary = sampler._build_summary(
-        prompt_entry={
-            "id": "what_papers_of_mine_do_you_know_about",
-            "category": "entity_relative_kb_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "What papers of mine do you know about?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        task_id="task-123",
-        session_id="session-123",
-        request_id="request-123",
-        history_location={"history_index": 2, "session_id": "session-123"},
-        generate_payload={"response": "Test response."},
-        llm_debug_data={
-            "model": "gpt-5.4-nano",
-            "tool_invocations": [{"tool": "search_knowledge_base"}],
-            "turn_execution_diagnostics": {
-                "turn_context_handoff_decision": {
-                    "mode": "no_prior_context",
-                    "summary": "The prompt is self-contained.",
-                },
-                "turn_context_handoff_mode": "no_prior_context",
-                "turn_context_handoff_summary": "The prompt is self-contained.",
-                "turn_context_handoff_messages": [],
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                        "selected_execution_mode": "tool_pipeline",
-                    }
-                },
-                "tool_history": [],
-            },
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_grounded"],
-        seed=17,
-        requested_model="gemma4:26b",
-        run_environment={
-            "base_url": "http://127.0.0.1:5000",
-            "authenticated_user_concept_id": "#V#michael_witbrock",
-            "authenticated_organisation_concept_id": "university_of_auckland_strong_ai_lab",
-            "local_repo_git_branch": "jvnautosci-1894-replay-programme",
-            "local_repo_git_head": "abc123",
-            "server_reported_git_branch": "jvnautosci-1894-replay-programme",
-            "server_reported_git_commit": "abc123",
-            "server_metadata_source": "health",
-            "server_metadata_error": None,
-            "server_resolved_active_llm_provider": "ollama",
-            "server_resolved_active_llm_model": "gemma4:26b",
-            "server_resolved_active_llm_lookup_error": None,
-            "requested_model": "gemma4:26b",
-            "run_started_at_utc": "2026-04-16T19:00:00+00:00",
-            "session_name": "test session",
-        },
-    )
-
-    assert summary["guidance"]["replay_guide_path"] == sampler.REAL_PATH_REPLAY_GUIDE
-    assert (
-        "real_path_server_replay_and_telemetry_loop.md"
-        in summary["guidance"]["replay_guide_note"]
-    )
-    assert summary["prompt"]["complexity_class"] == "vontology_grounded"
-    assert (
-        summary["selection"]["prompt_bank_schema_version"]
-        == "live_kb_tool_prompt_bank.v3"
-    )
-    assert summary["selection"]["requested_complexity_classes"] == [
-        "vontology_grounded"
-    ]
-    assert summary["selection"]["seed"] == 17
-    assert summary["selection"]["requested_model"] == "gemma4:26b"
-    assert summary["environment"]["base_url"] == "http://127.0.0.1:5000"
-    assert (
-        summary["environment"]["authenticated_user_concept_id"] == "#V#michael_witbrock"
-    )
-    assert (
-        summary["environment"]["local_repo_git_branch"]
-        == "jvnautosci-1894-replay-programme"
-    )
-    assert (
-        summary["environment"]["server_reported_git_branch"]
-        == "jvnautosci-1894-replay-programme"
-    )
-    assert summary["environment"]["server_resolved_active_llm_model"] == "gemma4:26b"
-    assert summary["telemetry"]["tool_history"] == []
-    assert summary["telemetry"]["observed_tools"] == ["search_knowledge_base"]
-    assert summary["telemetry"]["tool_count"] == 1
-    assert summary["telemetry"]["context_adjudication"]["mode"] == "no_prior_context"
-    assert summary["telemetry"]["context_adjudication"]["summary"] == (
-        "The prompt is self-contained."
-    )
-    model_report = summary["model_portfolio_evaluation"]
-    assert model_report["schema_version"] == "model_portfolio_replay_report.v1"
-    assert model_report["replay_set_id"] == "JVNAUTOSCI-1894"
-    assert model_report["stage_evidence_schema_version"] == (
-        "model_stage_suitability_evidence.v1"
-    )
-    assert [entry["workflow_stage"] for entry in model_report["stage_evidence"]] == [
-        "workflow_selector",
-        "turn_answer",
-    ]
-    assert model_report["stage_evidence"][1]["metrics"]["tool_count"] == 1
-    assert model_report["certification_decision"]["promotion_authorised"] is False
-    assert "insufficient_distinct_replay_cases" in (
-        model_report["certification_decision"]["promotion_blockers"]
-    )
-
-
-def test_build_summary_projects_context_adjudication_from_background_status() -> None:
-    summary = sampler._build_summary(
-        prompt_entry={
-            "id": "gmail_token_refresh_check",
-            "category": "single_tool_gmail_auth",
-            "complexity_class": "tool_use",
-            "prompt": "Refresh the Gmail token if you have a tool.",
-            "knowledge_surfaces": ["tools"],
-            "likely_tools": ["gmail_get_auth_config"],
-        },
-        task_id="task-123",
-        session_id="session-123",
-        request_id="request-123",
-        history_location={"history_index": 2, "session_id": "session-123"},
-        generate_payload={"response": "No refresh tool is available."},
-        llm_debug_data={
-            "model": "qwen3:8b",
-            "background_task_status": {
-                "status": "completed",
-                "progress_history": [
-                    {
-                        "status": "llm_call_end",
-                        "stage": "context_adjudication",
-                        "model": "qwen3:8b",
-                        "llm_response_preview": {
-                            "text": (
-                                '{"mode":"no_prior_context",'
-                                '"summary":"Use only the current Gmail-token request.",'
-                                '"routing_evidence_scope":"current_request_only",'
-                                '"expected_outcome_scope":"current_request_only",'
-                                '"answer_scope":"current_request_only",'
-                                '"turn_context_handoff_messages":[],'
-                                '"lineage":[],'
-                                '"omitted_context_reasons":[],'
-                                '"risks":[],'
-                                '"confidence":0.85}'
-                            )
-                        },
-                    }
-                ],
-            },
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                        "selected_execution_mode": "tool_pipeline",
-                    }
-                },
-                "tool_history": [],
-            },
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["tool_use"],
-        seed=17,
-        requested_model="qwen3:8b",
-        run_environment={"base_url": "http://127.0.0.1:5000"},
-    )
-
-    context_adjudication = summary["telemetry"]["context_adjudication"]
-    assert context_adjudication["source"] == "llm_debug_data"
-    assert context_adjudication["source_detail"] == "llm_response_preview.text"
-    assert context_adjudication["validated_output_recorded"] is False
-    assert context_adjudication["mode"] == "no_prior_context"
-    assert context_adjudication["summary"] == (
-        "Use only the current Gmail-token request."
-    )
-
-
-def test_build_summary_flags_empty_success_llm_output_as_suspect() -> None:
-    summary = sampler._build_summary(
-        prompt_entry={
-            "id": "represented_self_facts_vs_inferences",
-            "category": "epistemic_summary",
-            "complexity_class": "vontology_grounded",
-            "prompt": "Tell me about myself as represented here.",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        task_id="task-empty",
-        session_id="session-empty",
-        request_id="request-empty",
-        history_location={"history_index": 4, "session_id": "session-empty"},
-        generate_payload={"response": ""},
-        llm_debug_data={
-            "model": "gemma4:26b",
-            "stage_diagnostics": [
-                {
-                    "stage_id": "plain_response",
-                    "stage_label": "Plain response",
-                    "latest_status": "llm_call_end",
-                    "latest_llm_exchange": {
-                        "llm_request_state": "completed",
-                        "selected_model": "gemma4:26b",
-                        "response_preview": {"char_count": 0, "text": ""},
-                    },
-                }
-            ],
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "selector": {
-                        "response": {
-                            "char_count": 120,
-                            "text": "{'workflow_id':'#V#chat_assistant_workflow'}",
-                        },
-                        "selection_metadata": {
-                            "structured_selection_detected": False,
-                            "raw_response_format": "text",
-                        },
-                        "selection_resolution": "candidate_label_exact_match",
-                    },
-                    "dispatch": {
-                        "dispatch_workflow_id": "#V#chat_assistant_workflow",
-                        "selected_execution_mode": "direct_response",
-                    },
-                },
-                "tool_history": [],
-            },
-        },
-        evaluation={
-            "verdict": "unhappy",
-            "should_user_be_happy": False,
-            "reasons": ["No assistant response text was returned."],
-            "missing_evidence": [],
-            "missing_answer_evidence": [],
-        },
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_grounded"],
-        seed=17,
-        requested_model="gemma4:26b",
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-    )
-
-    model_report = summary["model_portfolio_evaluation"]
-    assert len(model_report["empty_success_suspects"]) == 2
-    assert model_report["selector"]["structured_output_valid"] is False
-    answer_evidence = model_report["stage_evidence"][1]
-    assert answer_evidence["workflow_stage"] == "turn_answer"
-    assert answer_evidence["verdict"] == "failed"
-    assert answer_evidence["metrics"]["empty_success_suspect_count"] == 2
-    assert answer_evidence["promotion_eligible"] is False
-    assert "single_prompt_replay_evidence_only" in answer_evidence["promotion_blockers"]
-
-
-def test_build_summary_records_canonical_concept_id_mismatch_evidence() -> None:
-    prompt_entry = {
-        "id": "represented_self_facts_vs_inferences",
-        "category": "epistemic_summary",
-        "complexity_class": "vontology_grounded",
-        "prompt": "Tell me about myself as represented here.",
-        "knowledge_surfaces": ["kb"],
-        "likely_tools": ["fetch_concept", "get_predicate_incidence"],
-    }
-    generate_payload = {
-        "response": (
-            "Based on the current Vontology, this is a self-representation "
-            "audit for #V#michael_switbrock."
-        )
-    }
-    llm_debug_data = {
-        "model": "gemma4:26b",
-        "turn_execution_diagnostics": {
-            "workflow_routing_diagnostics": {
-                "dispatch": {
-                    "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
-                    "selected_execution_mode": "custom_workflow",
-                }
-            },
-            "tool_history": [
-                {"tool": "fetch_concept", "success": True},
-                {"tool": "get_predicate_incidence", "success": True},
-            ],
-        },
-    }
-    run_environment = {
-        "base_url": "http://127.0.0.1:5010",
-        "authenticated_user_concept_id": "#V#michael_witbrock",
-    }
-    evaluation = sampler._evaluate_user_happiness(
-        prompt_entry=prompt_entry,
-        generate_payload=generate_payload,
-        llm_debug_data=llm_debug_data,
-        run_environment=run_environment,
-    )
-
-    summary = sampler._build_summary(
-        prompt_entry=prompt_entry,
-        task_id="task-canonical",
-        session_id="session-canonical",
-        request_id="request-canonical",
-        history_location={"history_index": 2, "session_id": "session-canonical"},
-        generate_payload=generate_payload,
-        llm_debug_data=llm_debug_data,
-        evaluation=evaluation,
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_grounded"],
-        seed=17,
-        requested_model="gemma4:26b",
-        run_environment=run_environment,
-    )
-
-    answer_evidence = summary["model_portfolio_evaluation"]["stage_evidence"][1]
-    assert answer_evidence["workflow_stage"] == "turn_answer"
-    assert answer_evidence["verdict"] == "failed"
-    assert (
-        answer_evidence["metrics"]["canonical_concept_id_fidelity_status"] == "failed"
-    )
-    assert answer_evidence["metrics"]["canonical_concept_id_mismatch_count"] == 1
-    artifact = answer_evidence["evidence_artifact"]
-    assert (
-        artifact["canonical_concept_id_fidelity"]["findings"][0]["reason_code"]
-        == "canonical_concept_id_mismatch"
-    )
-    assert "#V#michael_switbrock" in (answer_evidence["rationale"] or "")
-
-
-def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None:
-    prompt_entry = {
-        "id": "what_papers_of_mine_do_you_know_about",
-        "category": "entity_relative_kb_lookup",
-        "complexity_class": "vontology_grounded",
-        "prompt": "What papers of mine do you know about?",
-        "knowledge_surfaces": ["kb"],
-        "likely_tools": ["search_knowledge_base"],
-    }
-    run_environment = {
-        "base_url": "http://127.0.0.1:5000",
-        "authenticated_user_concept_id": "#V#michael_witbrock",
-        "session_name": "comparison run",
-        "server_resolved_active_llm_model": "gpt-5.4-mini",
-    }
-    arm_a = sampler._build_summary(
-        prompt_entry=prompt_entry,
-        task_id="task-a",
-        session_id="session-a",
-        request_id="request-a",
-        history_location={"history_index": 2, "session_id": "session-a"},
-        generate_payload={"response": "Answer from gemma."},
-        llm_debug_data={
-            "model": "gemma4:26b",
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "dispatch_workflow_id": "#V#tool_calling_workflow",
-                        "selected_execution_mode": "tool_pipeline",
-                    }
-                },
-                "tool_history": [],
-            },
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_grounded"],
-        seed=17,
-        requested_model="gemma4:26b",
-        run_environment={
-            **run_environment,
-            "requested_model": "gemma4:26b",
-            "session_name": "comparison run [arm_1:gemma4:26b]",
-        },
-        arm_metadata={
-            "arm_id": "arm_1",
-            "label": "gemma4:26b",
-            "requested_model": "gemma4:26b",
-        },
-    )
-    arm_b = sampler._build_summary(
-        prompt_entry=prompt_entry,
-        task_id="task-b",
-        session_id="session-b",
-        request_id="request-b",
-        history_location={"history_index": 2, "session_id": "session-b"},
-        generate_payload={"response": "Answer from the active model."},
-        llm_debug_data={
-            "model": "gpt-5.4-mini",
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "dispatch_workflow_id": "#V#direct_response",
-                        "selected_execution_mode": "direct_response",
-                    }
-                },
-                "tool_history": [],
-            },
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_grounded"],
-        seed=17,
-        requested_model=None,
-        run_environment={
-            **run_environment,
-            "requested_model": None,
-            "session_name": "comparison run [arm_2:active_authenticated_model]",
-        },
-        arm_metadata={
-            "arm_id": "arm_2",
-            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
-            "requested_model": None,
-        },
-    )
-
-    summary = sampler._build_multi_arm_summary(
-        prompt_entry=prompt_entry,
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_grounded"],
-        seed=17,
-        requested_model="gemma4:26b",
-        requested_model_arms=[
-            {
-                "arm_id": "arm_1",
-                "label": "gemma4:26b",
-                "requested_model": "gemma4:26b",
-            },
-            {
-                "arm_id": "arm_2",
-                "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
-                "requested_model": None,
-            },
-        ],
-        run_environment=run_environment,
-        arm_summaries=[arm_a, arm_b],
-    )
-
-    assert summary["mode"] == "multi_arm_comparison"
-    assert summary["selection"]["requested_model"] == "gemma4:26b"
-    assert summary["selection"]["requested_model_arms"] == [
-        {
-            "arm_id": "arm_1",
-            "label": "gemma4:26b",
-            "requested_model": "gemma4:26b",
-            "requested_provider": None,
-        },
-        {
-            "arm_id": "arm_2",
-            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
-            "requested_model": None,
-            "requested_provider": None,
-        },
-    ]
-    assert summary["comparison"]["arm_count"] == 2
-    assert summary["comparison"]["happy_arm_count"] == 2
-    assert summary["comparison"]["all_should_user_be_happy"] is True
-    assert summary["comparison"]["telemetry_models"] == [
-        "gemma4:26b",
-        "gpt-5.4-mini",
-    ]
-    portfolio_report = summary["model_portfolio_report"]
-    assert portfolio_report["schema_version"] == "model_portfolio_replay_report.v1"
-    assert portfolio_report["arm_count"] == 2
-    assert portfolio_report["stage_evidence_count"] == 4
-    assert portfolio_report["policy_update"]["authorised"] is False
-    assert (
-        portfolio_report["aggregate_certification_decision"]["promotion_authorised"]
-        is False
-    )
-
-
-def test_run_replay_plan_continues_multi_arm_after_history_readback_warning(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    run_models: list[str | None] = []
-
-    def fake_establish_session(**kwargs: object) -> tuple[str, str]:
-        arm_index = len(run_models) + 1
-        return f"default-session-{arm_index}", f"window-session-{arm_index}"
-
-    def fake_run_generate_background(**kwargs: object) -> tuple[str, dict[str, object]]:
-        requested_model = kwargs["model"]
-        run_models.append(requested_model if isinstance(requested_model, str) else None)
-        arm_index = len(run_models)
-        model = requested_model if isinstance(requested_model, str) else "active-model"
-        return (
-            f"task-{arm_index}",
-            {
-                "request_id": f"request-{arm_index}",
-                "conversation_session_id": f"session-{arm_index}",
-                "response_text": (
-                    f"{model} returned grounded Jira issue details from the tool."
-                ),
-                "model": model,
-                "workflow_routing": {
-                    "workflow_id": "#V#tool_calling_workflow",
-                    "source": "selector",
-                },
-                "tool_invocations": [{"tool": "jira_get_issue", "success": True}],
-            },
-        )
-
-    def fake_find_history_location(**kwargs: object) -> dict[str, object]:
-        raise RuntimeError("assistant history location missing")
-
-    monkeypatch.setattr(
-        sampler, "_establish_authenticated_session", fake_establish_session
-    )
-    monkeypatch.setattr(sampler, "_run_generate_background", fake_run_generate_background)
-    monkeypatch.setattr(
-        sampler,
-        "_find_assistant_turn_history_location",
-        fake_find_history_location,
-    )
-
-    replay_arms = sampler._build_model_arm_plan(
-        requested_model="gemma4:26b",
-        compare_models=["gpt-5.4-mini"],
-        include_active_model_arm=False,
-    )
-    summary, should_user_be_happy = sampler._run_replay_plan(
-        prompt_entry={
-            "id": "tell_me_about_jvnautosci_150_in_jira",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "tool_augmented",
-            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        base_url="http://127.0.0.1:5000",
-        requested_model="gemma4:26b",
-        replay_arms=replay_arms,
-        timeout_seconds=30.0,
-        poll_interval_seconds=0.2,
-        user_concept_id="#V#michael_witbrock",
-        organisation_concept_id="university_of_auckland_strong_ai_lab",
-        session_name="comparison run",
-        run_environment={"base_url": "http://127.0.0.1:5000"},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["tool_augmented"],
-        seed=17,
-        base_prompt_id=None,
-        prompt_variant_ids=[],
-        presenter_mode=False,
-        gmail_profile=None,
-        agent_test_selector_replay_mode=None,
-    )
-
-    assert run_models == ["gemma4:26b", "gpt-5.4-mini"]
-    assert should_user_be_happy is True
-    assert summary["mode"] == "multi_arm_comparison"
-    assert summary["comparison"]["arm_count"] == 2
-    assert summary["comparison"]["all_should_user_be_happy"] is True
-    for arm_summary in summary["arms"]:
-        assert arm_summary["conversation"]["history_location"]["source"] == (
-            "background_task_result"
-        )
-        assert arm_summary["telemetry"]["debug_readback_source"] == (
-            "background_task_result"
-        )
-        assert arm_summary["telemetry"]["debug_readback_partial"] is True
-        assert arm_summary["telemetry"]["history_lookup_error"] == (
-            "assistant history location missing"
-        )
-        assert arm_summary["telemetry"]["selected_workflow_id"] == (
-            "#V#tool_calling_workflow"
-        )
-        assert arm_summary["telemetry"]["observed_tools"] == ["jira_get_issue"]
-
-
-def test_build_repeated_replay_summary_reports_success_rate() -> None:
-    prompt_entry = {
-        "id": "text_relations_for_michael_witbrock_concept",
-        "category": "represented_relation_lookup",
-        "complexity_class": "vontology_grounded",
-        "prompt": "What text relations are used with the concept for Michael Witbrock?",
-        "knowledge_surfaces": ["kb"],
-        "likely_tools": ["get_text_relations_summary"],
-        "requires_tool_use": True,
-    }
-    attempts = [
-        {"status": "ok", "evaluation": {"should_user_be_happy": True}},
-        {"status": "ok", "evaluation": {"should_user_be_happy": True}},
-        {"status": "error", "evaluation": {"should_user_be_happy": False}},
-    ]
-
-    summary = sampler._build_repeated_replay_summary(
-        prompt_entry=prompt_entry,
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["vontology_grounded"],
-        seed=17,
-        requested_model="gemma4:26b",
-        requested_model_arms=[
-            {"arm_id": "arm_1", "label": "gemma4:26b", "requested_model": "gemma4:26b"}
-        ],
-        run_environment={
-            "base_url": "http://127.0.0.1:5010",
-            "model_policy": {"local_only_default": True},
-        },
-        attempt_summaries=attempts,
-        success_count=2,
-        minimum_success_rate=0.95,
-    )
-
-    assert summary["mode"] == "repeated_replay_suite"
-    assert summary["status"] == "failed"
-    assert summary["repeat"] == {
-        "attempt_count": 3,
-        "successful_attempt_count": 2,
-        "failed_attempt_count": 1,
-        "success_rate": pytest.approx(2 / 3),
-        "minimum_success_rate": 0.95,
-        "meets_minimum_success_rate": False,
-    }
-    assert summary["environment"]["model_policy"]["local_only_default"] is True
-
-
-def test_summary_success_threshold_requires_terminal_acceptance() -> None:
-    summary = {
-        "status": "ok",
-        "evaluation": {
-            "should_user_be_happy": True,
-            "terminal_outcome": {
-                "accepted": False,
-                "completion_gate_consistent": False,
-            },
-        },
-    }
-
-    assert sampler._summary_meets_success_threshold(summary) is False
-
-
-def test_repeated_summary_threshold_recomputes_terminally_accepted_attempts() -> None:
-    accepted_attempt = {
-        "status": "ok",
-        "evaluation": {
-            "should_user_be_happy": True,
-            "terminal_outcome": {"accepted": True},
-        },
-    }
-    unaccepted_attempt = {
-        "status": "ok",
-        "evaluation": {
-            "should_user_be_happy": True,
-            "terminal_outcome": {"accepted": False},
-        },
-    }
-    summary = {
-        "status": "ok",
-        "repeat": {
-            "attempt_count": 2,
-            "successful_attempt_count": 2,
-            "success_rate": 1.0,
-            "minimum_success_rate": 1.0,
-            "meets_minimum_success_rate": True,
-        },
-        "attempts": [accepted_attempt, unaccepted_attempt],
-    }
-
-    assert sampler._summary_meets_success_threshold(summary) is False
-
-
-def test_build_replay_arm_plan_adds_prompt_variant_arms() -> None:
-    model_arms = sampler._build_model_arm_plan(
-        requested_model="gemma4:26b",
-        compare_models=["gpt-5.4-mini"],
-        include_active_model_arm=False,
-    )
-
-    arms = sampler._build_replay_arm_plan(
-        model_arms=model_arms,
-        base_prompt_id="#V#mail_answer_prompt",
-        prompt_variant_ids=["#V#gemma_mail_answer_prompt_v2"],
-        workflow_stage_id="turn_answer",
-        target_workflow_id="#V#general_mail_review_workflow",
-        replay_set_id="JVNAUTOSCI-2318",
-        replay_case_id="mail-listing-failure",
-    )
-
-    assert [arm["candidate_prompt_variant_id"] for arm in arms] == [
-        None,
-        "#V#gemma_mail_answer_prompt_v2",
-        None,
-        "#V#gemma_mail_answer_prompt_v2",
-    ]
-    assert {arm["base_prompt_id"] for arm in arms} == {"#V#mail_answer_prompt"}
-    assert {arm["workflow_stage_id"] for arm in arms} == {"turn_answer"}
-    assert {arm["target_workflow_id"] for arm in arms} == {
-        "#V#general_mail_review_workflow"
-    }
-
-
-def test_build_summary_records_prompt_variant_selection_and_scoring_blockers() -> None:
-    summary = sampler._build_summary(
-        prompt_entry={
-            "id": "mail-listing-failure",
-            "category": "failure_case_replay",
-            "complexity_class": "tool_augmented",
-            "prompt": "List my last six email messages.",
-            "knowledge_surfaces": ["conversation_history"],
-            "likely_tools": ["gmail_list_messages", "gmail_get_message"],
-            "requires_tool_use": True,
-        },
-        task_id="task-mail",
-        session_id="session-mail",
-        request_id="request-mail",
-        history_location={"history_index": 9, "session_id": "session-mail"},
-        generate_payload={
-            "response": "Here are the six messages.",
-            "request_id": "request-mail",
-            "session_id": "session-mail",
-        },
-        llm_debug_data={
-            "model": "gemma4:26b",
-            "prompt_variant_selection": {
-                "base_prompt_concept_id": "#V#mail_answer_prompt",
-                "selected_prompt_concept_id": "#V#gemma_mail_answer_prompt_v2",
-                "match_reason": "model_family",
-                "fallback_reason": None,
-            },
-            "completion_gate_verdict": {"decision": "partial"},
-            "turn_execution_diagnostics": {
-                "workflow_routing_diagnostics": {
-                    "dispatch": {
-                        "dispatch_workflow_id": "#V#general_mail_review_workflow",
-                        "selected_execution_mode": "custom_workflow",
-                    }
-                },
-                "tool_history": [
-                    {"tool": "gmail_list_messages", "success": True},
-                    {"tool": "gmail_get_message", "success": True},
-                ],
-                "response_surfaces": {
-                    "evidence_consistency": {
-                        "status": "inconsistent",
-                        "scoring_caveats": [
-                            "completion_gate_non_success_with_user_visible_response"
-                        ],
-                        "disagreement_codes": [
-                            "critic_pass_with_completion_gate_non_success"
-                        ],
-                    }
-                },
-            },
-        },
-        evaluation={"verdict": "happy", "should_user_be_happy": True},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
-        requested_complexity_classes=["tool_augmented"],
-        seed=17,
-        requested_model="gemma4:26b",
-        run_environment={"base_url": "http://127.0.0.1:5010"},
-        arm_metadata={
-            "arm_id": "arm_2",
-            "label": "gemma:variant",
-            "requested_model": "gemma4:26b",
-            "base_prompt_id": "#V#mail_answer_prompt",
-            "candidate_prompt_variant_id": "#V#gemma_mail_answer_prompt_v2",
-        },
-    )
-
-    prompt_variant = summary["prompt_variant_evaluation"]
-    assert prompt_variant["candidate_prompt_variant_selected"] is True
-    assert prompt_variant["match_reason"] == "model_family"
-    assert prompt_variant["promotion_blockers"] == []
-    scoring = summary["replay_scoring_consistency"]
-    assert scoring["non_promotable"] is True
-    assert "response_surface_inconsistent" in scoring["promotion_blockers"]
-    answer_evidence = summary["model_portfolio_evaluation"]["stage_evidence"][1]
-    assert answer_evidence["prompt_id"] == "#V#mail_answer_prompt"
-    assert answer_evidence["prompt_variant_id"] == "#V#gemma_mail_answer_prompt_v2"
-    assert "response_surface_inconsistent" in answer_evidence["promotion_blockers"]
-
-
-def test_experiment_observation_captures_prompt_variant_arm() -> None:
-    summary = {
-        "arm": {
-            "arm_id": "arm_2",
-            "label": "gemma:variant",
-            "requested_model": "gemma4:26b",
-            "replay_set_id": "JVNAUTOSCI-2318",
-            "replay_case_id": "mail-listing-failure",
-        },
-        "prompt": {"id": "mail-listing-failure"},
-        "conversation": {
-            "request_id": "request-mail",
-            "history_location": {"session_id": "session-mail", "history_index": 9},
-        },
-        "telemetry": {
-            "model": "gemma4:26b",
-            "selected_workflow_id": "#V#general_mail_review_workflow",
-            "selected_execution_mode": "custom_workflow",
-            "tool_count": 2,
-            "tool_history": [{"tool": "gmail_get_message", "success": True}],
-        },
-        "evaluation": {"should_user_be_happy": True, "reasons": []},
-        "response": {"text": "Here are the six messages."},
-        "prompt_variant_evaluation": {
-            "base_prompt_id": "#V#mail_answer_prompt",
-            "candidate_prompt_variant_id": "#V#gemma_mail_answer_prompt_v2",
-            "selected_prompt_id": "#V#gemma_mail_answer_prompt_v2",
-            "candidate_prompt_variant_selected": True,
-            "normal_prompt_variant_resolution_observed": True,
-            "promotion_blockers": [],
-        },
-        "replay_scoring_consistency": {
-            "completion_gate_status": "pass",
-            "response_surface_status": "consistent",
-            "non_promotable": False,
-        },
-    }
-
-    observation = sampler._build_experiment_observation_from_arm_summary(summary)
-
-    assert observation["verdict"] == "pass"
-    assert observation["observed_outcome"]["candidate_prompt_variant_id"] == (
-        "#V#gemma_mail_answer_prompt_v2"
-    )
-    assert observation["candidate_validation"]["valid"] is None
-    assert (
-        observation["candidate_validation"]["structural_prompt_variant_blockers"] == []
-    )
-    assert (
-        observation["candidate_validation"]["evaluation_authority"]["authoritative"]
-        is False
-    )
-    assert observation["workflow_execution"]["workflow_id"] == (
-        "#V#general_mail_review_workflow"
-    )
-    assert observation["turn_execution_request_ids"] == ["request-mail"]
-
-
-def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    choose_calls: list[dict[str, object]] = []
-    replay_calls: list[dict[str, object]] = []
-
-    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
-    monkeypatch.setattr(
-        sampler,
-        "_load_prompt_bank",
-        lambda: {
-            "schema_version": "live_kb_tool_prompt_bank.v3",
-            "prompts": [
-                {
-                    "id": "who_am_i_in_this_conversation",
-                    "category": "identity_context",
-                    "complexity_class": "direct_context_or_background",
-                    "prompt": "Who am I in this conversation?",
-                    "knowledge_surfaces": ["turn_context"],
-                    "likely_tools": [],
-                }
-            ],
-        },
-    )
-
-    def fake_choose_prompt(*args: object, **kwargs: object) -> dict[str, object]:
-        choose_calls.append({"args": args, "kwargs": kwargs})
-        return {
-            "id": "who_am_i_in_this_conversation",
-            "category": "identity_context",
-            "complexity_class": "direct_context_or_background",
-            "prompt": "Who am I in this conversation?",
-            "knowledge_surfaces": ["turn_context"],
-            "likely_tools": [],
-        }
-
-    monkeypatch.setattr(sampler, "_choose_prompt", fake_choose_prompt)
-    monkeypatch.setattr(
-        sampler,
-        "_collect_run_environment",
-        lambda **kwargs: {
-            "base_url": kwargs["base_url"],
-            "requested_model": kwargs["requested_model"],
-            "session_name": kwargs["session_name"],
-        },
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_augment_run_environment_with_server_diag",
-        lambda **kwargs: {
-            **kwargs["run_environment"],
-            "server_reported_git_commit": "abc123",
-            "server_agent_test_instance": True,
-        },
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_augment_run_environment_with_active_llm_info",
-        lambda **kwargs: {
-            **kwargs["run_environment"],
-            "server_resolved_active_llm_model": "gpt-5.4-mini",
-        },
-    )
-
-    def fake_run_prompt_replay_arm(**kwargs: object) -> dict[str, object]:
-        replay_calls.append(kwargs)
-        arm = dict(kwargs["arm_metadata"])  # type: ignore[arg-type]
-        requested_model = kwargs["requested_model"]
-        telemetry_model = requested_model or "gpt-5.4-mini"
-        return {
-            "status": "ok",
-            "arm": arm,
-            "evaluation": {"should_user_be_happy": True},
-            "telemetry": {
-                "model": telemetry_model,
-                "selected_workflow_id": "#V#direct_response",
-                "selected_execution_mode": "direct_response",
-            },
-            "response": {"text": f"Response from {telemetry_model}"},
-        }
-
-    monkeypatch.setattr(sampler, "_run_prompt_replay_arm", fake_run_prompt_replay_arm)
-
-    exit_code = sampler.main(
-        [
-            "--prompt-id",
-            "who_am_i_in_this_conversation",
-            "--model",
-            "gemma4:26b",
-            "--compare-model",
-            "gpt-5.4-mini",
-            "--include-active-model-arm",
-            "--allow-premium-model",
-        ]
-    )
-
-    output = json.loads(capsys.readouterr().out)
-    assert exit_code == 0
-    assert len(choose_calls) == 1
-    assert [call["requested_model"] for call in replay_calls] == [
-        None,
-        "gemma4:26b",
-        "gpt-5.4-mini",
-    ]
-    assert all(
-        isinstance(prompt_entry := call.get("prompt_entry"), dict)
-        and prompt_entry.get("prompt") == "Who am I in this conversation?"
-        for call in replay_calls
-    )
-    assert output["mode"] == "multi_arm_comparison"
-    assert output["environment"]["base_url"] == "http://127.0.0.1:5010"
-    assert output["environment"]["server_agent_test_instance"] is True
-    assert output["comparison"]["arm_count"] == 3
-    assert output["selection"]["requested_model_arms"] == [
-        {
-            "arm_id": "arm_1",
-            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
-            "requested_model": None,
-            "requested_provider": None,
-        },
-        {
-            "arm_id": "arm_2",
-            "label": "gemma4:26b",
-            "requested_model": "gemma4:26b",
-            "requested_provider": "ollama",
-        },
-        {
-            "arm_id": "arm_3",
-            "label": "gpt-5.4-mini",
-            "requested_model": "gpt-5.4-mini",
-            "requested_provider": "openai",
-        },
-    ]
-
-
-def test_main_records_prompt_variant_arms_to_experiment_run(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    replay_calls: list[dict[str, object]] = []
-    recorded: dict[str, object] = {}
-
-    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
-    monkeypatch.setattr(
-        sampler,
-        "_load_prompt_bank",
-        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_collect_run_environment",
-        lambda **kwargs: {
-            "base_url": kwargs["base_url"],
-            "requested_model": kwargs["requested_model"],
-            "session_name": kwargs["session_name"],
-        },
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_augment_run_environment_with_server_diag",
-        lambda **kwargs: {
-            **kwargs["run_environment"],
-            "server_agent_test_instance": True,
-        },
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_augment_run_environment_with_active_llm_info",
-        lambda **kwargs: {
-            **kwargs["run_environment"],
-            "server_resolved_active_llm_model": "gpt-5.4-mini",
-        },
-    )
-
-    def fake_run_prompt_replay_arm(**kwargs: object) -> dict[str, object]:
-        replay_calls.append(kwargs)
-        arm_raw = kwargs["arm_metadata"]
-        assert isinstance(arm_raw, dict)
-        arm: dict[str, object] = dict(arm_raw)
-        return {
-            "status": "ok",
-            "arm": arm,
-            "prompt": {"id": "mail-listing-failure"},
-            "conversation": {"request_id": f"req-{len(replay_calls)}"},
-            "evaluation": {"should_user_be_happy": True},
-            "telemetry": {
-                "model": kwargs["requested_model"],
-                "selected_workflow_id": "#V#general_mail_review_workflow",
-                "selected_execution_mode": "custom_workflow",
-            },
-            "response": {"text": "Replay response."},
-            "prompt_variant_evaluation": {
-                "base_prompt_id": arm.get("base_prompt_id"),
-                "candidate_prompt_variant_id": arm.get("candidate_prompt_variant_id"),
-                "selected_prompt_id": arm.get("candidate_prompt_variant_id")
-                or arm.get("base_prompt_id"),
-                "candidate_prompt_variant_selected": (
-                    arm.get("candidate_prompt_variant_id") is not None
-                ),
-                "promotion_blockers": [],
-            },
-            "replay_scoring_consistency": {"non_promotable": False},
-            "model_portfolio_evaluation": {
-                "stage_evidence": [],
-                "empty_success_suspects": [],
-            },
-        }
-
-    def fake_record_experiment_observations(**kwargs: object) -> dict[str, object]:
-        recorded.update(kwargs)
-        return {
-            "success": True,
-            "run_id": kwargs["run_id"],
-            "recorded_observation_count": len(kwargs["arm_summaries"]),  # type: ignore[arg-type]
-        }
-
-    monkeypatch.setattr(sampler, "_run_prompt_replay_arm", fake_run_prompt_replay_arm)
-    monkeypatch.setattr(
-        sampler,
-        "_record_experiment_observations",
-        fake_record_experiment_observations,
-    )
-
-    exit_code = sampler.main(
-        [
-            "--prompt-text",
-            "List my last six email messages.",
-            "--replay-case-id",
-            "mail-listing-failure",
-            "--model",
-            "gemma4:26b",
-            "--base-prompt-id",
-            "#V#mail_answer_prompt",
-            "--prompt-variant-id",
-            "#V#gemma_mail_answer_prompt_v2",
-            "--experiment-run-id",
-            "#V#experiment_run_mail_prompt_variants",
-        ]
-    )
-
-    output = json.loads(capsys.readouterr().out)
-    assert exit_code == 0
-    assert [call["requested_model"] for call in replay_calls] == [
-        "gemma4:26b",
-        "gemma4:26b",
-    ]
-    assert [
-        call["arm_metadata"]["candidate_prompt_variant_id"]  # type: ignore[index]
-        for call in replay_calls
-    ] == [None, "#V#gemma_mail_answer_prompt_v2"]
-    assert recorded["run_id"] == "#V#experiment_run_mail_prompt_variants"
-    assert len(recorded["arm_summaries"]) == 2  # type: ignore[arg-type]
-    assert output["experiment_recording"]["recorded_observation_count"] == 2
-
-
-def test_main_can_start_from_failure_conversation_ref_json(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    replay_calls: list[dict[str, object]] = []
-    failure_intake_calls: list[dict[str, object]] = []
-
-    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
-    monkeypatch.setattr(
-        sampler,
-        "_load_prompt_bank",
-        lambda: {"schema_version": "live_kb_tool_prompt_bank.v3", "prompts": []},
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_collect_run_environment",
-        lambda **kwargs: {
-            "base_url": kwargs["base_url"],
-            "requested_model": kwargs["requested_model"],
-            "session_name": kwargs["session_name"],
-        },
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_augment_run_environment_with_server_diag",
-        lambda **kwargs: {
-            **kwargs["run_environment"],
-            "server_agent_test_instance": True,
-        },
-    )
-    monkeypatch.setattr(
-        sampler,
-        "_augment_run_environment_with_active_llm_info",
-        lambda **kwargs: kwargs["run_environment"],
-    )
-
-    def fake_collect_failure_case_prompt_entry(
-        **kwargs: object,
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        failure_intake_calls.append(kwargs)
-        return (
-            {
-                "id": "req-failure",
-                "category": "failure_case_replay",
-                "complexity_class": "tool_augmented",
-                "prompt": "List my last six email messages.",
-                "knowledge_surfaces": ["conversation_history"],
-                "likely_tools": ["gmail_get_message"],
-                "requires_tool_use": True,
-                "source_kind": "failure_case_intake",
-                "source_request_id": "req-failure",
-                "source_workflow_id": "#V#general_mail_review_workflow",
-            },
-            {"success": True, "request_id": "req-failure"},
-        )
-
-    def fake_run_prompt_replay_arm(**kwargs: object) -> dict[str, object]:
-        replay_calls.append(kwargs)
-        prompt_entry = kwargs["prompt_entry"]
-        assert isinstance(prompt_entry, dict)
-        return {
-            "status": "ok",
-            "prompt": {"id": prompt_entry["id"], "text": prompt_entry["prompt"]},
-            "conversation": {"request_id": "req-replay"},
-            "evaluation": {"should_user_be_happy": True},
-            "telemetry": {
-                "model": kwargs["requested_model"],
-                "selected_workflow_id": "#V#general_mail_review_workflow",
-                "selected_execution_mode": "custom_workflow",
-            },
-            "response": {"text": "Replay response."},
-            "prompt_variant_evaluation": {"promotion_blockers": []},
-            "replay_scoring_consistency": {"non_promotable": False},
-            "model_portfolio_evaluation": {
-                "stage_evidence": [],
-                "empty_success_suspects": [],
-            },
-        }
-
-    monkeypatch.setattr(
-        sampler,
-        "_collect_failure_case_prompt_entry",
-        fake_collect_failure_case_prompt_entry,
-    )
-    monkeypatch.setattr(sampler, "_run_prompt_replay_arm", fake_run_prompt_replay_arm)
-
-    exit_code = sampler.main(
-        [
-            "--failure-conversation-ref-json",
-            '{"kind":"von_conversation_ref","conversation_ref":{"session_id":"session-1"}}',
-            "--failure-request-id",
-            "req-failure",
-            "--model",
-            "gemma4:26b",
-        ]
-    )
-
-    output = json.loads(capsys.readouterr().out)
-    assert exit_code == 0
-    assert failure_intake_calls[0]["request_id"] == "req-failure"
-    assert failure_intake_calls[0]["conversation_ref"] == {
-        "kind": "von_conversation_ref",
-        "conversation_ref": {"session_id": "session-1"},
-    }
-    first_prompt_entry = replay_calls[0]["prompt_entry"]
-    assert isinstance(first_prompt_entry, dict)
-    assert first_prompt_entry["prompt"] == "List my last six email messages."
-    assert output["failure_case_intake"] == {
-        "success": True,
-        "request_id": "req-failure",
-    }
+    assert json.loads(output_path.read_text(encoding="utf-8"))["status"] == "ok"

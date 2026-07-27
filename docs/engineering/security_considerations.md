@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 25 July 2026
+- **Last reviewed:** 27 July 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -233,14 +233,19 @@ Current implementation details:
 
 ### 4. MCP Tool Access Control and Agentic-AI Threats
 
-**Current**: Ordinary adaptive turns receive a standing read-only projection
-of internal MCP capabilities. The gateway binds trusted actor and namespace
-context outside model arguments. Gmail reads are projected only when a
-represented actor-to-profile relation authorises a configured profile, which
-the entry point injects without letting the model choose it.
+**Current as of 27 July 2026**: When internal MCP is enabled, authenticated
+ordinary turns receive a bounded additive representation aperture. Trusted
+actor and namespace values are server-bound; creation scope is fixed; effects
+on existing subjects require actor- or organisation-scoped authority; and
+ordinary turns cannot change visibility scope. Gmail reads are projected only
+when a represented actor-to-profile relation authorises a configured profile,
+which the entry point injects without letting the model choose it. Revalidate
+the catalogue and adaptive-turn service before relying on this dated
+implementation claim.
 
 **Protection**:
-- The ordinary-turn projection contains no write-category capability
+- The ordinary-turn projection excludes undelegated effects; an operation's
+  catalogue category alone does not establish authority
 - Gateway handlers distinguish trusted ambient actor context from raw
   tool-payload identity claims
 - Actor-private RAG, chat, turn, experiment, and critique-memory reads validate
@@ -276,6 +281,8 @@ the entry point injects without letting the model choose it.
   relevant deployment limits of tools when those facts help the model and
   runtime choose proportionate assurance. Avoid a universal verb-based risk
   taxonomy.
+- Apply the semantic read-only boundary in [`AGENTS.md`](../../AGENTS.md) to
+  derived maintenance.
 - Log enough tool input/output metadata to investigate suspicious tool use while
   redacting secrets and private content where required.
 
@@ -584,6 +591,9 @@ be added before broader external contribution or partner deployment.
 
 ## Change Log
 
+- **2026-07-27**: Distinguished logical read semantics from physical write
+  purity and documented the bounded ordinary-turn representation-effect
+  aperture
 - **2026-07-25**: Replaced categorical write/destructive guardrails with
   delegated-capability and residual-risk guidance
   - Distinguished the actor's maximum capability from semantic action choice

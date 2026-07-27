@@ -158,12 +158,15 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     assert result["prompt_concept_ids"] == ["#V#prompt_a"]
     assert result["tool_guidance_hash"], "expected a tool guidance hash"
     assert "direct adaptive turn path" in result["tool_guidance_preview"]
-    assert "turn_read_capabilities" in result["tool_guidance_preview"]
+    assert "turn_capabilities" in result["tool_guidance_preview"]
     assert "gateway_enabled" in result
     assert result["orchestrator_max_tool_invocations"] is None
     assert result["orchestrator_missing_tool_call_retry_cap"] is None
     assert result["workflow_mode"]["ordinary_turn_path"] == "direct_adaptive_turn"
-    assert result["workflow_mode"]["ordinary_turn_capability_mode"] == "read_only"
+    assert (
+        result["workflow_mode"]["ordinary_turn_capability_mode"]
+        == "bounded_capabilities"
+    )
     assert (
         result["workflow_mode"]["automatic_workflow_selector_enabled"] is False
     )
@@ -233,14 +236,12 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
     assert result["configured_openai_api_key_env_var_present"] is True
     assert result["sensitive_env_presence"]["OPENAI_API_KEY"] is True
     assert result["workflow_mode"]["ordinary_turn_path"] == "direct_adaptive_turn"
-    assert (
-        result["workflow_mode"]["automatic_workflow_selector_enabled"] is False
-    )
+    assert result["workflow_mode"]["automatic_workflow_selector_enabled"] is False
     assert result["workflow_mode"]["legacy_orchestrator_status"] == "retired"
     assert result["workflow_mode"]["explicit_workflow_model_policy_enabled"] is True
     assert result["workflow_mode"]["explicit_workflows_enabled"] is True
     assert result["workflow_mode"]["event_workflow_integration_enabled"] is True
-    assert result["workflow_mode"]["runtime_mode"] == "direct_adaptive_read"
+    assert result["workflow_mode"]["runtime_mode"] == "direct_adaptive_capabilities"
     assert result["event_workflow_bindings"]["task.created"] == "#V#todo_refresh_workflow"
     assert (
         result["event_workflow_bindings"]["task.status_changed"]

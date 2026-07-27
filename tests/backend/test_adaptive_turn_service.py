@@ -29,12 +29,14 @@ from src.backend.services.adaptive_turn_service import (
     _capability_catalogue,
     _compact_context_after_limit,
     _compact_evidence_index,
+    _effect_subject_authorised,
     _final_synthesis_context,
     _json_bytes,
     _trusted_tool_payload,
     execute_adaptive_turn,
-    ordinary_turn_read_delegation,
+    ordinary_turn_capability_delegation,
 )
+from src.backend.services.turn_evidence_store import TrustedTurnScope
 
 
 class _SequenceClient:
@@ -197,6 +199,79 @@ def _delegation_gateway() -> InternalMCPGateway:
     )
 
 
+def _effect_gateway(
+    handler: Any,
+    *,
+    write_timeout_sec: float = 1.0,
+) -> InternalMCPGateway:
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="general_read",
+            handler=lambda **kwargs: handler("general_read", kwargs),
+            input_schema=Schema(allow_unknown=True),
+            category="read",
+        )
+    )
+    for name, subject_argument in (
+        ("create_concepts", None),
+        ("upsert_text_relation", "concept_id"),
+        ("add_relationship", "source_id"),
+    ):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda _name=name, **kwargs: handler(_name, kwargs),
+                input_schema=Schema(allow_unknown=True),
+                category="write",
+                ordinary_turn_effect=True,
+                ordinary_turn_mutation_subject_argument=subject_argument,
+                ordinary_turn_trusted_argument_bindings=(
+                    {
+                        "namespace": "turn_namespace",
+                        "created_by_concept_id": "actor_user_concept_id",
+                    }
+                    if name == "create_concepts"
+                    else (
+                        {"namespace": "turn_namespace"}
+                        if name == "upsert_text_relation"
+                        else None
+                    )
+                ),
+                ordinary_turn_fixed_arguments=(
+                    {
+                        "organisation_concept_id": None,
+                        "org_id": None,
+                        "scope_mode": "user_org_default",
+                        "visibility_scope_mode": None,
+                    }
+                    if name == "create_concepts"
+                    else (
+                        {"provenance": None}
+                        if name == "upsert_text_relation"
+                        else None
+                    )
+                ),
+            )
+        )
+    catalogue.register(
+        MethodDefinition(
+            name="other_write",
+            handler=lambda **kwargs: handler("other_write", kwargs),
+            input_schema=Schema(allow_unknown=True),
+            category="write",
+        )
+    )
+    return InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(
+            read_timeout_sec=1.0,
+            write_timeout_sec=write_timeout_sec,
+        ),
+        enabled=True,
+    )
+
+
 class _ManualClock:
     def __init__(self, now: float = 0.0) -> None:
         self.now = now
@@ -307,7 +382,7 @@ class _HydrationDeadlineClient:
                 text_response="",
                 tool_calls=[
                     ToolCall(
-                        tool_name="turn_invoke_read_capability",
+                        tool_name="turn_invoke_capability",
                         call_id="call-source-evidence",
                         payload={
                             "name": "general_read",
@@ -369,19 +444,19 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     system_message = client.calls[0]["system_message"]
     assert "#V#person" in system_message
     assert "#V#org" in system_message
-    assert "no write or effect capability" in system_message
+    assert "all other writes are unavailable" in system_message
     assert {
         tool.name for tool in client.calls[0]["available_tools"]
     } == {
-        "turn_read_capabilities",
-        "turn_invoke_read_capability",
+        "turn_capabilities",
+        "turn_invoke_capability",
         "turn_list_evidence",
         "turn_read_evidence",
     }
     catalogue_tool = next(
         tool
         for tool in client.calls[0]["available_tools"]
-        if tool.name == "turn_read_capabilities"
+        if tool.name == "turn_capabilities"
     )
     assert set(catalogue_tool.input_schema["properties"]) == {
         "query",
@@ -394,11 +469,11 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
 def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None:
     gateway = _delegation_gateway()
 
-    without_mail = ordinary_turn_read_delegation(
+    without_mail = ordinary_turn_capability_delegation(
         gateway,
         user_concept_id="#V#person",
     )
-    with_mail = ordinary_turn_read_delegation(
+    with_mail = ordinary_turn_capability_delegation(
         gateway,
         user_concept_id="#V#person",
         trusted_argument_values={
@@ -417,7 +492,7 @@ def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None
 
     gateway.disable()
     assert (
-        ordinary_turn_read_delegation(
+        ordinary_turn_capability_delegation(
             gateway,
             user_concept_id="#V#person",
             trusted_argument_values={
@@ -428,7 +503,7 @@ def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None
     )
 
     gateway.enable()
-    assert ordinary_turn_read_delegation(
+    assert ordinary_turn_capability_delegation(
         gateway,
         user_concept_id=None,
     ) == ("search_arxiv",)
@@ -436,7 +511,7 @@ def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None
 
 def test_server_bound_capability_argument_is_not_model_visible() -> None:
     gateway = _gmail_gateway(lambda **_kwargs: {"success": True})
-    delegated = ordinary_turn_read_delegation(
+    delegated = ordinary_turn_capability_delegation(
         gateway,
         user_concept_id="#V#person",
         trusted_argument_values={
@@ -455,6 +530,356 @@ def test_server_bound_capability_argument_is_not_model_visible() -> None:
     assert set(input_schema["properties"]) == {"query"}
     assert "profile" not in input_schema.get("required", [])
     assert "x-von-argument-aliases" not in input_schema
+
+
+def test_effect_delegation_is_authenticated_and_exactly_metadata_marked() -> None:
+    gateway = _effect_gateway(lambda _name, _arguments: {"success": True})
+    trusted = {
+        "turn_namespace": "#V#person@org",
+        "actor_user_concept_id": "#V#person",
+    }
+
+    assert ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id=None,
+        trusted_argument_values=trusted,
+    ) == ()
+    delegated = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        trusted_argument_values=trusted,
+    )
+
+    assert set(delegated) == {
+        "general_read",
+        "create_concepts",
+        "upsert_text_relation",
+        "add_relationship",
+    }
+    assert "other_write" not in delegated
+
+
+def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "create_concepts"
+        seen.update(arguments)
+        return {"success": True, "effect_status": "succeeded", "changed": True}
+
+    gateway = _effect_gateway(handler)
+    delegated = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        trusted_argument_values={
+            "turn_namespace": "#V#person@org",
+            "actor_user_concept_id": "#V#person",
+        },
+    )
+    capability = _capability_catalogue(
+        gateway,
+        delegated,
+        {"names": ["create_concepts"]},
+    )["capabilities"][0]
+    assert {
+        "namespace",
+        "created_by_concept_id",
+        "organisation_concept_id",
+        "scope_mode",
+        "visibility_scope_mode",
+    }.isdisjoint(capability["input_schema"]["properties"])
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="create-1",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "namespace": "#V#spoof@other",
+                            "created_by_concept_id": "#V#spoof",
+                            "organisation_concept_id": "#V#other",
+                            "org_id": "#V#other",
+                            "scope_mode": "global_general",
+                            "visibility_scope_mode": "global_general",
+                            "concepts": [{"name": "Bounded representation"}],
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Created and ready for canonical read-back."),
+    )
+    execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Represent this.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="create-scope",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert seen["namespace"] == "#V#person@org"
+    assert seen["created_by_concept_id"] == "#V#person"
+    assert seen["organisation_concept_id"] is None
+    assert seen["org_id"] is None
+    assert seen["scope_mode"] == "user_org_default"
+    assert seen["visibility_scope_mode"] is None
+
+
+def test_effect_subject_authority_matches_actor_or_organisation_scope(
+    monkeypatch,
+) -> None:
+    from src.backend.db import mongo_client
+
+    class _Collection:
+        relationships: dict[str, Any] = {}
+
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"relationships": dict(self.relationships)}
+
+    collection = _Collection()
+    monkeypatch.setattr(mongo_client, "get_concepts_collection", lambda: collection)
+    scope = TrustedTurnScope(
+        user_concept_id="#V#person",
+        organisation_concept_id="#V#org",
+        namespace="#V#person@org",
+    )
+
+    collection.relationships = {
+        "#V#specific_to_user": ["#V#other_person"],
+        "#V#specific_to_organisation": ["#V#org"],
+    }
+    assert _effect_subject_authorised("#V#subject", scope) is True
+    collection.relationships["#V#specific_to_user"] = ["#V#person"]
+    assert _effect_subject_authorised("#V#subject", scope) is True
+    collection.relationships = {
+        "#V#specific_to_organisation": ["#V#org"],
+    }
+    assert _effect_subject_authorised("#V#subject", scope) is True
+    collection.relationships = {
+        "#V#specific_to_user": ["#V#other_person"],
+        "#V#specific_to_organisation": ["#V#other_org"],
+    }
+    assert _effect_subject_authorised("#V#subject", scope) is False
+    collection.relationships = {}
+    assert _effect_subject_authorised("#V#subject", scope) is False
+    assert _effect_subject_authorised("#V#person", scope) is True
+    assert _effect_subject_authorised("#V#org", scope) is False
+
+
+def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
+    monkeypatch,
+) -> None:
+    from src.backend.db import mongo_client
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_concepts_collection",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("actor identity should not require visibility lookup")
+        ),
+    )
+    invoked: list[str] = []
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(name)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="actor-profile",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#person",
+                            "predicate": "#V#hasResearchInterest",
+                            "target": "#V#topic",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The actor profile was updated."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Add this research interest to my profile.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="actor-profile",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == ["add_relationship"]
+    assert result.tool_invocations[0]["effect_status"] == "succeeded"
+    assert result.tool_invocations[0]["changed"] is True
+
+
+@pytest.mark.parametrize(
+    "relationships",
+    [
+        {
+            "#V#specific_to_user": ["#V#other_person"],
+            "#V#specific_to_organisation": ["#V#other_org"],
+        },
+        {},
+    ],
+    ids=["foreign-scoped", "global"],
+)
+def test_ordinary_effect_rejects_unscoped_subject_before_handler(
+    monkeypatch,
+    relationships: dict[str, Any],
+) -> None:
+    from src.backend.db import mongo_client
+
+    class _Collection:
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"relationships": relationships}
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    invoked: list[str] = []
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(name)
+        return {"success": True}
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="foreign-subject",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#foreign_subject",
+                            "predicate": "#V#hasResearchInterest",
+                            "target": "#V#topic",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The subject was outside delegated authority."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Update this represented concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="foreign-subject",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == []
+    assert result.tool_invocations[0]["effect_status"] == "failed"
+    assert "effect_subject_not_authorised" in (
+        result.tool_invocations[0]["evidence"]["preview"]
+    )
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        "specific_to_user",
+        "#V#specific_to_user",
+        "specific_to_org",
+        "specific_to_organisation",
+        "#V#specific_to_org",
+        "#V#specific_to_organisation",
+    ],
+)
+def test_ordinary_relationship_effect_cannot_widen_visibility(
+    monkeypatch,
+    predicate: str,
+) -> None:
+    from src.backend.services import adaptive_turn_service
+
+    invoked: list[str] = []
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(name)
+        return {"success": True}
+
+    monkeypatch.setattr(
+        adaptive_turn_service,
+        "_effect_subject_authorised",
+        lambda *_args: True,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id=f"visibility-{predicate}",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#private_subject",
+                            "predicate": predicate,
+                            "target": "#V#other_actor",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Visibility was not changed."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Share this represented concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=f"visibility-{predicate}",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == []
+    assert result.tool_invocations[0]["effect_status"] == "failed"
+    assert "visibility_effect_not_delegated" in (
+        result.tool_invocations[0]["evidence"]["preview"]
+    )
 
 
 def test_capability_query_ranks_without_eliminating_the_delegated_set(
@@ -527,7 +952,7 @@ def test_capability_query_ranks_without_eliminating_the_delegated_set(
     assert unmatched_query["total"] == 2
     assert unmatched_query["delegated_total"] == 2
     assert unmatched_query["matched_total"] == 0
-    assert unmatched_query["catalogue_scope"] == "complete_delegated_read_set"
+    assert unmatched_query["catalogue_scope"] == "complete_delegated_capability_set"
     assert [item["name"] for item in unmatched_query["capabilities"]] == [
         "internal_record_search",
         "public_web_search",
@@ -656,7 +1081,7 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
         [
             ToolResult(
                 call_id=f"catalogue-{index}",
-                tool_name="turn_read_capabilities",
+                tool_name="turn_capabilities",
                 output=first_raw_page,
                 status="ok",
             )
@@ -699,7 +1124,7 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
             [
                 ToolResult(
                     call_id=f"catalogue-page-{offset}",
-                    tool_name="turn_read_capabilities",
+                    tool_name="turn_capabilities",
                     output=raw_page,
                     status="ok",
                 )
@@ -733,7 +1158,7 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
     assert reference["external_surface"] is False
     assert reference["server_bound_arguments"] == ["actor_id"]
     assert reference["input_schema_hydration"] == {
-        "tool": "turn_read_capabilities",
+        "tool": "turn_capabilities",
         "arguments": {
             "names": [reference["name"]],
             "limit": 1,
@@ -750,7 +1175,7 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
         [
             ToolResult(
                 call_id="exact-schema",
-                tool_name="turn_read_capabilities",
+                tool_name="turn_capabilities",
                 output=exact_page,
                 status="ok",
             )
@@ -819,7 +1244,7 @@ def test_single_oversized_capability_remains_visible_as_schema_reference(
         [
             ToolResult(
                 call_id="oversized-schema",
-                tool_name="turn_read_capabilities",
+                tool_name="turn_capabilities",
                 output=raw,
                 status="ok",
             )
@@ -853,7 +1278,7 @@ def test_single_oversized_capability_remains_visible_as_schema_reference(
         "schema_exceeds_model_context_budget"
     )
     assert compact["direct_invocation"] == {
-        "tool": "turn_invoke_read_capability",
+        "tool": "turn_invoke_capability",
         "available_if_arguments_known": True,
     }
 
@@ -913,7 +1338,7 @@ def test_bulky_capability_metadata_falls_back_without_hiding_the_schema(
         [
             ToolResult(
                 call_id="bulky-metadata",
-                tool_name="turn_read_capabilities",
+                tool_name="turn_capabilities",
                 output=raw,
                 status="ok",
             )
@@ -934,7 +1359,7 @@ def test_bulky_capability_metadata_falls_back_without_hiding_the_schema(
         "capability_metadata_omitted_for_model_context": True,
         "input_schema_omitted_for_model_context": True,
         "input_schema_hydration": {
-            "tool": "turn_read_capabilities",
+            "tool": "turn_capabilities",
             "arguments": {
                 "names": [name],
                 "limit": 1,
@@ -952,7 +1377,7 @@ def test_bulky_capability_metadata_falls_back_without_hiding_the_schema(
         [
             ToolResult(
                 call_id="bulky-metadata-exact",
-                tool_name="turn_read_capabilities",
+                tool_name="turn_capabilities",
                 output=exact,
                 status="ok",
             )
@@ -997,7 +1422,7 @@ def test_fixed_ordinary_turn_arguments_narrow_only_unsafe_options() -> None:
         enabled=True,
     )
 
-    delegated = ordinary_turn_read_delegation(
+    delegated = ordinary_turn_capability_delegation(
         gateway,
         user_concept_id="#V#person",
     )
@@ -1254,7 +1679,7 @@ def test_tool_result_correlation_shell_overflow_has_no_oversized_fallback() -> N
     results = [
         ToolResult(
             call_id=f"call-{index}",
-            tool_name="turn_invoke_read_capability",
+            tool_name="turn_invoke_capability",
             status="ok",
             output={"evidence_id": f"ev-{index}", "preview": "x" * 1_000},
         )
@@ -1283,7 +1708,7 @@ def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier() -> No
             text_response="",
             tool_calls=[
                 ToolCall(
-                    tool_name="turn_invoke_read_capability",
+                    tool_name="turn_invoke_capability",
                     call_id="call-1",
                     payload={
                         "name": "general_read",
@@ -1338,6 +1763,161 @@ def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier() -> No
     )
 
 
+def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
+    monkeypatch,
+) -> None:
+    from src.backend.services import adaptive_turn_service
+
+    seen: list[tuple[str, dict[str, Any]]] = []
+    state = {"created": False}
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        seen.append((name, dict(arguments)))
+        if name == "create_concepts":
+            state["created"] = True
+            return {"success": True, "effect_status": "succeeded", "changed": True}
+        if name == "general_read":
+            return {"success": True, "created": state["created"]}
+        return {"success": True, "effect_status": "succeeded", "changed": True}
+
+    monkeypatch.setattr(
+        adaptive_turn_service,
+        "_effect_subject_authorised",
+        lambda *_args: True,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="ordered-create",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {"concepts": [{"name": "Ordered"}]},
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="ordered-read",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"concept_id": "#V#ordered"},
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="ordered-text",
+                    payload={
+                        "name": "upsert_text_relation",
+                        "arguments": {
+                            "concept_id": "#V#ordered",
+                            "predicate": "hasDescription",
+                            "text": "Observed after creation.",
+                            "provenance": {"source": "model-spoof"},
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(text_response="Canonical state was available to inspect."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Represent and inspect this.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="ordered-effects",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert [name for name, _arguments in seen] == [
+        "create_concepts",
+        "general_read",
+        "upsert_text_relation",
+    ]
+    assert seen[2][1]["provenance"] is None
+    assert result.tool_invocations[1]["evidence"]["preview"].find(
+        '"created":true'
+    ) >= 0
+
+
+def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> None:
+    seen_cases: list[str] = []
+
+    def handler(_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        case = str(arguments["case"])
+        seen_cases.append(case)
+        if case == "partial":
+            return {
+                "success": False,
+                "effect_status": "partial",
+                "changed": True,
+                "partial_failures": [{"stage": "derived_inverse", "error": "late"}],
+            }
+        if case == "failed":
+            return {
+                "success": False,
+                "effect_status": "failed",
+                "changed": False,
+                "error_code": "rejected",
+            }
+        if case == "timeout":
+            time.sleep(0.1)
+        return {"success": True, "effect_status": "succeeded", "changed": True}
+
+    calls = [
+        ToolCall(
+            tool_name="turn_invoke_capability",
+            call_id=f"effect-{case}",
+            payload={
+                "name": "create_concepts",
+                "arguments": {"case": case},
+            },
+        )
+        for case in ("succeeded", "partial", "failed", "timeout")
+    ]
+    client = _SequenceClient(
+        LLMResponse(text_response="", tool_calls=calls),
+        LLMResponse(text_response="The bounded effects were reported truthfully."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, write_timeout_sec=0.02),
+        prompt="Exercise bounded effects.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="effect-statuses",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert seen_cases == ["succeeded", "partial", "failed", "timeout"]
+    assert [item["effect_status"] for item in result.tool_invocations] == [
+        "succeeded",
+        "partial",
+        "failed",
+        "indeterminate",
+    ]
+    assert len({item["effect_id"] for item in result.tool_invocations}) == 4
+    assert result.tool_invocations[0]["changed"] is True
+    assert result.tool_invocations[1]["changed"] is True
+    assert "partial_failures" in result.tool_invocations[1]["evidence"]["preview"]
+    assert result.tool_invocations[2]["changed"] is False
+    assert result.tool_invocations[3]["changed"] is None
+    assert all(item.get("evidence", {}).get("evidence_id") for item in result.tool_invocations)
+
+
 def test_identity_shaped_targets_are_not_globally_rewritten() -> None:
     captured: dict[str, Any] = {}
 
@@ -1350,7 +1930,7 @@ def test_identity_shaped_targets_are_not_globally_rewritten() -> None:
             text_response="",
             tool_calls=[
                 ToolCall(
-                    tool_name="turn_invoke_read_capability",
+                    tool_name="turn_invoke_capability",
                     call_id="call-actor-aliases",
                     payload={
                         "name": "shared_conversation_list_invites",
@@ -1673,7 +2253,7 @@ def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -
             text_response="",
             tool_calls=[
                 ToolCall(
-                    tool_name="turn_invoke_read_capability",
+                    tool_name="turn_invoke_capability",
                     call_id="call-final-evidence",
                     payload={
                         "name": "general_read",
@@ -1825,7 +2405,7 @@ def test_final_reset_carries_exact_hydrated_evidence_for_provider_styles(
 def test_many_read_results_share_one_model_context_budget() -> None:
     calls = [
         ToolCall(
-            tool_name="turn_invoke_read_capability",
+            tool_name="turn_invoke_capability",
             call_id=f"call-{index}",
             payload={
                 "name": "general_read",
@@ -1904,7 +2484,7 @@ def test_correlation_shell_overflow_switches_to_bounded_final_synthesis() -> Non
             text_response="",
             tool_calls=[
                 ToolCall(
-                    tool_name="turn_read_capabilities",
+                    tool_name="turn_capabilities",
                     call_id=f"catalogue-call-{index}",
                     payload={"offset": index},
                 )
@@ -1967,7 +2547,7 @@ def test_trusted_gmail_profile_overrides_model_profile_and_aliases() -> None:
             text_response="",
             tool_calls=[
                 ToolCall(
-                    tool_name="turn_invoke_read_capability",
+                    tool_name="turn_invoke_capability",
                     call_id="call-gmail",
                     payload={
                         "name": "gmail_list_messages",
@@ -2021,7 +2601,7 @@ def test_model_cannot_select_gmail_profile_without_a_trusted_binding() -> None:
             text_response="",
             tool_calls=[
                 ToolCall(
-                    tool_name="turn_invoke_read_capability",
+                    tool_name="turn_invoke_capability",
                     call_id="call-model-gmail",
                     payload={
                         "name": "gmail_list_messages",
@@ -2052,5 +2632,5 @@ def test_model_cannot_select_gmail_profile_without_a_trusted_binding() -> None:
     assert result.tool_invocations[0]["status"] == "error"
     assert (
         result.tool_invocations[0]["effective_payload"]["error_code"]
-        == "read_capability_not_delegated"
+            == "capability_not_delegated"
     )

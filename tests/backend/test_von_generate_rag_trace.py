@@ -37,7 +37,7 @@ def app(monkeypatch):
         "extra_messages": [
             {
                 "role": "tool",
-                "name": "turn_invoke_read_capability",
+                "name": "turn_invoke_capability",
                 "tool_call_id": "call-rag-trace",
                 "content": '{"evidence_id":"ev_rag_trace"}',
             }
@@ -45,7 +45,7 @@ def app(monkeypatch):
         "tool_invocations": [
             {
                 "tool": "search_knowledge_base",
-                "via": "turn_invoke_read_capability",
+                "via": "turn_invoke_capability",
                 "call_id": "call-rag-trace",
                 "payload": {
                     "name": "search_knowledge_base",

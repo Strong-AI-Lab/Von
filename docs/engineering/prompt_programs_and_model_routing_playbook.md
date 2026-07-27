@@ -3,7 +3,7 @@
 - **Kind:** Prompt and model-routing playbook
 - **Lifecycle:** Active
 - **Authority:** Normative within its stated prompt/model scope
-- **Last reviewed:** 25 July 2026
+- **Last reviewed:** 27 July 2026
 
 ## 1. When to read this
 
@@ -149,11 +149,21 @@ not collapsed into an unexplained fatal model badge.
 A reasonable default pattern is:
 
 1. try the cheapest adequate model for routine bounded work
-2. escalate when confidence, validation, or complexity signals require it
-3. use stronger models for difficult synthesis, ambiguous planning, or hard reasoning
-4. use narrow fine-tunes when the task is stable and frequent enough to justify them
+2. if a miss plausibly reflects model capability, run a bounded comparison
+   with a stronger suitable model before encoding semantic recovery in code
+3. if an adequate route is too slow or expensive, compare a faster or cheaper
+   model and retain the least costly model that preserves the required outcome
+4. use stronger models for difficult synthesis, ambiguous planning, or hard
+   reasoning, and narrow fine-tunes when a stable frequent task justifies them
 
 Do not hard-code this into many helpers. Centralise it.
+
+Model escalation is not a generic retry. Use available evidence to distinguish
+model weakness from tool, authority, transport, context, or harness failure,
+and collect only the comparison evidence needed under §7A. A stronger model
+that finds the right path but cannot finish inside the latency or cost envelope
+is evidence, not a production success; a faster model that produces an adequate
+answer may be the better route.
 
 ## 7A. Proportionate replay evidence
 

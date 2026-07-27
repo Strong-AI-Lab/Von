@@ -689,7 +689,7 @@ def test_responses_serialises_actual_adaptive_tools_with_explicit_strictness() -
         for tool in _tool_definitions()
     ]
     read_tool = next(
-        tool for tool in tools if tool["name"] == "turn_invoke_read_capability"
+        tool for tool in tools if tool["name"] == "turn_invoke_capability"
     )
     assert read_tool["strict"] is False
     assert (

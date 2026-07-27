@@ -268,9 +268,11 @@ Practical rules:
 4. Before running a sampled prompt used as acceptance evidence, record the
    expectation-first preflight when Tier 2/3 or subjective judgement warrants
    it.
-5. Treat the harness verdict such as `should_user_be_happy` as supporting
-   evidence, not as the whole judgement. Compare the real answer and telemetry
-   against your recorded expectation.
+5. The sampler does not issue a semantic verdict. Its collection status says
+   whether the run evidence was captured, not whether the answer was good.
+   Compare the real answer and, where relevant, effects, model, timing, and
+   telemetry against the user job, or use an explicit evaluator when the
+   experiment genuinely needs one.
 6. For operational prompts that are really asking Von to mutate or inspect its
    own task/message state, record whether actual task/message tool use happened.
    A generic "I can help with that" answer is not a pass for a create/update
@@ -383,12 +385,12 @@ sampler harness when it fits the task:
 - `scripts/run_live_kb_tool_prompt_sampler.py`
 
 It already creates a fresh authenticated conversation, captures the response,
-resolves history location, fetches persisted debug telemetry, and emits a
-conservative verdict. It defaults to the `JVNAUTOSCI-2070` isolated agent-test
+resolves history location, fetches persisted debug telemetry, and emits an
+unscored collection record. It defaults to the `JVNAUTOSCI-2070` isolated agent-test
 backend and will reject a non-agent-test server unless you pass
 `--allow-non-agent-test-server` for an explicitly interactive-server check.
-Keep in mind that its verdict complements rather than replaces the
-expectation-first human judgement.
+Collection success means the evidence was captured; assess the user outcome
+separately.
 
 The sampler also supports controlled multi-arm model comparison. Use repeated
 `--compare-model` flags, and optionally `--include-active-model-arm`, when you

@@ -1197,6 +1197,23 @@ def _create_concepts(**kwargs):
         and isinstance(r.get("concept_id"), str)
         and str(r.get("concept_id")).strip()
     ]
+    partial_failures = [
+        {
+            "concept_id": str(r.get("concept_id") or "").strip() or None,
+            **dict(failure),
+        }
+        for r in results
+        if isinstance(r, dict) and isinstance(r.get("concept"), dict)
+        for failure in (r.get("concept") or {}).get("partial_failures", [])
+        if isinstance(failure, dict)
+    ]
+    failed = len(concepts) - successful - already_exists
+    if partial_failures or (failed > 0 and (successful > 0 or already_exists > 0)):
+        effect_status = "partial"
+    elif failed > 0:
+        effect_status = "failed"
+    else:
+        effect_status = "succeeded"
     applied_scope_modes = sorted(
         {
             str(
@@ -1221,11 +1238,16 @@ def _create_concepts(**kwargs):
     )
 
     return {
+        "success": failed == 0 and not partial_failures,
+        "effect_status": effect_status,
+        "changed": successful > 0,
         "results": results,
         "total": len(concepts),
         "successful": successful,
         "already_existed": already_exists,
-        "failed": len(concepts) - successful - already_exists,
+        "failed": failed,
+        "partial_failure_count": len(partial_failures),
+        "partial_failures": partial_failures,
         "created_concept_ids": created_concept_ids,
         "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
         "parent_resolution": parent_resolution.to_dict(),
@@ -1256,6 +1278,33 @@ def _search_concepts(**kwargs):
     return search_concepts(**kwargs)
 
 
+def _indeterminate_effect_error(
+    message: str,
+    *,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    """Report an unexpected write-path exception without inventing finality."""
+
+    response = make_error_response(
+        "effect_outcome_unknown",
+        message,
+        details=details,
+        suggestions=["Inspect canonical state before retrying the effect."],
+    )
+    response.update(
+        {
+            "effect_status": "indeterminate",
+            "mutation_outcome": "unknown",
+            "changed": None,
+            "retryable": False,
+            "recovery_affordances": [
+                {"action_type": "inspect_operation_state_before_retry"}
+            ],
+        }
+    )
+    return response
+
+
 def _upsert_text_relation(**kwargs):
     from ...services.text_value_service import upsert_text_for_concept
     from ...services.text_relation_predicate_validation_service import (
@@ -1273,6 +1322,7 @@ def _upsert_text_relation(**kwargs):
     context = kwargs.get("context")
     provenance = kwargs.get("provenance")
     namespace = kwargs.get("namespace")
+    mutation_dispatched = False
 
     if not concept_id:
         return make_error_response(
@@ -1301,6 +1351,7 @@ def _upsert_text_relation(**kwargs):
     try:
         predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
         storage_predicate = predicate_resolution.storage_predicate
+        mutation_dispatched = True
         result = upsert_text_for_concept(
             subject_concept_id=concept_id,
             predicate=storage_predicate,
@@ -1321,9 +1372,14 @@ def _upsert_text_relation(**kwargs):
         text_preview = text[:100] + "..." if len(text) > 100 else text
         return {
             "success": True,
+            "effect_status": "succeeded",
+            "changed": bool(
+                result.get("relation_created") or result.get("context_updated")
+            ),
             "text_value_id": str(result.get("text_value_id")),
             "relation_id": str(result.get("relation_id")),
             "relation_created": result.get("relation_created"),
+            "context_updated": result.get("context_updated"),
             "predicate": storage_predicate,
             "input_predicate": predicate_resolution.input_predicate,
             "predicate_concept_id": predicate_resolution.predicate_concept_id,
@@ -1338,10 +1394,23 @@ def _upsert_text_relation(**kwargs):
             suggestions=exc.suggestions,
         )
     except Exception as exc:
-        return make_error_response(
-            "exception",
-            f"Failed to upsert text relation: {exc}",
-            details={"exception_type": type(exc).__name__},
+        if not mutation_dispatched:
+            return make_error_response(
+                "exception",
+                f"Failed to prepare text relation: {exc}",
+                details={"exception_type": type(exc).__name__},
+            )
+        return _indeterminate_effect_error(
+            (
+                "The text-relation operation raised unexpectedly; canonical "
+                "state may already have changed."
+            ),
+            details={
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "concept_id": concept_id,
+                "predicate": predicate,
+            },
         )
 
 
@@ -1867,6 +1936,7 @@ def _add_relationship(**kwargs):
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
+    mutation_dispatched = False
 
     if not source_id:
         return make_error_response(
@@ -1937,6 +2007,7 @@ def _add_relationship(**kwargs):
         well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
         if predicate_normalised in well_known_text_predicates:
             target_text = target if isinstance(target, str) else str(target)
+            mutation_dispatched = True
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
                 predicate=predicate_normalised,
@@ -1946,6 +2017,10 @@ def _add_relationship(**kwargs):
             )
             return {
                 "success": True,
+                "effect_status": "succeeded",
+                "changed": bool(
+                    result.get("relation_created") or result.get("context_updated")
+                ),
                 "relationship_type": "text_relation",
                 "source_id": source_id,
                 "predicate": predicate_normalised,
@@ -1971,6 +2046,7 @@ def _add_relationship(**kwargs):
 
         # Handle text predicates (target is text value, not concept)
         if is_text_predicate:
+            mutation_dispatched = True
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
                 predicate=predicate_str,
@@ -1980,6 +2056,10 @@ def _add_relationship(**kwargs):
             )
             return {
                 "success": True,
+                "effect_status": "succeeded",
+                "changed": bool(
+                    result.get("relation_created") or result.get("context_updated")
+                ),
                 "relationship_type": "text_relation",
                 "source_id": source_id,
                 "predicate": predicate_str,
@@ -1989,6 +2069,7 @@ def _add_relationship(**kwargs):
             }
 
         # Concept-to-concept relationships use the single authoritative pathway.
+        mutation_dispatched = True
         result = add_relationship(
             source_id=source_id,
             predicate=predicate_str,
@@ -2016,6 +2097,9 @@ def _add_relationship(**kwargs):
         target_out = result.get("target_id") or target
         response: dict[str, Any] = {
             "success": True,
+            "effect_status": (
+                "partial" if result.get("inverse_error") else "succeeded"
+            ),
             "relationship_type": "concept_relation",
             "source_id": source_id,
             "predicate": predicate_out,
@@ -2027,6 +2111,7 @@ def _add_relationship(**kwargs):
                 else result.get("modified")
             ),
         }
+        response["changed"] = response["added"]
         if "inverse_predicate" in result or "inverse_modified" in result:
             response["inverse"] = {
                 "predicate": result.get("inverse_predicate"),
@@ -2035,17 +2120,38 @@ def _add_relationship(**kwargs):
         # Propagate warning from service layer (e.g. vacuous typing, JVNAUTOSCI-1010)
         if "warning" in result:
             response["warning"] = result["warning"]
+        if result.get("inverse_error"):
+            response["partial_failures"] = [
+                {
+                    "stage": "inverse_relationship",
+                    "error": str(result["inverse_error"]),
+                }
+            ]
         return response
 
     except Exception as e:
-        return make_error_response(
-            "exception",
-            f"Exception: {str(e)}",
+        if not mutation_dispatched:
+            return make_error_response(
+                "exception",
+                f"Failed to prepare relationship: {e}",
+                details={
+                    "source_id": source_id,
+                    "predicate": predicate,
+                    "target": target,
+                    "exception_type": type(e).__name__,
+                },
+            )
+        return _indeterminate_effect_error(
+            (
+                "The relationship operation raised unexpectedly; canonical "
+                "state may already have changed."
+            ),
             details={
                 "source_id": source_id,
                 "predicate": predicate,
                 "target": target,
                 "exception_type": type(e).__name__,
+                "exception": str(e),
             },
         )
 
@@ -7081,6 +7187,11 @@ def _concepts_create_output_schema() -> Schema:
         },
         optional={
             "scope_selection": (dict,),
+            "success": (bool,),
+            "effect_status": (str,),
+            "changed": (bool,),
+            "partial_failure_count": (int,),
+            "partial_failures": (list,),
         },
         allow_unknown=True,
         description="create_concepts output: results (list of creation results), total (int), successful (int)",
@@ -7226,6 +7337,9 @@ def _upsert_text_relation_output_schema() -> Schema:
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "relation_created": (bool, type(None)),
+            "context_updated": (bool, type(None)),
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
             "predicate": (str, type(None)),
             "input_predicate": (str, type(None)),
             "predicate_concept_id": (str, type(None)),
@@ -7832,6 +7946,9 @@ def _add_relationship_output_schema() -> Schema:
             "target": (str, type(None)),
             "already_existed": (bool, type(None)),
             "added": (bool, type(None)),
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
+            "partial_failures": (list, type(None)),
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "error": (str, type(None)),
@@ -14205,7 +14322,9 @@ def _context_bundle_build_benchmark(**kwargs):
 
 
 def _testing_theory_create_slice(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "testing control plane"
+    ):
         return denial
     from ...services.testing_theory_service import create_testing_theory_slice
 
@@ -14254,9 +14373,7 @@ def _testing_theory_assert_local_claims(**kwargs):
 
 
 def _testing_theory_compute_diff(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial(
-        "testing control plane"
-    ):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
         return denial
     from ...services.testing_theory_service import compute_testing_theory_diff
 
@@ -26199,13 +26316,13 @@ def _chat_introspect(
     inferred_runtime_mode = (
         "direct_adaptive_model_only"
         if gateway_enabled is False
-        else "direct_adaptive_read"
+        else "direct_adaptive_capabilities"
     )
 
     workflow_mode = {
         "runtime_mode": inferred_runtime_mode,
         "ordinary_turn_path": "direct_adaptive_turn",
-        "ordinary_turn_capability_mode": "read_only",
+        "ordinary_turn_capability_mode": "bounded_capabilities",
         "automatic_workflow_selector_enabled": False,
         "legacy_orchestrator_status": legacy_orchestrator_status,
         "explicit_workflow_trace_enabled": workflow_trace_enabled,
@@ -26232,8 +26349,8 @@ def _chat_introspect(
     # retired controller merely to ask it how it would have controlled a turn.
     tool_guidance_text = (
         "Ordinary chat turns use the direct adaptive turn path. The model may "
-        "inspect delegated read capabilities with turn_read_capabilities, invoke "
-        "an authorised read with turn_invoke_read_capability, and hydrate bounded "
+        "inspect delegated capabilities with turn_capabilities, invoke an authorised "
+        "capability with turn_invoke_capability, and hydrate bounded "
         "evidence by provenance handle with turn_read_evidence. There is no "
         "automatic workflow selector or general controller on this path. Explicit "
         "workflows remain separately callable through their registered interfaces."
@@ -30581,6 +30698,17 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_concepts_create_input_schema(),
             output_schema=_concepts_create_output_schema(),
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+                "created_by_concept_id": "actor_user_concept_id",
+            },
+            ordinary_turn_fixed_arguments={
+                "organisation_concept_id": None,
+                "org_id": None,
+                "scope_mode": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+                "visibility_scope_mode": None,
+            },
+            ordinary_turn_effect=True,
             description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
         ),
         MethodDefinition(
@@ -30651,10 +30779,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "argument_index='subject' means inspect outgoing subject-side relations, "
                 "not that the payload should contain a subject field. Use when you need "
                 "distinct predicates plus counts before choosing a predicate-specific "
-                "extent or filtered relation lookup. For kind-specific turns such as "
-                "papers, projects, students, organisations, or other represented related "
-                "things, set include_argument_type_counts=true to get direct asserted "
-                "type distributions for non-anchor arguments. Set role_expansion_mode="
+                "extent or filtered relation lookup. Start with bounded minimal incidence "
+                "(a modest limit, without argument type counts, previews, or text snippets), "
+                "then request those richer fields only when the initial evidence shows they "
+                "are needed; avoid concurrent rich incidence probes by default. Set "
+                "role_expansion_mode="
                 "'explicit' with represented node-type or role-predicate filters when "
                 "the immediate neighbour is a reified/event/claim node whose other role "
                 "fillers are the useful retrieval targets."
@@ -30701,6 +30830,12 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_upsert_text_relation_input_schema(),
             output_schema=_upsert_text_relation_output_schema(),
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_fixed_arguments={"provenance": None},
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="concept_id",
             description="Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types. More general than add_names which is specialized for hasName relations only.",
         ),
         MethodDefinition(
@@ -30773,6 +30908,8 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_add_relationship_input_schema(),
             output_schema=_add_relationship_output_schema(),
             category="write",
+            ordinary_turn_effect=True,
+            ordinary_turn_mutation_subject_argument="source_id",
             description="Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
         ),
         MethodDefinition(

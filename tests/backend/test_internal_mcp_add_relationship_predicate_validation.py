@@ -1,5 +1,3 @@
-
-
 def test_add_relationship_rejects_non_vontology_predicate_keys(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue
 
@@ -36,6 +34,8 @@ def test_add_relationship_rejects_non_vontology_predicate_keys(monkeypatch):
     assert result["success"] is False
     assert result.get("error_code") == "invalid_predicate_format"
     assert "invalid_predicate_format" in (result.get("error") or "")
+    assert "mutation_outcome" not in result
+    assert result.get("effect_status") != "indeterminate"
 
 
 def test_add_relationship_rejects_missing_dynamic_predicate_concepts(monkeypatch):
@@ -156,3 +156,67 @@ def test_add_relationship_returns_structured_error_for_missing_target(monkeypatc
 
     assert result["success"] is False
     assert result.get("error_code") == "target_not_found"
+
+
+def test_add_relationship_commit_then_raise_is_indeterminate(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    committed: list[str] = []
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda *_args, **_kwargs: {
+            "concept_id": "#V#source",
+            "relationships": {},
+        },
+    )
+
+    def _commit_then_raise(**_kwargs):
+        committed.append("relationship-written")
+        raise RuntimeError("lost acknowledgement after commit")
+
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        _commit_then_raise,
+    )
+
+    result = catalogue._add_relationship(
+        source_id="#V#source",
+        predicate="typeOf",
+        target="#V#target",
+    )
+
+    assert committed == ["relationship-written"]
+    assert result["success"] is False
+    assert result["error_code"] == "effect_outcome_unknown"
+    assert result["effect_status"] == "indeterminate"
+    assert result["mutation_outcome"] == "unknown"
+    assert result["changed"] is None
+    assert result["retryable"] is False
+    assert result["recovery_affordances"] == [
+        {"action_type": "inspect_operation_state_before_retry"}
+    ]
+
+
+def test_add_relationship_unexpected_pre_dispatch_failure_remains_definite(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("concept store unavailable")
+        ),
+    )
+
+    result = catalogue._add_relationship(
+        source_id="#V#source",
+        predicate="typeOf",
+        target="#V#target",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "exception"
+    assert "mutation_outcome" not in result
+    assert result.get("effect_status") != "indeterminate"

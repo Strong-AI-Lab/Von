@@ -643,6 +643,7 @@ def create_concept(
         result: InsertOneResult = concepts_coll.insert_one(concept_doc)
         # Fetch the document to ensure all defaults/triggers (if any) are included
         created_concept = concepts_coll.find_one({"_id": result.inserted_id})
+        partial_failures: List[Dict[str, str]] = []
 
         # CRITICAL: Create name as text_relation immediately (modern approach)
         # This prevents migrate-on-read from triggering and creating duplicates
@@ -712,6 +713,13 @@ def create_concept(
 
             except Exception as name_err:
                 # Non-fatal: concept is created, relation write failed.
+                partial_failures.append(
+                    {
+                        "stage": "text_relations",
+                        "error": str(name_err),
+                        "error_class": type(name_err).__name__,
+                    }
+                )
                 logger.warning(
                     f"[create_concept] Failed to create text relations for {concept_identifier}: {name_err}"
                 )
@@ -723,6 +731,13 @@ def create_concept(
                     concept_doc.get("relationships") or {},
                 )
         except Exception as reconcile_err:
+            partial_failures.append(
+                {
+                    "stage": "relationship_reconciliation",
+                    "error": str(reconcile_err),
+                    "error_class": type(reconcile_err).__name__,
+                }
+            )
             logger.warning(
                 "create_concept: relationship reconciliation best-effort failure for %s: %s",
                 concept_doc.get("concept_id"),
@@ -812,6 +827,8 @@ def create_concept(
                 pass
             if workflow_event_launches:
                 created_concept["workflow_event_launch"] = workflow_event_launches
+            if partial_failures:
+                created_concept["partial_failures"] = partial_failures
         _invalidate_concept_mutation_caches()
         return created_concept if created_concept else {}
 

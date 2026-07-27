@@ -71,7 +71,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         build_default_catalogue,
     )
     from src.backend.services.adaptive_turn_service import (
-        ordinary_turn_read_delegation,
+        ordinary_turn_capability_delegation,
     )
 
     catalogue = build_default_catalogue()
@@ -82,23 +82,30 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     )
 
     public_reads = set(
-        ordinary_turn_read_delegation(gateway, user_concept_id=None)
+        ordinary_turn_capability_delegation(gateway, user_concept_id=None)
     )
     actor_reads = set(
-        ordinary_turn_read_delegation(
+        ordinary_turn_capability_delegation(
             gateway,
             user_concept_id="#V#ordinary_actor",
         )
     )
     actor_mail_reads = set(
-        ordinary_turn_read_delegation(
+        ordinary_turn_capability_delegation(
             gateway,
             user_concept_id="#V#ordinary_actor",
             trusted_argument_values={
                 "gmail_profile": "represented-profile",
+                "turn_namespace": "#V#ordinary_actor@ordinary_org",
+                "actor_user_concept_id": "#V#ordinary_actor",
             },
         )
     )
+    delegated_effects = {
+        name
+        for name in actor_mail_reads
+        if catalogue.get(name).category == "write"
+    }
 
     # A newly registered ordinary read does not need a second positive
     # allow-list entry. These representative unannotated capabilities are
@@ -122,6 +129,29 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "build_paper_recommendations",
         "episode_critique_build_benchmark",
     }.isdisjoint(actor_mail_reads)
+    assert delegated_effects == {
+        "create_concepts",
+        "upsert_text_relation",
+        "add_relationship",
+    }
+    assert not {
+        name for name in public_reads if catalogue.get(name).category == "write"
+    }
+
+    create_definition = catalogue.get("create_concepts")
+    assert create_definition.ordinary_turn_trusted_argument_bindings == {
+        "namespace": "turn_namespace",
+        "created_by_concept_id": "actor_user_concept_id",
+    }
+    assert create_definition.ordinary_turn_fixed_arguments == {
+        "organisation_concept_id": None,
+        "org_id": None,
+        "scope_mode": "user_org_default",
+        "visibility_scope_mode": None,
+    }
+    assert catalogue.get("upsert_text_relation").ordinary_turn_fixed_arguments == {
+        "provenance": None,
+    }
 
     # Server-bound resources are absent until the entry point supplies the
     # actor's represented binding; the model never selects the profile.
@@ -168,7 +198,6 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "turn_execution_build_context_answering_benchmark",
         "turn_execution_build_selector_benchmark",
     } <= actor_reads
-
 
 def test_actor_scoped_private_reads_reject_payload_only_identity(monkeypatch):
     from src.backend.integrations.internal_mcp import (

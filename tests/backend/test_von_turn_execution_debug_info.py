@@ -142,6 +142,45 @@ def test_finalise_llm_debug_info_preserves_bounded_evidence_envelope(
     ]
 
 
+def test_effect_status_and_evidence_survive_bounded_serialisation() -> None:
+    from src.backend.server.routes import von_routes
+
+    evidence = {
+        "evidence_id": "ev_effect",
+        "preview": '{"partial_failures":[{"stage":"inverse_relationship"}]}',
+        "sha256": "abc123",
+    }
+    invocation = {
+        "tool": "add_relationship",
+        "status": "ok",
+        "effect_id": "effect_opaque",
+        "effect_status": "partial",
+        "changed": True,
+        "evidence": evidence,
+    }
+
+    assert von_routes._serialise_tool_invocations_for_llm_debug([invocation])[0] == {
+        "tool": "add_relationship",
+        "method": "add_relationship",
+        "arguments": {},
+        "status": "ok",
+        "effect_id": "effect_opaque",
+        "effect_status": "partial",
+        "changed": True,
+    }
+    assert von_routes._serialise_tool_invocations_for_turn_execution_record(
+        [invocation]
+    )[0] == {
+        "tool": "add_relationship",
+        "method": "add_relationship",
+        "status": "ok",
+        "effect_id": "effect_opaque",
+        "effect_status": "partial",
+        "changed": True,
+        "evidence": evidence,
+    }
+
+
 def test_created_concept_label_extractor_ignores_existing_concept_results() -> None:
     from src.backend.server.routes import von_routes
 

@@ -6730,6 +6730,9 @@ def _serialise_tool_invocations_for_llm_debug(
             "write_policy_decision_basis",
             "write_policy_effective_mutation_authority",
             "write_policy_authority_sources",
+            "effect_id",
+            "effect_status",
+            "changed",
         ):
             if key in raw_invocation:
                 entry[key] = raw_invocation.get(key)
@@ -6788,6 +6791,9 @@ def _serialise_tool_invocations_for_turn_execution_record(
             "workflow_action_id",
             "workflow_id",
             "workflow_state_id",
+            "effect_id",
+            "effect_status",
+            "changed",
         ):
             if key in raw_invocation:
                 entry[key] = raw_invocation.get(key)
@@ -11011,9 +11017,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             for name in invoked_tools
         )
         rag_trace["retrieval_attempt_reason"] = (
-            "read_capability_invoked"
+            "capability_invoked"
             if invoked_tools
-            else ("no_read_capability_invoked" if user_concept_id else "not_authenticated")
+            else ("no_capability_invoked" if user_concept_id else "not_authenticated")
         )
         rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
 

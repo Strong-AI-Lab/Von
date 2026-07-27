@@ -336,10 +336,27 @@ def test_handle_von_chat_run_is_read_only_even_when_profile_allows_writes(
         enabled = True
 
         def describe_methods(self):
-            return {}
+            return {
+                "safe_read": {"category": "read"},
+                "bounded_effect": {
+                    "category": "write",
+                    "ordinary_turn_effect": True,
+                },
+            }
 
-        def get_method_definition(self, _method_name):
+        def get_method_definition(self, method_name):
+            if method_name == "safe_read":
+                return SimpleNamespace(name=method_name, category="read")
+            if method_name == "bounded_effect":
+                return SimpleNamespace(name=method_name, category="write")
             return None
+
+    def _adaptive(**kwargs):
+        restricted_gateway = kwargs["gateway"]
+        assert set(restricted_gateway.describe_methods()) == {"safe_read"}
+        assert restricted_gateway.get_method_definition("safe_read") is not None
+        assert restricted_gateway.get_method_definition("bounded_effect") is None
+        return _adaptive_result()
 
     async def _run_blocking(func, *, timeout_seconds):
         assert timeout_seconds == 91.0
@@ -360,7 +377,7 @@ def test_handle_von_chat_run_is_read_only_even_when_profile_allows_writes(
     )
     monkeypatch.setattr(
         "src.backend.services.adaptive_turn_service.execute_adaptive_turn",
-        lambda **_kwargs: _adaptive_result(),
+        _adaptive,
     )
     monkeypatch.setattr(mod, "build_default_catalogue", lambda: object())
     monkeypatch.setattr(mod, "InternalMCPTransport", lambda: object())

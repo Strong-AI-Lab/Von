@@ -95,6 +95,14 @@ class MethodDefinition:
     # Evidence-backed option-level boundary. The model cannot see or override
     # these values on an ordinary turn; keep the rest of the capability usable.
     ordinary_turn_fixed_arguments: Mapping[str, Any] | None = None
+    # Explicitly delegate this write as a bounded ordinary-turn semantic effect.
+    # This is an access/effect ceiling, not a request classifier or preferred
+    # solution route.
+    ordinary_turn_effect: bool = False
+    # Existing concepts may be changed only when this authoritative forward
+    # subject is scoped to the trusted actor or organisation. Creation effects
+    # leave this unset because their scope is fixed server-side.
+    ordinary_turn_mutation_subject_argument: str | None = None
 
     def resolved_timeout(self, transport: InternalMCPTransport) -> float | None:
         if self.timeout_sec is not None:
@@ -214,6 +222,10 @@ class MethodCatalogue:
                         Mapping,
                     )
                     else None
+                ),
+                "ordinary_turn_effect": definition.ordinary_turn_effect,
+                "ordinary_turn_mutation_subject_argument": (
+                    definition.ordinary_turn_mutation_subject_argument
                 ),
                 "input_schema": self._summarise_schema(definition.input_schema),
                 "output_schema": self._summarise_schema(definition.output_schema),

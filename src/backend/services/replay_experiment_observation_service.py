@@ -47,21 +47,6 @@ PROMPT_VARIANT_PROMPT_ID_KEYS = frozenset(
         "selected_prompt_concept_id",
     }
 )
-NON_SUCCESS_COMPLETION_STATUSES = frozenset(
-    {
-        "blocked",
-        "deny",
-        "denied",
-        "error",
-        "fail",
-        "failed",
-        "follow_up_required",
-        "incomplete",
-        "needs_replay",
-        "partial",
-        "requires_follow_up",
-    }
-)
 
 
 def _safe_text(value: Any) -> str:
@@ -228,7 +213,9 @@ def build_prompt_variant_evaluation(
             blockers.append("selected_prompt_id_missing")
             candidate_selected = False
         else:
-            candidate_selected = selected_prompt_id.lower() == expected_variant_id.lower()
+            candidate_selected = (
+                selected_prompt_id.lower() == expected_variant_id.lower()
+            )
             if not candidate_selected:
                 blockers.append("candidate_prompt_variant_not_selected")
     if (
@@ -300,8 +287,6 @@ def completion_gate_status(
 def build_replay_scoring_consistency(
     *,
     llm_debug_data: Mapping[str, Any],
-    evaluation: Mapping[str, Any],
-    response_text: str,
 ) -> dict[str, Any]:
     completion_gate = _as_mapping(llm_debug_data.get("completion_gate_verdict"))
     completion_status = completion_gate_status(completion_gate)
@@ -321,11 +306,6 @@ def build_replay_scoring_consistency(
     if surface_status == "inconsistent":
         blockers.append("response_surface_inconsistent")
     blockers.extend(caveats)
-    if completion_status and completion_status.lower() in NON_SUCCESS_COMPLETION_STATUSES:
-        if response_text:
-            blockers.append("completion_gate_non_success_with_user_visible_response")
-        if bool(evaluation.get("should_user_be_happy")):
-            blockers.append("completion_gate_non_success_on_happy_arm")
     if disagreement_codes:
         blockers.extend(f"response_surface_{code}" for code in disagreement_codes)
     return {
@@ -342,23 +322,6 @@ def build_replay_scoring_consistency(
         },
         "non_promotable": bool(blockers),
     }
-
-
-def normalise_experiment_verdict(summary: Mapping[str, Any]) -> str:
-    """Return the local smoke-test verdict for non-authoritative replay summaries."""
-
-    evaluation = _as_mapping(summary.get("evaluation"))
-    scoring_consistency = _as_mapping(summary.get("replay_scoring_consistency"))
-    prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
-    if (
-        bool(evaluation.get("should_user_be_happy"))
-        and not bool(scoring_consistency.get("non_promotable"))
-        and not _as_list(prompt_variant_evaluation.get("promotion_blockers"))
-    ):
-        return "pass"
-    if bool(evaluation.get("should_user_be_happy")):
-        return "partial"
-    return "fail"
 
 
 def extract_represented_replay_evaluation(
@@ -394,11 +357,11 @@ def _normalise_represented_result(
     base_authority: dict[str, Any] = {
         "schema_version": REPLAY_EVALUATION_AUTHORITY_SCHEMA_VERSION,
         "authoritative": False,
-        "status": "local_smoke_only",
-        "source": "python_structural_smoke_diagnostics",
+        "status": "unscored_observation",
+        "source": "replay_observation_collector",
         "reason": (
-            "No represented replay-evaluation result was supplied; any verdict "
-            "derived here is local smoke evidence only."
+            "No represented replay-evaluation result was supplied. The replay "
+            "is retained as evidence without a Python semantic verdict."
         ),
     }
     if replay_evaluation_authority_error:
@@ -466,6 +429,11 @@ def _normalise_represented_result(
 def compact_tool_invocations(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
     compact: list[dict[str, Any]] = []
     telemetry = _as_mapping(summary.get("telemetry"))
+    for item in _as_list(telemetry.get("tool_invocations"))[:40]:
+        if isinstance(item, Mapping):
+            compact.append(dict(item))
+    if compact:
+        return compact
     for item in _as_list(telemetry.get("tool_history"))[:40]:
         if not isinstance(item, Mapping):
             continue
@@ -497,7 +465,6 @@ def build_experiment_observation_from_arm_summary(
     prompt = _as_mapping(summary.get("prompt"))
     conversation = _as_mapping(summary.get("conversation"))
     telemetry = _as_mapping(summary.get("telemetry"))
-    evaluation = _as_mapping(summary.get("evaluation"))
     prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
     scoring_consistency = _as_mapping(summary.get("replay_scoring_consistency"))
     response = _as_mapping(summary.get("response"))
@@ -525,11 +492,11 @@ def build_experiment_observation_from_arm_summary(
         if isinstance(represented_candidate_valid, bool)
         else None
     )
-    local_smoke_verdict = normalise_experiment_verdict(summary)
+    unscored_verdict = "inconclusive"
     verdict = (
         _safe_text((represented_result or {}).get("verdict"))
         if represented_result is not None
-        else local_smoke_verdict
+        else unscored_verdict
     )
     structural_prompt_blockers = _as_list(
         prompt_variant_evaluation.get("structural_blockers")
@@ -539,12 +506,21 @@ def build_experiment_observation_from_arm_summary(
         scoring_consistency.get("structural_blockers")
         or scoring_consistency.get("promotion_blockers")
     )
+    is_prompt_variant_arm = bool(
+        prompt_variant_evaluation
+        or candidate_prompt_variant_id
+        or _safe_text(arm.get("base_prompt_id"))
+        or _safe_text(arm.get("candidate_prompt_variant_id"))
+    )
+    candidate_kind = "prompt_variant" if is_prompt_variant_arm else "replay_arm"
     label_parts = [
-        "prompt_variant_arm",
+        candidate_kind,
         _safe_text(arm.get("label")) or _safe_text(arm.get("arm_id")) or "single_arm",
     ]
     replay_set_id = (
-        _safe_text(arm.get("replay_set_id")) or _safe_text(default_replay_set_id) or None
+        _safe_text(arm.get("replay_set_id"))
+        or _safe_text(default_replay_set_id)
+        or None
     )
     return {
         "schema_version": LIVE_PROMPT_SAMPLER_OBSERVATION_SCHEMA_VERSION,
@@ -554,7 +530,7 @@ def build_experiment_observation_from_arm_summary(
         "verdict": verdict,
         "evidence": {
             "evaluation_authority": evaluation_authority,
-            "local_smoke_verdict": local_smoke_verdict,
+            "unscored_verdict": unscored_verdict,
             "structural_prompt_variant_blockers": structural_prompt_blockers,
             "structural_replay_scoring_blockers": structural_scoring_blockers,
         },
@@ -570,15 +546,26 @@ def build_experiment_observation_from_arm_summary(
             "model": _safe_text(telemetry.get("model"))
             or _safe_text(arm.get("requested_model"))
             or None,
-            "base_prompt_id": _safe_text(prompt_variant_evaluation.get("base_prompt_id"))
+            "base_prompt_id": _safe_text(
+                prompt_variant_evaluation.get("base_prompt_id")
+            )
             or None,
             "candidate_prompt_variant_id": candidate_prompt_variant_id or None,
             "selected_prompt_id": selected_prompt_id or None,
             "candidate_prompt_variant_selected": prompt_variant_evaluation.get(
                 "candidate_prompt_variant_selected"
             ),
-            "should_user_be_happy": bool(evaluation.get("should_user_be_happy")),
-            "telemetry_non_promotable": bool(scoring_consistency.get("non_promotable")),
+            "collection_status": _safe_text(summary.get("status")) or None,
+            "ordinary_turn_terminal_status": _safe_text(
+                telemetry.get("ordinary_turn_terminal_status")
+            )
+            or None,
+            "response_length": len(_safe_text(response.get("text"))),
+            "tool_count": telemetry.get("tool_count"),
+            "timing": _as_mapping(telemetry.get("timing")),
+            "response_surface_non_promotable": bool(
+                scoring_consistency.get("non_promotable")
+            ),
             "represented_evaluation_verdict": _safe_text(
                 (represented_result or {}).get("verdict")
             )
@@ -594,10 +581,12 @@ def build_experiment_observation_from_arm_summary(
             "history_location": _as_mapping(conversation.get("history_location")),
         },
         "candidate_validation": {
-            "candidate_kind": "prompt_variant",
+            "candidate_kind": candidate_kind,
             "valid": candidate_valid,
             "evaluation_authority": evaluation_authority,
-            "base_prompt_id": _safe_text(prompt_variant_evaluation.get("base_prompt_id"))
+            "base_prompt_id": _safe_text(
+                prompt_variant_evaluation.get("base_prompt_id")
+            )
             or None,
             "candidate_prompt_variant_id": candidate_prompt_variant_id or None,
             "selected_prompt_id": selected_prompt_id or None,
@@ -616,9 +605,7 @@ def build_experiment_observation_from_arm_summary(
             "request_id": request_id,
             "response_length": len(_safe_text(response.get("text"))),
             "tool_count": telemetry.get("tool_count"),
-            "completion_gate_status": scoring_consistency.get(
-                "completion_gate_status"
-            ),
+            "completion_gate_status": scoring_consistency.get("completion_gate_status"),
             "response_surface_status": scoring_consistency.get(
                 "response_surface_status"
             ),
@@ -626,9 +613,14 @@ def build_experiment_observation_from_arm_summary(
         },
         "policy_decisions": represented_policy_decisions,
         "quality_signals": {
-            "should_user_be_happy": bool(evaluation.get("should_user_be_happy")),
-            "telemetry_non_promotable": bool(scoring_consistency.get("non_promotable")),
-            "reasons": _as_list(evaluation.get("reasons"))[:20],
+            "collection_status": _safe_text(summary.get("status")) or None,
+            "ordinary_turn_terminal_status": _safe_text(
+                telemetry.get("ordinary_turn_terminal_status")
+            )
+            or None,
+            "response_surface_non_promotable": bool(
+                scoring_consistency.get("non_promotable")
+            ),
             "evaluation_authority": evaluation_authority,
         },
         "repair_hints": represented_repair_hints
@@ -642,7 +634,11 @@ def build_experiment_observation_from_arm_summary(
         ],
         "tool_invocations": compact_tool_invocations(summary),
         "assertion_classes": [
-            "model_prompt_variant_arm_replay",
+            (
+                "model_prompt_variant_arm_replay"
+                if is_prompt_variant_arm
+                else "model_replay_arm_observation"
+            ),
             "experiment_observation",
         ],
         "turn_execution_request_ids": [request_id] if request_id else [],
@@ -656,7 +652,7 @@ def record_experiment_observations(
     default_replay_set_id: str | None = None,
     gateway: Any | None = None,
     replay_evaluation_rubric: ReplayEvaluationRubric | None = None,
-    require_represented_evaluation: bool = True,
+    require_represented_evaluation: bool = False,
 ) -> dict[str, Any]:
     authority_error: str | None = None
     active_rubric = replay_evaluation_rubric

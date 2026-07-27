@@ -4,9 +4,10 @@ This runner provides one place to:
 - list discovered replay definitions from prompt banks and workflow seed bundles;
 - run replay-capable cases with per-case and suite-level timeout bounds;
 - report skipped/not-runnable/timeouts as first-class outcomes;
-- enforce local-first defaults (AgentTest server and local models) unless
-  explicit opt-in flags are provided.
+- preserve the explicitly requested model and AgentTest execution context.
 """
+
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -38,17 +39,6 @@ SEED_BUNDLE_DIR = PROJECT_ROOT / "src" / "backend" / "workflows" / "repo_seed_bu
 
 REPORT_SCHEMA_VERSION = "replay_suite_report.v1"
 DEFAULT_PROMPT_MODEL = "gemma4:31b"
-PREMIUM_MODEL_PREFIXES = (
-    "gpt-",
-    "gpt4",
-    "gpt5",
-    "o1",
-    "o3",
-    "o4",
-    "claude",
-    "gemini",
-    "text-davinci",
-)
 
 REPLAY_SOURCE_CHOICES = (
     "all",
@@ -154,24 +144,6 @@ def _load_json(path: Path) -> dict[str, Any]:
     return _as_mapping(json.loads(path.read_text(encoding="utf-8")))
 
 
-def _looks_like_premium_model(model_name: str) -> bool:
-    lowered = _safe_text(model_name).lower()
-    if not lowered:
-        return False
-    if lowered.startswith("openai:") or lowered.startswith("anthropic:") or lowered.startswith("gemini:"):
-        return True
-    return any(lowered.startswith(prefix) for prefix in PREMIUM_MODEL_PREFIXES)
-
-
-def _enforce_local_only_policy(model_name: str, allow_premium_model: bool) -> None:
-    if allow_premium_model:
-        return
-    if _looks_like_premium_model(model_name):
-        raise RuntimeError(
-            "Local-only policy blocks premium model names by default; pass --allow-premium-model to opt in."
-        )
-
-
 def _collect_values_for_key(node: Any, key_name: str) -> list[str]:
     values: list[str] = []
     stack = [node]
@@ -182,7 +154,9 @@ def _collect_values_for_key(node: Any, key_name: str) -> list[str]:
                 if key == key_name and isinstance(value, str):
                     values.append(value)
                 stack.append(value)
-        elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+        elif isinstance(current, Sequence) and not isinstance(
+            current, (str, bytes, bytearray)
+        ):
             stack.extend(current)
     return values
 
@@ -195,7 +169,9 @@ def _discover_replay_or_rubric_concepts(bundle_payload: Mapping[str, Any]) -> li
         if isinstance(current, Mapping):
             for value in current.values():
                 stack.append(value)
-        elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+        elif isinstance(current, Sequence) and not isinstance(
+            current, (str, bytes, bytearray)
+        ):
             stack.extend(current)
         elif isinstance(current, str) and current.startswith("#V#"):
             lowered = current.lower()
@@ -211,22 +187,26 @@ def discover_prompt_bank_cases(
     max_prompt_cases: int | None = None,
 ) -> list[dict[str, Any]]:
     payload = _load_json(PROMPT_BANK_PATH)
-    prompts = [entry for entry in _as_list(payload.get("prompts")) if isinstance(entry, Mapping)]
+    prompts = [
+        entry
+        for entry in _as_list(payload.get("prompts"))
+        if isinstance(entry, Mapping)
+    ]
     discovered: list[dict[str, Any]] = []
     for prompt in prompts:
         prompt_id = _safe_text(prompt.get("id"))
         complexity_class = _safe_text(prompt.get("complexity_class"))
         if prompt_ids and prompt_id not in prompt_ids:
             continue
-        if prompt_complexity_classes and complexity_class not in prompt_complexity_classes:
+        if (
+            prompt_complexity_classes
+            and complexity_class not in prompt_complexity_classes
+        ):
             continue
         required_concepts = {
-            "#V#live_prompt_sampler_replay_evaluation_rubric_v1",
-            *(
-                _safe_text(item)
-                for item in _as_list(prompt.get("required_concepts"))
-                if _safe_text(item)
-            ),
+            _safe_text(item)
+            for item in _as_list(prompt.get("required_concepts"))
+            if _safe_text(item)
         }
         discovered.append(
             {
@@ -252,7 +232,7 @@ def discover_prompt_bank_cases(
                     }
                 ),
                 "required_concepts": sorted(required_concepts),
-                "mode_environment": "AgentTest/local model",
+                "mode_environment": "AgentTest/explicit requested model",
                 "prompt_id": prompt_id,
                 "prompt_text": _safe_text(prompt.get("prompt")),
                 "complexity_class": complexity_class,
@@ -288,7 +268,9 @@ def discover_seed_bundle_workflow_cases() -> list[dict[str, Any]]:
                     "what_it_tests": _safe_text(metadata.get("what_it_tests")),
                     "surface_exercised": _safe_text(metadata.get("surface_exercised")),
                     "required_tools": [],
-                    "required_workflows": list(_as_list(metadata.get("required_workflows"))),
+                    "required_workflows": list(
+                        _as_list(metadata.get("required_workflows"))
+                    ),
                     "required_concepts": replay_concepts,
                     "mode_environment": "AgentTest/local workflow surfaces",
                     "workflow_id": workflow_id,
@@ -296,7 +278,9 @@ def discover_seed_bundle_workflow_cases() -> list[dict[str, Any]]:
                     "execution_kind": "arxiv_workflow_api"
                     if workflow_id == "#V#arxiv_paper_ingestion_testing_workflow"
                     else "seed_only",
-                    "not_runnable_reason": _safe_text(metadata.get("not_runnable_reason")),
+                    "not_runnable_reason": _safe_text(
+                        metadata.get("not_runnable_reason")
+                    ),
                 }
                 continue
 
@@ -316,7 +300,10 @@ def discover_seed_bundle_workflow_cases() -> list[dict[str, Any]]:
                 _safe_text(item) for item in replay_concepts if _safe_text(item)
             )
             existing["required_concepts"] = sorted(merged_required_concepts)
-    return sorted(discovered_by_replay_id.values(), key=lambda item: _safe_text(item.get("replay_id")))
+    return sorted(
+        discovered_by_replay_id.values(),
+        key=lambda item: _safe_text(item.get("replay_id")),
+    )
 
 
 def discover_replay_cases(
@@ -373,7 +360,9 @@ def _extract_evidence_tokens(payload: Any) -> list[str]:
                     if text:
                         evidence.add(f"{key}={text}")
                 stack.append(value)
-        elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+        elif isinstance(current, Sequence) and not isinstance(
+            current, (str, bytes, bytearray)
+        ):
             stack.extend(current)
     return sorted(evidence)
 
@@ -447,12 +436,16 @@ def _extract_prompt_sampler_failure_reason(
         cancellation = _as_mapping(background_task.get("cancellation_payload"))
         if not cancellation:
             return reason
-        status_payload = _as_mapping(cancellation.get("post_cancellation_status_payload"))
+        status_payload = _as_mapping(
+            cancellation.get("post_cancellation_status_payload")
+        )
         post_status = _safe_text(status_payload.get("status"))
         if not post_status:
             return reason
         terminal = cancellation.get("post_cancellation_terminal")
-        terminal_text = "true" if terminal is True else "false" if terminal is False else "unknown"
+        terminal_text = (
+            "true" if terminal is True else "false" if terminal is False else "unknown"
+        )
         summary = f"post-cancellation status={post_status} terminal={terminal_text}"
         if summary in reason:
             return reason
@@ -491,11 +484,11 @@ def _run_prompt_sampler_case(
     base_url: str,
     timeout_seconds: float,
     model: str,
-    allow_premium_model: bool,
     allow_non_agent_test_server: bool,
 ) -> dict[str, Any]:
-    _enforce_local_only_policy(model, allow_premium_model)
-    with tempfile.NamedTemporaryFile(prefix="replay_prompt_case_", suffix=".json", delete=False) as tmp_file:
+    with tempfile.NamedTemporaryFile(
+        prefix="replay_prompt_case_", suffix=".json", delete=False
+    ) as tmp_file:
         output_path = Path(tmp_file.name)
 
     command = [
@@ -514,8 +507,6 @@ def _run_prompt_sampler_case(
     ]
     if allow_non_agent_test_server:
         command.append("--allow-non-agent-test-server")
-    if allow_premium_model:
-        command.append("--allow-premium-model")
 
     process = subprocess.run(  # noqa: S603
         command,
@@ -538,22 +529,25 @@ def _run_prompt_sampler_case(
             "result": "failed",
             "health": "0/1 (0%)",
             "failure_stall_reason": reason,
-            "evidence": _extract_evidence_tokens(payload) or [f"return_code={process.returncode}"],
+            "evidence": _extract_evidence_tokens(payload)
+            or [f"return_code={process.returncode}"],
             "raw_result": payload,
         }
 
     repeat = _as_mapping(payload.get("repeat"))
-    success_count = int(repeat.get("successful_attempt_count") or 1)
+    collection_count = int(repeat.get("collected_attempt_count") or 1)
     attempt_count = int(repeat.get("attempt_count") or 1)
-    meets_threshold = bool(repeat.get("meets_minimum_success_rate", True))
+    meets_threshold = bool(repeat.get("meets_minimum_collection_rate", True))
     status = _safe_text(payload.get("status"))
-    should_pass = status == "ok" and meets_threshold and success_count >= 1
-    percent = int((100.0 * success_count / attempt_count)) if attempt_count > 0 else 0
+    collection_complete = status == "ok" and meets_threshold and collection_count >= 1
+    percent = (
+        int((100.0 * collection_count / attempt_count)) if attempt_count > 0 else 0
+    )
     return {
-        "result": "passed" if should_pass else "failed",
-        "health": f"{success_count}/{attempt_count} ({percent}%)",
+        "result": "collected" if collection_complete else "failed",
+        "health": f"{collection_count}/{attempt_count} ({percent}%)",
         "failure_stall_reason": ""
-        if should_pass
+        if collection_complete
         else _extract_prompt_sampler_failure_reason(
             payload,
             stderr_text=process.stderr,
@@ -602,7 +596,8 @@ def _run_arxiv_workflow_case(
         "result": "passed" if passed else "failed",
         "health": "1/1 (100%)" if passed else "0/1 (0%)",
         "failure_stall_reason": "" if passed else reason,
-        "evidence": _extract_evidence_tokens(payload) or [f"return_code={process.returncode}"],
+        "evidence": _extract_evidence_tokens(payload)
+        or [f"return_code={process.returncode}"],
         "raw_result": payload,
     }
 
@@ -614,7 +609,6 @@ def execute_replay_case(
     timeout_seconds: float,
     dry_run: bool,
     model: str,
-    allow_premium_model: bool,
     allow_non_agent_test_server: bool,
 ) -> dict[str, Any]:
     start = time.monotonic()
@@ -647,7 +641,6 @@ def execute_replay_case(
                 base_url=base_url,
                 timeout_seconds=timeout_seconds,
                 model=model,
-                allow_premium_model=allow_premium_model,
                 allow_non_agent_test_server=allow_non_agent_test_server,
             )
         elif execution_kind == "arxiv_workflow_api":
@@ -738,7 +731,9 @@ def render_markdown_table(rows: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(output)
 
 
-def _build_table_row(case: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+def _build_table_row(
+    case: Mapping[str, Any], result: Mapping[str, Any]
+) -> dict[str, Any]:
     additional_sources = [
         _safe_text(item)
         for item in _as_list(case.get("additional_sources"))
@@ -766,7 +761,9 @@ def _build_table_row(case: Mapping[str, Any], result: Mapping[str, Any]) -> dict
     )
     dedup_required = sorted(set(required_items))
     evidence_text = "; ".join(
-        _safe_text(item) for item in _as_list(result.get("evidence")) if _safe_text(item)
+        _safe_text(item)
+        for item in _as_list(result.get("evidence"))
+        if _safe_text(item)
     )
     return {
         "replay_id": _safe_text(case.get("replay_id")),
@@ -790,7 +787,6 @@ def run_replay_suite(
     suite_timeout_seconds: float,
     dry_run: bool,
     model: str,
-    allow_premium_model: bool,
     allow_non_agent_test_server: bool,
 ) -> list[dict[str, Any]]:
     started = time.monotonic()
@@ -819,7 +815,6 @@ def run_replay_suite(
             timeout_seconds=case_timeout,
             dry_run=dry_run,
             model=model,
-            allow_premium_model=allow_premium_model,
             allow_non_agent_test_server=allow_non_agent_test_server,
         )
         results.append(case_result)
@@ -841,7 +836,10 @@ def _write_text(path_text: str, content: str) -> None:
 
 
 def _write_json(path_text: str, payload: Mapping[str, Any]) -> None:
-    _write_text(path_text, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    _write_text(
+        path_text,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -872,8 +870,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional prompt-bank complexity-class filter.",
     )
     parser.add_argument("--max-prompt-cases", type=int, default=None)
-    parser.add_argument("--list", action="store_true", help="List discovered replay cases only.")
-    parser.add_argument("--dry-run", action="store_true", help="Discover and classify without executing replay subprocesses.")
+    parser.add_argument(
+        "--list", action="store_true", help="List discovered replay cases only."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Discover and classify without executing replay subprocesses.",
+    )
     parser.add_argument("--base-url", default=get_default_agent_test_base_url())
     parser.add_argument(
         "--allow-non-agent-test-server",
@@ -881,11 +885,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Allow targeting non-AgentTest servers; otherwise downstream harnesses enforce AgentTest markers.",
     )
     parser.add_argument("--model", default=DEFAULT_PROMPT_MODEL)
-    parser.add_argument(
-        "--allow-premium-model",
-        action="store_true",
-        help="Permit premium model names for prompt-bank replay runs.",
-    )
     parser.add_argument("--per-replay-timeout-seconds", type=float, default=600.0)
     parser.add_argument("--suite-timeout-seconds", type=float, default=3600.0)
     parser.add_argument("--output-json", default="")
@@ -897,19 +896,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
     source_filters = {
-        _safe_text(item)
-        for item in _as_list(args.sources)
-        if _safe_text(item)
+        _safe_text(item) for item in _as_list(args.sources) if _safe_text(item)
     }
     replay_ids = {
-        _safe_text(item)
-        for item in _as_list(args.replay_ids)
-        if _safe_text(item)
+        _safe_text(item) for item in _as_list(args.replay_ids) if _safe_text(item)
     }
     prompt_ids = {
-        _safe_text(item)
-        for item in _as_list(args.prompt_ids)
-        if _safe_text(item)
+        _safe_text(item) for item in _as_list(args.prompt_ids) if _safe_text(item)
     }
     prompt_complexity_classes = {
         _safe_text(item)
@@ -929,8 +922,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     dry_run = bool(args.dry_run or args.list)
-    if not dry_run:
-        _enforce_local_only_policy(_safe_text(args.model), bool(args.allow_premium_model))
 
     results = run_replay_suite(
         selected_cases,
@@ -939,7 +930,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         suite_timeout_seconds=float(args.suite_timeout_seconds),
         dry_run=dry_run,
         model=_safe_text(args.model) or DEFAULT_PROMPT_MODEL,
-        allow_premium_model=bool(args.allow_premium_model),
         allow_non_agent_test_server=bool(args.allow_non_agent_test_server),
     )
 
@@ -962,8 +952,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "dry_run": dry_run,
             "base_url": _safe_text(args.base_url),
             "allow_non_agent_test_server": bool(args.allow_non_agent_test_server),
-            "model": _safe_text(args.model),
-            "allow_premium_model": bool(args.allow_premium_model),
+            "requested_model": _safe_text(args.model),
             "per_replay_timeout_seconds": float(args.per_replay_timeout_seconds),
             "suite_timeout_seconds": float(args.suite_timeout_seconds),
         },
