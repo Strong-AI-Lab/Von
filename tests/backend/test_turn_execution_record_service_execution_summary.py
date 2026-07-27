@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from src.backend.services.turn_decision_attribution_service import (
     DECISION_KINDS,
     TURN_DECISION_ATTRIBUTION_SCHEMA_VERSION,
@@ -15,6 +17,7 @@ from src.backend.services.turn_execution_record_service import (
     project_final_answer_tool_evidence,
     record_effect_observation_phase,
     upsert_turn_execution_record_projection,
+    _classify_tool_invocation_status,
     _normalise_projection_field_entries,
     _summarise_tool_execution_context,
 )
@@ -34,6 +37,497 @@ _KR_REQUIRED_TOOLS = [
     "fetch_concept",
     "get_text_relations_summary",
 ]
+
+
+def _build_effect_projection_record(
+    request_id: str,
+    tool_invocations: list[dict],
+    **overrides,
+):
+    return build_turn_execution_record(
+        request_id=request_id,
+        session_id=f"session-{request_id}",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Continue this bounded turn.",
+        response_text="The bounded turn completed.",
+        interaction_timestamp_utc="2026-07-27T00:00:00Z",
+        tool_invocations=tool_invocations,
+        **overrides,
+    )
+
+
+def test_explicit_error_with_argument_payload_is_not_classified_as_success() -> None:
+    assert (
+        _classify_tool_invocation_status(
+            invocation={
+                "tool": "create_concepts",
+                "status": "error",
+                "payload": {
+                    "name": "create_concepts",
+                    "arguments": {"concepts": [{"name": "Unstarted"}]},
+                },
+            }
+        )
+        == "error"
+    )
+
+
+def test_not_started_durable_effect_blocks_completion_with_exact_receipt() -> None:
+    invocation = {
+        "tool": "create_concepts",
+        "status": "error",
+        "payload": {
+            "name": "create_concepts",
+            "arguments": {"concepts": [{"name": "Unstarted"}]},
+        },
+        "effective_arguments": {"concepts": [{"name": "Unstarted"}]},
+        "effect_id": "effect_not_started_1",
+        "effect_status": "failed",
+        "changed": False,
+        "mutation_outcome": "not_started",
+        "outcome_finality": "terminal_for_turn",
+        "error_code": "insufficient_effect_window",
+        "transport": {
+            "schema_version": "internal_mcp_transport.v1",
+            "outcome": "not_started",
+            "timeout_phase": "pre_dispatch",
+        },
+        "evidence": {"preview": "private bounded receipt detail"},
+    }
+
+    record = _build_effect_projection_record(
+        "req-not-started-effect",
+        [invocation],
+    )
+
+    serialised = record["execution"]["tool_invocations"][0]
+    assert serialised["status"] == "not_started"
+    assert serialised["mutation_outcome"] == "not_started"
+    assert serialised["outcome_finality"] == "terminal_for_turn"
+    assert serialised["error_code"] == "insufficient_effect_window"
+    assert "effective_payload" not in serialised
+    assert "evidence" not in serialised
+    effect = next(
+        item
+        for item in record["required_effects"]
+        if item["effect_id"] == "effect_not_started_1"
+    )
+    assert effect["status"] == "not_executed"
+    assert effect["failure_codes"] == ["insufficient_effect_window"]
+    assert record["execution"]["summary"]["successful_invocation_count"] == 0
+    assert record["completion_gate"]["decision"] == "escalation_required"
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+    assert record["execution_correctness"]["failure_mode"] == "mutation_not_executed"
+
+
+def test_distinct_same_tool_effect_failure_is_not_masked_by_success() -> None:
+    record = _build_effect_projection_record(
+        "req-distinct-effects",
+        [
+            {
+                "tool": "create_concepts",
+                "status": "ok",
+                "payload": {
+                    "name": "create_concepts",
+                    "arguments": {"concepts": [{"name": "Created"}]},
+                },
+                "effect_id": "effect_created",
+                "effect_status": "succeeded",
+                "changed": True,
+            },
+            {
+                "tool": "create_concepts",
+                "status": "error",
+                "payload": {
+                    "name": "create_concepts",
+                    "arguments": {"concepts": [{"name": "Unstarted"}]},
+                },
+                "effect_id": "effect_unstarted",
+                "effect_status": "failed",
+                "changed": False,
+                "mutation_outcome": "not_started",
+                "outcome_finality": "terminal_for_turn",
+                "error_code": "insufficient_effect_batch_window",
+                "transport": {"outcome": "not_started"},
+            },
+        ],
+    )
+
+    effects = {
+        item["effect_id"]: item["status"]
+        for item in record["required_effects"]
+        if item["effect_id"] in {"effect_created", "effect_unstarted"}
+    }
+    assert effects == {
+        "effect_created": "satisfied",
+        "effect_unstarted": "not_executed",
+    }
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+
+
+@pytest.mark.parametrize(
+    ("invocation_status", "effect_status", "mutation_outcome"),
+    [
+        ("ok", "partial", "partial"),
+        ("error", "indeterminate", "unknown"),
+    ],
+)
+def test_partial_and_indeterminate_effects_remain_unsafe(
+    invocation_status: str,
+    effect_status: str,
+    mutation_outcome: str,
+) -> None:
+    effect_id = f"effect_{effect_status}"
+    record = _build_effect_projection_record(
+        f"req-{effect_status}-effect",
+        [
+            {
+                "tool": "create_concepts",
+                "status": invocation_status,
+                "payload": {
+                    "name": "create_concepts",
+                    "arguments": {"concepts": [{"name": "Incomplete"}]},
+                },
+                "effect_id": effect_id,
+                "effect_status": effect_status,
+                "changed": True if effect_status == "partial" else None,
+                "mutation_outcome": mutation_outcome,
+                "outcome_finality": "terminal_for_turn",
+            }
+        ],
+    )
+
+    serialised = record["execution"]["tool_invocations"][0]
+    assert serialised["status"] == effect_status
+    projected_effect = next(
+        item for item in record["required_effects"] if item["effect_id"] == effect_id
+    )
+    assert projected_effect["status"] == "not_satisfied"
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+    assert record["completion_gate"]["repeat_eligible"] is False
+    assert effect_id in record["completion_gate"]["evidence_payload"][
+        "repeat_ineligible_effect_ids"
+    ]
+
+
+def test_successful_effect_with_canonical_readback_remains_completable() -> None:
+    record = _build_effect_projection_record(
+        "req-successful-effect-readback",
+        [
+            {
+                "tool": "create_concepts",
+                "status": "ok",
+                "payload": {
+                    "name": "create_concepts",
+                    "arguments": {"concepts": [{"name": "Created"}]},
+                },
+                "effect_id": "effect_created_and_read",
+                "effect_status": "succeeded",
+                "changed": True,
+                "result_target_ids": ["#V#created"],
+            },
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "effective_arguments": {"concept_id": "#V#created"},
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#created",
+                },
+            },
+        ],
+    )
+
+    effect = next(
+        item
+        for item in record["required_effects"]
+        if item["effect_id"] == "effect_created_and_read"
+    )
+    assert effect["status"] == "satisfied"
+    assert record["postcondition_checks"][0]["status"] == "verified"
+    assert (
+        record["postcondition_checks"][0]["verification_mode"]
+        == "state_requery_correlated"
+    )
+    assert record["completion_gate"]["safe_to_claim_completion"] is True
+
+
+def test_unrelated_verification_read_does_not_verify_effect() -> None:
+    record = _build_effect_projection_record(
+        "req-unrelated-readback",
+        [
+            {
+                "tool": "create_concepts",
+                "status": "ok",
+                "effect_id": "effect_created",
+                "effect_status": "succeeded",
+                "changed": True,
+                "result_target_ids": ["#V#created"],
+            },
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "effective_arguments": {"concept_id": "#V#unrelated"},
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#unrelated",
+                },
+            },
+        ],
+    )
+
+    check = next(
+        item
+        for item in record["postcondition_checks"]
+        if item["effect_id"] == "effect_created"
+    )
+    assert check["status"] == "inconclusive"
+    assert check["verification_mode"] == "state_requery_target_mismatch"
+    assert check["observed"]["required_targets"] == ["#V#created"]
+    assert check["observed"]["observed_verification_targets"] == ["#V#unrelated"]
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+
+
+def test_relationship_readback_correlates_source_target_and_predicate() -> None:
+    record = _build_effect_projection_record(
+        "req-relationship-readback",
+        [
+            {
+                "tool": "add_relationship",
+                "status": "ok",
+                "effect_id": "effect_relationship",
+                "effect_status": "succeeded",
+                "changed": True,
+                "effective_arguments": {
+                    "source_id": "#V#source",
+                    "target_id": "#V#target",
+                    "predicate": "#V#related_to",
+                },
+            },
+            {
+                "tool": "find_relations_with_argument",
+                "status": "ok",
+                "effective_arguments": {
+                    "source_id": "#V#source",
+                    "target_id": "#V#target",
+                    "predicate": "#V#related_to",
+                },
+                "effective_payload": {
+                    "success": True,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#source",
+                            "target_concept_id": "#V#target",
+                            "predicate_concept_id": "#V#related_to",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    effect = next(
+        item
+        for item in record["required_effects"]
+        if item["effect_id"] == "effect_relationship"
+    )
+    assert effect["targets"] == ["#V#source", "#V#target"]
+    assert effect["required_predicates"] == ["#V#related_to"]
+    assert effect["required_relation_tuples"] == [
+        {
+            "source_id": "#V#source",
+            "predicate_id": "#V#related_to",
+            "target_id": "#V#target",
+        }
+    ]
+    check = next(
+        item
+        for item in record["postcondition_checks"]
+        if item["effect_id"] == "effect_relationship"
+    )
+    assert check["status"] == "verified"
+    assert check["verification_mode"] == "state_requery_correlated"
+    assert record["completion_gate"]["safe_to_claim_completion"] is True
+
+
+def test_relationship_readback_does_not_join_fields_across_distinct_rows() -> None:
+    record = _build_effect_projection_record(
+        "req-relationship-split-readback",
+        [
+            {
+                "tool": "add_relationship",
+                "status": "ok",
+                "effect_id": "effect_relationship_split",
+                "effect_status": "succeeded",
+                "changed": True,
+                "effective_arguments": {
+                    "source_id": "#V#source",
+                    "target_id": "#V#target",
+                    "predicate": "#V#related_to",
+                },
+            },
+            {
+                "tool": "find_relations_with_argument",
+                "status": "ok",
+                "effective_arguments": {
+                    "source_id": "#V#source",
+                    "target_id": "#V#target",
+                    "predicate": "#V#related_to",
+                },
+                "effective_payload": {
+                    "success": True,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#source",
+                            "target_concept_id": "#V#other_target",
+                            "predicate_concept_id": "#V#related_to",
+                        },
+                        {
+                            "source_concept_id": "#V#source",
+                            "target_concept_id": "#V#target",
+                            "predicate_concept_id": "#V#other_predicate",
+                        },
+                    ],
+                },
+            },
+        ],
+    )
+
+    check = next(
+        item
+        for item in record["postcondition_checks"]
+        if item["effect_id"] == "effect_relationship_split"
+    )
+    assert check["status"] == "inconclusive"
+    assert check["verification_mode"] == "state_requery_target_mismatch"
+    assert check["observed"]["observed_verification_relation_tuples"] == [
+        {
+            "source_id": "#V#source",
+            "predicate_id": "#V#related_to",
+            "target_id": "#V#other_target",
+        },
+        {
+            "source_id": "#V#source",
+            "predicate_id": "#V#other_predicate",
+            "target_id": "#V#target",
+        },
+    ]
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+
+
+def test_relationship_readback_accepts_exact_tuple_among_distractor_rows() -> None:
+    record = _build_effect_projection_record(
+        "req-relationship-exact-readback",
+        [
+            {
+                "tool": "add_relationship",
+                "status": "ok",
+                "effect_id": "effect_relationship_exact",
+                "effect_status": "succeeded",
+                "changed": True,
+                "effective_arguments": {
+                    "source_id": "#V#source",
+                    "target_id": "#V#target",
+                    "predicate": "#V#related_to",
+                },
+            },
+            {
+                "tool": "find_relations_with_argument",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#source",
+                            "target_concept_id": "#V#other_target",
+                            "predicate_concept_id": "#V#related_to",
+                        },
+                        {
+                            "source_concept_id": "#V#source",
+                            "target_concept_id": "#V#target",
+                            "predicate_concept_id": "#V#related_to",
+                        },
+                    ],
+                },
+            },
+        ],
+    )
+
+    check = next(
+        item
+        for item in record["postcondition_checks"]
+        if item["effect_id"] == "effect_relationship_exact"
+    )
+    assert check["status"] == "verified"
+    assert check["verification_mode"] == "state_requery_correlated"
+    assert check["observed"]["correlated_verification_tools"] == [
+        "find_relations_with_argument"
+    ]
+    assert record["completion_gate"]["safe_to_claim_completion"] is True
+
+
+def test_stable_effect_receipts_remain_visible_with_workflow_contract() -> None:
+    record = _build_effect_projection_record(
+        "req-workflow-and-stable-effects",
+        [
+            {
+                "tool": "create_concepts",
+                "status": "ok",
+                "effect_id": "effect_created",
+                "effect_status": "succeeded",
+                "changed": True,
+                "result_target_ids": ["#V#created"],
+            },
+            {
+                "tool": "create_concepts",
+                "status": "error",
+                "effect_id": "effect_unstarted",
+                "effect_status": "failed",
+                "changed": False,
+                "mutation_outcome": "not_started",
+                "outcome_finality": "terminal_for_turn",
+                "error_code": "insufficient_effect_window",
+                "transport": {"outcome": "not_started"},
+            },
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "effective_arguments": {"concept_id": "#V#created"},
+                "effective_payload": {
+                    "success": True,
+                    "concept_id": "#V#created",
+                },
+            },
+        ],
+        selected_workflow_trace={
+            "workflow_required_effects_contract": {
+                "schema_version": "workflow_required_effects_contract.v1",
+                "contract_id": "bounded-readback",
+                "required_effects": [
+                    {
+                        "effect_id": "workflow_readback",
+                        "effect_type": "tool_execution",
+                        "required_tools": ["fetch_concept"],
+                    }
+                ],
+            }
+        },
+    )
+
+    effects = {
+        item["effect_id"]: item["status"]
+        for item in record["required_effects"]
+        if item["effect_id"]
+        in {"workflow_readback", "effect_created", "effect_unstarted"}
+    }
+    assert effects == {
+        "workflow_readback": "satisfied",
+        "effect_created": "satisfied",
+        "effect_unstarted": "not_executed",
+    }
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
 
 
 def test_timeout_transport_metadata_survives_durable_turn_record_readback(

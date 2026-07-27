@@ -13,12 +13,14 @@ Policy:
 - Callers with deterministic stable identities can select
   ``duplicate_resolution_mode="canonical_id_only"`` to retain exact identity
   reuse while skipping semantic name resolution after an exact miss.
+- Explicit external identifiers, and conservative leading arXiv labels on
+  instances, are checked before title-derived canonical or semantic reuse.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id
@@ -57,6 +59,18 @@ class CreateConceptDuplicateGuardMatch:
     existing_parent_ids: tuple[str, ...] = ()
     requested_parent_id: str | None = None
     mismatch_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CreateConceptDuplicateGuardBlock:
+    error_code: str
+    message: str
+    match_source: str
+    guard_scope: str
+    candidate_concept_ids: tuple[str, ...] = ()
+    external_identifier_scheme: str | None = None
+    external_identifier_value: str | None = None
+    retryable: bool = False
 
 
 def _normalise_kind(kind: str | None) -> str:
@@ -175,6 +189,38 @@ def _identity_mismatch_details(
     )
 
 
+def _external_identity_mismatch_details(
+    *,
+    doc: dict[str, Any],
+    scope: str,
+    parent_id_for_concept: str | None,
+) -> tuple[str | None, str, tuple[str, ...], str | None, tuple[str, ...]]:
+    from .concept_external_identity_service import (
+        arxiv_paper_parent_scopes_compatible,
+    )
+
+    requested_kind = "instance" if scope == "workflow_instance" else scope
+    existing_kind = _infer_kind(doc)
+    existing_parent_ids = _existing_parent_ids(doc, requested_kind)
+    requested_parent_id = canonicalise_vontology_concept_id(parent_id_for_concept)
+
+    mismatch_reasons: list[str] = []
+    if existing_kind != requested_kind:
+        mismatch_reasons.append("kind_mismatch")
+    if requested_kind == "instance" and not arxiv_paper_parent_scopes_compatible(
+        existing_parent_ids=existing_parent_ids,
+        requested_parent_id=requested_parent_id,
+    ):
+        mismatch_reasons.append("parent_mismatch")
+    return (
+        existing_kind,
+        requested_kind,
+        existing_parent_ids,
+        requested_parent_id,
+        tuple(mismatch_reasons),
+    )
+
+
 def _guard_scope_for_request(
     kind: str,
     parent_id_for_concept: str | None,
@@ -241,21 +287,133 @@ def find_existing_concept_for_create_concepts(
     preferred_language: str | None = None,
     allow_duplicate_instances: bool = False,
     duplicate_resolution_mode: str | None = None,
-) -> CreateConceptDuplicateGuardMatch | None:
+    external_identifiers: Any = None,
+    external_identity_concept_ids: Sequence[str] = (),
+) -> CreateConceptDuplicateGuardMatch | CreateConceptDuplicateGuardBlock | None:
     """Return an existing concept match when duplicate creation should be blocked.
 
     ``canonical_id_only`` retains the normal exact match and scope checks, but
     deliberately returns after an exact miss instead of searching text values.
     """
 
+    from .concept_external_identity_service import (
+        normalise_create_external_identifiers,
+        resolve_external_identity_candidates,
+    )
+
     normalised_kind = _normalise_kind(kind)
+    normalised_external_identifiers = normalise_create_external_identifiers(
+        external_identifiers=external_identifiers,
+        concept_name=concept_name,
+        kind=normalised_kind,
+    )
     scope = _guard_scope_for_request(
         normalised_kind,
         parent_id_for_concept,
-        allow_duplicate_instances=allow_duplicate_instances,
+        # True homonyms may share a name, but an asserted external identity
+        # remains singleton even when duplicate instance names were requested.
+        allow_duplicate_instances=(
+            allow_duplicate_instances and not normalised_external_identifiers
+        ),
     )
     if scope is None:
         return None
+
+    if normalised_external_identifiers:
+        external_identifier = normalised_external_identifiers[0]
+        match_source = f"external_identifier:{external_identifier.scheme}"
+        try:
+            external_resolution = resolve_external_identity_candidates(
+                external_identifier,
+                canonical_concept_id_candidates=external_identity_concept_ids,
+            )
+        except Exception:
+            return CreateConceptDuplicateGuardBlock(
+                error_code="external_identity_resolution_failed",
+                message=(
+                    "External identity lookup failed before concept creation. "
+                    "No concept was created."
+                ),
+                match_source=match_source,
+                guard_scope=scope,
+                external_identifier_scheme=external_identifier.scheme,
+                external_identifier_value=external_identifier.value,
+                retryable=True,
+            )
+
+        if external_resolution.status == "not_found":
+            # An asserted external identity is authoritative. A title or
+            # title-derived concept ID must not substitute for an identity miss.
+            return None
+
+        if external_resolution.status == "ambiguous":
+            return CreateConceptDuplicateGuardBlock(
+                error_code="ambiguous_external_identity",
+                message=(
+                    "More than one visible concept carries the requested external "
+                    "identity. No concept was selected or created."
+                ),
+                match_source=match_source,
+                guard_scope=scope,
+                candidate_concept_ids=external_resolution.candidate_concept_ids,
+                external_identifier_scheme=external_identifier.scheme,
+                external_identifier_value=external_identifier.value,
+            )
+
+        if (
+            external_resolution.status == "resolved"
+            and len(external_resolution.candidate_concept_ids) == 1
+        ):
+            existing_concept_id = external_resolution.candidate_concept_ids[0]
+            doc = _find_concept(existing_concept_id)
+            if not isinstance(doc, dict):
+                return CreateConceptDuplicateGuardBlock(
+                    error_code="external_identity_resolution_failed",
+                    message=(
+                        "The externally identified concept changed during "
+                        "creation preflight. No concept was created."
+                    ),
+                    match_source=match_source,
+                    guard_scope=scope,
+                    external_identifier_scheme=external_identifier.scheme,
+                    external_identifier_value=external_identifier.value,
+                    retryable=True,
+                )
+            (
+                existing_kind,
+                requested_kind,
+                existing_parent_ids,
+                requested_parent_id,
+                mismatch_reasons,
+            ) = _external_identity_mismatch_details(
+                doc=doc,
+                scope=scope,
+                parent_id_for_concept=parent_id_for_concept,
+            )
+            return CreateConceptDuplicateGuardMatch(
+                existing_concept_id=existing_concept_id,
+                match_source=match_source,
+                guard_scope=scope,
+                identity_conflict=bool(mismatch_reasons),
+                existing_kind=existing_kind,
+                requested_kind=requested_kind,
+                existing_parent_ids=existing_parent_ids,
+                requested_parent_id=requested_parent_id,
+                mismatch_reasons=mismatch_reasons,
+            )
+
+        return CreateConceptDuplicateGuardBlock(
+            error_code="external_identity_resolution_failed",
+            message=(
+                "External identity lookup returned an invalid resolution state. "
+                "No concept was created."
+            ),
+            match_source=match_source,
+            guard_scope=scope,
+            external_identifier_scheme=external_identifier.scheme,
+            external_identifier_value=external_identifier.value,
+            retryable=True,
+        )
 
     canonical_requested_id = canonicalise_vontology_concept_id(concept_name)
     if canonical_requested_id:
@@ -385,18 +543,25 @@ def build_canonical_identity_conflict_create_concepts_result(
     existing_parent_ids: tuple[str, ...],
     requested_parent_id: str | None,
     mismatch_reasons: tuple[str, ...],
+    error_code: str = "canonical_identity_conflict",
+    match_source: str = "canonical_concept_id",
 ) -> dict[str, Any]:
     mismatch_summary = ", ".join(mismatch_reasons) or "incompatible identity"
+    identity_label = (
+        "External concept identity"
+        if match_source.startswith("external_identifier:")
+        else "Canonical concept identity"
+    )
     return {
         "success": False,
         "effect_status": "failed",
         "changed": False,
         "message": (
-            f"Canonical concept identity '{existing_concept_id}' is already occupied "
+            f"{identity_label} '{existing_concept_id}' is already occupied "
             f"by an incompatible concept ({mismatch_summary}). No concept was created."
         ),
         "concept": None,
-        "error_code": "canonical_identity_conflict",
+        "error_code": error_code,
         "existing_concept_id": existing_concept_id,
         "canonical_concept_id": existing_concept_id,
         "input_name": requested_name,
@@ -408,9 +573,43 @@ def build_canonical_identity_conflict_create_concepts_result(
         "identity_mismatch_reasons": list(mismatch_reasons),
         "duplicate_prevented": True,
         "duplicate_guard_scope": guard_scope,
-        "duplicate_match_source": "canonical_concept_id",
+        "duplicate_match_source": match_source,
         "suggestion": (
-            "Use a different canonical name, or inspect the existing concept and "
-            "explicitly update its typing if that existing identity is the intended one."
+            "Inspect the existing concept and explicitly reconcile its typing "
+            "before deciding whether to reuse or update it."
+        ),
+    }
+
+
+def build_duplicate_guard_block_create_concepts_result(
+    *,
+    requested_name: str,
+    requested_kind: str,
+    block: CreateConceptDuplicateGuardBlock,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "effect_status": "failed",
+        "changed": False,
+        "message": block.message,
+        "concept": None,
+        "error_code": block.error_code,
+        "input_name": requested_name,
+        "requested_name": requested_name,
+        "requested_kind": requested_kind,
+        "duplicate_prevented": True,
+        "duplicate_guard_scope": block.guard_scope,
+        "duplicate_match_source": block.match_source,
+        "candidate_concept_ids": list(block.candidate_concept_ids),
+        "external_identifier": {
+            "scheme": block.external_identifier_scheme,
+            "value": block.external_identifier_value,
+        },
+        "retryable": block.retryable,
+        "suggestion": (
+            "Inspect the candidate concepts and explicitly reconcile their "
+            "identity evidence before retrying."
+            if block.candidate_concept_ids
+            else "Retry after the external identity lookup is available."
         ),
     }

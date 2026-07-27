@@ -691,6 +691,17 @@ class InternalMCPGateway:
             else None
         )
 
+    def get_method_effect_admission_window_sec(
+        self,
+        method_name: str,
+    ) -> float | None:
+        """Return the resolved minimum window for one delegated effect."""
+
+        definition = self.get_method_definition(method_name)
+        if definition is None or not definition.ordinary_turn_effect:
+            return None
+        return definition.resolved_effect_admission_window(self._transport)
+
     def extend_catalogue(self, definitions: Iterable[MethodDefinition]) -> None:
         for definition in definitions:
             self._catalogue.register(definition)

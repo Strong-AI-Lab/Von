@@ -3740,6 +3740,7 @@ def create_vontology_concept(
     event_namespace: Optional[str] = None,
     visibility_scope_mode: Optional[str] = None,
     allow_duplicate_instance_suffix: bool = True,
+    canonical_concept_id_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates a new concept in the Vontology.
@@ -3753,6 +3754,10 @@ def create_vontology_concept(
             allocate ``_2``, ``_3``, and later IDs for duplicate instance names.
             Higher-level creation surfaces should opt out unless duplicate
             instances were explicitly requested.
+        canonical_concept_id_override: Optional already-normalised concept ID
+            selected by an authoritative mechanical identity rule. When set,
+            instance suffix allocation is disabled so the concept ID uniqueness
+            constraint provides atomic race handling.
         notes: Optional notes for the new concept
         description: Optional description for the new concept
         instance_of_type: Optional concept_id to create an is_an_instance_of relationship.
@@ -3784,14 +3789,27 @@ def create_vontology_concept(
         if not is_valid:
             return {"success": False, "message": error_msg, "concept": None}
 
-        # Generate a canonical concept_id from the provided name (slug-like input).
-        # This prevents punctuation variants (e.g. hyphen vs underscore) creating distinct concepts.
-        canonical_id = canonicalise_vontology_concept_id(new_concept_name)
+        # Generate a canonical concept_id from the provided name unless an
+        # authoritative mechanical identity rule supplied a stable override.
+        canonical_id = canonicalise_vontology_concept_id(
+            canonical_concept_id_override or new_concept_name
+        )
         if not canonical_id:
             return {
                 "success": False,
                 "message": "New concept name is empty after normalisation.",
                 "concept": None,
+            }
+
+        if (
+            canonical_concept_id_override is not None
+            and canonical_id != canonical_concept_id_override.strip()
+        ):
+            return {
+                "success": False,
+                "message": "canonical_concept_id_override is not canonical.",
+                "concept": None,
+                "error_code": "invalid_canonical_concept_id_override",
             }
 
         base_slug = canonical_id[3:]
@@ -3803,12 +3821,13 @@ def create_vontology_concept(
 
         candidate_concept_id = canonical_id
         if create_as_instance:
-            if allow_duplicate_instance_suffix:
+            if (
+                allow_duplicate_instance_suffix
+                and canonical_concept_id_override is None
+            ):
                 # Preflight existence check and append incremental suffix until free
                 counter = 2
-                while ConceptsRepository.find_one(
-                    {"concept_id": candidate_concept_id}
-                ):
+                while ConceptsRepository.find_one({"concept_id": candidate_concept_id}):
                     candidate_concept_id = f"#V#{base_slug}_{counter}"
                     counter += 1
                     if counter > 50:  # safety stop to avoid pathological loops

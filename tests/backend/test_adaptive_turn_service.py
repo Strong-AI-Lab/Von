@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -465,6 +466,82 @@ class _HydrationDeadlineClient:
         )
 
 
+class _RootAliasHydrationClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.hydrated_slice: dict[str, Any] | None = None
+
+    @staticmethod
+    def _latest_tool_output(kwargs: dict[str, Any]) -> dict[str, Any]:
+        tool_results = kwargs.get("tool_results")
+        assert isinstance(tool_results, list)
+        assert len(tool_results) == 1
+        assert isinstance(tool_results[0], ToolResult)
+        assert isinstance(tool_results[0].output, dict)
+        return dict(tool_results[0].output)
+
+    def generate_with_tools(
+        self,
+        prompt: str,
+        available_tools: list[Any],
+        **kwargs: Any,
+    ) -> LLMResponse:
+        call_number = len(self.calls)
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "available_tools": list(available_tools),
+                **kwargs,
+            }
+        )
+        if call_number == 0:
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="root-alias-source",
+                        payload={
+                            "name": "general_read",
+                            "arguments": {"query": "canonical record"},
+                        },
+                    )
+                ],
+                continuation=LLMContinuation(
+                    provider="test",
+                    api_surface="responses",
+                    model="test-model",
+                    response_id="root-source-response",
+                ),
+            )
+        if call_number == 1:
+            envelope = self._latest_tool_output(kwargs)
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_read_evidence",
+                        call_id="root-alias-hydration",
+                        payload={
+                            "evidence_id": envelope["evidence_id"],
+                            "json_pointer": "/",
+                            "max_chars": 4_000,
+                        },
+                    )
+                ],
+                continuation=LLMContinuation(
+                    provider="test",
+                    api_surface="responses",
+                    model="test-model",
+                    response_id="root-hydration-response",
+                ),
+            )
+        if call_number == 2:
+            self.hydrated_slice = self._latest_tool_output(kwargs)
+            return LLMResponse(text_response="The canonical identifier was retained.")
+        raise AssertionError("unexpected model call")
+
+
 def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     client = _SequenceClient(LLMResponse(text_response="A useful answer."))
     gateway = _gateway(lambda **_kwargs: {"success": True})
@@ -509,6 +586,48 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
         "offset",
         "limit",
     }
+
+
+def test_model_slash_evidence_pointer_hydrates_the_whole_result() -> None:
+    client = _RootAliasHydrationClient()
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "": "RFC slash would select this empty-key member.",
+                "canonical_concept_id": "#V#stable_readback_id",
+                "success": True,
+            }
+        ),
+        prompt="Read the canonical record.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="root-alias-hydration",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "The canonical identifier was retained."
+    assert client.hydrated_slice is not None
+    assert client.hydrated_slice["success"] is True
+    assert client.hydrated_slice["selector"]["json_pointer"] is None
+    assert (
+        json.loads(client.hydrated_slice["content"])["canonical_concept_id"]
+        == "#V#stable_readback_id"
+    )
+    read_tool = next(
+        tool
+        for tool in client.calls[0]["available_tools"]
+        if tool.name == "turn_read_evidence"
+    )
+    assert "root alias" in read_tool.description
+    assert "root alias" in (
+        read_tool.input_schema["properties"]["json_pointer"]["description"]
+    )
 
 
 def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None:
@@ -602,6 +721,93 @@ def test_effect_delegation_is_authenticated_and_exactly_metadata_marked() -> Non
         "add_relationship",
     }
     assert "other_write" not in delegated
+
+
+def test_effect_catalogue_and_scope_project_resolved_remaining_windows() -> None:
+    gateway = _effect_gateway(
+        lambda _name, _arguments: {"success": True},
+        write_timeout_sec=0.5,
+        effect_admission_window_sec=0.125,
+    )
+    trusted = {
+        "turn_namespace": "#V#person@org",
+        "actor_user_concept_id": "#V#person",
+    }
+    delegated = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        trusted_argument_values=trusted,
+    )
+
+    catalogue_entry = _capability_catalogue(
+        gateway,
+        delegated,
+        {"names": ["create_concepts"]},
+    )["capabilities"][0]
+
+    assert gateway.get_method_effect_admission_window_sec(
+        "create_concepts"
+    ) == pytest.approx(0.125)
+    assert gateway.get_method_effect_admission_window_sec("general_read") is None
+    assert catalogue_entry["semantic_effect"] is True
+    assert catalogue_entry["minimum_effect_window_seconds"] == pytest.approx(0.125)
+
+    clock = _ManualClock(100.0)
+    client = _SequenceClient(LLMResponse(text_response="A useful answer."))
+    execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Help with this.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="effect-window-scope",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=4,
+        final_answer_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert (
+        "Remaining effect-capable window before the protected final-answer "
+        "reserve: 8.000 seconds." in client.calls[0]["system_message"]
+    )
+
+
+def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
+    gateway = _effect_gateway(lambda _name, _arguments: {"success": True})
+    clock = _ManualClock(100.0)
+    client = _SequenceClient(LLMResponse(text_response="A useful answer."))
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Help with this.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="default-answer-reserve",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=4,
+        clock=clock,
+    )
+
+    assert (
+        "Remaining effect-capable window before the protected final-answer "
+        "reserve: 6.000 seconds." in client.calls[0]["system_message"]
+    )
+    allocation = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_budget_allocation"
+    )
+    assert allocation["effective_final_answer_reserve_seconds"] == 4.0
+    assert allocation["final_answer_reserve_source"] == "environment_or_default"
+    assert allocation["explicit_zero_override"] is False
 
 
 def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> None:
@@ -1160,16 +1366,398 @@ def test_effect_is_not_started_without_its_minimum_admission_window() -> None:
         turn_id="effect-window-admission",
         turn_budget_seconds=0.2,
         final_synthesis_reserve_seconds=0.15,
+        final_answer_reserve_seconds=0.15,
     )
 
     assert invoked == []
-    assert result.response_text.startswith("The write was not started")
-    assert result.tool_invocations[0]["effect_status"] == "failed"
+    assert result.terminal_status == "effect_not_started"
+    assert result.effect_finality_fallback is True
+    assert "1 not_started" in result.response_text
+    assert "was not dispatched and reports no change" in result.response_text
+    assert "it can be retried in a new turn" in result.response_text
+    assert "will not claim that nothing changed" not in result.response_text
+    assert "The write was not started" not in result.response_text
+    assert result.tool_invocations[0]["effect_status"] == "not_started"
     assert result.tool_invocations[0]["changed"] is False
     assert "insufficient_effect_window" in (
         result.tool_invocations[0]["evidence"]["preview"]
     )
     assert "not_started" in result.tool_invocations[0]["evidence"]["preview"]
+
+
+def test_research_effect_uses_window_through_protected_answer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _ManualClock()
+    observed_deadlines: list[float] = []
+    gateway = _effect_gateway(
+        lambda _name, _arguments: {"success": True},
+        write_timeout_sec=3.0,
+        effect_admission_window_sec=3.0,
+    )
+
+    def invoke(
+        method_name: str,
+        _arguments: dict[str, Any],
+        *,
+        deadline_monotonic: float,
+        **_kwargs: Any,
+    ) -> SimpleNamespace:
+        observed_deadlines.append(deadline_monotonic)
+        return SimpleNamespace(
+            payload={
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "mutation_outcome": "completed",
+                "outcome_finality": "terminal_for_turn",
+                "private_detail": "x" * 10_000,
+            },
+            execution_id=f"execution-{method_name}",
+            timed_out=False,
+            telemetry_metadata=lambda: {
+                "schema_version": "internal_mcp_transport.v1",
+                "outcome": "completed",
+            },
+        )
+
+    monkeypatch.setattr(gateway, "invoke", invoke)
+    client = _TimedSequenceClient(
+        clock,
+        (
+            3.5,
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="protected-window-effect",
+                        payload={
+                            "name": "create_concepts",
+                            "arguments": {"concepts": [{"name": "Protected"}]},
+                        },
+                    )
+                ],
+            ),
+        ),
+        (3.6, LLMResponse(text_response="The effect completed.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Represent this.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="protected-effect-window",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=6,
+        final_answer_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert result.response_text == "The effect completed."
+    assert observed_deadlines == [pytest.approx(8.0)]
+    invocation = result.tool_invocations[0]
+    assert invocation["effect_status"] == "succeeded"
+    assert invocation["mutation_outcome"] == "completed"
+    assert invocation["outcome_finality"] == "terminal_for_turn"
+    assert "effective_payload" not in invocation
+    assert "private_detail" not in invocation
+    assert "x" * 10_000 not in json.dumps(invocation)
+
+
+def test_mixed_effect_batch_preserves_order_with_independent_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _ManualClock()
+    observed: list[tuple[str, float]] = []
+    gateway = _effect_gateway(
+        lambda _name, _arguments: {"success": True},
+        write_timeout_sec=0.05,
+        effect_admission_window_sec=0.05,
+    )
+
+    def invoke(
+        method_name: str,
+        _arguments: dict[str, Any],
+        *,
+        deadline_monotonic: float,
+        **_kwargs: Any,
+    ) -> SimpleNamespace:
+        observed.append((method_name, deadline_monotonic))
+        is_effect = method_name != "general_read"
+        return SimpleNamespace(
+            payload={
+                "success": True,
+                **(
+                    {"effect_status": "succeeded", "changed": True}
+                    if is_effect
+                    else {"observed": True}
+                ),
+            },
+            execution_id=f"execution-{len(observed)}",
+            timed_out=False,
+            telemetry_metadata=lambda: {
+                "schema_version": "internal_mcp_transport.v1",
+                "outcome": "completed",
+            },
+        )
+
+    monkeypatch.setattr(gateway, "invoke", invoke)
+    calls = [
+        ToolCall(
+            tool_name="turn_invoke_capability",
+            call_id=f"mixed-{index}",
+            payload={"name": name, "arguments": arguments},
+        )
+        for index, (name, arguments) in enumerate(
+            (
+                ("general_read", {"query": "before"}),
+                ("create_concepts", {"concepts": [{"name": "One"}]}),
+                ("general_read", {"query": "between"}),
+                ("add_relationship", {"source_id": "#V#person"}),
+                ("general_read", {"query": "after"}),
+            )
+        )
+    ]
+    client = _TimedSequenceClient(
+        clock,
+        (0.1, LLMResponse(text_response="", tool_calls=calls)),
+        (0.15, LLMResponse(text_response="The ordered batch completed.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Apply and verify both effects.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="mixed-suffix-reservation",
+        turn_budget_seconds=1.0,
+        final_synthesis_reserve_seconds=0.8,
+        final_answer_reserve_seconds=0.2,
+        clock=clock,
+    )
+
+    assert result.response_text == "The ordered batch completed."
+    assert [item[0] for item in observed] == [
+        "general_read",
+        "create_concepts",
+        "general_read",
+        "add_relationship",
+        "general_read",
+    ]
+    assert [item[1] for item in observed] == pytest.approx([0.8] * 5)
+
+
+def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _ManualClock()
+    invoked: list[str] = []
+    gateway = _effect_gateway(
+        lambda _name, _arguments: {"success": True},
+        write_timeout_sec=0.11,
+        effect_admission_window_sec=0.11,
+    )
+
+    def invoke(method_name: str, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        invoked.append(method_name)
+        return SimpleNamespace(
+            payload={
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+            },
+            execution_id=f"execution-{method_name}",
+            timed_out=False,
+            telemetry_metadata=lambda: {
+                "schema_version": "internal_mcp_transport.v1",
+                "outcome": "completed",
+            },
+        )
+
+    monkeypatch.setattr(gateway, "invoke", invoke)
+    client = _TimedSequenceClient(
+        clock,
+        (
+            0.1,
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="invalid-relationship",
+                        payload={
+                            "name": "add_relationship",
+                            "arguments": {
+                                "source_id": "#V#person",
+                                "predicate": "#V#specific_to_user",
+                                "target": "#V#other_actor",
+                            },
+                        },
+                    ),
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="valid-create",
+                        payload={
+                            "name": "create_concepts",
+                            "arguments": {"concepts": [{"name": "One"}]},
+                        },
+                    ),
+                ],
+            ),
+        ),
+        (0.15, LLMResponse(text_response="The valid effect completed.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Apply both effects.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="independent-effect-admission",
+        turn_budget_seconds=1.0,
+        final_synthesis_reserve_seconds=0.8,
+        final_answer_reserve_seconds=0.7,
+        clock=clock,
+    )
+
+    assert result.terminal_status == "effect_failed"
+    assert result.effect_finality_fallback is True
+    assert "1 failed" in result.response_text
+    assert "The valid effect completed." not in result.response_text
+    assert invoked == ["create_concepts"]
+    assert len(result.tool_invocations) == 2
+    assert len({item["effect_id"] for item in result.tool_invocations}) == 2
+    assert result.tool_invocations[0]["status"] == "error"
+    assert result.tool_invocations[0]["effect_status"] == "failed"
+    assert result.tool_invocations[0]["changed"] is False
+    assert "visibility_effect_not_delegated" in (
+        result.tool_invocations[0]["evidence"]["preview"]
+    )
+    assert result.tool_invocations[1]["status"] == "ok"
+    assert result.tool_invocations[1]["effect_status"] == "succeeded"
+
+
+def test_indeterminate_effect_stops_later_effect_but_allows_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invoked: list[str] = []
+    gateway = _effect_gateway(
+        lambda _name, _arguments: {"success": True},
+        write_timeout_sec=0.2,
+        effect_admission_window_sec=0.05,
+    )
+
+    def invoke(method_name: str, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        invoked.append(method_name)
+        if method_name == "create_concepts":
+            return SimpleNamespace(
+                payload={
+                    "success": False,
+                    "error_code": "tool_timeout_outcome_unknown",
+                    "mutation_outcome": "unknown",
+                    "outcome_finality": "terminal_for_turn",
+                },
+                execution_id="execution-indeterminate",
+                timed_out=True,
+                telemetry_metadata=lambda: {
+                    "schema_version": "internal_mcp_transport.v1",
+                    "outcome": "timed_out",
+                    "timeout_phase": "handler",
+                },
+            )
+        assert method_name == "general_read"
+        return SimpleNamespace(
+            payload={"success": True, "concept_id": "#V#created_if_present"},
+            execution_id="execution-readback",
+            timed_out=False,
+            telemetry_metadata=lambda: {
+                "schema_version": "internal_mcp_transport.v1",
+                "outcome": "completed",
+            },
+        )
+
+    monkeypatch.setattr(gateway, "invoke", invoke)
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="indeterminate-create",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {"concepts": [{"name": "Uncertain"}]},
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-after-indeterminate",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"concept_id": "#V#created_if_present"},
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="blocked-later-effect",
+                    payload={
+                        "name": "upsert_text_relation",
+                        "arguments": {
+                            "concept_id": "#V#person",
+                            "predicate": "#V#has_note",
+                            "text": "must not run",
+                        },
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(text_response="The first effect needs canonical inspection."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create, inspect, then update.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="stop-after-indeterminate-effect",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        final_answer_reserve_seconds=1,
+    )
+
+    assert invoked == ["create_concepts", "general_read"]
+    assert result.terminal_status == "effect_outcome_indeterminate"
+    assert result.effect_finality_fallback is True
+    assert "indeterminate" in result.response_text
+    assert "The first effect needs canonical inspection." not in result.response_text
+    assert result.tool_invocations[0]["effect_status"] == "indeterminate"
+    assert result.tool_invocations[1]["result_target_ids"] == [
+        "#V#created_if_present"
+    ]
+    blocked = result.tool_invocations[2]
+    assert blocked["status"] == "error"
+    assert blocked["effect_status"] == "not_started"
+    assert blocked["changed"] is False
+    assert blocked["mutation_outcome"] == "not_started"
+    assert blocked["error_code"] == "prior_effect_outcome_indeterminate"
 
 
 def test_per_method_minimum_admits_sequential_effects_below_hard_cap() -> None:
@@ -1295,7 +1883,11 @@ def test_effect_is_not_dispatched_when_durable_intent_is_unavailable(
     )
 
     assert invoked == []
-    assert result.tool_invocations[0]["effect_status"] == "failed"
+    assert result.terminal_status == "effect_not_started"
+    assert "1 not_started" in result.response_text
+    assert "was not dispatched and reports no change" in result.response_text
+    assert result.tool_invocations[0]["effect_status"] == "not_started"
+    assert result.tool_invocations[0]["changed"] is False
     preview = result.tool_invocations[0]["evidence"]["preview"]
     assert "effect_observation_unavailable" in preview
     assert "not_started" in preview
@@ -2252,6 +2844,35 @@ def test_tool_result_correlation_shell_overflow_has_no_oversized_fallback() -> N
     assert _bound_tool_results_for_model(results) is None
 
 
+def test_bounded_effect_result_preserves_exact_partial_receipt() -> None:
+    result = ToolResult(
+        call_id="partial-effect",
+        tool_name="turn_invoke_capability",
+        status="error",
+        output={
+            "evidence_id": "ev-partial",
+            "status": "partial",
+            "effect_status": "partial",
+            "changed": True,
+            "error_code": "derived_identity_write_failed",
+            "mutation_outcome": "partial",
+            "outcome_finality": "terminal_for_turn",
+            "preview": "x" * 20_000,
+        },
+    )
+
+    bounded = _bound_tool_results_for_model([result], max_bytes=450)
+
+    assert bounded is not None
+    assert bounded[0].status == "error"
+    assert bounded[0].output["evidence_id"] == "ev-partial"
+    assert bounded[0].output["effect_status"] == "partial"
+    assert bounded[0].output["changed"] is True
+    assert bounded[0].output["error_code"] == "derived_identity_write_failed"
+    assert bounded[0].output["mutation_outcome"] == "partial"
+    assert bounded[0].output["outcome_finality"] == "terminal_for_turn"
+
+
 def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier() -> None:
     raw_tail = "z" * 50_000
     seen_actor: dict[str, Any] = {}
@@ -2413,6 +3034,7 @@ def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
 
 def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> None:
     seen_cases: list[str] = []
+    progress_events: list[dict[str, Any]] = []
 
     def handler(_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         case = str(arguments["case"])
@@ -2463,14 +3085,27 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
         turn_id="effect-statuses",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event)),
+            check_cancellation=lambda: None,
+        ),
     )
 
     assert seen_cases == ["succeeded", "partial", "failed", "timeout"]
+    assert result.terminal_status == "effect_outcome_indeterminate"
+    assert result.effect_finality_fallback is True
+    assert "The bounded effects were reported truthfully." not in result.response_text
     assert [item["effect_status"] for item in result.tool_invocations] == [
         "succeeded",
         "partial",
         "failed",
         "indeterminate",
+    ]
+    assert [item["status"] for item in result.tool_invocations] == [
+        "ok",
+        "error",
+        "error",
+        "error",
     ]
     assert len({item["effect_id"] for item in result.tool_invocations}) == 4
     assert result.tool_invocations[0]["changed"] is True
@@ -2479,6 +3114,58 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
     assert result.tool_invocations[2]["changed"] is False
     assert result.tool_invocations[3]["changed"] is None
     assert all(item.get("evidence", {}).get("evidence_id") for item in result.tool_invocations)
+    partial_progress = next(
+        event
+        for event in progress_events
+        if event.get("status") == "tool_completed"
+        and event.get("call_id") == "effect-partial"
+    )
+    assert partial_progress["success"] is False
+
+
+def test_partial_effect_downgrades_nominal_model_completion() -> None:
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="partial-effect",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {"concepts": [{"name": "Only partly created"}]},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Everything was created."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            lambda _name, _arguments: {
+                "success": False,
+                "effect_status": "partial",
+                "changed": True,
+                "error_code": "derived_relation_failed",
+            }
+        ),
+        prompt="Create the represented concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="partial-effect-terminal-status",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is True
+    assert "1 partial" in result.response_text
+    assert "Everything was created." not in result.response_text
 
 
 def test_identity_shaped_targets_are_not_globally_rewritten() -> None:
@@ -2749,6 +3436,7 @@ def test_research_deadline_failure_preserves_final_synthesis_reserve() -> None:
         turn_id="turn-research-deadline",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
+        final_answer_reserve_seconds=0,
         clock=clock,
     )
 
@@ -2759,6 +3447,13 @@ def test_research_deadline_failure_preserves_final_synthesis_reserve() -> None:
     assert {
         tool.name for tool in client.calls[1]["available_tools"]
     } == {"turn_list_evidence", "turn_read_evidence"}
+    allocation = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_budget_allocation"
+    )
+    assert allocation["final_answer_reserve_source"] == "caller"
+    assert allocation["explicit_zero_override"] is True
     assert result.llm_calls[1]["mode"] == "evidence_capable"
     recovery = next(
         item
@@ -3171,6 +3866,7 @@ def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -
         turn_id="turn-final-evidence",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
+        final_answer_reserve_seconds=0,
         clock=clock,
     )
 
@@ -3250,6 +3946,7 @@ def test_final_reset_carries_exact_hydrated_evidence_for_provider_styles(
         turn_id=f"turn-hydration-{'native' if native_continuation else 'stateless'}",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
+        final_answer_reserve_seconds=0,
         clock=clock,
     )
 

@@ -874,15 +874,27 @@ def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
     from ...services.create_concepts_duplicate_guard_service import (
+        CreateConceptDuplicateGuardBlock,
         build_canonical_identity_conflict_create_concepts_result,
+        build_duplicate_guard_block_create_concepts_result,
         build_duplicate_prevented_create_concepts_result,
         find_existing_concept_for_create_concepts,
+    )
+    from ...services.concept_external_identity_service import (
+        ExternalIdentityInputError,
+        canonical_concept_id_for_external_identifiers,
+        normalise_create_external_identifiers,
+        persist_external_identity_names,
     )
     from ...services.create_concepts_parent_resolution_service import (
         resolve_parent_for_create_concepts,
     )
     from ...services.relationship_extent_index_service import (
         defer_relationship_extent_index_sync,
+    )
+    from ...security.access_control import (
+        override_current_organisation,
+        override_current_user,
     )
 
     parent_id: str | None = kwargs.get("parent_id")
@@ -1157,7 +1169,11 @@ def _create_concepts(**kwargs):
             return True
         return False
 
-    with defer_relationship_extent_index_sync():
+    with (
+        override_current_user(actor_user_id),
+        override_current_organisation(actor_org_id),
+        defer_relationship_extent_index_sync(),
+    ):
         for concept_data in concepts:
             # This is both the batch boundary and the safe cancellation point after
             # the preceding concept's complete logical write bundle.
@@ -1192,6 +1208,66 @@ def _create_concepts(**kwargs):
                 create_as_instance = kind == "instance"
                 parent_id_for_concept = validated_parent_id
 
+            try:
+                external_identifiers = normalise_create_external_identifiers(
+                    external_identifiers=concept_data.get("external_identifiers"),
+                    concept_name=str(name),
+                    kind=kind,
+                )
+            except ExternalIdentityInputError as exc:
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": exc.error_code,
+                        "message": str(exc),
+                        "error_details": dict(exc.details),
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
+
+            canonical_concept_id_override = None
+            if external_identifiers:
+                canonical_concept_id_override = (
+                    canonical_concept_id_for_external_identifiers(
+                        external_identifiers,
+                        kind=kind,
+                        parent_id=parent_id_for_concept,
+                        scope_mode=scope_mode,
+                        actor_user_id=actor_user_id,
+                        actor_org_id=actor_org_id,
+                    )
+                )
+                if canonical_concept_id_override is None:
+                    results.append(
+                        {
+                            "success": False,
+                            "effect_status": "failed",
+                            "changed": False,
+                            "error_code": "external_identity_parent_incompatible",
+                            "message": (
+                                "The external identity identifies an arXiv paper, "
+                                "but the requested kind or parent is not a supported "
+                                "scholarly-paper identity scope. No concept was created."
+                            ),
+                            "concept": None,
+                            "input_name": str(name),
+                            "requested_name": str(name),
+                            "requested_kind": kind,
+                            "requested_parent_id": parent_id_for_concept,
+                            "external_identifiers": [
+                                identifier.to_dict()
+                                for identifier in external_identifiers
+                            ],
+                        }
+                    )
+                    continue
+
             duplicate_match = find_existing_concept_for_create_concepts(
                 concept_name=str(name),
                 kind=kind,
@@ -1203,9 +1279,29 @@ def _create_concepts(**kwargs):
                     if canonical_id_only
                     else None
                 ),
+                external_identifiers=external_identifiers,
+                external_identity_concept_ids=(
+                    (canonical_concept_id_override,)
+                    if canonical_concept_id_override
+                    else ()
+                ),
             )
             if duplicate_match is not None:
+                if isinstance(
+                    duplicate_match,
+                    CreateConceptDuplicateGuardBlock,
+                ):
+                    result = build_duplicate_guard_block_create_concepts_result(
+                        requested_name=str(name),
+                        requested_kind=kind,
+                        block=duplicate_match,
+                    )
+                    results.append(result)
+                    continue
                 if duplicate_match.identity_conflict:
+                    is_external_identity = duplicate_match.match_source.startswith(
+                        "external_identifier:"
+                    )
                     result = build_canonical_identity_conflict_create_concepts_result(
                         requested_name=str(name),
                         requested_kind=kind,
@@ -1215,6 +1311,12 @@ def _create_concepts(**kwargs):
                         existing_parent_ids=duplicate_match.existing_parent_ids,
                         requested_parent_id=duplicate_match.requested_parent_id,
                         mismatch_reasons=duplicate_match.mismatch_reasons,
+                        error_code=(
+                            "external_identity_conflict"
+                            if is_external_identity
+                            else "canonical_identity_conflict"
+                        ),
+                        match_source=duplicate_match.match_source,
                     )
                 else:
                     result = build_duplicate_prevented_create_concepts_result(
@@ -1243,7 +1345,33 @@ def _create_concepts(**kwargs):
                 organisation_concept_id=actor_org_id,
                 event_namespace=namespace,
                 visibility_scope_mode=scope_mode,
+                canonical_concept_id_override=canonical_concept_id_override,
             )
+            if (
+                external_identifiers
+                and canonical_concept_id_override
+                and result.get("error_code") == "already_exists"
+            ):
+                # The external-identity preflight did not verify this record.
+                # A unique-key collision may be a concurrent legitimate create,
+                # an actor-invisible record, or an unrelated record occupying the
+                # predicted ID. None is safe to report as successful reuse until
+                # a later actor-scoped lookup verifies the persisted identity.
+                result = {
+                    "success": False,
+                    "effect_status": "failed",
+                    "changed": False,
+                    "error_code": "external_identity_collision_unverified",
+                    "message": (
+                        "The actor-scoped external identity became occupied before "
+                        "creation completed, but its identity was not verified. "
+                        "No existing concept was exposed or reused."
+                    ),
+                    "concept": None,
+                    "canonical_concept_id": canonical_concept_id_override,
+                    "input_name": name,
+                    "retryable": True,
+                }
             # Enrich result with the requested name for traceability and surface
             # the canonical created concept_id at a stable top-level key so UI
             # summaries can reliably name what was created.
@@ -1266,6 +1394,34 @@ def _create_concepts(**kwargs):
                     concept_id_value = existing_id
             if isinstance(concept_id_value, str) and concept_id_value.strip():
                 result["concept_id"] = concept_id_value.strip()
+                if result.get("success") and external_identifiers:
+                    identity_persistence = persist_external_identity_names(
+                        concept_id=concept_id_value.strip(),
+                        identifiers=external_identifiers,
+                    )
+                    result["external_identity"] = {
+                        "identifiers": [
+                            identifier.to_dict() for identifier in external_identifiers
+                        ],
+                        "canonical_concept_id_override": (
+                            canonical_concept_id_override
+                        ),
+                        "persistence": identity_persistence,
+                    }
+                    identity_failures = identity_persistence.get("failures")
+                    if (
+                        isinstance(identity_failures, list)
+                        and identity_failures
+                        and isinstance(result.get("concept"), dict)
+                    ):
+                        concept_partial_failures = result["concept"].setdefault(
+                            "partial_failures",
+                            [],
+                        )
+                        if isinstance(concept_partial_failures, list):
+                            concept_partial_failures.extend(identity_failures)
+                        result["effect_status"] = "partial"
+                        result["changed"] = True
             results.append(result)
 
     # Count different outcome types for summary
@@ -7268,7 +7424,14 @@ def _concepts_create_input_schema() -> Schema:
         allow_unknown=True,
         description=(
             "create_concepts input: parent_id (str, semantic type concept_id; not an owner, organisation, user, or container individual), "
-            "concepts (list of {name, kind?, description?, notes?}). "
+            "concepts (list of {name, kind?, description?, notes?, external_identifiers?}). "
+            "external_identifiers is a list of identity objects such as "
+            "{scheme:'arxiv', value:'2506.03346v1', role:'identity'}; arXiv "
+            "URLs and versioned IDs are normalised to the base identifier. "
+            "A leading 'arXiv:ID — title' instance name is supported only as a "
+            "legacy compatibility form. Identified arXiv entities must use a "
+            "supported scholarly-paper parent. Arbitrary description citations "
+            "are not identities. "
             "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
             "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "

@@ -57,10 +57,10 @@ _LOCAL_TOOL_NAMES = {
 }
 _DEFAULT_TURN_BUDGET_SECONDS = 180.0
 _DEFAULT_FINAL_RESERVE_SECONDS = 30.0
-# The answer checkpoint is an experimental allocation seam, disabled unless a
-# candidate environment or caller supplies a value. It is not Von's theory of
-# how much thought a task deserves.
-_DEFAULT_FINAL_ANSWER_RESERVE_SECONDS = 0.0
+# The answer checkpoint keeps a small live-path reserve while remaining an
+# explicit allocation seam. A caller-supplied zero intentionally disables it
+# for experiments that need the full evidence-capable synthesis interval.
+_DEFAULT_FINAL_ANSWER_RESERVE_SECONDS = 5.0
 _DEFAULT_OUTER_TOOL_WORKERS = 8
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
@@ -133,12 +133,16 @@ def _compact_evidence_envelope(
     for key in (
         "schema_version",
         "evidence_id",
+        "effect_status",
+        "changed",
+        "error_code",
+        "mutation_outcome",
+        "outcome_finality",
         "tool_name",
         "call_id",
         "status",
         "trust_boundary",
         "success",
-        "error_code",
         "sha256",
         "source_sha256",
         "size_bytes",
@@ -251,12 +255,18 @@ def _capability_schema_reference(
             "description",
             "query_match",
             "server_bound_arguments",
+            "semantic_effect",
+            "minimum_effect_window_seconds",
             "surface_family",
             "evidence_surface_family",
             "external_surface",
         )
         if include_metadata
-        else ("name",)
+        else (
+            "name",
+            "semantic_effect",
+            "minimum_effect_window_seconds",
+        )
     )
     compact = {
         key: capability.get(key)
@@ -299,6 +309,8 @@ def _capability_schema_focused_projection(
             "name",
             "input_schema",
             "server_bound_arguments",
+            "semantic_effect",
+            "minimum_effect_window_seconds",
         )
         if key in capability
     }
@@ -509,6 +521,11 @@ def _bounded_model_tool_output(value: Any, *, max_bytes: int) -> Any:
             "success",
             "error_code",
             "evidence_id",
+            "status",
+            "effect_status",
+            "changed",
+            "mutation_outcome",
+            "outcome_finality",
             "total",
             "offset",
             "next_offset",
@@ -522,6 +539,27 @@ def _bounded_model_tool_output(value: Any, *, max_bytes: int) -> Any:
     return summary
 
 
+def _model_tool_output_receipt(value: Any) -> dict[str, Any]:
+    """Retain exact effect finality when a result batch must be compacted."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        key: value.get(key)
+        for key in (
+            "evidence_id",
+            "status",
+            "effect_status",
+            "changed",
+            "error_code",
+            "mutation_outcome",
+            "outcome_finality",
+            "success",
+        )
+        if key in value
+    }
+
+
 def _bound_tool_results_for_model(
     results: Sequence[ToolResult],
     *,
@@ -531,58 +569,71 @@ def _bound_tool_results_for_model(
 
     if not results:
         return []
+    receipt_outputs = [
+        _model_tool_output_receipt(result.output) for result in results
+    ]
     serialisable_shells = [
         {
             "call_id": result.call_id,
             "tool_name": result.tool_name,
             "status": result.status,
-            "output": {},
+            "output": receipt_outputs[index],
         }
-        for result in results
+        for index, result in enumerate(results)
     ]
     shell_bytes = len(_json_bytes(serialisable_shells))
     if shell_bytes > max_bytes:
         return None
     output_budget = max(0, max_bytes - shell_bytes)
     per_result_budget = max(1, output_budget // len(results))
-    bounded = [
-        ToolResult(
-            call_id=result.call_id,
-            tool_name=result.tool_name,
-            status=result.status,
-            output=_bounded_model_tool_output(
-                result.output,
-                max_bytes=per_result_budget,
-            ),
+    bounded: list[ToolResult] = []
+    for index, result in enumerate(results):
+        bounded_output = _bounded_model_tool_output(
+            result.output,
+            max_bytes=per_result_budget,
         )
-        for result in results
-    ]
-    if len(
-        _json_bytes(
-            [
-                {
-                    "call_id": result.call_id,
-                    "tool_name": result.tool_name,
-                    "status": result.status,
-                    "output": result.output,
-                }
-                for result in bounded
-            ]
+        if isinstance(bounded_output, Mapping):
+            bounded_output = {
+                **dict(bounded_output),
+                **receipt_outputs[index],
+            }
+        bounded.append(
+            ToolResult(
+                call_id=result.call_id,
+                tool_name=result.tool_name,
+                status=result.status,
+                output=bounded_output,
+            )
         )
-    ) <= max_bytes:
+    if (
+        len(
+            _json_bytes(
+                [
+                    {
+                        "call_id": result.call_id,
+                        "tool_name": result.tool_name,
+                        "status": result.status,
+                        "output": result.output,
+                    }
+                    for result in bounded
+                ]
+            )
+        )
+        <= max_bytes
+    ):
         return bounded
 
-    # Correlation shells fit but useful per-call payloads do not. Empty
-    # correlated results remain within the same exact byte budget; all evidence
-    # handles are still discoverable through the pageable turn index.
+    # Correlation shells and exact finality receipts fit even when richer
+    # previews do not. Full evidence remains discoverable through the pageable
+    # turn index.
     return [
         ToolResult(
             call_id=result.call_id,
             tool_name=result.tool_name,
             status=result.status,
-            output={},
+            output=receipt_outputs[index],
         )
-        for result in results
+        for index, result in enumerate(results)
     ]
 
 
@@ -1014,13 +1065,21 @@ def _tool_definitions() -> list[ToolDefinition]:
                 "Read a selected bounded slice of a prior tool result by its "
                 "turn-scoped evidence handle. Select with a JSON pointer, a text "
                 "query, an offset, or any combination. Repeated calls may inspect "
-                "different portions; the raw result is not discarded."
+                "different portions; the raw result is not discarded. Omit "
+                "json_pointer, use the RFC root pointer (an empty string), or use "
+                "'/' as this model-facing tool's root alias to read the whole result."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "evidence_id": {"type": "string"},
-                    "json_pointer": {"type": "string"},
+                    "json_pointer": {
+                        "type": "string",
+                        "description": (
+                            "RFC 6901 JSON pointer. Omit it, use an empty string, "
+                            "or use '/' as this tool's root alias for the whole result."
+                        ),
+                    },
                     "query": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0},
                     "max_chars": {
@@ -1059,6 +1118,7 @@ def _scope_message(
     delegated_count: int,
     final_synthesis: bool,
     answer_only: bool = False,
+    remaining_effect_capable_seconds: float = 0.0,
 ) -> str:
     actor = scope.user_concept_id or "unauthenticated"
     organisation = scope.organisation_concept_id or "none"
@@ -1072,6 +1132,8 @@ def _scope_message(
         "capabilities.\n"
         "- Effect boundary: only explicitly marked bounded effects are available; "
         "all other writes are unavailable.\n"
+        "- Remaining effect-capable window before the protected final-answer "
+        f"reserve: {max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
         f"- {_CAPABILITY_TOOL_NAME} exposes the complete delegated catalogue "
         "without interpreting the user's intent.\n"
         f"- {_INVOKE_TOOL_NAME} invokes any named delegated capability.\n"
@@ -1301,6 +1363,11 @@ def _capability_catalogue(
         }
         if definition.ordinary_turn_effect:
             capability["semantic_effect"] = True
+            minimum_effect_window = gateway.get_method_effect_admission_window_sec(name)
+            if minimum_effect_window is not None:
+                capability["minimum_effect_window_seconds"] = float(
+                    minimum_effect_window
+                )
         if surface_metadata is not None:
             capability.update(
                 {
@@ -1554,6 +1621,83 @@ def _effect_id(*, turn_id: str | None, call_id: str, capability_name: str) -> st
     return f"effect_{hashlib.sha256(material).hexdigest()[:24]}"
 
 
+def _effect_result_target_ids(raw_payload: Any) -> list[str]:
+    """Extract bounded concrete mutation targets from a handler receipt."""
+
+    scalar_fields = {
+        "canonical_concept_id",
+        "computer_file_copy_concept_id",
+        "concept_id",
+        "created_concept_id",
+        "existing_concept_id",
+        "file_copy_concept_id",
+        "object_id",
+        "paper_concept_id",
+        "relation_id",
+        "source_concept_id",
+        "source_id",
+        "subject_id",
+        "target_concept_id",
+        "target_id",
+    }
+    sequence_fields = {
+        "concept_ids",
+        "created_concept_ids",
+        "relation_ids",
+        "source_ids",
+        "target_ids",
+    }
+    traversal_fields = {
+        "concept",
+        "created",
+        "data",
+        "hits",
+        "items",
+        "relationship",
+        "relationships",
+        "result",
+        "results",
+    }
+    collected: list[str] = []
+    seen: set[str] = set()
+
+    def append_value(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        cleaned = value.strip()
+        lowered = cleaned.lower()
+        if not cleaned or lowered in seen:
+            return
+        seen.add(lowered)
+        collected.append(cleaned)
+
+    def walk(value: Any, *, depth: int) -> None:
+        if depth > 5 or len(collected) >= 50:
+            return
+        if isinstance(value, Mapping):
+            for raw_key, item in list(value.items())[:100]:
+                key = str(raw_key).strip().lower()
+                if key in scalar_fields:
+                    append_value(item)
+                elif key in sequence_fields and isinstance(item, Sequence) and not isinstance(
+                    item,
+                    (str, bytes, bytearray),
+                ):
+                    for nested in list(item)[:50]:
+                        append_value(nested)
+                if key in traversal_fields:
+                    walk(item, depth=depth + 1)
+        elif isinstance(value, Sequence) and not isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            for item in list(value)[:100]:
+                walk(item, depth=depth + 1)
+
+    walk(raw_payload, depth=0)
+    return collected
+
+
 def _effect_status(
     raw_payload: Any,
     *,
@@ -1561,12 +1705,24 @@ def _effect_status(
 ) -> str:
     if isinstance(raw_payload, Mapping):
         if (
+            str(raw_payload.get("status") or "").strip().lower() == "not_started"
+            or str(raw_payload.get("mutation_outcome") or "").strip().lower()
+            == "not_started"
+        ):
+            return "not_started"
+        if (
             raw_payload.get("mutation_outcome") == "unknown"
             or raw_payload.get("error_code") == "tool_timeout_outcome_unknown"
         ):
             return "indeterminate"
         explicit = str(raw_payload.get("effect_status") or "").strip().lower()
-        if explicit in {"succeeded", "partial", "failed", "indeterminate"}:
+        if explicit in {
+            "succeeded",
+            "partial",
+            "failed",
+            "indeterminate",
+            "not_started",
+        }:
             return explicit
     if isinstance(raw_payload, Mapping) and raw_payload.get("success") is False:
         return "failed"
@@ -1590,7 +1746,7 @@ def _late_effect_observation_state(
         payload.get("changed")
         if isinstance(payload, Mapping)
         and isinstance(payload.get("changed"), bool)
-        else (False if effect_status == "failed" else None)
+        else (False if effect_status in {"failed", "not_started"} else None)
     )
     return effect_status, changed
 
@@ -1728,7 +1884,27 @@ def execute_adaptive_turn(
     extra_messages: list[dict[str, Any]] = []
     tool_invocations: list[dict[str, Any]] = []
     llm_calls: list[dict[str, Any]] = []
-    aux_calls: list[dict[str, Any]] = []
+    aux_calls: list[dict[str, Any]] = [
+        {
+            "type": "adaptive_turn_budget_allocation",
+            "schema_version": "adaptive_turn_budget_allocation.v1",
+            "turn_budget_seconds": turn_budget,
+            "final_synthesis_reserve_seconds": final_reserve,
+            "requested_final_answer_reserve_seconds": (
+                requested_final_answer_reserve
+            ),
+            "effective_final_answer_reserve_seconds": final_answer_reserve,
+            "final_answer_reserve_source": (
+                "caller"
+                if final_answer_reserve_seconds is not None
+                else "environment_or_default"
+            ),
+            "explicit_zero_override": bool(
+                final_answer_reserve_seconds is not None
+                and requested_final_answer_reserve == 0.0
+            ),
+        }
+    ]
     usage_totals: dict[str, float] = {}
     seen_request_digests: set[str] = set()
     last_partial_text = ""
@@ -1916,6 +2092,25 @@ def execute_adaptive_turn(
                 effect_id: dict(state)
                 for effect_id, state in effect_states.items()
             }
+        incomplete_effects = [
+            state
+            for state in effect_snapshot.values()
+            if state.get("effect_status")
+            in {"failed", "partial", "indeterminate", "not_started"}
+        ]
+        if status == "completed" and incomplete_effects:
+            incomplete_statuses = {
+                str(state.get("effect_status") or "")
+                for state in incomplete_effects
+            }
+            if "indeterminate" in incomplete_statuses:
+                status = "effect_outcome_indeterminate"
+            elif "partial" in incomplete_statuses:
+                status = "effect_partially_completed"
+            elif "failed" in incomplete_statuses:
+                status = "effect_failed"
+            else:
+                status = "effect_not_started"
         reconciled_invocations: list[dict[str, Any]] = []
         for raw_invocation in tool_invocations:
             invocation = dict(raw_invocation)
@@ -1942,7 +2137,8 @@ def execute_adaptive_turn(
             state
             for state in effect_snapshot.values()
             if (
-                state.get("effect_status") in {"partial", "indeterminate"}
+                state.get("effect_status")
+                in {"failed", "partial", "indeterminate", "not_started"}
                 or state.get("changed") is True
                 or (
                     state.get("effect_status") == "succeeded"
@@ -1963,6 +2159,7 @@ def execute_adaptive_turn(
                     "partial",
                     "failed",
                     "indeterminate",
+                    "not_started",
                 )
             }
             count_text = ", ".join(
@@ -1976,13 +2173,41 @@ def execute_adaptive_turn(
                     f"{'s' if len(relevant_effects) != 1 else ''} "
                     "with unresolved status"
                 )
-            text = (
-                "That turn did not finish cleanly. Its effect receipts currently "
-                f"report {count_text}. A handler receipt is not canonical "
-                "read-back, so I will not claim that nothing changed. Inspect "
-                "the represented state before retrying any effect whose outcome "
-                "is unknown."
-            )
+            unknown_change_effects = [
+                state
+                for state in relevant_effects
+                if state.get("effect_status") in {"partial", "indeterminate"}
+                or state.get("changed") is True
+                or (
+                    state.get("effect_status") == "succeeded"
+                    and state.get("changed") is None
+                )
+            ]
+            if unknown_change_effects:
+                text = (
+                    "That turn did not finish cleanly. Its effect receipts currently "
+                    f"report {count_text}. A handler receipt is not canonical "
+                    "read-back, so I will not claim that nothing changed. Inspect "
+                    "the represented state before retrying any effect whose outcome "
+                    "is unknown."
+                )
+            elif status_counts["not_started"]:
+                text = (
+                    "That turn did not finish cleanly. Its effect receipts currently "
+                    f"report {count_text}. The not-started effect"
+                    f"{'s were' if status_counts['not_started'] != 1 else ' was'} "
+                    "not dispatched and "
+                    f"{'report' if status_counts['not_started'] != 1 else 'reports'} "
+                    "no change; "
+                    f"{'they can' if status_counts['not_started'] != 1 else 'it can'} "
+                    "be retried in a new turn."
+                )
+            else:
+                text = (
+                    "That turn did not finish cleanly. Its effect receipts currently "
+                    f"report {count_text} and report no change. Inspect the failure "
+                    "receipt before retrying."
+                )
             aux_calls.append(
                 {
                     "type": "adaptive_turn_effect_finality_fallback",
@@ -2196,6 +2421,11 @@ def execute_adaptive_turn(
                     delegated_count=len(delegated_names),
                     final_synthesis=final_synthesis,
                     answer_only=answer_only,
+                    remaining_effect_capable_seconds=(
+                        0.0
+                        if final_synthesis or answer_only
+                        else max(0.0, final_answer_deadline - request_started)
+                    ),
                 ),
                 llm_params=effective_params,
                 **(
@@ -2483,7 +2713,7 @@ def execute_adaptive_turn(
             tuple[Any, Any, dict[str, Any], str, bool],
         ] = {}
         actual_capabilities: list[
-            tuple[int, ToolCall, str, dict[str, Any], bool]
+            tuple[int, ToolCall, str, dict[str, Any], bool, float]
         ] = []
 
         for index, call in enumerate(calls):
@@ -2576,13 +2806,24 @@ def execute_adaptive_turn(
                 continue
             if call.tool_name == _EVIDENCE_TOOL_NAME:
                 try:
+                    requested_json_pointer = (
+                        str(call.payload.get("json_pointer"))
+                        if call.payload.get("json_pointer") is not None
+                        else None
+                    )
+                    # RFC 6901 assigns the empty string to the document root and
+                    # "/" to a member whose key is empty. Models nevertheless
+                    # routinely use "/" for "the whole result". Keep the evidence
+                    # store's RFC semantics exact and provide that ergonomic alias
+                    # only at this model-facing adaptive boundary.
+                    evidence_json_pointer = (
+                        None
+                        if requested_json_pointer == "/"
+                        else requested_json_pointer
+                    )
                     output = evidence_store.read(
                         str(call.payload.get("evidence_id") or ""),
-                        json_pointer=(
-                            str(call.payload.get("json_pointer"))
-                            if call.payload.get("json_pointer") is not None
-                            else None
-                        ),
+                        json_pointer=evidence_json_pointer,
                         query=(
                             str(call.payload.get("query"))
                             if call.payload.get("query") is not None
@@ -2677,6 +2918,19 @@ def execute_adaptive_turn(
                 model_payload=arguments,
                 trusted_argument_values=trusted_values,
             )
+            minimum_effect_window = 0.0
+            if is_effect:
+                resolved_effect_window = gateway.get_method_effect_admission_window_sec(
+                    canonical_name
+                )
+                if resolved_effect_window is None:
+                    resolved_effect_window = gateway.get_method_timeout_sec(
+                        canonical_name
+                    )
+                minimum_effect_window = max(
+                    0.0,
+                    float(resolved_effect_window or 0.0),
+                )
             actual_capabilities.append(
                 (
                     index,
@@ -2684,16 +2938,27 @@ def execute_adaptive_turn(
                     canonical_name,
                     trusted_arguments,
                     is_effect,
+                    minimum_effect_window,
                 )
             )
 
         def invoke_and_contain(
-            item: tuple[int, ToolCall, str, dict[str, Any], bool],
+            item: tuple[int, ToolCall, str, dict[str, Any], bool, float],
+            *,
+            deadline_monotonic: float,
+            effect_window_denial: Mapping[str, Any] | None = None,
         ) -> tuple[
             int,
             tuple[Any, Any, dict[str, Any], str, bool],
         ]:
-            index, call, canonical_name, arguments, is_effect = item
+            (
+                index,
+                call,
+                canonical_name,
+                arguments,
+                is_effect,
+                _minimum_effect_window,
+            ) = item
             assert gateway is not None
             definition = gateway.get_method_definition(canonical_name)
             subject_argument = (
@@ -2781,6 +3046,45 @@ def execute_adaptive_turn(
                         canonical_name,
                         is_effect,
                     )
+                if isinstance(effect_window_denial, Mapping):
+                    denial_payload = dict(effect_window_denial)
+                    terminal_effect_status = _effect_status(
+                        denial_payload,
+                        transport_result=None,
+                    )
+                    terminal_outcome = persist_effect_observation_phase(
+                        effect_id=effect_identifier,
+                        phase="turn_terminal",
+                        observation={
+                            "call_id": call.call_id,
+                            "capability_name": canonical_name,
+                            "effect_status": terminal_effect_status,
+                            "changed": False,
+                            "transport": {},
+                            "receipt": dict(denial_payload),
+                        },
+                    )
+                    if not _effect_phase_acknowledged(terminal_outcome):
+                        aux_calls.append(
+                            {
+                                "type": "effect_observation_persistence_failure",
+                                "schema_version": (
+                                    "effect_observation_persistence_failure.v1"
+                                ),
+                                "effect_id": effect_identifier,
+                                "phase": "turn_terminal",
+                                "reason": (
+                                    terminal_outcome.get("reason") or "not_acknowledged"
+                                ),
+                            }
+                        )
+                    return index, (
+                        denial_payload,
+                        None,
+                        arguments,
+                        canonical_name,
+                        is_effect,
+                    )
             try:
                 with override_current_actor(
                     scope.user_concept_id,
@@ -2789,7 +3093,7 @@ def execute_adaptive_turn(
                     transport_result = gateway.invoke(
                         canonical_name,
                         arguments,
-                        deadline_monotonic=research_deadline,
+                        deadline_monotonic=deadline_monotonic,
                         late_completion_observer=(
                             late_effect_observer(
                                 effect_id=effect_identifier,
@@ -2854,7 +3158,7 @@ def execute_adaptive_turn(
                     and isinstance(raw_payload.get("changed"), bool)
                     else (
                         False
-                        if terminal_effect_status == "failed"
+                        if terminal_effect_status in {"failed", "not_started"}
                         else None
                     )
                 )
@@ -2899,11 +3203,68 @@ def execute_adaptive_turn(
 
         if actual_capabilities and any(item[4] for item in actual_capabilities):
             # Preserve model-call order whenever the batch contains an effect.
-            # This leaves the model free to mix reads and writes while ensuring
-            # that later calls can observe earlier committed state.
+            # Each effect receives an independent admission decision in model
+            # order. One invalid or oversized call therefore cannot deny an
+            # otherwise admissible sibling. A dispatched indeterminate effect
+            # stops later effects until canonical state can be inspected; reads
+            # remain available for that inspection.
+            prior_indeterminate_effect_id: str | None = None
             for item in actual_capabilities:
-                result_index, contained = invoke_and_contain(item)
+                (
+                    _item_index,
+                    _call,
+                    canonical_name,
+                    _arguments,
+                    is_effect,
+                    _minimum_effect_window,
+                ) = item
+                effect_window_denial = None
+                if is_effect and prior_indeterminate_effect_id is not None:
+                    effect_window_denial = {
+                        **_error_payload(
+                            "prior_effect_outcome_indeterminate",
+                            (
+                                "This effect was not started because an earlier "
+                                "effect in the same ordered batch has an "
+                                "indeterminate outcome. Inspect canonical state "
+                                "before attempting another effect."
+                            ),
+                            retryable=True,
+                        ),
+                        "status": "not_started",
+                        "mutation_outcome": "not_started",
+                        "outcome_finality": "terminal_for_turn",
+                        "prior_effect_id": prior_indeterminate_effect_id,
+                        "capability_name": canonical_name,
+                        "recovery_affordances": [
+                            {
+                                "action_type": (
+                                    "inspect_canonical_state_before_retry"
+                                )
+                            }
+                        ],
+                    }
+                result_index, contained = invoke_and_contain(
+                    item,
+                    deadline_monotonic=final_answer_deadline,
+                    effect_window_denial=effect_window_denial,
+                )
                 raw_capability_results[result_index] = contained
+                raw_payload, transport_result, *_rest = contained
+                if (
+                    is_effect
+                    and effect_window_denial is None
+                    and _effect_status(
+                        raw_payload,
+                        transport_result=transport_result,
+                    )
+                    == "indeterminate"
+                ):
+                    prior_indeterminate_effect_id = _effect_id(
+                        turn_id=turn_id,
+                        call_id=_call.call_id,
+                        capability_name=canonical_name,
+                    )
         elif actual_capabilities:
             max_workers = min(
                 len(actual_capabilities),
@@ -2923,6 +3284,7 @@ def execute_adaptive_turn(
                         context_snapshot.run,
                         invoke_and_contain,
                         item,
+                        deadline_monotonic=research_deadline,
                     )
                     futures.append(future)
                 for future in futures:
@@ -2970,11 +3332,7 @@ def execute_adaptive_turn(
                     else None
                 )
                 status = (
-                    (
-                        "ok"
-                        if effect_status in {"succeeded", "partial"}
-                        else "error"
-                    )
+                    ("ok" if effect_status == "succeeded" else "error")
                     if is_effect
                     else (
                         "error"
@@ -3004,12 +3362,19 @@ def execute_adaptive_turn(
                     status=effect_status or status,
                 )
                 envelope_payload = envelope.to_mapping()
+                result_target_ids = _effect_result_target_ids(raw_payload)
+                if result_target_ids:
+                    envelope_payload["result_target_ids"] = result_target_ids
                 if is_effect:
                     changed = (
                         raw_payload.get("changed")
                         if isinstance(raw_payload, Mapping)
                         and isinstance(raw_payload.get("changed"), bool)
-                        else (False if effect_status == "failed" else None)
+                        else (
+                            False
+                            if effect_status in {"failed", "not_started"}
+                            else None
+                        )
                     )
                     remember_effect_state(
                         effect_identifier,
@@ -3035,6 +3400,15 @@ def execute_adaptive_turn(
                             "changed": changed,
                         }
                     )
+                    if isinstance(raw_payload, Mapping):
+                        for receipt_key in (
+                            "mutation_outcome",
+                            "outcome_finality",
+                            "error_code",
+                        ):
+                            receipt_value = raw_payload.get(receipt_key)
+                            if isinstance(receipt_value, (str, int, float, bool)):
+                                envelope_payload[receipt_key] = receipt_value
                 batch_results[index] = ToolResult(
                     call_id=call.call_id,
                     tool_name=call.tool_name,
@@ -3049,6 +3423,11 @@ def execute_adaptive_turn(
                     "effective_arguments": arguments,
                     "evidence": envelope_payload,
                     "status": status,
+                    **(
+                        {"result_target_ids": result_target_ids}
+                        if result_target_ids
+                        else {}
+                    ),
                 }
                 if is_effect:
                     invocation.update(
@@ -3058,6 +3437,15 @@ def execute_adaptive_turn(
                             "changed": envelope_payload.get("changed"),
                         }
                     )
+                    if isinstance(raw_payload, Mapping):
+                        for receipt_key in (
+                            "mutation_outcome",
+                            "outcome_finality",
+                            "error_code",
+                        ):
+                            receipt_value = raw_payload.get(receipt_key)
+                            if isinstance(receipt_value, (str, int, float, bool)):
+                                invocation[receipt_key] = receipt_value
                 if transport_metadata:
                     invocation["transport"] = transport_metadata
                 tool_invocations.append(invocation)

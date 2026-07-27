@@ -126,6 +126,42 @@ def test_read_supports_bounded_pointer_slices_and_escaped_tokens() -> None:
     assert escaped["has_more"] is False
 
 
+def test_store_keeps_rfc_slash_and_empty_string_pointer_semantics() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-rfc-root")
+    envelope = store.record(
+        "generic_lookup",
+        "call-rfc-root",
+        {
+            "": "empty-key-member",
+            "canonical_concept_id": "#V#stable_readback_id",
+        },
+    )
+
+    slash_member = store.read(
+        envelope.evidence_id,
+        json_pointer="/",
+        max_chars=100,
+        trusted_scope=scope,
+        turn_id="turn-rfc-root",
+    )
+    document_root = store.read(
+        envelope.evidence_id,
+        json_pointer="",
+        max_chars=1_000,
+        trusted_scope=scope,
+        turn_id="turn-rfc-root",
+    )
+
+    assert slash_member["success"] is True
+    assert slash_member["content"] == "empty-key-member"
+    assert document_root["success"] is True
+    assert (
+        json.loads(document_root["content"])["canonical_concept_id"]
+        == "#V#stable_readback_id"
+    )
+
+
 def test_read_hides_handle_existence_across_actor_and_turn_boundaries() -> None:
     owner_scope = _scope()
     store = TurnEvidenceStore(owner_scope, "turn-owner")
