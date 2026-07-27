@@ -164,6 +164,7 @@ def _registry_parameter_policy(
     model: str | None,
     parameter: str,
     api_surface: str | None,
+    profile_concept_id: str | None = None,
 ) -> Mapping[str, Any] | None:
     if not model:
         return None
@@ -177,6 +178,7 @@ def _registry_parameter_policy(
             provider=provider,
             parameter=parameter,
             api_surface=api_surface,
+            profile_concept_id=profile_concept_id,
         )
     except Exception:
         return None
@@ -188,6 +190,7 @@ def build_model_parameter_capabilities(
     model: str | None,
     api_surface: str | None = "responses",
     include_registry: bool = False,
+    profile_concept_id: str | None = None,
 ) -> dict[str, Any]:
     provider_name = _normalise_provider(provider)
     model_id = _clean_text(model)
@@ -211,6 +214,7 @@ def build_model_parameter_capabilities(
             model=model_id,
             parameter=MODEL_PARAMETER_REASONING_EFFORT,
             api_surface=surface,
+            profile_concept_id=profile_concept_id,
         )
         if isinstance(reasoning_policy, Mapping):
             action = str(reasoning_policy.get("action") or "").strip().lower()
@@ -257,6 +261,7 @@ def _normalise_reasoning_effort(
     model: str | None,
     api_surface: str | None,
     include_registry: bool,
+    profile_concept_id: str | None = None,
 ) -> str | None:
     effort = _clean_text(value)
     if not effort:
@@ -269,6 +274,7 @@ def _normalise_reasoning_effort(
         model=model,
         api_surface=api_surface,
         include_registry=include_registry,
+        profile_concept_id=profile_concept_id,
     )
     reasoning = _extract_mapping(capability.get("parameters")).get(
         MODEL_PARAMETER_REASONING_EFFORT
@@ -324,6 +330,7 @@ def provider_kwargs_from_model_parameters(
     model: str | None,
     api_surface: str | None,
     include_registry: bool = True,
+    profile_concept_id: str | None = None,
 ) -> dict[str, Any]:
     surface = _normalise_api_surface(api_surface)
     params = normalise_model_parameters_for_storage(
@@ -332,6 +339,7 @@ def provider_kwargs_from_model_parameters(
         model=model,
         api_surface=surface,
         include_registry=include_registry,
+        profile_concept_id=profile_concept_id,
     )
     if not params:
         return {}
@@ -341,6 +349,7 @@ def provider_kwargs_from_model_parameters(
         model=model,
         api_surface=surface,
         include_registry=include_registry,
+        profile_concept_id=profile_concept_id,
     )
     capability_params = _extract_mapping(capabilities.get("parameters"))
     kwargs: dict[str, Any] = {}
@@ -363,6 +372,7 @@ def normalise_model_parameters_for_storage(
     model: str | None = None,
     api_surface: str | None = "responses",
     include_registry: bool = False,
+    profile_concept_id: str | None = None,
 ) -> dict[str, Any]:
     payload = _extract_model_parameters_payload(raw)
     if not payload:
@@ -395,6 +405,7 @@ def normalise_model_parameters_for_storage(
             model=model,
             api_surface=api_surface,
             include_registry=include_registry,
+            profile_concept_id=profile_concept_id,
         )
         if effort:
             params[MODEL_PARAMETER_REASONING_EFFORT] = effort
@@ -429,6 +440,7 @@ def openai_responses_kwargs_from_model_parameters(
     raw: Any,
     *,
     model: str | None,
+    profile_concept_id: str | None = None,
 ) -> dict[str, Any]:
     return provider_kwargs_from_model_parameters(
         raw,
@@ -436,6 +448,7 @@ def openai_responses_kwargs_from_model_parameters(
         model=model,
         api_surface="responses",
         include_registry=True,
+        profile_concept_id=profile_concept_id,
     )
 
 
@@ -443,6 +456,7 @@ def openai_chat_completions_kwargs_from_model_parameters(
     raw: Any,
     *,
     model: str | None,
+    profile_concept_id: str | None = None,
 ) -> dict[str, Any]:
     return provider_kwargs_from_model_parameters(
         raw,
@@ -450,4 +464,5 @@ def openai_chat_completions_kwargs_from_model_parameters(
         model=model,
         api_surface="chat_completions",
         include_registry=True,
+        profile_concept_id=profile_concept_id,
     )

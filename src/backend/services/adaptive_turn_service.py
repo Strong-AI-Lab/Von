@@ -2706,6 +2706,53 @@ def execute_adaptive_turn(
                         canonical_name,
                         is_effect,
                     )
+            if is_effect:
+                configured_effect_window = gateway.get_method_timeout_sec(
+                    canonical_name
+                )
+                remaining_research_window = max(
+                    0.0,
+                    research_deadline - clock(),
+                )
+                if (
+                    configured_effect_window is not None
+                    and configured_effect_window > remaining_research_window
+                ):
+                    return index, (
+                        {
+                            **_error_payload(
+                                "insufficient_effect_window",
+                                (
+                                    f"{canonical_name!r} was not started because "
+                                    "the remaining research window is shorter "
+                                    "than its configured hard execution window."
+                                ),
+                                retryable=True,
+                            ),
+                            "status": "not_started",
+                            "mutation_outcome": "not_started",
+                            "outcome_finality": "terminal_for_turn",
+                            "configured_effect_window_seconds": round(
+                                configured_effect_window,
+                                6,
+                            ),
+                            "remaining_research_window_seconds": round(
+                                remaining_research_window,
+                                6,
+                            ),
+                            "recovery_affordances": [
+                                {
+                                    "action_type": (
+                                        "return_bounded_failure_or_retry_in_new_turn"
+                                    )
+                                }
+                            ],
+                        },
+                        None,
+                        arguments,
+                        canonical_name,
+                        is_effect,
+                    )
             try:
                 effect_identifier = (
                     _effect_id(
@@ -2733,6 +2780,7 @@ def execute_adaptive_turn(
                             if effect_identifier is not None
                             else None
                         ),
+                        require_configured_timeout=is_effect,
                     )
                 raw_payload = transport_result.payload
             except SchemaValidationError as exc:

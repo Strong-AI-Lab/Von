@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence, cast
 
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import OperationFailure, PyMongoError
+from pymongo.errors import DuplicateKeyError, OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
@@ -10477,13 +10477,13 @@ def upsert_turn_execution_record_projection(
     payload.pop("late_effect_observations", None)
     payload["request_id"] = request_id
     if _safe_str(user_id):
-        payload.setdefault("user_id", _safe_str(user_id))
+        payload["user_id"] = _safe_str(user_id)
     if _safe_str(session_id):
-        payload.setdefault("session_id", _safe_str(session_id))
+        payload["session_id"] = _safe_str(session_id)
     if _safe_str(namespace):
-        payload.setdefault("namespace", _safe_str(namespace))
+        payload["namespace"] = _safe_str(namespace)
     if _safe_str(org_id):
-        payload.setdefault("org_id", _safe_str(org_id))
+        payload["org_id"] = _safe_str(org_id)
     payload.setdefault("schema_version", TURN_EXECUTION_RECORD_SCHEMA_VERSION)
     payload.setdefault("created_at_utc", _iso_utc(now))
     payload["updated_at_utc"] = _iso_utc(now)
@@ -10497,13 +10497,31 @@ def upsert_turn_execution_record_projection(
     if isinstance(compacted_payload.payload, Mapping):
         payload = dict(compacted_payload.payload)
     payload["request_id"] = request_id
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            payload[field_name] = clean_value
     payload.setdefault("schema_version", TURN_EXECUTION_RECORD_SCHEMA_VERSION)
     payload["updated_at_utc"] = _iso_utc(now)
+
+    scope_query: dict[str, Any] = {"request_id": request_id}
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            scope_query[field_name] = clean_value
 
     try:
         result = _turn_execution_update_one(
             coll,
-            {"request_id": request_id},
+            scope_query,
             {
                 "$set": payload,
                 "$setOnInsert": {"inserted_at": now},
@@ -10518,6 +10536,19 @@ def upsert_turn_execution_record_projection(
             "updated": updated or inserted,
             "inserted": inserted,
             "matched": matched,
+            "request_id": request_id,
+        }
+    except DuplicateKeyError:
+        # request_id is globally unique. A scoped upsert that collides with an
+        # existing record therefore denotes a different actor scope, not a
+        # record this caller may replace.
+        logger.warning(
+            "Refused turn_execution_records scope collision for request_id=%s",
+            request_id,
+        )
+        return {
+            "updated": False,
+            "reason": "actor_scope_mismatch",
             "request_id": request_id,
         }
     except PyMongoError as exc:
@@ -10547,15 +10578,14 @@ def append_late_effect_observation(
     """Append one bounded, identity-bearing late-effect observation.
 
     The entry is additive to the ordinary turn projection: a later full-record
-    ``$set`` upsert does not remove it.  ``$addToSet`` also makes an exact retry
-    of the same observation harmless.  The caller remains responsible for
-    interpreting a handler receipt versus canonical state.
+    ``$set`` upsert does not remove it.  The conditional append is idempotent
+    by ``observation_id``, including when a retry changes volatile receipt
+    fields.  The caller remains responsible for interpreting a handler receipt
+    versus canonical state.
 
     Entries are individually bounded, but the array has no arbitrary count
-    ceiling.  Replacing this atomic idempotent append with ``$push/$slice``
-    would admit duplicates, while a read-trim-write sequence would lose
-    concurrent observations.  A per-turn retention limit should therefore use
-    an atomic pipeline or a separately indexed collection if observed growth
+    ceiling.  A per-turn retention limit should therefore use an atomic
+    pipeline or a separately indexed collection if observed growth
     demonstrates the need.
     """
 
@@ -10575,6 +10605,22 @@ def append_late_effect_observation(
     if not isinstance(observation, Mapping):
         return {"updated": False, "reason": "invalid_observation"}
 
+    actor_scope: dict[str, str] = {}
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            actor_scope[field_name] = clean_value
+    if not actor_scope:
+        return {
+            "updated": False,
+            "reason": "missing_actor_scope",
+            "request_id": clean_request_id,
+        }
+
     coll = get_turn_execution_records_collection()
     if coll is None:
         return {
@@ -10583,8 +10629,9 @@ def append_late_effect_observation(
             "request_id": clean_request_id,
         }
 
+    source_observation = dict(observation)
     bounded_observation = _compact_final_answer_projection_payload(
-        dict(observation),
+        source_observation,
         max_depth=4,
         max_items=32,
         max_string_chars=2_000,
@@ -10592,6 +10639,9 @@ def append_late_effect_observation(
     if not isinstance(bounded_observation, Mapping):
         bounded_observation = {"value": bounded_observation}
     bounded_observation = dict(bounded_observation)
+    storage_transformed = _hash_payload(source_observation) != _hash_payload(
+        bounded_observation
+    )
 
     observed_at_utc = (
         _safe_str(bounded_observation.get("observed_at_utc"))
@@ -10611,6 +10661,7 @@ def append_late_effect_observation(
             "effect_id": clean_effect_id,
             "execution_id": clean_execution_id,
             "observed_at_utc": observed_at_utc,
+            "storage_transformed": storage_transformed,
         }
     )
 
@@ -10632,25 +10683,164 @@ def append_late_effect_observation(
         if clean_value:
             insert_payload[field_name] = clean_value
 
+    record_scope_query = {
+        "request_id": clean_request_id,
+        **actor_scope,
+    }
+    append_query = {
+        **record_scope_query,
+        "late_effect_observations": {
+            "$not": {"$elemMatch": {"observation_id": observation_id}}
+        },
+    }
+    persisted_at_utc = _iso_utc(now)
+    append_update = {
+        "$push": {"late_effect_observations": entry},
+        "$max": {
+            "updated_at_utc": persisted_at_utc,
+            "late_effect_updated_at_utc": persisted_at_utc,
+        },
+    }
+
     try:
         result = _turn_execution_update_one(
             coll,
-            {"request_id": clean_request_id},
-            {
-                "$addToSet": {"late_effect_observations": entry},
-                "$setOnInsert": insert_payload,
-            },
+            append_query,
+            append_update,
             operation="append_late_effect_observation.update_one",
             detail=clean_execution_id,
-            upsert=True,
+            upsert=False,
         )
         appended = bool(getattr(result, "modified_count", 0) > 0)
-        inserted = getattr(result, "upserted_id", None) is not None
         matched = bool(getattr(result, "matched_count", 0) > 0)
+        inserted = False
+        if not matched:
+            existing = _turn_execution_find_one(
+                coll,
+                record_scope_query,
+                projection={
+                    "_id": 0,
+                    "late_effect_observations.observation_id": 1,
+                },
+                operation="append_late_effect_observation.find_existing",
+                detail=clean_execution_id,
+            )
+            existing_observations = (
+                existing.get("late_effect_observations")
+                if isinstance(existing, Mapping)
+                and isinstance(existing.get("late_effect_observations"), list)
+                else []
+            )
+            duplicate = any(
+                isinstance(item, Mapping)
+                and item.get("observation_id") == observation_id
+                for item in existing_observations
+            )
+            if duplicate:
+                return {
+                    "updated": False,
+                    "appended": False,
+                    "duplicate": True,
+                    "inserted": False,
+                    "matched": True,
+                    "request_id": clean_request_id,
+                    "effect_id": clean_effect_id,
+                    "execution_id": clean_execution_id,
+                    "observation_id": observation_id,
+                }
+
+            if existing is None:
+                request_id_collision = _turn_execution_find_one(
+                    coll,
+                    {"request_id": clean_request_id},
+                    projection={
+                        "_id": 0,
+                        "namespace": 1,
+                        "user_id": 1,
+                        "org_id": 1,
+                    },
+                    operation="append_late_effect_observation.find_scope_collision",
+                    detail=clean_execution_id,
+                )
+                if request_id_collision is not None:
+                    return {
+                        "updated": False,
+                        "appended": False,
+                        "duplicate": False,
+                        "inserted": False,
+                        "matched": False,
+                        "reason": "actor_scope_mismatch",
+                        "request_id": clean_request_id,
+                        "effect_id": clean_effect_id,
+                        "execution_id": clean_execution_id,
+                        "observation_id": observation_id,
+                    }
+                ensured = _turn_execution_update_one(
+                    coll,
+                    record_scope_query,
+                    {"$setOnInsert": insert_payload},
+                    operation="append_late_effect_observation.ensure_record",
+                    detail=clean_execution_id,
+                    upsert=True,
+                )
+                inserted = getattr(ensured, "upserted_id", None) is not None
+
+            # Re-evaluate the identity predicate after the record existence
+            # check so concurrent submissions still admit at most one entry.
+            result = _turn_execution_update_one(
+                coll,
+                append_query,
+                append_update,
+                operation="append_late_effect_observation.retry_update_one",
+                detail=clean_execution_id,
+                upsert=False,
+            )
+            appended = bool(getattr(result, "modified_count", 0) > 0)
+            matched = bool(getattr(result, "matched_count", 0) > 0)
+
+        duplicate = False
+        if not appended and not matched:
+            final_existing = _turn_execution_find_one(
+                coll,
+                record_scope_query,
+                projection={
+                    "_id": 0,
+                    "late_effect_observations.observation_id": 1,
+                },
+                operation="append_late_effect_observation.confirm_identity",
+                detail=clean_execution_id,
+            )
+            final_observations = (
+                final_existing.get("late_effect_observations")
+                if isinstance(final_existing, Mapping)
+                and isinstance(
+                    final_existing.get("late_effect_observations"), list
+                )
+                else []
+            )
+            duplicate = any(
+                isinstance(item, Mapping)
+                and item.get("observation_id") == observation_id
+                for item in final_observations
+            )
+            if not duplicate:
+                return {
+                    "updated": False,
+                    "appended": False,
+                    "duplicate": False,
+                    "inserted": inserted,
+                    "matched": False,
+                    "reason": "append_not_acknowledged",
+                    "request_id": clean_request_id,
+                    "effect_id": clean_effect_id,
+                    "execution_id": clean_execution_id,
+                    "observation_id": observation_id,
+                }
+
         return {
-            "updated": appended or inserted,
-            "appended": appended or inserted,
-            "duplicate": matched and not appended,
+            "updated": appended,
+            "appended": appended,
+            "duplicate": duplicate,
             "inserted": inserted,
             "matched": matched,
             "request_id": clean_request_id,
@@ -10689,7 +10879,15 @@ def submit_late_effect_observation(**kwargs: Any) -> bool:
 
     def _append() -> None:
         try:
-            append_late_effect_observation(**kwargs)
+            outcome = append_late_effect_observation(**kwargs)
+            if not outcome.get("updated") and not outcome.get("duplicate"):
+                logger.warning(
+                    "Late-effect observation was not persisted; request_id=%s "
+                    "effect_id=%s reason=%s",
+                    _safe_str(kwargs.get("request_id")),
+                    _safe_str(kwargs.get("effect_id")),
+                    _safe_str(outcome.get("reason")) or "append_not_acknowledged",
+                )
         except Exception:
             logger.exception(
                 "Late-effect observation append failed; request_id=%s "

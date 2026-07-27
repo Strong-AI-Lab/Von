@@ -968,47 +968,61 @@ def _entry_model_match_score(
 
 
 def _iter_parameter_constraints_for_entry(
-    entry: Mapping[str, Any], *, api_surface: str | None = None
+    entry: Mapping[str, Any],
+    *,
+    api_surface: str | None = None,
+    profile_concept_id: str | None = None,
 ) -> list[Mapping[str, Any]]:
     profiles = entry.get("api_profiles")
     if not isinstance(profiles, Sequence) or isinstance(profiles, str):
         return []
 
     requested_surface = _normalise_lookup_token(api_surface)
+    requested_profile_id = (
+        profile_concept_id.strip()
+        if isinstance(profile_concept_id, str) and profile_concept_id.strip()
+        else None
+    )
     matching_constraints: list[Mapping[str, Any]] = []
     generic_constraints: list[Mapping[str, Any]] = []
 
     for profile in profiles:
         if not isinstance(profile, Mapping):
             continue
+        if requested_profile_id is not None and (
+            str(profile.get("profile_concept_id") or "").strip()
+            != requested_profile_id
+        ):
+            continue
         constraints = profile.get("parameter_constraints")
         if not isinstance(constraints, Sequence) or isinstance(constraints, str):
             continue
+        projected_constraints = [
+            {
+                **constraint,
+                "profile_concept_id": (
+                    constraint.get("profile_concept_id")
+                    or profile.get("profile_concept_id")
+                ),
+            }
+            for constraint in constraints
+            if isinstance(constraint, Mapping)
+        ]
 
         profile_surface = _normalise_lookup_token(profile.get("api_surface"))
         if not requested_surface:
-            matching_constraints.extend(
-                constraint
-                for constraint in constraints
-                if isinstance(constraint, Mapping)
-            )
+            matching_constraints.extend(projected_constraints)
             continue
 
         if not profile_surface:
-            generic_constraints.extend(
-                constraint
-                for constraint in constraints
-                if isinstance(constraint, Mapping)
-            )
+            generic_constraints.extend(projected_constraints)
             continue
 
         if profile_surface == requested_surface:
-            matching_constraints.extend(
-                constraint
-                for constraint in constraints
-                if isinstance(constraint, Mapping)
-            )
+            matching_constraints.extend(projected_constraints)
 
+    if requested_profile_id is not None:
+        return matching_constraints
     return matching_constraints or generic_constraints
 
 
@@ -1018,6 +1032,7 @@ def resolve_model_parameter_policy(
     parameter: str,
     provider: str | None = None,
     api_surface: str | None = None,
+    profile_concept_id: str | None = None,
     preferred_language: str | None = None,
 ) -> Mapping[str, Any] | None:
     registry_snapshot = get_model_registry_snapshot(
@@ -1031,35 +1046,48 @@ def resolve_model_parameter_policy(
     if not requested_parameter:
         return None
 
-    for entry in models:
-        if not isinstance(entry, Mapping):
-            continue
-        if not _entry_matches_model(entry, model=model, provider=provider):
+    matching_entries = [
+        entry
+        for entry in models
+        if isinstance(entry, Mapping)
+        and _entry_matches_model(entry, model=model, provider=provider)
+    ]
+    if not matching_entries:
+        return None
+    entry = max(
+        matching_entries,
+        key=lambda candidate: _entry_model_match_score(
+            candidate,
+            model=model,
+            provider=provider,
+        ),
+    )
+
+    for constraint in _iter_parameter_constraints_for_entry(
+        entry,
+        api_surface=api_surface,
+        profile_concept_id=profile_concept_id,
+    ):
+        parameter_name = _normalise_parameter_name(
+            constraint.get("parameter") or constraint.get("parameter_concept_id")
+        )
+        if parameter_name != requested_parameter:
             continue
 
-        for constraint in _iter_parameter_constraints_for_entry(
-            entry, api_surface=api_surface
-        ):
-            parameter_name = _normalise_parameter_name(
-                constraint.get("parameter") or constraint.get("parameter_concept_id")
-            )
-            if parameter_name != requested_parameter:
-                continue
-
-            return {
-                "parameter": parameter_name,
-                "action": constraint.get("action"),
-                "fixed_value": constraint.get("fixed_value"),
-                "allowed_values": list(constraint.get("allowed_values") or []),
-                "constraint_concept_id": constraint.get("constraint_concept_id"),
-                "parameter_concept_id": constraint.get("parameter_concept_id"),
-                "profile_concept_id": constraint.get("profile_concept_id"),
-                "registry_entry_id": entry.get("registry_entry_id"),
-                "concept_id": entry.get("concept_id"),
-                "provider": entry.get("provider"),
-                "model_id": entry.get("model_id"),
-                "source": registry_snapshot.get("source"),
-            }
+        return {
+            "parameter": parameter_name,
+            "action": constraint.get("action"),
+            "fixed_value": constraint.get("fixed_value"),
+            "allowed_values": list(constraint.get("allowed_values") or []),
+            "constraint_concept_id": constraint.get("constraint_concept_id"),
+            "parameter_concept_id": constraint.get("parameter_concept_id"),
+            "profile_concept_id": constraint.get("profile_concept_id"),
+            "registry_entry_id": entry.get("registry_entry_id"),
+            "concept_id": entry.get("concept_id"),
+            "provider": entry.get("provider"),
+            "model_id": entry.get("model_id"),
+            "source": registry_snapshot.get("source"),
+        }
 
     return None
 
@@ -1150,6 +1178,7 @@ def sanitise_model_parameter_value(
     value: Any,
     provider: str | None = None,
     api_surface: str | None = None,
+    profile_concept_id: str | None = None,
     preferred_language: str | None = None,
 ) -> Any:
     if value is None:
@@ -1160,6 +1189,7 @@ def sanitise_model_parameter_value(
         parameter=parameter,
         provider=provider,
         api_surface=api_surface,
+        profile_concept_id=profile_concept_id,
         preferred_language=preferred_language,
     )
     if not isinstance(policy, Mapping):

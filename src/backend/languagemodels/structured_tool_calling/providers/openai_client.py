@@ -68,6 +68,35 @@ def _provider_item_mapping(item: Any) -> dict[str, Any]:
     return {}
 
 
+def _raw_reasoning_effort(raw: Any) -> Any:
+    if not isinstance(raw, Mapping):
+        return None
+    payload = raw.get("model_parameters")
+    if not isinstance(payload, Mapping):
+        payload = raw
+    effort = payload.get("reasoning_effort")
+    if effort is None:
+        effort = payload.get("reasoningEffort")
+    nested = payload.get("reasoning")
+    if effort is None and isinstance(nested, Mapping):
+        effort = nested.get("effort")
+    return effort
+
+
+def _merge_provider_parameter_kwargs(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+) -> None:
+    """Merge provider projections without discarding adjacent nested options."""
+
+    for key, value in source.items():
+        current = target.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            target[key] = {**dict(current), **dict(value)}
+        else:
+            target[key] = value
+
+
 class OpenAIClient(LLMClient):
     """OpenAI client whose wire surface is selected from represented profiles."""
 
@@ -456,14 +485,33 @@ class OpenAIClient(LLMClient):
             dict(llm_params) if isinstance(llm_params, Mapping) else {}
         )
         effective_parameters: dict[str, Any] = {}
+        direct_reasoning_effort = request_kwargs.pop("reasoning_effort", None)
+        if (
+            _raw_reasoning_effort(llm_params) is None
+            and direct_reasoning_effort is not None
+        ):
+            requested_parameters["reasoning_effort"] = direct_reasoning_effort
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_chat_completions_kwargs_from_model_parameters(
+                    {"reasoning_effort": direct_reasoning_effort},
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
+            )
 
         if self.config.max_tokens is not None:
             request_kwargs["max_tokens"] = self.config.max_tokens
         if isinstance(llm_params, Mapping) and llm_params:
-            effective_parameters = openai_chat_completions_kwargs_from_model_parameters(
-                llm_params, model=request_model
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_chat_completions_kwargs_from_model_parameters(
+                    llm_params,
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
             )
-            request_kwargs.update(effective_parameters)
+        _merge_provider_parameter_kwargs(request_kwargs, effective_parameters)
         if (
             tools
             and "reasoning_effort" in request_kwargs
@@ -475,13 +523,26 @@ class OpenAIClient(LLMClient):
                 "Omitting non-zero reasoning_effort for a represented Chat "
                 "Completions structured-tool profile."
             )
+        if (
+            "temperature" not in requested_parameters
+            and "temperature" in request_kwargs
+        ):
+            requested_parameters["temperature"] = request_kwargs["temperature"]
+        requested_temperature = requested_parameters.get(
+            "temperature",
+            request_kwargs.get("temperature", self.config.temperature),
+        )
+        request_kwargs.pop("temperature", None)
+        effective_parameters.pop("temperature", None)
         safe_temperature = resolve_safe_temperature_for_model(
             request_model,
-            self.config.temperature,
+            requested_temperature,
             api_surface=API_SURFACE_CHAT_COMPLETIONS,
+            profile_concept_id=decision.profile_concept_id,
         )
         if safe_temperature is not None:
             request_kwargs["temperature"] = safe_temperature
+            effective_parameters["temperature"] = safe_temperature
 
         response = await request_client.chat.completions.create(
             model=request_model,
@@ -542,6 +603,31 @@ class OpenAIClient(LLMClient):
             dict(llm_params) if isinstance(llm_params, Mapping) else {}
         )
         effective_parameters: dict[str, Any] = {}
+        direct_reasoning_effort = request_kwargs.pop("reasoning_effort", None)
+        raw_direct_reasoning = request_kwargs.pop("reasoning", None)
+        if isinstance(raw_direct_reasoning, Mapping):
+            direct_reasoning = dict(raw_direct_reasoning)
+            nested_effort = direct_reasoning.pop("effort", None)
+            if direct_reasoning_effort is None:
+                direct_reasoning_effort = nested_effort
+            if direct_reasoning:
+                request_kwargs["reasoning"] = direct_reasoning
+        elif raw_direct_reasoning is not None:
+            # An invalid raw shape must not bypass represented reasoning policy.
+            requested_parameters["reasoning"] = raw_direct_reasoning
+        if (
+            _raw_reasoning_effort(llm_params) is None
+            and direct_reasoning_effort is not None
+        ):
+            requested_parameters["reasoning_effort"] = direct_reasoning_effort
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_responses_kwargs_from_model_parameters(
+                    {"reasoning_effort": direct_reasoning_effort},
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
+            )
         input_items = self._build_responses_input(
             prompt=prompt,
             context=context,
@@ -551,18 +637,35 @@ class OpenAIClient(LLMClient):
         if self.config.max_tokens is not None:
             request_kwargs["max_output_tokens"] = self.config.max_tokens
         if isinstance(llm_params, Mapping) and llm_params:
-            effective_parameters = openai_responses_kwargs_from_model_parameters(
-                llm_params,
-                model=request_model,
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_responses_kwargs_from_model_parameters(
+                    llm_params,
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
             )
-            request_kwargs.update(effective_parameters)
+        _merge_provider_parameter_kwargs(request_kwargs, effective_parameters)
+        if (
+            "temperature" not in requested_parameters
+            and "temperature" in request_kwargs
+        ):
+            requested_parameters["temperature"] = request_kwargs["temperature"]
+        requested_temperature = requested_parameters.get(
+            "temperature",
+            request_kwargs.get("temperature", self.config.temperature),
+        )
+        request_kwargs.pop("temperature", None)
+        effective_parameters.pop("temperature", None)
         safe_temperature = resolve_safe_temperature_for_model(
             request_model,
-            self.config.temperature,
+            requested_temperature,
             api_surface=API_SURFACE_RESPONSES,
+            profile_concept_id=decision.profile_concept_id,
         )
         if safe_temperature is not None:
             request_kwargs["temperature"] = safe_temperature
+            effective_parameters["temperature"] = safe_temperature
         request_kwargs["store"] = decision.store
         if decision.continuation_mode == "stateless" and not decision.store:
             requested_include = request_kwargs.get("include")

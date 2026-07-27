@@ -676,6 +676,7 @@ class InternalMCPTransport:
         category: str = "read",
         advisory_timeout_sec: float | None = None,
         deadline_monotonic: float | None = None,
+        require_configured_timeout: bool = False,
         log_tag: str = "[mcp_gateway]",
         late_completion_observer: LateCompletionObserver | None = None,
     ) -> TransportResult:
@@ -728,6 +729,58 @@ class InternalMCPTransport:
             if observe_late_write
             else "discard_from_turn"
         )
+
+        if (
+            require_configured_timeout
+            and deadline_monotonic is not None
+            and hard_timeout_sec < configured_hard_timeout_sec
+        ):
+            is_write = str(category or "").strip().lower() == "write"
+            payload: Dict[str, Any] = {
+                "success": False,
+                "status": "not_started",
+                "error": (
+                    f"{method_name!r} was not started because the caller's "
+                    "remaining window is shorter than its configured hard "
+                    "execution window."
+                ),
+                "error_code": (
+                    "insufficient_effect_window"
+                    if is_write
+                    else "insufficient_execution_window"
+                ),
+                "error_type": "admission_denied",
+                "retryable": True,
+                "execution_id": execution_id,
+                "configured_execution_window_seconds": (
+                    configured_hard_timeout_sec
+                ),
+                "remaining_execution_window_seconds": hard_timeout_sec,
+                "timeout_phase": "pre_dispatch",
+                "outcome_finality": "terminal_for_turn",
+                "recovery_affordances": [
+                    {
+                        "action_type": (
+                            "return_bounded_failure_or_retry_in_new_turn"
+                        )
+                    }
+                ],
+            }
+            if is_write:
+                payload["mutation_outcome"] = "not_started"
+            return TransportResult(
+                payload=payload,
+                duration_ms=max(0.0, (time.perf_counter() - submitted_at) * 1000.0),
+                execution_id=execution_id,
+                outcome="not_started",
+                timeout_sec=hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                queue_duration_ms=0.0,
+                handler_duration_ms=None,
+                handler_elapsed_ms=None,
+                transport_overhead_ms=0.0,
+                timeout_phase="pre_dispatch",
+            )
 
         if hard_timeout_sec <= 0.0:
             with self._diagnostics_lock:

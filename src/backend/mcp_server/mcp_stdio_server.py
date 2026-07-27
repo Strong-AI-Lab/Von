@@ -947,12 +947,17 @@ class _RestrictedGateway:
             return definition
         return None
 
+    def get_method_timeout_sec(self, method_name: str) -> float | None:
+        return self._gateway.get_method_timeout_sec(method_name)
+
     def invoke(
         self,
         method_name: str,
         payload: dict[str, Any] | None = None,
         *,
         deadline_monotonic: float | None = None,
+        late_completion_observer: Any | None = None,
+        require_configured_timeout: bool = False,
     ):
         if not self._allow_writes:
             meta = self._gateway.describe_methods().get(method_name) or {}
@@ -966,6 +971,8 @@ class _RestrictedGateway:
             method_name,
             payload,
             deadline_monotonic=deadline_monotonic,
+            late_completion_observer=late_completion_observer,
+            require_configured_timeout=require_configured_timeout,
         )
 
 

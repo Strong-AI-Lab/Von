@@ -1090,6 +1090,75 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
 
 
+def test_effect_is_not_started_without_its_configured_execution_window() -> None:
+    started = time.monotonic()
+    clock = _ManualClock(started)
+    invoked: list[str] = []
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(name)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+        }
+
+    client = _TimedSequenceClient(
+        clock,
+        (
+            started + 7.5,
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id="effect-with-clipped-window",
+                        payload={
+                            "name": "create_concepts",
+                            "arguments": {
+                                "concepts": [{"name": "Must not start late"}]
+                            },
+                        },
+                    )
+                ],
+            ),
+        ),
+        (
+            started + 7.6,
+            LLMResponse(
+                text_response=(
+                    "The write was not started because its full bounded window "
+                    "was no longer available."
+                )
+            ),
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, write_timeout_sec=1.0),
+        prompt="Represent this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="effect-window-admission",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        clock=clock,
+    )
+
+    assert invoked == []
+    assert result.response_text.startswith("The write was not started")
+    assert result.tool_invocations[0]["effect_status"] == "failed"
+    assert result.tool_invocations[0]["changed"] is False
+    assert "insufficient_effect_window" in (
+        result.tool_invocations[0]["evidence"]["preview"]
+    )
+    assert "not_started" in result.tool_invocations[0]["evidence"]["preview"]
+
+
 @pytest.mark.parametrize(
     "relationships",
     [

@@ -1120,7 +1120,7 @@ def enrich_concept_with_text_relations(
     never migrates or deletes them.  Schema migration belongs to an explicit,
     authorised maintenance operation rather than an ordinary fetch.
     """
-    from .text_value_service import get_texts_for_concept
+    from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
     if not logger:
         logger = globals().get("logger")
@@ -1139,10 +1139,53 @@ def enrich_concept_with_text_relations(
 
     legacy_names = concept.get("names", [])
 
-    # Fetch names from text relations (authoritative source)
-    names_from_relations = get_texts_for_concept(
-        subject_concept_id=concept_id, predicate="hasName", limit=100
+    # The ordinary fetch path needs three predicates. Fetch them with one
+    # relation/text join while the bounded batch is known to be complete. If
+    # the batch reaches its cap, retain the older per-predicate reads so a
+    # name-heavy concept cannot crowd out content or notes.
+    enrichment_batch_cap = 102
+    batch_query_metadata: Dict[str, Any] = {}
+    batched_rows = get_texts_for_concepts(
+        [concept_id],
+        predicates=("hasName", "hasContent", "hasNote"),
+        limit_per_concept=enrichment_batch_cap,
+        query_metadata=batch_query_metadata,
+    ).get(concept_id, [])
+    relation_query_truncated = batch_query_metadata.get(
+        "relation_query_truncated"
     )
+    batch_complete = (
+        not relation_query_truncated
+        if isinstance(relation_query_truncated, bool)
+        else len(batched_rows) < enrichment_batch_cap
+    )
+    if batch_complete:
+        names_from_relations = [
+            row for row in batched_rows if row.get("predicate") == "hasName"
+        ][:100]
+        content_relations = [
+            row for row in batched_rows if row.get("predicate") == "hasContent"
+        ][:1]
+        note_relations = [
+            row for row in batched_rows if row.get("predicate") == "hasNote"
+        ][:1]
+    else:
+        names_from_relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            limit=100,
+        )
+        content_relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasContent",
+            limit=1,
+        )
+        note_relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasNote",
+            limit=1,
+        )
+
     # Convert to frontend format
     concept["names"] = [
         {
@@ -1258,16 +1301,10 @@ def enrich_concept_with_text_relations(
         _add_code_name(maybe_guid)
 
     # Fetch content from text relations (for diary entries, articles, etc.)
-    content_relations = get_texts_for_concept(
-        subject_concept_id=concept_id, predicate="hasContent", limit=1
-    )
     if content_relations:
         concept["content"] = content_relations[0].get("text", "")
 
     # Fetch notes from text relations
-    note_relations = get_texts_for_concept(
-        subject_concept_id=concept_id, predicate="hasNote", limit=1
-    )
     if note_relations:
         concept["note"] = note_relations[0].get("text", "")
 

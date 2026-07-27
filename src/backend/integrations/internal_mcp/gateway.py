@@ -343,6 +343,7 @@ class InternalMCPGateway:
         payload: Optional[MutableMapping[str, Any]] = None,
         *,
         deadline_monotonic: float | None = None,
+        require_configured_timeout: bool = False,
         late_completion_observer: LateCompletionObserver | None = None,
     ) -> TransportResult:
         if not self._enabled:
@@ -520,6 +521,7 @@ class InternalMCPGateway:
                         category=definition.category,
                         advisory_timeout_sec=advisory_timeout,
                         deadline_monotonic=deadline_monotonic,
+                        require_configured_timeout=require_configured_timeout,
                         log_tag=self._log_tag,
                         late_completion_observer=observed_late_completion,
                     )
@@ -642,6 +644,16 @@ class InternalMCPGateway:
             return self._catalogue.get(method_name)
         except Exception:
             return None
+
+    def get_method_timeout_sec(self, method_name: str) -> float | None:
+        """Return the configured hard window for one registered method."""
+
+        definition = self.get_method_definition(method_name)
+        return (
+            definition.resolved_timeout(self._transport)
+            if definition is not None
+            else None
+        )
 
     def extend_catalogue(self, definitions: Iterable[MethodDefinition]) -> None:
         for definition in definitions:

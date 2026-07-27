@@ -11,7 +11,7 @@ required for concept creation; it does not imply uniqueness of parentage.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Tuple
+from typing import Any, Iterable, Mapping, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id
@@ -32,6 +32,7 @@ class ParentResolutionResult:
     fallback_used: bool
     fallback_candidates_checked: Tuple[str, ...]
     fallback_selected_parent_id: str | None
+    resolved_parent_kind: str | None = None
 
     @property
     def success(self) -> bool:
@@ -45,11 +46,23 @@ class ParentResolutionResult:
             "fallback_used": self.fallback_used,
             "fallback_candidates_checked": list(self.fallback_candidates_checked),
             "fallback_selected_parent_id": self.fallback_selected_parent_id,
+            "resolved_parent_kind": self.resolved_parent_kind,
         }
 
 
-def _concept_exists(concept_id: str) -> bool:
-    return bool(ConceptsRepository.find_one({"concept_id": concept_id}))
+def _find_concept(concept_id: str) -> Mapping[str, Any] | None:
+    concept = ConceptsRepository.find_one({"concept_id": concept_id})
+    return concept if isinstance(concept, Mapping) else None
+
+
+def _concept_kind(concept: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(concept, Mapping):
+        return None
+    raw_kind = concept.get("kind")
+    if not isinstance(raw_kind, str):
+        return None
+    kind = raw_kind.strip().lower()
+    return kind or None
 
 
 def _canonicalise_candidates(candidates: Iterable[str]) -> tuple[str, ...]:
@@ -91,7 +104,8 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
     """
 
     canonical_parent = canonicalise_vontology_concept_id(parent_id)
-    if canonical_parent and _concept_exists(canonical_parent):
+    canonical_concept = _find_concept(canonical_parent) if canonical_parent else None
+    if canonical_parent and canonical_concept is not None:
         return ParentResolutionResult(
             requested_parent_id=parent_id,
             canonical_parent_id=canonical_parent,
@@ -99,6 +113,7 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
             fallback_used=False,
             fallback_candidates_checked=(),
             fallback_selected_parent_id=None,
+            resolved_parent_kind=_concept_kind(canonical_concept),
         )
 
     fallback_candidates = _fallback_candidates_for_parent(canonical_parent)
@@ -107,7 +122,8 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
         if candidate == canonical_parent:
             continue
         checked.append(candidate)
-        if _concept_exists(candidate):
+        candidate_concept = _find_concept(candidate)
+        if candidate_concept is not None:
             return ParentResolutionResult(
                 requested_parent_id=parent_id,
                 canonical_parent_id=canonical_parent,
@@ -115,6 +131,7 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
                 fallback_used=True,
                 fallback_candidates_checked=tuple(checked),
                 fallback_selected_parent_id=candidate,
+                resolved_parent_kind=_concept_kind(candidate_concept),
             )
 
     return ParentResolutionResult(
@@ -125,4 +142,3 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
         fallback_candidates_checked=tuple(checked),
         fallback_selected_parent_id=None,
     )
-

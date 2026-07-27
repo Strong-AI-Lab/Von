@@ -87,7 +87,7 @@ def test_repeated_timeouts_use_a_bounded_shared_worker_pool() -> None:
     time.sleep(0.25)
 
 
-def test_restricted_gateway_forwards_absolute_read_deadline() -> None:
+def test_restricted_gateway_forwards_adaptive_read_transport_options() -> None:
     from src.backend.mcp_server.mcp_stdio_server import _RestrictedGateway
 
     captured: dict[str, object] = {}
@@ -101,22 +101,39 @@ def test_restricted_gateway_forwards_absolute_read_deadline() -> None:
         def get_method_definition(self, method_name):
             return SimpleNamespace(name=method_name, category="read")
 
-        def invoke(self, method_name, payload, *, deadline_monotonic=None):
+        def get_method_timeout_sec(self, method_name):
+            assert method_name == "safe_read"
+            return 17.0
+
+        def invoke(
+            self,
+            method_name,
+            payload,
+            *,
+            deadline_monotonic=None,
+            late_completion_observer=None,
+            require_configured_timeout=False,
+        ):
             captured.update(
                 {
                     "method_name": method_name,
                     "payload": payload,
                     "deadline_monotonic": deadline_monotonic,
+                    "late_completion_observer": late_completion_observer,
+                    "require_configured_timeout": require_configured_timeout,
                 }
             )
             return "result"
 
     gateway = _RestrictedGateway(gateway=_BaseGateway(), allow_writes=False)
+    assert gateway.get_method_timeout_sec("safe_read") == 17.0
 
     result = gateway.invoke(
         "safe_read",
         {"query": "bounded"},
         deadline_monotonic=123.5,
+        late_completion_observer=None,
+        require_configured_timeout=False,
     )
 
     assert result == "result"
@@ -124,6 +141,8 @@ def test_restricted_gateway_forwards_absolute_read_deadline() -> None:
         "method_name": "safe_read",
         "payload": {"query": "bounded"},
         "deadline_monotonic": 123.5,
+        "late_completion_observer": None,
+        "require_configured_timeout": False,
     }
 
 

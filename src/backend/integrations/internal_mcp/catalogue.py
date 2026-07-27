@@ -1093,6 +1093,49 @@ def _create_concepts(**kwargs):
                 "Provide an array of concept objects, e.g., concepts=[{name: 'MyType'}]"
             ],
         )
+    requested_non_predicate_kinds = {
+        (
+            str(concept_data.get("kind") or "type").strip().lower()
+            if isinstance(concept_data, dict)
+            else "invalid"
+        )
+        for concept_data in concepts
+        if not (
+            isinstance(concept_data, dict)
+            and str(concept_data.get("kind") or "type").strip().lower()
+            == "predicate"
+        )
+    }
+    if (
+        parent_resolution.resolved_parent_kind in {"individual", "instance"}
+        and requested_non_predicate_kinds
+    ):
+        return make_error_response(
+            "parent_is_not_a_type",
+            (
+                f"Parent concept '{validated_parent_id}' is an individual, not "
+                "a semantic type. No concepts were created."
+            ),
+            details={
+                "original_parent_id": parent_id,
+                "resolved_parent_id": validated_parent_id,
+                "resolved_parent_kind": parent_resolution.resolved_parent_kind,
+                "requested_child_kinds": sorted(requested_non_predicate_kinds),
+            },
+            suggestions=[
+                "Choose an existing semantic type for parent_id",
+                (
+                    "Use scope_mode or organisation_concept_id for ownership and "
+                    "visibility; do not use an organisation or owner individual "
+                    "as parent_id"
+                ),
+                (
+                    "If the intended type does not exist, create that type first "
+                    "under a semantically close type parent"
+                ),
+            ],
+            related_concept_ids=[validated_parent_id],
+        )
 
     results = []
     with defer_relationship_extent_index_sync():
@@ -7172,7 +7215,8 @@ def _concepts_create_input_schema() -> Schema:
         },
         allow_unknown=True,
         description=(
-            "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). "
+            "create_concepts input: parent_id (str, semantic type concept_id; not an owner, organisation, user, or container individual), "
+            "concepts (list of {name, kind?, description?, notes?}). "
             "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
             "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
@@ -10080,6 +10124,65 @@ def _summarise_turn_execution_tool_invocations(
             break
 
     return summary
+
+
+def _summarise_late_effect_observations(
+    raw_observations: Any,
+    *,
+    max_items: int = 32,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return an actor-safe bounded receipt projection for late effects."""
+
+    if not isinstance(raw_observations, list):
+        return [], 0
+
+    summary: list[dict[str, Any]] = []
+    for raw_entry in raw_observations[-max_items:]:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry = {
+            key: raw_entry.get(key)
+            for key in (
+                "schema_version",
+                "observation_id",
+                "effect_id",
+                "execution_id",
+                "call_id",
+                "capability_name",
+                "method_name",
+                "outcome",
+                "effect_status",
+                "changed",
+                "observed_at_utc",
+                "output_schema_validation",
+                "output_schema_valid",
+                "output_schema_error",
+                "payload_truncated",
+                "payload_redacted",
+                "storage_transformed",
+                "error_type",
+                "error",
+            )
+            if key in raw_entry
+        }
+        payload = raw_entry.get("payload")
+        if isinstance(payload, Mapping):
+            entry["receipt"] = {
+                key: payload.get(key)
+                for key in (
+                    "success",
+                    "status",
+                    "effect_status",
+                    "changed",
+                    "error",
+                    "error_code",
+                    "mutation_outcome",
+                    "partial_failures",
+                )
+                if key in payload
+            }
+        summary.append(entry)
+    return summary, len(raw_observations)
 
 
 def _extract_turn_execution_tool_invocation_summary(
@@ -21670,6 +21773,12 @@ def _rag_get_item(**kwargs):
                 source="turn_execution_get.turn_execution_record",
             )
         )
+        (
+            late_effect_observations,
+            late_effect_observation_count,
+        ) = _summarise_late_effect_observations(
+            doc.get("late_effect_observations")
+        )
 
         payload = {
             "collection": collection,
@@ -21711,6 +21820,11 @@ def _rag_get_item(**kwargs):
             "prompt_preview": prompt_payload.get("preview"),
             "tool_invocation_summary": _summarise_turn_execution_tool_invocations(
                 tool_invocations
+            ),
+            "late_effect_observation_count": late_effect_observation_count,
+            "late_effect_observations": late_effect_observations,
+            "late_effect_observations_truncated": (
+                late_effect_observation_count > len(late_effect_observations)
             ),
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,

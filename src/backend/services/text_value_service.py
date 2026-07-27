@@ -424,6 +424,7 @@ def get_texts_for_concepts(
     limit_per_concept: int = 50,
     recent_first: bool = False,
     max_time_ms: Optional[int] = None,
+    query_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Fetch linked TextValues for many concepts with one relation/text join.
 
@@ -450,6 +451,14 @@ def get_texts_for_concepts(
     ]
 
     if not ordered_subject_ids:
+        if query_metadata is not None:
+            query_metadata.update(
+                {
+                    "raw_relation_count": 0,
+                    "relation_query_limit": 0,
+                    "relation_query_truncated": False,
+                }
+            )
         return {}
 
     rel_filter: Dict[str, Any] = {"subject_concept_id": {"$in": ordered_subject_ids}}
@@ -465,7 +474,16 @@ def get_texts_for_concepts(
             rel_filter["predicate"] = {"$in": predicate_values}
 
     sort = [("updated_at", -1), ("created_at", -1)] if recent_first else None
-    relation_limit = max(len(ordered_subject_ids) * max(limit_per_concept, 1), 1)
+    per_concept_relation_limit = max(limit_per_concept, 1)
+    if query_metadata is not None:
+        # One extra raw relation is a completeness sentinel. Joined text rows
+        # cannot provide this signal because dangling TextValue references are
+        # deliberately omitted from the projection below.
+        per_concept_relation_limit += 1
+    relation_limit = max(
+        len(ordered_subject_ids) * per_concept_relation_limit,
+        1,
+    )
     relations = list(
         TextRelationsRepository.find(
             rel_filter,
@@ -474,6 +492,14 @@ def get_texts_for_concepts(
             max_time_ms=max_time_ms,
         )
     )
+    if query_metadata is not None:
+        query_metadata.update(
+            {
+                "raw_relation_count": len(relations),
+                "relation_query_limit": relation_limit,
+                "relation_query_truncated": len(relations) >= relation_limit,
+            }
+        )
     rows_by_concept: Dict[str, List[Dict[str, Any]]] = {
         subject_id: [] for subject_id in ordered_subject_ids
     }

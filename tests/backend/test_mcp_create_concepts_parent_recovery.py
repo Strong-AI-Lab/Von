@@ -93,6 +93,40 @@ def test_create_concepts_parent_not_found_includes_recovery_details(monkeypatch)
     assert any("workflow supertype" in str(item) for item in suggestions)
 
 
+def test_create_concepts_rejects_individual_as_semantic_parent(monkeypatch):
+    created: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda query: (
+            {
+                "concept_id": "#V#example_research_lab",
+                "kind": "individual",
+            }
+            if query.get("concept_id") == "#V#example_research_lab"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.utils_vontology.create_vontology_concept",
+        lambda **kwargs: created.append(dict(kwargs)) or {"success": True},
+    )
+
+    result = _create_concepts(
+        parent_id="#V#example_research_lab",
+        concepts=[{"name": "Synthetic scenario", "kind": "individual"}],
+    )
+
+    assert result.get("success") is False
+    assert result.get("error_code") == "parent_is_not_a_type"
+    assert result.get("error_details") == {
+        "original_parent_id": "#V#example_research_lab",
+        "resolved_parent_id": "#V#example_research_lab",
+        "resolved_parent_kind": "individual",
+        "requested_child_kinds": ["individual"],
+    }
+    assert created == []
+
+
 def test_create_concepts_recovery_works_through_gateway(monkeypatch):
     _patch_create_concept_success(monkeypatch)
     monkeypatch.setattr(
@@ -161,4 +195,3 @@ def test_stdio_create_concepts_recovery_uses_same_parent_logic(monkeypatch):
     assert (payload.get("results") or [{}])[0].get("concept_id") == "#V#stdio_workflow_recovery_type"
     assert payload.get("parent_id_used") == "#V#durable_workflow"
     assert (payload.get("parent_resolution") or {}).get("fallback_used") is True
-

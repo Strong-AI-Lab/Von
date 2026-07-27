@@ -1785,17 +1785,15 @@ class OpenAIClient(LLMInterface):
     def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
         resolved_model = resolve_openai_model_name(model)
-        safe_temperature = resolve_safe_temperature_for_model(
-            resolved_model or self.DEFAULT_MODEL,
-            0.7,
-        )
         return LLMClientConfig(
             model=resolved_model or self.DEFAULT_MODEL,
             provider="openai",
             api_key=self.api_key,
             connection_id="#V#openai_provider",
             deployment_id=resolved_model or self.DEFAULT_MODEL,
-            temperature=safe_temperature,
+            # The effective API surface is selected by the structured adapter.
+            # Defer optional-parameter policy until that surface is known.
+            temperature=0.7,
         )
 
     def validate_model_response(self, response, model: str) -> str:

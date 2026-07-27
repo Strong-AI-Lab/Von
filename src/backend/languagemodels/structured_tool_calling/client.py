@@ -64,6 +64,7 @@ def resolve_safe_temperature_for_model(
     temperature: Optional[float],
     *,
     api_surface: str = "chat_completions",
+    profile_concept_id: str | None = None,
 ) -> Optional[float]:
     """Return a temperature that is safe to send for the given model.
 
@@ -80,6 +81,7 @@ def resolve_safe_temperature_for_model(
         parameter="temperature",
         value=temperature,
         api_surface=api_surface,
+        profile_concept_id=profile_concept_id,
     )
     return sanitised if isinstance(sanitised, (int, float)) else None
 

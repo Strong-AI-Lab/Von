@@ -26,6 +26,7 @@ def _gateway_for(
     transport: InternalMCPTransport,
     category: str = "read",
     output_schema: Schema | None = None,
+    timeout_sec: float | None = None,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -35,6 +36,7 @@ def _gateway_for(
             input_schema=Schema(required={}, optional={}, allow_unknown=False),
             output_schema=output_schema,
             category=category,
+            timeout_sec=timeout_sec,
         )
     )
     return InternalMCPGateway(
@@ -185,6 +187,39 @@ def test_caller_deadline_shortens_the_registered_method_timeout() -> None:
     assert handler_deadlines
     assert handler_deadlines[0] <= caller_deadline + 0.005
     assert cancellation_seen.wait(timeout=1.0)
+
+
+def test_required_configured_write_window_is_denied_atomically_before_dispatch() -> None:
+    handler_called = Event()
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.5,
+        write_advisory_timeout_sec=0.1,
+        handler_executor=executor,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_full_window_write",
+        handler=lambda: handler_called.set(),
+        transport=transport,
+        category="write",
+        timeout_sec=0.2,
+    )
+
+    result = gateway.invoke(
+        "synthetic_full_window_write",
+        {},
+        deadline_monotonic=time.monotonic() + 0.19,
+        require_configured_timeout=True,
+    )
+
+    assert result.outcome == "not_started"
+    assert result.timeout_phase == "pre_dispatch"
+    assert result.payload["error_code"] == "insufficient_effect_window"
+    assert result.payload["mutation_outcome"] == "not_started"
+    assert result.payload["configured_execution_window_seconds"] == 0.2
+    assert 0.0 < result.payload["remaining_execution_window_seconds"] < 0.2
+    assert handler_called.is_set() is False
+    assert executor.diagnostics()["submitted_count"] == 0
 
 
 def test_result_completed_after_absolute_deadline_is_discarded() -> None:

@@ -1041,6 +1041,26 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
             {"check_id": "check_effect_2", "status": "inconclusive"}
         ],
         "critic": {"summary": {"inconclusive_count": 1}},
+        "late_effect_observations": [
+            {
+                "schema_version": "late_effect_observation.v1",
+                "observation_id": "late-observation-9",
+                "effect_id": "effect_2",
+                "execution_id": "mcp_late_9",
+                "capability_name": "add_relationship",
+                "outcome": "late_success",
+                "effect_status": "succeeded",
+                "changed": True,
+                "observed_at_utc": "2026-02-19T01:00:02Z",
+                "storage_transformed": True,
+                "payload": {
+                    "success": True,
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "private_detail": "not part of the actor receipt projection",
+                },
+            }
+        ],
     }
 
     coll = _TurnExecutionCollection([doc])
@@ -1074,6 +1094,64 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
         result["workflow_routing_diagnostics"]["dispatch"]["last_successful_boundary"]
         == "workflow_handoff"
     )
+    assert result["late_effect_observation_count"] == 1
+    assert result["late_effect_observations_truncated"] is False
+    assert result["late_effect_observations"] == [
+        {
+            "schema_version": "late_effect_observation.v1",
+            "observation_id": "late-observation-9",
+            "effect_id": "effect_2",
+            "execution_id": "mcp_late_9",
+            "capability_name": "add_relationship",
+            "outcome": "late_success",
+            "effect_status": "succeeded",
+            "changed": True,
+            "observed_at_utc": "2026-02-19T01:00:02Z",
+            "storage_transformed": True,
+            "receipt": {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+            },
+        }
+    ]
+
+
+def test_rag_get_item_does_not_expose_late_effects_across_namespaces(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    coll = _TurnExecutionCollection(
+        [
+                {
+                    "request_id": "req-private-late-effect",
+                    "session_id": "chat-private-late-effect",
+                    "namespace": "#V#user@org_a",
+                "late_effect_observations": [
+                    {
+                        "observation_id": "private-observation",
+                        "effect_id": "private-effect",
+                        "outcome": "late_success",
+                    }
+                ],
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._rag_get_item(
+        namespace="#V#user@org_b",
+        collection="turn_execution_records",
+        session_id="req-private-late-effect",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "not_found"
+    assert "late_effect_observations" not in result
 
 
 def test_rag_list_indexed_supports_episode_critique_improvement_suggestion_summary(

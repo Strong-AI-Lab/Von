@@ -144,8 +144,37 @@ def test_late_effect_observation_is_bounded_idempotent_and_survives_full_upsert(
     class _Collection:
         document = None
 
-        def update_one(self, _query, update, **_kwargs):
+        def update_one(self, query, update, **_kwargs):
             existed = self.document is not None
+            if not existed and not _kwargs.get("upsert"):
+                return SimpleNamespace(
+                    modified_count=0,
+                    matched_count=0,
+                    upserted_id=None,
+                )
+            if existed and query.get("request_id") != self.document.get("request_id"):
+                return SimpleNamespace(
+                    modified_count=0,
+                    matched_count=0,
+                    upserted_id=None,
+                )
+            late_filter = query.get("late_effect_observations")
+            if existed and isinstance(late_filter, dict):
+                observation_id = (
+                    (late_filter.get("$not") or {})
+                    .get("$elemMatch", {})
+                    .get("observation_id")
+                )
+                if any(
+                    item.get("observation_id") == observation_id
+                    for item in self.document.get("late_effect_observations", [])
+                    if isinstance(item, dict)
+                ):
+                    return SimpleNamespace(
+                        modified_count=0,
+                        matched_count=0,
+                        upserted_id=None,
+                    )
             if self.document is None:
                 self.document = dict(update.get("$setOnInsert") or {})
             modified = False
@@ -159,10 +188,22 @@ def test_late_effect_observation_is_bounded_idempotent_and_survives_full_upsert(
                 if value not in values:
                     values.append(value)
                     modified = True
+            for key, value in (update.get("$push") or {}).items():
+                self.document.setdefault(key, []).append(value)
+                modified = True
+            for key, value in (update.get("$max") or {}).items():
+                current = self.document.get(key)
+                if current is None or current < value:
+                    self.document[key] = value
+                    modified = True
             return SimpleNamespace(
                 modified_count=1 if modified and existed else 0,
                 matched_count=1 if existed else 0,
-                upserted_id=None if existed else "late-observation-1",
+                upserted_id=(
+                    None
+                    if existed or not _kwargs.get("upsert")
+                    else "late-observation-1"
+                ),
             )
 
         def find_one(self, query, **_kwargs):
@@ -218,7 +259,14 @@ def test_late_effect_observation_is_bounded_idempotent_and_survives_full_upsert(
         request_id="req-late-effect",
         effect_id="effect-late-1",
         execution_id="mcp_late_effect_1",
-        observation=late_observation,
+        observation={
+            **late_observation,
+            "observed_at_utc": "2026-07-27T10:00:02Z",
+            "payload": {
+                **late_observation["payload"],
+                "changed": False,
+            },
+        },
         user_id="#V#user",
         session_id="session-late-effect",
         namespace="#V#user@org",
@@ -238,6 +286,10 @@ def test_late_effect_observation_is_bounded_idempotent_and_survives_full_upsert(
     assert len(json.dumps(stored_observation)) < 64_000
     assert "source_observation_sha256" not in stored_observation
     assert "storage_truncated" not in stored_observation
+    assert stored_observation["storage_transformed"] is True
+    assert collection.document["late_effect_updated_at_utc"] == (
+        collection.document["updated_at_utc"]
+    )
 
     full_record = build_turn_execution_record(
         request_id="req-late-effect",
@@ -292,6 +344,95 @@ def test_late_effect_observation_is_bounded_idempotent_and_survives_full_upsert(
         == "succeeded"
     )
     assert readback["late_effect_observations"][0]["payload"]["changed"] is True
+
+
+def test_late_effect_observation_refuses_cross_actor_request_id_collision(
+    monkeypatch,
+) -> None:
+    class _Collection:
+        document = {
+            "request_id": "shared-client-request-id",
+            "namespace": "#V#actor_a@org",
+            "user_id": "#V#actor_a",
+            "org_id": "#V#org",
+            "late_effect_observations": [],
+        }
+
+        def update_one(self, _query, _update, **_kwargs):
+            return SimpleNamespace(
+                modified_count=0,
+                matched_count=0,
+                upserted_id=None,
+            )
+
+        def find_one(self, query, **_kwargs):
+            for field_name, expected in query.items():
+                if self.document.get(field_name) != expected:
+                    return None
+            return dict(self.document)
+
+    collection = _Collection()
+    import src.backend.services.turn_execution_record_service as record_service
+
+    monkeypatch.setattr(
+        record_service,
+        "get_turn_execution_records_collection",
+        lambda: collection,
+    )
+
+    outcome = append_late_effect_observation(
+        request_id="shared-client-request-id",
+        effect_id="effect-b",
+        execution_id="execution-b",
+        observation={
+            "outcome": "late_success",
+            "payload": {"success": True, "changed": True},
+        },
+        namespace="#V#actor_b@org",
+        user_id="#V#actor_b",
+        org_id="#V#org",
+    )
+
+    assert outcome["updated"] is False
+    assert outcome["reason"] == "actor_scope_mismatch"
+    assert collection.document["late_effect_observations"] == []
+
+
+def test_turn_record_upsert_refuses_cross_actor_request_id_collision(
+    monkeypatch,
+) -> None:
+    from pymongo.errors import DuplicateKeyError
+
+    class _Collection:
+        def update_one(self, query, _update, **_kwargs):
+            assert query == {
+                "request_id": "shared-upsert-request-id",
+                "namespace": "#V#actor_b@org",
+                "user_id": "#V#actor_b",
+                "org_id": "#V#org",
+            }
+            raise DuplicateKeyError("request_id_unique")
+
+    import src.backend.services.turn_execution_record_service as record_service
+
+    monkeypatch.setattr(
+        record_service,
+        "get_turn_execution_records_collection",
+        lambda: _Collection(),
+    )
+
+    outcome = upsert_turn_execution_record_projection(
+        record={"request_id": "shared-upsert-request-id"},
+        namespace="#V#actor_b@org",
+        user_id="#V#actor_b",
+        org_id="#V#org",
+    )
+
+    assert outcome == {
+        "updated": False,
+        "reason": "actor_scope_mismatch",
+        "request_id": "shared-upsert-request-id",
+    }
 
 
 def test_projection_field_telemetry_preserves_bounded_collection_row_index() -> None:

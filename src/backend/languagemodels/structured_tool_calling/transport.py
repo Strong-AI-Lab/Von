@@ -324,7 +324,9 @@ def resolve_structured_tool_transport(
     Unknown profiles preserve existing provider behaviour.  For OpenAI and
     OpenAI-compatible clients that means Chat Completions.  Responses is chosen
     only when a matching represented profile explicitly advertises structured
-    tool support (or requires it).
+    tool support (or requires it).  A represented required surface also remains
+    authoritative for text-only calls so that surface-specific parameter
+    constraints are not lost when a caller deliberately supplies no tools.
     """
 
     provider_key = _normalise(provider) or "unknown"
@@ -341,21 +343,6 @@ def resolve_structured_tool_transport(
             reason="provider_native_structured_tool_surface",
             capability_class="provider_native",
             tools_present=tools_present,
-            requested_api_surface=requested_surface,
-            connection_id=connection_id,
-            deployment_id=deployment_id,
-            parameter_projection=projection,
-        )
-
-    if not tools_present:
-        return StructuredToolTransportDecision(
-            provider=provider_key,
-            model=model_name,
-            effective_api_surface=API_SURFACE_CHAT_COMPLETIONS,
-            status="compatible",
-            reason="no_structured_tools_in_request",
-            capability_class="no_tool_generation",
-            tools_present=False,
             requested_api_surface=requested_surface,
             connection_id=connection_id,
             deployment_id=deployment_id,
@@ -454,51 +441,12 @@ def resolve_structured_tool_transport(
         invalid_applicable = [
             item for item in invalid_applicable if item[3] == max_specificity
         ]
-    advertised = [
-        (item[0], item[1], item[2], item[3], item[5])
-        for item in applicable
-        if item[2] != "unsupported"
-    ]
-    explicitly_unsupported = [
-        item[1] for item in applicable if item[2] == "unsupported"
-    ]
-
-    conflicting_surface = next(
-        (
-            surface
-            for surface in sorted(_OPENAI_STRUCTURED_TOOL_API_SURFACES)
-            if surface in explicitly_unsupported
-            and any(item[1] == surface for item in advertised)
-        ),
-        None,
-    )
-    required_surfaces = {item[1] for item in advertised if item[2] == "required"}
-
-    selected: tuple[Mapping[str, Any], str, str, str, bool] | None = None
-    required = [item for item in advertised if item[2] == "required"]
-    if requested_surface != "auto" and allow_advertised_surface_override:
-        selected = next(
-            (item for item in advertised if item[1] == requested_surface),
-            None,
-        )
-    elif required:
-        selected = required[0]
-    elif requested_surface != "auto":
-        selected = next(
-            (item for item in advertised if item[1] == requested_surface),
-            None,
-        )
-    if selected is None and advertised:
-        selected = next(
-            (item for item in advertised if item[1] == API_SURFACE_CHAT_COMPLETIONS),
-            advertised[0],
-        )
 
     provenance = dict(resolved or {}) if isinstance(resolved, Mapping) else {}
     common = {
         "provider": provider_key,
         "model": model_name,
-        "tools_present": True,
+        "tools_present": tools_present,
         "requested_api_surface": requested_surface,
         "registry_concept_id": provenance.get("registry_concept_id"),
         "registry_entry_id": provenance.get("registry_entry_id"),
@@ -525,6 +473,28 @@ def resolve_structured_tool_transport(
             advertised_alternatives=(),
         )
 
+    advertised = [
+        (item[0], item[1], item[2], item[3], item[5])
+        for item in applicable
+        if item[2] != "unsupported"
+    ]
+    explicitly_unsupported = [
+        item[1] for item in applicable if item[2] == "unsupported"
+    ]
+    conflicting_surface = next(
+        (
+            surface
+            for surface in sorted(_OPENAI_STRUCTURED_TOOL_API_SURFACES)
+            if surface in explicitly_unsupported
+            and any(item[1] == surface for item in advertised)
+        ),
+        None,
+    )
+    required_surfaces = {item[1] for item in advertised if item[2] == "required"}
+
+    # Contradictory represented authority is invalid independently of whether
+    # this particular request carries tools.  Answer-only traffic must not
+    # silently choose one side of a same-surface contradiction.
     if conflicting_surface is not None:
         return StructuredToolTransportDecision(
             **common,
@@ -545,6 +515,139 @@ def resolve_structured_tool_transport(
             capability_class="invalid_represented_authority",
             capability_source=str(provenance.get("source") or "model_registry"),
             advertised_alternatives=(),
+        )
+
+    if not tools_present:
+        required = [item for item in applicable if item[2] == "required"]
+        selected_no_tool: tuple[
+            Mapping[str, Any],
+            str,
+            str,
+            str,
+            str,
+            bool,
+            tuple[int, int, int],
+        ] | None = None
+        if requested_surface != "auto" and allow_advertised_surface_override:
+            selected_no_tool = next(
+                (item for item in applicable if item[1] == requested_surface),
+                None,
+            )
+        elif required:
+            selected_no_tool = required[0]
+        elif requested_surface != "auto":
+            selected_no_tool = next(
+                (item for item in applicable if item[1] == requested_surface),
+                None,
+            )
+
+        if selected_no_tool is not None:
+            (
+                profile,
+                surface,
+                capability,
+                continuation_mode,
+                _storage_policy,
+                store,
+                _specificity,
+            ) = selected_no_tool
+            alternatives = tuple(
+                item[1] for item in applicable if item[1] != surface
+            )
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=surface,
+                status="compatible",
+                reason=f"represented_profile_{capability}",
+                capability_class=(
+                    "responses_required"
+                    if surface == API_SURFACE_RESPONSES
+                    and capability == "required"
+                    else "represented_text_surface"
+                ),
+                capability_source=str(
+                    provenance.get("source") or "model_registry"
+                ),
+                profile_concept_id=(
+                    str(profile.get("profile_concept_id"))
+                    if profile.get("profile_concept_id")
+                    else None
+                ),
+                continuation_mode=continuation_mode,
+                store=store,
+                advertised_alternatives=alternatives,
+            )
+
+        # A profile can prohibit structured tools while still governing ordinary
+        # text generation on its surface. Preserve that exact profile when the
+        # conservative answer-only surface is Chat Completions so downstream
+        # parameter policy cannot drift to another connection's Chat profile.
+        conservative_chat_profile = next(
+            (
+                item
+                for item in applicable
+                if item[1] == API_SURFACE_CHAT_COMPLETIONS
+            ),
+            None,
+        )
+        if conservative_chat_profile is not None:
+            (
+                profile,
+                surface,
+                _capability,
+                continuation_mode,
+                _storage_policy,
+                store,
+                _specificity,
+            ) = conservative_chat_profile
+            return StructuredToolTransportDecision(
+                **common,
+                effective_api_surface=surface,
+                status="compatible",
+                reason="no_structured_tools_in_request",
+                capability_class="no_tool_generation",
+                capability_source=str(
+                    provenance.get("source") or "model_registry"
+                ),
+                profile_concept_id=(
+                    str(profile.get("profile_concept_id"))
+                    if profile.get("profile_concept_id")
+                    else None
+                ),
+                continuation_mode=continuation_mode,
+                store=store,
+                advertised_alternatives=tuple(
+                    item[1] for item in applicable if item[1] != surface
+                ),
+            )
+
+        return StructuredToolTransportDecision(
+            **common,
+            effective_api_surface=API_SURFACE_CHAT_COMPLETIONS,
+            status="compatible",
+            reason="no_structured_tools_in_request",
+            capability_class="no_tool_generation",
+            capability_source="conservative_client_default",
+        )
+
+    selected: tuple[Mapping[str, Any], str, str, str, bool] | None = None
+    required = [item for item in advertised if item[2] == "required"]
+    if requested_surface != "auto" and allow_advertised_surface_override:
+        selected = next(
+            (item for item in advertised if item[1] == requested_surface),
+            None,
+        )
+    elif required:
+        selected = required[0]
+    elif requested_surface != "auto":
+        selected = next(
+            (item for item in advertised if item[1] == requested_surface),
+            None,
+        )
+    if selected is None and advertised:
+        selected = next(
+            (item for item in advertised if item[1] == API_SURFACE_CHAT_COMPLETIONS),
+            advertised[0],
         )
 
     if selected is not None:
