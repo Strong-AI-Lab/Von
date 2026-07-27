@@ -1784,6 +1784,35 @@ def execute_adaptive_turn(
             effect_states[effect_id] = state
             effect_state_generation += 1
 
+    def persist_effect_observation_phase(
+        *,
+        effect_id: str,
+        phase: str,
+        observation: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not turn_id:
+            return {
+                "updated": False,
+                "duplicate": False,
+                "reason": "missing_request_id",
+            }
+        from src.backend.services.turn_execution_record_service import (
+            record_effect_observation_phase,
+        )
+
+        return record_effect_observation_phase(
+            request_id=turn_id,
+            effect_id=effect_id,
+            phase=phase,
+            observation=observation,
+            user_id=scope.user_concept_id,
+            namespace=scope.namespace,
+            org_id=scope.organisation_concept_id,
+        )
+
+    def _effect_phase_acknowledged(outcome: Mapping[str, Any]) -> bool:
+        return bool(outcome.get("updated") or outcome.get("duplicate"))
+
     def late_effect_observer(
         *,
         effect_id: str,
@@ -1804,6 +1833,22 @@ def execute_adaptive_turn(
                     "mutation_outcome": "unknown",
                 }
             )
+            phase_outcome = persist_effect_observation_phase(
+                effect_id=effect_id,
+                phase="late_terminal",
+                observation={
+                    **observed,
+                    "call_id": call_id,
+                    "capability_name": capability_name,
+                    "effect_status": effect_status,
+                    "changed": changed,
+                },
+            )
+            if not _effect_phase_acknowledged(phase_outcome):
+                raise RuntimeError(
+                    "late_effect_observation_not_persisted:"
+                    f"{phase_outcome.get('reason') or 'not_acknowledged'}"
+                )
             envelope = evidence_store.record(
                 capability_name,
                 call_id,
@@ -1831,27 +1876,6 @@ def execute_adaptive_turn(
                 execution_id=execution_id,
                 late_observation=observed,
                 evidence_id=envelope.evidence_id,
-            )
-            if not turn_id or not execution_id:
-                return
-            from src.backend.services.turn_execution_record_service import (
-                submit_late_effect_observation,
-            )
-
-            submit_late_effect_observation(
-                request_id=turn_id,
-                effect_id=effect_id,
-                execution_id=execution_id,
-                observation={
-                    **observed,
-                    "call_id": call_id,
-                    "capability_name": capability_name,
-                    "effect_status": effect_status,
-                    "changed": changed,
-                },
-                user_id=scope.user_concept_id,
-                namespace=scope.namespace,
-                org_id=scope.organisation_concept_id,
             )
 
         return observe
@@ -2706,39 +2730,43 @@ def execute_adaptive_turn(
                         canonical_name,
                         is_effect,
                     )
-            if is_effect:
-                configured_effect_window = gateway.get_method_timeout_sec(
-                    canonical_name
+            effect_identifier = (
+                _effect_id(
+                    turn_id=turn_id,
+                    call_id=call.call_id,
+                    capability_name=canonical_name,
                 )
-                remaining_research_window = max(
-                    0.0,
-                    research_deadline - clock(),
+                if is_effect
+                else None
+            )
+            if effect_identifier is not None:
+                dispatch_outcome = persist_effect_observation_phase(
+                    effect_id=effect_identifier,
+                    phase="dispatch_intent",
+                    observation={
+                        "call_id": call.call_id,
+                        "capability_name": canonical_name,
+                        "dispatch_state": "intent_recorded",
+                    },
                 )
-                if (
-                    configured_effect_window is not None
-                    and configured_effect_window > remaining_research_window
-                ):
+                if not _effect_phase_acknowledged(dispatch_outcome):
                     return index, (
                         {
                             **_error_payload(
-                                "insufficient_effect_window",
+                                "effect_observation_unavailable",
                                 (
-                                    f"{canonical_name!r} was not started because "
-                                    "the remaining research window is shorter "
-                                    "than its configured hard execution window."
+                                    "The effect was not started because its "
+                                    "durable observation intent could not be "
+                                    "recorded."
                                 ),
                                 retryable=True,
                             ),
                             "status": "not_started",
                             "mutation_outcome": "not_started",
                             "outcome_finality": "terminal_for_turn",
-                            "configured_effect_window_seconds": round(
-                                configured_effect_window,
-                                6,
-                            ),
-                            "remaining_research_window_seconds": round(
-                                remaining_research_window,
-                                6,
+                            "persistence_reason": (
+                                dispatch_outcome.get("reason")
+                                or "not_acknowledged"
                             ),
                             "recovery_affordances": [
                                 {
@@ -2754,15 +2782,6 @@ def execute_adaptive_turn(
                         is_effect,
                     )
             try:
-                effect_identifier = (
-                    _effect_id(
-                        turn_id=turn_id,
-                        call_id=call.call_id,
-                        capability_name=canonical_name,
-                    )
-                    if is_effect
-                    else None
-                )
                 with override_current_actor(
                     scope.user_concept_id,
                     scope.organisation_concept_id,
@@ -2780,7 +2799,7 @@ def execute_adaptive_turn(
                             if effect_identifier is not None
                             else None
                         ),
-                        require_configured_timeout=is_effect,
+                        require_effect_admission_window=is_effect,
                     )
                 raw_payload = transport_result.payload
             except SchemaValidationError as exc:
@@ -2814,6 +2833,62 @@ def execute_adaptive_turn(
                 if is_effect:
                     raw_payload["mutation_outcome"] = "unknown"
                 transport_result = None
+            if effect_identifier is not None:
+                transport_metadata_fn = getattr(
+                    transport_result,
+                    "telemetry_metadata",
+                    None,
+                )
+                transport_metadata = (
+                    transport_metadata_fn()
+                    if callable(transport_metadata_fn)
+                    else {}
+                )
+                terminal_effect_status = _effect_status(
+                    raw_payload,
+                    transport_result=transport_result,
+                )
+                changed = (
+                    raw_payload.get("changed")
+                    if isinstance(raw_payload, Mapping)
+                    and isinstance(raw_payload.get("changed"), bool)
+                    else (
+                        False
+                        if terminal_effect_status == "failed"
+                        else None
+                    )
+                )
+                terminal_outcome = persist_effect_observation_phase(
+                    effect_id=effect_identifier,
+                    phase="turn_terminal",
+                    observation={
+                        "call_id": call.call_id,
+                        "capability_name": canonical_name,
+                        "effect_status": terminal_effect_status,
+                        "changed": changed,
+                        "transport": transport_metadata,
+                        "receipt": (
+                            dict(raw_payload)
+                            if isinstance(raw_payload, Mapping)
+                            else {"value": raw_payload}
+                        ),
+                    },
+                )
+                if not _effect_phase_acknowledged(terminal_outcome):
+                    aux_calls.append(
+                        {
+                            "type": "effect_observation_persistence_failure",
+                            "schema_version": (
+                                "effect_observation_persistence_failure.v1"
+                            ),
+                            "effect_id": effect_identifier,
+                            "phase": "turn_terminal",
+                            "reason": (
+                                terminal_outcome.get("reason")
+                                or "not_acknowledged"
+                            ),
+                        }
+                    )
             return index, (
                 raw_payload,
                 transport_result,

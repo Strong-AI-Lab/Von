@@ -64,6 +64,20 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "testing_cleanup_arxiv_paper_ingestion_artifacts" in methods
 
 
+def test_default_catalogue_exposes_calibrated_effect_admission_windows():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    catalogue = build_default_catalogue()
+    snapshot = catalogue.snapshot()
+
+    assert catalogue.get("create_concepts").effect_admission_window_sec is None
+    assert catalogue.get("upsert_text_relation").effect_admission_window_sec == 8.0
+    assert catalogue.get("add_relationship").effect_admission_window_sec == 5.0
+    assert snapshot["create_concepts"]["effect_admission_window_sec"] is None
+    assert snapshot["upsert_text_relation"]["effect_admission_window_sec"] == 8.0
+    assert snapshot["add_relationship"]["effect_admission_window_sec"] == 5.0
+
+
 def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,

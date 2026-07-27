@@ -2787,10 +2787,28 @@ def _build_health_runtime_authority_projection(app: Flask) -> dict[str, object]:
                 "scheduler_running": None,
             }
 
+    try:
+        from ..services.model_registry_service import (
+            get_model_registry_snapshot_status,
+        )
+
+        model_registry = dict(get_model_registry_snapshot_status())
+    except Exception:
+        model_registry = {
+            "schema_version": "model_registry_snapshot_status.v1",
+            "ready": False,
+            "source": None,
+            "cache_state": "unavailable",
+            "age_seconds": None,
+            "refresh_in_progress": False,
+            "last_refresh_succeeded": None,
+        }
+
     return {
         "schema_version": "health_runtime_authority_projection.v1",
         "mongo": mongo,
         "durable_workflows": durable,
+        "model_registry": model_registry,
     }
 
 

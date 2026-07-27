@@ -112,7 +112,7 @@ def test_restricted_gateway_forwards_adaptive_read_transport_options() -> None:
             *,
             deadline_monotonic=None,
             late_completion_observer=None,
-            require_configured_timeout=False,
+            require_effect_admission_window=False,
         ):
             captured.update(
                 {
@@ -120,7 +120,9 @@ def test_restricted_gateway_forwards_adaptive_read_transport_options() -> None:
                     "payload": payload,
                     "deadline_monotonic": deadline_monotonic,
                     "late_completion_observer": late_completion_observer,
-                    "require_configured_timeout": require_configured_timeout,
+                    "require_effect_admission_window": (
+                        require_effect_admission_window
+                    ),
                 }
             )
             return "result"
@@ -133,7 +135,7 @@ def test_restricted_gateway_forwards_adaptive_read_transport_options() -> None:
         {"query": "bounded"},
         deadline_monotonic=123.5,
         late_completion_observer=None,
-        require_configured_timeout=False,
+        require_effect_admission_window=False,
     )
 
     assert result == "result"
@@ -142,7 +144,7 @@ def test_restricted_gateway_forwards_adaptive_read_transport_options() -> None:
         "payload": {"query": "bounded"},
         "deadline_monotonic": 123.5,
         "late_completion_observer": None,
-        "require_configured_timeout": False,
+        "require_effect_admission_window": False,
     }
 
 

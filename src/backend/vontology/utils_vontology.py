@@ -3739,6 +3739,7 @@ def create_vontology_concept(
     organisation_concept_id: Optional[str] = None,
     event_namespace: Optional[str] = None,
     visibility_scope_mode: Optional[str] = None,
+    allow_duplicate_instance_suffix: bool = True,
 ) -> Dict[str, Any]:
     """
     Creates a new concept in the Vontology.
@@ -3748,6 +3749,10 @@ def create_vontology_concept(
         new_concept_name: The name for the new concept (will be used to generate concept_id)
         create_as_instance: If True, creates an instance of the parent type.
                            If False, creates a subtype of the parent.
+        allow_duplicate_instance_suffix: If True, legacy low-level callers may
+            allocate ``_2``, ``_3``, and later IDs for duplicate instance names.
+            Higher-level creation surfaces should opt out unless duplicate
+            instances were explicitly requested.
         notes: Optional notes for the new concept
         description: Optional description for the new concept
         instance_of_type: Optional concept_id to create an is_an_instance_of relationship.
@@ -3768,7 +3773,10 @@ def create_vontology_concept(
     """
     try:
         # Local import to avoid circular dependency at module import time
-        from ..services.concept_service import create_concept  # type: ignore
+        from ..services.concept_service import (  # type: ignore
+            InvalidConceptDataError,
+            create_concept,
+        )
         from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 
         # Validate concept name constraints upfront
@@ -3795,17 +3803,22 @@ def create_vontology_concept(
 
         candidate_concept_id = canonical_id
         if create_as_instance:
-            # Preflight existence check and append incremental suffix until free
-            counter = 2
-            while ConceptsRepository.find_one({"concept_id": candidate_concept_id}):
-                candidate_concept_id = f"#V#{base_slug}_{counter}"
-                counter += 1
-                if counter > 50:  # safety stop to avoid pathological loops
-                    return {
-                        "success": False,
-                        "message": "Unable to allocate unique concept_id after 49 retries.",
-                        "concept": None,
-                    }
+            if allow_duplicate_instance_suffix:
+                # Preflight existence check and append incremental suffix until free
+                counter = 2
+                while ConceptsRepository.find_one(
+                    {"concept_id": candidate_concept_id}
+                ):
+                    candidate_concept_id = f"#V#{base_slug}_{counter}"
+                    counter += 1
+                    if counter > 50:  # safety stop to avoid pathological loops
+                        return {
+                            "success": False,
+                            "message": (
+                                "Unable to allocate unique concept_id after 49 retries."
+                            ),
+                            "concept": None,
+                        }
         else:
             # For type creation, fail fast if the concept_id already exists
             if ConceptsRepository.find_one({"concept_id": candidate_concept_id}):
@@ -3821,19 +3834,40 @@ def create_vontology_concept(
 
         parent_concept_ids = [parent_id] if parent_id else []
 
-        created_concept = create_concept(
-            name=new_concept_name,
-            concept_id=candidate_concept_id,
-            parent_concept_ids=parent_concept_ids,
-            create_as_instance=create_as_instance,
-            description=description,
-            notes=notes,
-            instance_of_type=instance_of_type,
-            created_by_concept_id=created_by_concept_id,
-            organisation_concept_id=organisation_concept_id,
-            event_namespace=event_namespace,
-            visibility_scope_mode=visibility_scope_mode,
-        )
+        try:
+            created_concept = create_concept(
+                name=new_concept_name,
+                concept_id=candidate_concept_id,
+                parent_concept_ids=parent_concept_ids,
+                create_as_instance=create_as_instance,
+                description=description,
+                notes=notes,
+                instance_of_type=instance_of_type,
+                created_by_concept_id=created_by_concept_id,
+                organisation_concept_id=organisation_concept_id,
+                event_namespace=event_namespace,
+                visibility_scope_mode=visibility_scope_mode,
+            )
+        except InvalidConceptDataError as exc:
+            if "duplicate key" not in str(exc).lower():
+                raise
+            return {
+                "success": False,
+                "changed": False,
+                "message": (
+                    f"Concept identity '{candidate_concept_id}' became occupied "
+                    "before creation completed. No suffixed concept was created."
+                ),
+                "concept": None,
+                "error_code": "already_exists",
+                "existing_concept_id": candidate_concept_id,
+                "canonical_concept_id": candidate_concept_id,
+                "input_name": new_concept_name,
+                "suggestion": (
+                    "Fetch the existing concept before deciding whether to reuse "
+                    "or update it."
+                ),
+            }
 
         if created_concept:
             return {

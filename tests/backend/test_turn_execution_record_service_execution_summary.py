@@ -13,6 +13,7 @@ from src.backend.services.turn_execution_record_service import (
     build_workflow_routing_diagnostics,
     get_turn_execution_record_projection,
     project_final_answer_tool_evidence,
+    record_effect_observation_phase,
     upsert_turn_execution_record_projection,
     _normalise_projection_field_entries,
     _summarise_tool_execution_context,
@@ -344,6 +345,163 @@ def test_late_effect_observation_is_bounded_idempotent_and_survives_full_upsert(
         == "succeeded"
     )
     assert readback["late_effect_observations"][0]["payload"]["changed"] is True
+
+
+def test_effect_observation_journal_is_actor_scoped_idempotent_and_survives_upsert(
+    monkeypatch,
+) -> None:
+    import mongomock
+    import src.backend.services.turn_execution_record_service as record_service
+
+    collection = mongomock.MongoClient().von_test.turn_execution_records
+    collection.create_index("request_id", unique=True)
+    monkeypatch.setattr(
+        record_service,
+        "get_turn_execution_records_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        record_service,
+        "_turn_execution_mongo_comment",
+        lambda *_args, **_kwargs: None,
+    )
+    scope = {
+        "user_id": "#V#user",
+        "namespace": "#V#user@org",
+        "org_id": "#V#org",
+    }
+
+    dispatch = record_effect_observation_phase(
+        request_id="req-effect-journal",
+        effect_id="effect_abc123",
+        phase="dispatch_intent",
+        observation={
+            "call_id": "call-1",
+            "capability_name": "upsert_text_relation",
+            "dispatch_state": "intent_recorded",
+        },
+        **scope,
+    )
+    assert dispatch["updated"] is True
+    identity = collection.find_one(
+        {"request_id": "req-effect-journal"}
+    )["effect_observation_journal"]["effect_abc123"]["identity"]
+
+    terminal = record_effect_observation_phase(
+        request_id="req-effect-journal",
+        effect_id="effect_abc123",
+        phase="turn_terminal",
+        observation={
+            "call_id": "must-not-replace-call-identity",
+            "capability_name": "must_not_replace_capability",
+            "effect_status": "indeterminate",
+            "changed": None,
+            "transport": {"outcome": "timed_out"},
+            "receipt": {"mutation_outcome": "unknown"},
+        },
+        **scope,
+    )
+    late = record_effect_observation_phase(
+        request_id="req-effect-journal",
+        effect_id="effect_abc123",
+        phase="late_terminal",
+        observation={
+            "call_id": "call-1",
+            "capability_name": "upsert_text_relation",
+            "outcome": "late_success",
+            "effect_status": "succeeded",
+            "changed": True,
+            "payload": {"success": True, "changed": True},
+        },
+        **scope,
+    )
+    duplicate_late = record_effect_observation_phase(
+        request_id="req-effect-journal",
+        effect_id="effect_abc123",
+        phase="late_terminal",
+        observation={
+            "outcome": "late_success",
+            "effect_status": "failed",
+            "changed": False,
+        },
+        **scope,
+    )
+
+    assert terminal["updated"] is True
+    assert late["updated"] is True
+    assert duplicate_late["updated"] is False
+    assert duplicate_late["duplicate"] is True
+    stored = collection.find_one({"request_id": "req-effect-journal"})
+    journal = stored["effect_observation_journal"]["effect_abc123"]
+    assert journal["identity"] == identity
+    assert journal["identity"]["call_id"] == "call-1"
+    assert journal["identity"]["capability_name"] == "upsert_text_relation"
+    assert journal["late_terminal"]["effect_status"] == "succeeded"
+
+    full_record = build_turn_execution_record(
+        request_id="req-effect-journal",
+        session_id="session-effect-journal",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Apply the bounded effect.",
+        response_text="The turn returned an indeterminate receipt.",
+        interaction_timestamp_utc="2026-07-27T10:00:01Z",
+    )
+    full_record["effect_observation_journal"] = {}
+    upsert = upsert_turn_execution_record_projection(
+        record=full_record,
+        session_id="session-effect-journal",
+        **scope,
+    )
+    assert upsert["updated"] is True
+    preserved = collection.find_one({"request_id": "req-effect-journal"})
+    assert (
+        preserved["effect_observation_journal"]["effect_abc123"]
+        == journal
+    )
+
+
+def test_effect_observation_journal_refuses_cross_actor_request_collision(
+    monkeypatch,
+) -> None:
+    import mongomock
+    import src.backend.services.turn_execution_record_service as record_service
+
+    collection = mongomock.MongoClient().von_test.turn_execution_records
+    collection.insert_one(
+        {
+            "request_id": "shared-effect-request",
+            "namespace": "#V#actor_a@org",
+            "user_id": "#V#actor_a",
+            "org_id": "#V#org",
+        }
+    )
+    monkeypatch.setattr(
+        record_service,
+        "get_turn_execution_records_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        record_service,
+        "_turn_execution_mongo_comment",
+        lambda *_args, **_kwargs: None,
+    )
+
+    outcome = record_effect_observation_phase(
+        request_id="shared-effect-request",
+        effect_id="effect_actor_b",
+        phase="dispatch_intent",
+        observation={"dispatch_state": "intent_recorded"},
+        namespace="#V#actor_b@org",
+        user_id="#V#actor_b",
+        org_id="#V#org",
+    )
+
+    assert outcome["updated"] is False
+    assert outcome["reason"] == "actor_scope_mismatch"
+    stored = collection.find_one({"request_id": "shared-effect-request"})
+    assert "effect_observation_journal" not in stored
 
 
 def test_late_effect_observation_refuses_cross_actor_request_id_collision(

@@ -158,6 +158,7 @@ _apply_dotenv_overrides(
         "VON_MODEL_REGISTRY_SNAPSHOT_CACHE_TTL_SECONDS",
         "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_ENABLED",
         "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_TTL_SECONDS",
+        "VON_MODEL_REGISTRY_SNAPSHOT_MAX_STALE_SECONDS",
         "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH",
         "VON_DEFAULT_NAMESPACE",
         "VON_DETERMINISTIC_INTROSPECTION",
@@ -345,6 +346,27 @@ def main():
     except Exception as e:  # pragma: no cover - startup failure path
         logger.error("Failed to initialize LLM client: %s", e, exc_info=True)
         sys.exit(1)  # Exit if client fails to initialize
+
+    # Resolve represented model/API-profile authority before the HTTP server
+    # can accept a caller-owned provider deadline. A cold worktree may spend
+    # time hydrating here; a bounded last-known represented snapshot returns
+    # immediately and refreshes outside the first user call.
+    try:
+        from src.backend.services.model_registry_service import (
+            preload_model_registry_snapshot,
+        )
+
+        registry_preload = preload_model_registry_snapshot()
+        logger.info(
+            "Model registry startup preload ready=%s source=%s "
+            "cache_state=%s duration_ms=%s.",
+            registry_preload.get("ready"),
+            registry_preload.get("source"),
+            registry_preload.get("cache_state"),
+            registry_preload.get("preload_duration_ms"),
+        )
+    except Exception as exc:
+        logger.warning("Model registry startup preload failed: %s", exc)
 
     # Create the Flask app, injecting the client's methods
     app = create_flask_app(

@@ -22,6 +22,7 @@ from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+from .relationship_write_service import compute_kind_from_relationships
 from ..workflows.workflow_concept_authority_service import (
     WORKFLOW_INSTANCE_TYPE_ID_CANDIDATES,
     resolve_available_workflow_type_ids,
@@ -34,6 +35,15 @@ _SAFE_CREATE_DUPLICATE_RESOLUTION_STAGES = {
     "diacritic_insensitive",
     "token_exact",
 }
+_DUPLICATE_GUARD_PROJECTION = {
+    "concept_id": 1,
+    "kind": 1,
+    "computed_kind": 1,
+    "relationships.is_a_type_of": 1,
+    "relationships.#V#is_a_type_of": 1,
+    "relationships.is_an_instance_of": 1,
+    "relationships.#V#is_an_instance_of": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -41,6 +51,12 @@ class CreateConceptDuplicateGuardMatch:
     existing_concept_id: str
     match_source: str
     guard_scope: str
+    identity_conflict: bool = False
+    existing_kind: str | None = None
+    requested_kind: str | None = None
+    existing_parent_ids: tuple[str, ...] = ()
+    requested_parent_id: str | None = None
+    mismatch_reasons: tuple[str, ...] = ()
 
 
 def _normalise_kind(kind: str | None) -> str:
@@ -74,28 +90,89 @@ def _extract_str_list(value: Any) -> list[str]:
     return []
 
 
+def _normalised_relationships(doc: dict[str, Any]) -> dict[str, Any]:
+    relationships = doc.get("relationships")
+    if not isinstance(relationships, dict):
+        return {}
+
+    normalised = dict(relationships)
+    for canonical_key, compatibility_key in (
+        ("is_a_type_of", "#V#is_a_type_of"),
+        ("is_an_instance_of", "#V#is_an_instance_of"),
+    ):
+        if canonical_key not in normalised:
+            compatibility_value = normalised.get(compatibility_key)
+            if compatibility_value:
+                normalised[canonical_key] = compatibility_value
+    return normalised
+
+
 def _infer_kind(doc: dict[str, Any]) -> str | None:
-    computed = doc.get("computed_kind")
-    if isinstance(computed, str):
+    relationships = _normalised_relationships(doc)
+    if any(
+        relationships.get(key)
+        for key in ("is_a_type_of", "is_an_instance_of")
+    ):
+        inferred = compute_kind_from_relationships(relationships)
+        return "instance" if inferred == "individual" else inferred
+
+    for field_name in ("computed_kind", "kind"):
+        computed = doc.get(field_name)
+        if not isinstance(computed, str):
+            continue
         raw = computed.strip().lower()
         if raw == "individual":
             return "instance"
         if raw in {"type", "instance", "predicate"}:
             return raw
-
-    relationships = doc.get("relationships")
-    if not isinstance(relationships, dict):
-        return None
-
-    is_type_of = _extract_str_list(relationships.get("is_a_type_of"))
-    is_instance_of = _extract_str_list(relationships.get("is_an_instance_of"))
-    if is_type_of:
-        return "type"
-    if "#V#predicate" in is_instance_of:
-        return "predicate"
-    if is_instance_of:
-        return "instance"
     return None
+
+
+def _existing_parent_ids(doc: dict[str, Any], requested_kind: str) -> tuple[str, ...]:
+    relationships = _normalised_relationships(doc)
+    relationship_key = (
+        "is_a_type_of" if requested_kind == "type" else "is_an_instance_of"
+    )
+    parent_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_parent_id in _extract_str_list(relationships.get(relationship_key)):
+        canonical_parent_id = (
+            canonicalise_vontology_concept_id(raw_parent_id) or raw_parent_id
+        )
+        if canonical_parent_id in seen:
+            continue
+        parent_ids.append(canonical_parent_id)
+        seen.add(canonical_parent_id)
+    return tuple(parent_ids)
+
+
+def _identity_mismatch_details(
+    *,
+    doc: dict[str, Any],
+    scope: str,
+    parent_id_for_concept: str | None,
+) -> tuple[str | None, str, tuple[str, ...], str | None, tuple[str, ...]]:
+    requested_kind = "instance" if scope == "workflow_instance" else scope
+    existing_kind = _infer_kind(doc)
+    existing_parent_ids = _existing_parent_ids(doc, requested_kind)
+    requested_parent_id = canonicalise_vontology_concept_id(parent_id_for_concept)
+
+    mismatch_reasons: list[str] = []
+    if existing_kind != requested_kind:
+        mismatch_reasons.append("kind_mismatch")
+    if (
+        scope in {"instance", "workflow_instance"}
+        and requested_parent_id
+        and requested_parent_id not in set(existing_parent_ids)
+    ):
+        mismatch_reasons.append("parent_mismatch")
+    return (
+        existing_kind,
+        requested_kind,
+        existing_parent_ids,
+        requested_parent_id,
+        tuple(mismatch_reasons),
+    )
 
 
 def _guard_scope_for_request(
@@ -126,36 +203,33 @@ def _matches_guard_scope(
     scope: str,
     parent_id_for_concept: str | None,
 ) -> bool:
-    inferred_kind = _infer_kind(doc)
-    relationships = doc.get("relationships")
-    if isinstance(relationships, dict):
-        instance_of = set(_extract_str_list(relationships.get("is_an_instance_of")))
-    else:
-        instance_of = set()
-
-    if scope == "type":
-        return inferred_kind == "type"
-    if scope == "predicate":
-        return inferred_kind == "predicate" or "#V#predicate" in instance_of
-    if scope == "instance":
-        if inferred_kind != "instance":
-            return False
-        canonical_parent = canonicalise_vontology_concept_id(parent_id_for_concept)
-        if canonical_parent:
-            return canonical_parent in instance_of
-        return True
+    (
+        existing_kind,
+        _requested_kind,
+        existing_parent_ids,
+        requested_parent_id,
+        mismatch_reasons,
+    ) = _identity_mismatch_details(
+        doc=doc,
+        scope=scope,
+        parent_id_for_concept=parent_id_for_concept,
+    )
     if scope == "workflow_instance":
-        canonical_parent = canonicalise_vontology_concept_id(parent_id_for_concept)
-        if canonical_parent and canonical_parent in instance_of:
+        if existing_kind != "instance":
+            return False
+        if requested_parent_id and requested_parent_id in set(existing_parent_ids):
             return True
-        return bool(instance_of.intersection(_workflow_type_ids()))
-    return False
+        return bool(set(existing_parent_ids).intersection(_workflow_type_ids()))
+    return not mismatch_reasons
 
 
 def _find_concept(concept_id: str) -> dict[str, Any] | None:
     if not isinstance(concept_id, str) or not concept_id.strip():
         return None
-    doc = ConceptsRepository.find_one({"concept_id": concept_id.strip()})
+    doc = ConceptsRepository.find_one(
+        {"concept_id": concept_id.strip()},
+        _DUPLICATE_GUARD_PROJECTION,
+    )
     return doc if isinstance(doc, dict) else None
 
 
@@ -186,15 +260,28 @@ def find_existing_concept_for_create_concepts(
     canonical_requested_id = canonicalise_vontology_concept_id(concept_name)
     if canonical_requested_id:
         doc = _find_concept(canonical_requested_id)
-        if isinstance(doc, dict) and _matches_guard_scope(
-            doc=doc,
-            scope=scope,
-            parent_id_for_concept=parent_id_for_concept,
-        ):
+        if isinstance(doc, dict):
+            (
+                existing_kind,
+                requested_kind,
+                existing_parent_ids,
+                requested_parent_id,
+                mismatch_reasons,
+            ) = _identity_mismatch_details(
+                doc=doc,
+                scope=scope,
+                parent_id_for_concept=parent_id_for_concept,
+            )
             return CreateConceptDuplicateGuardMatch(
                 existing_concept_id=canonical_requested_id,
                 match_source="canonical_concept_id",
                 guard_scope=scope,
+                identity_conflict=bool(mismatch_reasons),
+                existing_kind=existing_kind,
+                requested_kind=requested_kind,
+                existing_parent_ids=existing_parent_ids,
+                requested_parent_id=requested_parent_id,
+                mismatch_reasons=mismatch_reasons,
             )
 
     if duplicate_resolution_mode == "canonical_id_only":
@@ -284,5 +371,46 @@ def build_duplicate_prevented_create_concepts_result(
         "suggestion": (
             "Use fetch_concept_content or fetch_concept on existing_concept_id before "
             "attempting create_concepts again."
+        ),
+    }
+
+
+def build_canonical_identity_conflict_create_concepts_result(
+    *,
+    requested_name: str,
+    requested_kind: str,
+    existing_concept_id: str,
+    guard_scope: str,
+    existing_kind: str | None,
+    existing_parent_ids: tuple[str, ...],
+    requested_parent_id: str | None,
+    mismatch_reasons: tuple[str, ...],
+) -> dict[str, Any]:
+    mismatch_summary = ", ".join(mismatch_reasons) or "incompatible identity"
+    return {
+        "success": False,
+        "effect_status": "failed",
+        "changed": False,
+        "message": (
+            f"Canonical concept identity '{existing_concept_id}' is already occupied "
+            f"by an incompatible concept ({mismatch_summary}). No concept was created."
+        ),
+        "concept": None,
+        "error_code": "canonical_identity_conflict",
+        "existing_concept_id": existing_concept_id,
+        "canonical_concept_id": existing_concept_id,
+        "input_name": requested_name,
+        "requested_name": requested_name,
+        "requested_kind": requested_kind,
+        "existing_kind": existing_kind,
+        "requested_parent_id": requested_parent_id,
+        "existing_parent_ids": list(existing_parent_ids),
+        "identity_mismatch_reasons": list(mismatch_reasons),
+        "duplicate_prevented": True,
+        "duplicate_guard_scope": guard_scope,
+        "duplicate_match_source": "canonical_concept_id",
+        "suggestion": (
+            "Use a different canonical name, or inspect the existing concept and "
+            "explicitly update its typing if that existing identity is the intended one."
         ),
     }

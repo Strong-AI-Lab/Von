@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Mapping, Optional, Sequence
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .settings_service import resolve_enabled_llm_settings, resolve_llm_setting
 
@@ -50,7 +52,9 @@ PARAMETER_ACTION_FIXED_VALUE = "fixed_value"
 
 _MODEL_REGISTRY_SNAPSHOT_CACHE: dict[str, dict[str, Any]] = {}
 _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK = threading.Lock()
-_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION = "model_registry_snapshot_cache.v1"
+_MODEL_REGISTRY_SNAPSHOT_REFRESH_INFLIGHT: set[str] = set()
+_MODEL_REGISTRY_SNAPSHOT_REFRESH_STATE: dict[str, dict[str, Any]] = {}
+_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SCHEMA_VERSION = "model_registry_snapshot_cache.v2"
 _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES = frozenset(
     {"vontology_graph", "vontology_json"}
 )
@@ -83,9 +87,8 @@ def _registry_snapshot_cache_ttl_seconds() -> float:
 
 
 def _registry_snapshot_disk_cache_enabled() -> bool:
-    if (
-        os.getenv("PYTEST_CURRENT_TEST")
-        and not os.getenv("VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH")
+    if os.getenv("PYTEST_CURRENT_TEST") and not os.getenv(
+        "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_PATH"
     ):
         # Tests that intentionally exercise the disk cache provide an isolated
         # path.  All other pytest processes must not overwrite the live
@@ -100,6 +103,15 @@ def _registry_snapshot_disk_cache_enabled() -> bool:
 def _registry_snapshot_disk_cache_ttl_seconds() -> float:
     return _env_float_seconds(
         "VON_MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_TTL_SECONDS",
+        default=3600.0,
+    )
+
+
+def _registry_snapshot_max_stale_seconds() -> float:
+    # The one-hour default matches one extra default refresh interval. Operators
+    # may configure the refresh and stale-grace intervals independently.
+    return _env_float_seconds(
+        "VON_MODEL_REGISTRY_SNAPSHOT_MAX_STALE_SECONDS",
         default=3600.0,
     )
 
@@ -119,21 +131,135 @@ def _registry_snapshot_cache_key(preferred_language: str | None) -> str:
     )
 
 
+def _registry_snapshot_refresh_token(
+    *, cache_key: str, authority_fingerprint: str
+) -> str:
+    return f"{cache_key}:{authority_fingerprint}"
+
+
 def _utc_iso_from_timestamp(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _mongo_principal_fingerprint(uri: Any) -> str | None:
+    """Return a non-reversible identity for Mongo role-scoped authority."""
+
+    if not isinstance(uri, str) or not uri.strip():
+        return None
+    try:
+        parsed = urlsplit(uri.strip())
+        username = unquote(parsed.username or "").strip()
+        query_options = {
+            str(key).strip().lower(): str(value).strip()
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        }
+        authority_identity = {
+            "username": username,
+            "auth_source": query_options.get("authsource", ""),
+            "auth_mechanism": query_options.get("authmechanism", ""),
+        }
+        if not any(authority_identity.values()):
+            return None
+        encoded = json.dumps(
+            authority_identity,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+    except Exception:
+        return None
+
+
+def _model_registry_authority_fingerprint() -> str:
+    """Identify the represented authority without persisting connection secrets."""
+
+    namespace = str(os.getenv("VON_DEFAULT_NAMESPACE") or "").strip()
+    try:
+        from ..db.mongo_client import (
+            get_configured_database_name,
+            get_effective_mongo_uri,
+            is_using_fallback_uri,
+        )
+        from ..db.mongo_uri_redaction import build_safe_mongo_connection_location
+
+        effective_mongo_uri = get_effective_mongo_uri()
+        authority = {
+            "database_name": get_configured_database_name(),
+            "mongo_location": build_safe_mongo_connection_location(
+                effective_mongo_uri,
+                using_fallback=is_using_fallback_uri(),
+            ),
+            "mongo_principal_fingerprint": _mongo_principal_fingerprint(
+                effective_mongo_uri
+            ),
+            "namespace": namespace,
+        }
+    except Exception:
+        # The fallback remains secret-free and separates configured databases.
+        # A later successful refresh recomputes the fingerprint from the
+        # effective, sanitised connection location before it persists.
+        authority = {
+            "database_name": str(os.getenv("VON_DB_NAME") or "von_db").strip(),
+            "mongo_location": {"available": False},
+            "namespace": namespace,
+        }
+    encoded = json.dumps(
+        authority,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _represented_registry_snapshot(snapshot: Any) -> bool:
+    if (
+        not isinstance(snapshot, Mapping)
+        or snapshot.get("source") not in _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES
+    ):
+        return False
+    models = snapshot.get("models")
+    if not isinstance(models, Sequence) or isinstance(models, str) or not models:
+        return False
+    for model in models:
+        if not isinstance(model, Mapping):
+            return False
+        if not any(
+            isinstance(model.get(field), str) and str(model.get(field)).strip()
+            for field in ("model_id", "concept_id", "registry_entry_id")
+        ):
+            return False
+    return True
+
+
+def _registry_snapshot_refresh_seconds() -> float:
+    if _registry_snapshot_disk_cache_enabled():
+        disk_ttl_seconds = _registry_snapshot_disk_cache_ttl_seconds()
+        if disk_ttl_seconds > 0:
+            return disk_ttl_seconds
+    return _registry_snapshot_cache_ttl_seconds()
 
 
 def _store_registry_snapshot_in_memory(
     *,
     cache_key: str,
     snapshot: Mapping[str, Any],
-    expires_at: float,
+    authority_fingerprint: str,
+    created_at: float,
+    refresh_after: float,
+    stale_until: float,
 ) -> None:
-    if expires_at <= time.time():
+    if stale_until <= time.time() or not _represented_registry_snapshot(snapshot):
         return
     with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
         _MODEL_REGISTRY_SNAPSHOT_CACHE[cache_key] = {
-            "expires_at": expires_at,
+            "authority_fingerprint": authority_fingerprint,
+            "created_at": created_at,
+            "refresh_after": refresh_after,
+            "stale_until": stale_until,
             "snapshot": snapshot,
         }
 
@@ -141,8 +267,9 @@ def _store_registry_snapshot_in_memory(
 def _load_registry_snapshot_from_disk(
     *,
     cache_key: str,
+    authority_fingerprint: str,
     now: float,
-) -> tuple[Mapping[str, Any], float] | None:
+) -> Mapping[str, Any] | None:
     if not _registry_snapshot_disk_cache_enabled():
         return None
     try:
@@ -167,18 +294,41 @@ def _load_registry_snapshot_from_disk(
             return None
         if not isinstance(entry, Mapping):
             return None
-        expires_at = entry.get("expires_at")
-        if not isinstance(expires_at, (int, float)) or expires_at <= now:
+        if entry.get("authority_fingerprint") != authority_fingerprint:
+            return None
+        created_at = entry.get("created_at")
+        refresh_after = entry.get("refresh_after")
+        stale_until = entry.get("stale_until")
+        if not all(
+            isinstance(value, (int, float))
+            for value in (created_at, refresh_after, stale_until)
+        ):
+            return None
+        configured_stale_until = (
+            float(refresh_after) + _registry_snapshot_max_stale_seconds()
+        )
+        effective_stale_until = min(float(stale_until), configured_stale_until)
+        if not (
+            float(created_at) <= float(refresh_after) <= float(stale_until)
+            and effective_stale_until > now
+        ):
             return None
         source = entry.get("source")
         if source not in _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES:
             return None
         snapshot = entry.get("snapshot")
-        if not isinstance(snapshot, Mapping):
+        if (
+            not _represented_registry_snapshot(snapshot)
+            or snapshot.get("source") != source
+        ):
             return None
-        if snapshot.get("source") != source:
-            return None
-        return snapshot, float(expires_at)
+        return {
+            "authority_fingerprint": authority_fingerprint,
+            "created_at": float(created_at),
+            "refresh_after": float(refresh_after),
+            "stale_until": effective_stale_until,
+            "snapshot": snapshot,
+        }
     except Exception as exc:
         logger.debug("Could not load model registry snapshot disk cache: %s", exc)
         return None
@@ -189,26 +339,33 @@ def _persist_registry_snapshot_to_disk(
     cache_key: str,
     preferred_language: str | None,
     snapshot: Mapping[str, Any],
+    authority_fingerprint: str,
+    created_at: float,
+    refresh_after: float,
+    stale_until: float,
     hydrate_duration_ms: int | None,
 ) -> None:
     if not _registry_snapshot_disk_cache_enabled():
         return
+    if _registry_snapshot_disk_cache_ttl_seconds() <= 0:
+        return
     source = snapshot.get("source")
     if source not in _MODEL_REGISTRY_SNAPSHOT_DISK_CACHE_SOURCES:
         return
-    disk_ttl_seconds = _registry_snapshot_disk_cache_ttl_seconds()
-    if disk_ttl_seconds <= 0:
+    if stale_until <= created_at:
         return
 
-    created_at = time.time()
     entry = {
         "cache_key": cache_key,
         "preferred_language": preferred_language or "",
+        "authority_fingerprint": authority_fingerprint,
         "source": source,
         "created_at": created_at,
         "created_at_utc": _utc_iso_from_timestamp(created_at),
-        "expires_at": created_at + disk_ttl_seconds,
-        "expires_at_utc": _utc_iso_from_timestamp(created_at + disk_ttl_seconds),
+        "refresh_after": refresh_after,
+        "refresh_after_utc": _utc_iso_from_timestamp(refresh_after),
+        "stale_until": stale_until,
+        "stale_until_utc": _utc_iso_from_timestamp(stale_until),
         "metadata": {
             "hydrate_duration_ms": hydrate_duration_ms,
         },
@@ -282,6 +439,8 @@ def _persist_registry_snapshot_to_disk(
 def clear_model_registry_snapshot_caches(*, remove_disk: bool = False) -> None:
     with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
         _MODEL_REGISTRY_SNAPSHOT_CACHE.clear()
+        _MODEL_REGISTRY_SNAPSHOT_REFRESH_INFLIGHT.clear()
+        _MODEL_REGISTRY_SNAPSHOT_REFRESH_STATE.clear()
     if not remove_disk:
         return
     try:
@@ -768,83 +927,339 @@ def _build_registry_from_settings() -> Mapping[str, Any]:
     }
 
 
+def _usable_registry_memory_entry(
+    *,
+    cache_key: str,
+    authority_fingerprint: str,
+    now: float,
+) -> Mapping[str, Any] | None:
+    with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+        cached = _MODEL_REGISTRY_SNAPSHOT_CACHE.get(cache_key)
+        if not isinstance(cached, Mapping):
+            return None
+        if cached.get("authority_fingerprint") != authority_fingerprint:
+            return None
+        refresh_after = cached.get("refresh_after")
+        stale_until = cached.get("stale_until")
+        snapshot = cached.get("snapshot")
+        if (
+            not isinstance(refresh_after, (int, float))
+            or not isinstance(stale_until, (int, float))
+            or not _represented_registry_snapshot(snapshot)
+        ):
+            _MODEL_REGISTRY_SNAPSHOT_CACHE.pop(cache_key, None)
+            return None
+        effective_stale_until = min(
+            float(stale_until),
+            float(refresh_after) + _registry_snapshot_max_stale_seconds(),
+        )
+        if effective_stale_until <= now:
+            _MODEL_REGISTRY_SNAPSHOT_CACHE.pop(cache_key, None)
+            return None
+        return {
+            **dict(cached),
+            "stale_until": effective_stale_until,
+        }
+
+
+def _hydrate_represented_registry_snapshot(
+    *, preferred_language: str | None = None
+) -> tuple[Mapping[str, Any] | None, int]:
+    started_at = time.time()
+    try:
+        registry = _load_registry_from_vontology_graph(
+            preferred_language=preferred_language
+        )
+    except Exception as exc:
+        logger.warning("Model registry graph hydration failed: %s", exc)
+        registry = None
+    if registry is not None:
+        return (
+            {
+                "source": "vontology_graph",
+                **registry,
+            },
+            int((time.time() - started_at) * 1000),
+        )
+
+    try:
+        registry = _load_registry_from_vontology_json(
+            preferred_language=preferred_language
+        )
+    except Exception as exc:
+        logger.warning("Model registry JSON hydration failed: %s", exc)
+        registry = None
+    if registry is not None:
+        return (
+            {
+                "source": "vontology_json",
+                **registry,
+            },
+            int((time.time() - started_at) * 1000),
+        )
+    return None, int((time.time() - started_at) * 1000)
+
+
+def _commit_represented_registry_snapshot(
+    *,
+    cache_key: str,
+    preferred_language: str | None,
+    snapshot: Mapping[str, Any],
+    authority_fingerprint: str,
+    hydrate_duration_ms: int | None,
+) -> bool:
+    if not _represented_registry_snapshot(snapshot):
+        return False
+    if _model_registry_authority_fingerprint() != authority_fingerprint:
+        return False
+    created_at = time.time()
+    refresh_after = created_at + _registry_snapshot_refresh_seconds()
+    stale_until = refresh_after + _registry_snapshot_max_stale_seconds()
+    _store_registry_snapshot_in_memory(
+        cache_key=cache_key,
+        snapshot=snapshot,
+        authority_fingerprint=authority_fingerprint,
+        created_at=created_at,
+        refresh_after=refresh_after,
+        stale_until=stale_until,
+    )
+    _persist_registry_snapshot_to_disk(
+        cache_key=cache_key,
+        preferred_language=preferred_language,
+        snapshot=snapshot,
+        authority_fingerprint=authority_fingerprint,
+        created_at=created_at,
+        refresh_after=refresh_after,
+        stale_until=stale_until,
+        hydrate_duration_ms=hydrate_duration_ms,
+    )
+    refresh_token = _registry_snapshot_refresh_token(
+        cache_key=cache_key,
+        authority_fingerprint=authority_fingerprint,
+    )
+    with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+        _MODEL_REGISTRY_SNAPSHOT_REFRESH_STATE[refresh_token] = {
+            "last_refresh_succeeded": True,
+            "last_refresh_completed_at": created_at,
+        }
+    return True
+
+
+def _refresh_represented_registry_snapshot(
+    *,
+    cache_key: str,
+    preferred_language: str | None,
+    authority_fingerprint: str,
+) -> None:
+    refresh_token = _registry_snapshot_refresh_token(
+        cache_key=cache_key,
+        authority_fingerprint=authority_fingerprint,
+    )
+    try:
+        snapshot, hydrate_duration_ms = _hydrate_represented_registry_snapshot(
+            preferred_language=preferred_language
+        )
+        if snapshot is None:
+            with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+                _MODEL_REGISTRY_SNAPSHOT_REFRESH_STATE[refresh_token] = {
+                    "last_refresh_succeeded": False,
+                    "last_refresh_completed_at": time.time(),
+                    "failure_reason": "represented_registry_unavailable",
+                }
+            return
+        committed = _commit_represented_registry_snapshot(
+            cache_key=cache_key,
+            preferred_language=preferred_language,
+            snapshot=snapshot,
+            authority_fingerprint=authority_fingerprint,
+            hydrate_duration_ms=hydrate_duration_ms,
+        )
+        if not committed:
+            with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+                _MODEL_REGISTRY_SNAPSHOT_REFRESH_STATE[refresh_token] = {
+                    "last_refresh_succeeded": False,
+                    "last_refresh_completed_at": time.time(),
+                    "failure_reason": "authority_changed_during_refresh",
+                }
+    except Exception:
+        logger.exception("Model registry background refresh failed")
+        with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+            _MODEL_REGISTRY_SNAPSHOT_REFRESH_STATE[refresh_token] = {
+                "last_refresh_succeeded": False,
+                "last_refresh_completed_at": time.time(),
+                "failure_reason": "refresh_exception",
+            }
+    finally:
+        with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+            _MODEL_REGISTRY_SNAPSHOT_REFRESH_INFLIGHT.discard(refresh_token)
+
+
+def _start_registry_snapshot_background_refresh(
+    *,
+    cache_key: str,
+    preferred_language: str | None,
+    authority_fingerprint: str,
+) -> bool:
+    refresh_token = _registry_snapshot_refresh_token(
+        cache_key=cache_key,
+        authority_fingerprint=authority_fingerprint,
+    )
+    with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+        if refresh_token in _MODEL_REGISTRY_SNAPSHOT_REFRESH_INFLIGHT:
+            return False
+        _MODEL_REGISTRY_SNAPSHOT_REFRESH_INFLIGHT.add(refresh_token)
+    try:
+        threading.Thread(
+            target=_refresh_represented_registry_snapshot,
+            kwargs={
+                "cache_key": cache_key,
+                "preferred_language": preferred_language,
+                "authority_fingerprint": authority_fingerprint,
+            },
+            name="model-registry-refresh",
+            daemon=True,
+        ).start()
+        return True
+    except Exception:
+        with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+            _MODEL_REGISTRY_SNAPSHOT_REFRESH_INFLIGHT.discard(refresh_token)
+        logger.exception("Could not start model registry background refresh")
+        return False
+
+
 def get_model_registry_snapshot(
     *, preferred_language: str | None = None
 ) -> Mapping[str, Any]:
-    cache_ttl_seconds = _registry_snapshot_cache_ttl_seconds()
     cache_key = _registry_snapshot_cache_key(preferred_language)
-    now = time.time()
-    if cache_ttl_seconds > 0:
-        with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
-            cached = _MODEL_REGISTRY_SNAPSHOT_CACHE.get(cache_key)
-            if isinstance(cached, Mapping):
-                expires_at = cached.get("expires_at")
-                snapshot = cached.get("snapshot")
-                if (
-                    isinstance(expires_at, (int, float))
-                    and expires_at > now
-                    and isinstance(snapshot, Mapping)
-                ):
-                    return snapshot
+    for attempt in range(2):
+        authority_fingerprint = _model_registry_authority_fingerprint()
+        now = time.time()
+        cached = _usable_registry_memory_entry(
+            cache_key=cache_key,
+            authority_fingerprint=authority_fingerprint,
+            now=now,
+        )
+        if cached is not None:
+            refresh_after = cached.get("refresh_after")
+            if isinstance(refresh_after, (int, float)) and refresh_after <= now:
+                _start_registry_snapshot_background_refresh(
+                    cache_key=cache_key,
+                    preferred_language=preferred_language,
+                    authority_fingerprint=authority_fingerprint,
+                )
+            return cached["snapshot"]
 
-    disk_cache_hit = _load_registry_snapshot_from_disk(cache_key=cache_key, now=now)
-    if disk_cache_hit is not None:
-        disk_snapshot, disk_expires_at = disk_cache_hit
-        if cache_ttl_seconds > 0:
+        cached = _load_registry_snapshot_from_disk(
+            cache_key=cache_key,
+            authority_fingerprint=authority_fingerprint,
+            now=now,
+        )
+        if cached is not None:
             _store_registry_snapshot_in_memory(
                 cache_key=cache_key,
-                snapshot=disk_snapshot,
-                expires_at=min(time.time() + cache_ttl_seconds, disk_expires_at),
+                snapshot=cached["snapshot"],
+                authority_fingerprint=authority_fingerprint,
+                created_at=float(cached["created_at"]),
+                refresh_after=float(cached["refresh_after"]),
+                stale_until=float(cached["stale_until"]),
             )
-        return disk_snapshot
+            refresh_after = cached.get("refresh_after")
+            if isinstance(refresh_after, (int, float)) and refresh_after <= now:
+                _start_registry_snapshot_background_refresh(
+                    cache_key=cache_key,
+                    preferred_language=preferred_language,
+                    authority_fingerprint=authority_fingerprint,
+                )
+            return cached["snapshot"]
 
-    graph_started_at = time.time()
-    registry = _load_registry_from_vontology_graph(
-        preferred_language=preferred_language
-    )
-    graph_duration_ms = int((time.time() - graph_started_at) * 1000)
-    if registry is not None:
-        snapshot = {
-            "source": "vontology_graph",
-            **registry,
-        }
-        if cache_ttl_seconds > 0:
-            _store_registry_snapshot_in_memory(
-                cache_key=cache_key,
-                snapshot=snapshot,
-                expires_at=time.time() + cache_ttl_seconds,
-            )
-        _persist_registry_snapshot_to_disk(
+        snapshot, hydrate_duration_ms = _hydrate_represented_registry_snapshot(
+            preferred_language=preferred_language
+        )
+        if snapshot is None:
+            break
+        committed = _commit_represented_registry_snapshot(
             cache_key=cache_key,
             preferred_language=preferred_language,
             snapshot=snapshot,
-            hydrate_duration_ms=graph_duration_ms,
+            authority_fingerprint=authority_fingerprint,
+            hydrate_duration_ms=hydrate_duration_ms,
         )
-        return snapshot
+        if committed:
+            return snapshot
+        if attempt == 0:
+            continue
+        break
 
-    json_started_at = time.time()
-    registry = _load_registry_from_vontology_json(preferred_language=preferred_language)
-    json_duration_ms = int((time.time() - json_started_at) * 1000)
-    if registry is not None:
-        snapshot = {
-            "source": "vontology_json",
-            **registry,
-        }
-        if cache_ttl_seconds > 0:
-            _store_registry_snapshot_in_memory(
-                cache_key=cache_key,
-                snapshot=snapshot,
-                expires_at=time.time() + cache_ttl_seconds,
-            )
-        _persist_registry_snapshot_to_disk(
-            cache_key=cache_key,
-            preferred_language=preferred_language,
-            snapshot=snapshot,
-            hydrate_duration_ms=json_duration_ms,
-        )
-        return snapshot
-
+    # Settings remain an availability fallback, never a durable or stale
+    # representation of model API-profile authority. In particular, a
+    # represented snapshot rejected after both bounded authority-stable
+    # hydration attempts is not returned to the caller.
     return _build_registry_from_settings()
+
+
+def get_model_registry_snapshot_status(
+    *, preferred_language: str | None = None
+) -> Mapping[str, Any]:
+    """Return a secret-free, non-hydrating registry readiness projection."""
+
+    cache_key = _registry_snapshot_cache_key(preferred_language)
+    authority_fingerprint = _model_registry_authority_fingerprint()
+    now = time.time()
+    cached = _usable_registry_memory_entry(
+        cache_key=cache_key,
+        authority_fingerprint=authority_fingerprint,
+        now=now,
+    )
+    refresh_token = _registry_snapshot_refresh_token(
+        cache_key=cache_key,
+        authority_fingerprint=authority_fingerprint,
+    )
+    with _MODEL_REGISTRY_SNAPSHOT_CACHE_LOCK:
+        refresh_in_progress = refresh_token in _MODEL_REGISTRY_SNAPSHOT_REFRESH_INFLIGHT
+        refresh_state = dict(
+            _MODEL_REGISTRY_SNAPSHOT_REFRESH_STATE.get(refresh_token) or {}
+        )
+    if cached is None:
+        return {
+            "schema_version": "model_registry_snapshot_status.v1",
+            "ready": False,
+            "source": None,
+            "cache_state": "unavailable",
+            "age_seconds": None,
+            "refresh_in_progress": refresh_in_progress,
+            "last_refresh_succeeded": refresh_state.get("last_refresh_succeeded"),
+        }
+
+    created_at = float(cached["created_at"])
+    refresh_after = float(cached["refresh_after"])
+    stale = refresh_after <= now
+    return {
+        "schema_version": "model_registry_snapshot_status.v1",
+        "ready": True,
+        "source": cached["snapshot"].get("source"),
+        "cache_state": (
+            "stale_refreshing"
+            if stale and refresh_in_progress
+            else ("stale" if stale else "fresh")
+        ),
+        "age_seconds": round(max(0.0, now - created_at), 3),
+        "refresh_in_progress": refresh_in_progress,
+        "last_refresh_succeeded": refresh_state.get("last_refresh_succeeded", True),
+    }
+
+
+def preload_model_registry_snapshot(
+    *, preferred_language: str | None = None
+) -> Mapping[str, Any]:
+    """Load represented profile authority before the HTTP server accepts calls."""
+
+    started_at = time.time()
+    get_model_registry_snapshot(preferred_language=preferred_language)
+    status = get_model_registry_snapshot_status(preferred_language=preferred_language)
+    return {
+        **status,
+        "preload_duration_ms": int((time.time() - started_at) * 1000),
+    }
 
 
 def _entry_matches_model(
@@ -990,8 +1405,7 @@ def _iter_parameter_constraints_for_entry(
         if not isinstance(profile, Mapping):
             continue
         if requested_profile_id is not None and (
-            str(profile.get("profile_concept_id") or "").strip()
-            != requested_profile_id
+            str(profile.get("profile_concept_id") or "").strip() != requested_profile_id
         ):
             continue
         constraints = profile.get("parameter_constraints")

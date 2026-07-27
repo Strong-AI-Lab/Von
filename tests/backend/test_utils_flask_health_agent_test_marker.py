@@ -183,6 +183,7 @@ def test_diagnostics_use_live_durable_workflow_status_by_default(
 
 def test_health_runtime_authority_uses_count_free_durable_status(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
+    import src.backend.services.model_registry_service as model_registry_service
     import src.backend.workflows.durable.startup as durable_startup
 
     monkeypatch.delenv("VON_AGENT_TEST_INSTANCE", raising=False)
@@ -198,6 +199,19 @@ def test_health_runtime_authority_uses_count_free_durable_status(monkeypatch) ->
         }
 
     monkeypatch.setattr(durable_startup, "get_system_status", _status)
+    monkeypatch.setattr(
+        model_registry_service,
+        "get_model_registry_snapshot_status",
+        lambda: {
+            "schema_version": "model_registry_snapshot_status.v1",
+            "ready": True,
+            "source": "vontology_graph",
+            "cache_state": "stale_refreshing",
+            "age_seconds": 3612.5,
+            "refresh_in_progress": True,
+            "last_refresh_succeeded": True,
+        },
+    )
     app = Flask(__name__)
     app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {"state": "ready"}
 
@@ -210,5 +224,14 @@ def test_health_runtime_authority_uses_count_free_durable_status(monkeypatch) ->
         "database_connected": True,
         "worker_running": True,
         "scheduler_running": True,
+    }
+    assert payload["model_registry"] == {
+        "schema_version": "model_registry_snapshot_status.v1",
+        "ready": True,
+        "source": "vontology_graph",
+        "cache_state": "stale_refreshing",
+        "age_seconds": 3612.5,
+        "refresh_in_progress": True,
+        "last_refresh_succeeded": True,
     }
     assert "worker_id" not in json.dumps(payload)

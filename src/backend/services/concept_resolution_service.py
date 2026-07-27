@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from bson import ObjectId
 
 from .concept_search_service import _search_text_relations
-from .text_value_service import get_texts_for_concept
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
@@ -146,7 +146,12 @@ def resolve_concept_by_name(
     # Stage 1: exact name match via text relations.
     for query_text, variant in query_variants:
         hits = _accessible_candidate_ids(
-            _search_text_relations(query_text, exact=True)
+            _search_text_relations(
+                query_text,
+                exact=True,
+                result_limit=max_results,
+                allow_fallback_scan=False,
+            )
         )
         if hits:
             audit.append(
@@ -163,7 +168,11 @@ def resolve_concept_by_name(
     # Stage 2+: broaden if nothing found.
     if not candidate_ids:
         hits = _accessible_candidate_ids(
-            _search_text_relations(raw, prefix=True)
+            _search_text_relations(
+                raw,
+                prefix=True,
+                result_limit=max_results,
+            )
         )
         audit.append(
             {
@@ -176,7 +185,9 @@ def resolve_concept_by_name(
         candidate_ids.update(hits)
 
     if not candidate_ids:
-        hits = _accessible_candidate_ids(_search_text_relations(raw))
+        hits = _accessible_candidate_ids(
+            _search_text_relations(raw, result_limit=max_results)
+        )
         audit.append(
             {
                 "stage": "candidate_generation",
@@ -387,13 +398,26 @@ def resolve_concept_by_name(
     }
 
     matches: list[_CandidateMatch] = []
+    ordered_candidate_ids = sorted(candidate_ids)
+    name_query_metadata: dict[str, Any] = {}
+    names_by_concept_id = get_texts_for_concepts(
+        ordered_candidate_ids,
+        predicate="hasName",
+        limit_per_concept=200,
+        query_metadata=name_query_metadata,
+    )
+    if name_query_metadata.get("relation_query_truncated") is True:
+        names_by_concept_id = {
+            concept_id: get_texts_for_concept(
+                concept_id,
+                predicate="hasName",
+                limit=200,
+            )
+            for concept_id in ordered_candidate_ids
+        }
 
-    for concept_id in sorted(candidate_ids):
-        names = get_texts_for_concept(
-            concept_id,
-            predicate="hasName",
-            limit=200,
-        )
+    for concept_id in ordered_candidate_ids:
+        names = names_by_concept_id.get(concept_id, [])
 
         best: Optional[_CandidateMatch] = None
         for name_doc in names:

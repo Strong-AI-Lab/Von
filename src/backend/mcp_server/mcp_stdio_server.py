@@ -957,7 +957,7 @@ class _RestrictedGateway:
         *,
         deadline_monotonic: float | None = None,
         late_completion_observer: Any | None = None,
-        require_configured_timeout: bool = False,
+        require_effect_admission_window: bool = False,
     ):
         if not self._allow_writes:
             meta = self._gateway.describe_methods().get(method_name) or {}
@@ -972,7 +972,7 @@ class _RestrictedGateway:
             payload,
             deadline_monotonic=deadline_monotonic,
             late_completion_observer=late_completion_observer,
-            require_configured_timeout=require_configured_timeout,
+            require_effect_admission_window=require_effect_admission_window,
         )
 
 

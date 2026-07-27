@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -1061,6 +1062,81 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
                 },
             }
         ],
+        "effect_observation_journal": {
+            "effect_2": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_2",
+                    "call_id": "call-effect-2",
+                    "capability_name": "add_relationship",
+                    "created_at_utc": "2026-02-19T01:00:00Z",
+                },
+                "dispatch_intent": {
+                    "phase": "dispatch_intent",
+                    "dispatch_state": "intent_recorded",
+                    "recorded_at_utc": "2026-02-19T01:00:00Z",
+                },
+                "turn_terminal": {
+                    "phase": "turn_terminal",
+                    "effect_status": "indeterminate",
+                    "changed": None,
+                    "recorded_at_utc": "2026-02-19T01:00:01Z",
+                    "transport": {
+                        "execution_id": "mcp_late_9",
+                        "outcome": "timed_out",
+                    },
+                    "receipt": {"mutation_outcome": "unknown"},
+                },
+                "late_terminal": {
+                    "phase": "late_terminal",
+                    "outcome": "late_success",
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "recorded_at_utc": "2026-02-19T01:00:02Z",
+                    "payload": {
+                        "success": True,
+                        "effect_status": "succeeded",
+                        "changed": True,
+                        "private_detail": "not projected",
+                    },
+                },
+            },
+            "effect_unresolved": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_unresolved",
+                },
+                "turn_terminal": {
+                    "phase": "turn_terminal",
+                    "effect_status": "indeterminate",
+                    "receipt": {"mutation_outcome": "unknown"},
+                },
+            },
+            "effect_missing_late_payload": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_missing_late_payload",
+                },
+                "late_terminal": {
+                    "phase": "late_terminal",
+                    "outcome": "late_success",
+                    "effect_status": "succeeded",
+                    "changed": True,
+                },
+            },
+            "effect_missing_turn_receipt": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_missing_turn_receipt",
+                },
+                "turn_terminal": {
+                    "phase": "turn_terminal",
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "transport": {"outcome": "completed"},
+                },
+            },
+        },
     }
 
     coll = _TurnExecutionCollection([doc])
@@ -1115,6 +1191,29 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
             },
         }
     ]
+    assert result["effect_observation_journal_count"] == 4
+    assert result["effect_observation_journal_truncated"] is False
+    journal_by_id = {
+        item["effect_id"]: item
+        for item in result["effect_observation_journal"]
+    }
+    assert journal_by_id["effect_2"]["latest_phase"] == "late_terminal"
+    assert journal_by_id["effect_2"]["outcome_resolved"] is True
+    assert journal_by_id["effect_2"]["late_terminal"]["receipt"] == {
+        "success": True,
+        "effect_status": "succeeded",
+        "changed": True,
+    }
+    assert "private_detail" not in json.dumps(journal_by_id["effect_2"])
+    assert journal_by_id["effect_unresolved"]["outcome_resolved"] is False
+    assert (
+        journal_by_id["effect_missing_late_payload"]["outcome_resolved"]
+        is False
+    )
+    assert (
+        journal_by_id["effect_missing_turn_receipt"]["outcome_resolved"]
+        is False
+    )
 
 
 def test_rag_get_item_does_not_expose_late_effects_across_namespaces(
@@ -1135,6 +1234,13 @@ def test_rag_get_item_does_not_expose_late_effects_across_namespaces(
                         "outcome": "late_success",
                     }
                 ],
+                "effect_observation_journal": {
+                    "private-effect": {
+                        "dispatch_intent": {
+                            "phase": "dispatch_intent",
+                        }
+                    }
+                },
             }
         ]
     )
@@ -1152,6 +1258,7 @@ def test_rag_get_item_does_not_expose_late_effects_across_namespaces(
     assert result["success"] is False
     assert result["error_code"] == "not_found"
     assert "late_effect_observations" not in result
+    assert "effect_observation_journal" not in result
 
 
 def test_rag_list_indexed_supports_episode_critique_improvement_suggestion_summary(

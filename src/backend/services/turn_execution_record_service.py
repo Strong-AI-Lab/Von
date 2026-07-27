@@ -13,7 +13,6 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence, cast
 
@@ -82,6 +81,7 @@ logger = logging.getLogger(__name__)
 TURN_EXECUTION_RECORD_SCHEMA_VERSION = "turn_execution_record.v1"
 TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION = "turn_execution_correctness.v1"
 LATE_EFFECT_OBSERVATION_SCHEMA_VERSION = "late_effect_observation.v1"
+EFFECT_OBSERVATION_JOURNAL_SCHEMA_VERSION = "effect_observation_journal.v1"
 WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION = "workflow_routing_diagnostics.v1"
 FINAL_ANSWER_SYNTHESIS_TELEMETRY_SCHEMA_VERSION = "final_answer_synthesis_telemetry.v1"
 TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
@@ -123,15 +123,10 @@ _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_ENTRIES = 16
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_FIELD_ENTRIES = 32
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_IDENTIFIERS = 32
 _LATE_EFFECT_OBSERVATION_MAX_ID_CHARS = 512
-_LATE_EFFECT_APPEND_WORKERS = 2
-_LATE_EFFECT_APPEND_MAX_PENDING = 32
-_LATE_EFFECT_APPEND_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_LATE_EFFECT_APPEND_WORKERS,
-    thread_name_prefix="late-effect-observation",
+_EFFECT_OBSERVATION_PHASES = frozenset(
+    {"dispatch_intent", "turn_terminal", "late_terminal"}
 )
-_LATE_EFFECT_APPEND_SLOTS = threading.BoundedSemaphore(
-    _LATE_EFFECT_APPEND_WORKERS + _LATE_EFFECT_APPEND_MAX_PENDING
-)
+_SAFE_EFFECT_JOURNAL_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _FINAL_ANSWER_PROJECTION_SECRET_KEY_PARTS = (
     "access_token",
     "api_key",
@@ -10471,10 +10466,11 @@ def upsert_turn_execution_record_projection(
 
     now = _now_utc()
     payload = ensure_turn_execution_record_execution_correctness(record)
-    # Late observations arrive independently after the ordinary projection was
-    # assembled.  They are append-only and must not be replaced by a later
-    # whole-turn snapshot containing no, or stale, late-observation state.
+    # Effect observations arrive independently around the ordinary projection.
+    # They must not be replaced by a later whole-turn snapshot containing no,
+    # or stale, observation state.
     payload.pop("late_effect_observations", None)
+    payload.pop("effect_observation_journal", None)
     payload["request_id"] = request_id
     if _safe_str(user_id):
         payload["user_id"] = _safe_str(user_id)
@@ -10561,6 +10557,284 @@ def upsert_turn_execution_record_projection(
             "updated": False,
             "reason": "mongo_error",
             "request_id": request_id,
+        }
+
+
+def record_effect_observation_phase(
+    *,
+    request_id: Any,
+    effect_id: Any,
+    phase: Any,
+    observation: Mapping[str, Any],
+    user_id: Any = None,
+    session_id: Any = None,
+    namespace: Any = None,
+    org_id: Any = None,
+) -> dict[str, Any]:
+    """Persist one immutable mechanical phase for an ordinary effect.
+
+    The journal is embedded in the actor-scoped turn record and keyed by the
+    server-generated effect ID.  Each phase is written at most once.  Recovery
+    and read-back may inspect these receipts, but this service never invokes,
+    retries, requeues, or otherwise executes the underlying effect.
+    """
+
+    clean_request_id = _safe_str(request_id)
+    clean_effect_id = _safe_str(effect_id)
+    clean_phase = _safe_str(phase)
+    if not clean_request_id:
+        return {"updated": False, "reason": "missing_request_id"}
+    if (
+        not clean_effect_id
+        or len(clean_effect_id) > _LATE_EFFECT_OBSERVATION_MAX_ID_CHARS
+        or not _SAFE_EFFECT_JOURNAL_KEY_RE.fullmatch(clean_effect_id)
+    ):
+        return {
+            "updated": False,
+            "reason": "invalid_effect_id",
+            "request_id": clean_request_id,
+        }
+    if clean_phase not in _EFFECT_OBSERVATION_PHASES:
+        return {
+            "updated": False,
+            "reason": "invalid_phase",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+    if not isinstance(observation, Mapping):
+        return {
+            "updated": False,
+            "reason": "invalid_observation",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+
+    actor_scope: dict[str, str] = {}
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            actor_scope[field_name] = clean_value
+    if not actor_scope:
+        return {
+            "updated": False,
+            "reason": "missing_actor_scope",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+
+    coll = get_turn_execution_records_collection()
+    if coll is None:
+        return {
+            "updated": False,
+            "reason": "collection_unavailable",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+
+    bounded = _compact_final_answer_projection_payload(
+        dict(observation),
+        max_depth=4,
+        max_items=32,
+        max_string_chars=2_000,
+    )
+    if not isinstance(bounded, Mapping):
+        bounded = {"value": bounded}
+    now = _now_utc()
+    recorded_at_utc = _iso_utc(now)
+    phase_entry = dict(bounded)
+    phase_entry.update(
+        {
+            "schema_version": EFFECT_OBSERVATION_JOURNAL_SCHEMA_VERSION,
+            "phase": clean_phase,
+            "effect_id": clean_effect_id,
+            "recorded_at_utc": recorded_at_utc,
+        }
+    )
+
+    journal_root = f"effect_observation_journal.{clean_effect_id}"
+    phase_path = f"{journal_root}.{clean_phase}"
+    identity_path = f"{journal_root}.identity"
+    record_scope_query = {"request_id": clean_request_id, **actor_scope}
+    phase_absent_query = {
+        **record_scope_query,
+        phase_path: {"$exists": False},
+    }
+    identity_entry = {
+        "schema_version": EFFECT_OBSERVATION_JOURNAL_SCHEMA_VERSION,
+        "effect_id": clean_effect_id,
+        "created_at_utc": recorded_at_utc,
+    }
+    for field_name in ("call_id", "capability_name"):
+        clean_value = _safe_str(observation.get(field_name))
+        if clean_value:
+            identity_entry[field_name] = clean_value
+    phase_set: dict[str, Any] = {phase_path: phase_entry}
+    # Dispatch intent is durably acknowledged before the handler can start, so
+    # it is the authoritative creation point for stable effect identity.  Later
+    # terminal receipts must never replace its creation time or call identity.
+    if clean_phase == "dispatch_intent":
+        phase_set[identity_path] = identity_entry
+    phase_update = {
+        "$set": phase_set,
+        "$max": {
+            "updated_at_utc": recorded_at_utc,
+            "effect_observation_updated_at_utc": recorded_at_utc,
+        },
+    }
+    insert_payload: dict[str, Any] = {
+        "request_id": clean_request_id,
+        "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
+        "created_at_utc": recorded_at_utc,
+        "updated_at_utc": recorded_at_utc,
+        "inserted_at": now,
+    }
+    for field_name, raw_value in (
+        ("user_id", user_id),
+        ("session_id", session_id),
+        ("namespace", namespace),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            insert_payload[field_name] = clean_value
+
+    try:
+        result = _turn_execution_update_one(
+            coll,
+            phase_absent_query,
+            phase_update,
+            operation="record_effect_observation_phase.update_one",
+            detail=f"{clean_effect_id}:{clean_phase}",
+            upsert=False,
+        )
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        inserted = False
+        if not matched:
+            existing = _turn_execution_find_one(
+                coll,
+                record_scope_query,
+                projection={
+                    "_id": 0,
+                    phase_path: 1,
+                },
+                operation="record_effect_observation_phase.find_existing",
+                detail=f"{clean_effect_id}:{clean_phase}",
+            )
+            if isinstance(existing, Mapping):
+                journal = existing.get("effect_observation_journal")
+                effect_entry = (
+                    journal.get(clean_effect_id)
+                    if isinstance(journal, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(effect_entry, Mapping)
+                    and isinstance(effect_entry.get(clean_phase), Mapping)
+                ):
+                    return {
+                        "updated": False,
+                        "duplicate": True,
+                        "matched": True,
+                        "inserted": False,
+                        "request_id": clean_request_id,
+                        "effect_id": clean_effect_id,
+                        "phase": clean_phase,
+                    }
+            if existing is None:
+                request_id_collision = _turn_execution_find_one(
+                    coll,
+                    {"request_id": clean_request_id},
+                    projection={
+                        "_id": 0,
+                        "namespace": 1,
+                        "user_id": 1,
+                        "org_id": 1,
+                    },
+                    operation=(
+                        "record_effect_observation_phase.find_scope_collision"
+                    ),
+                    detail=f"{clean_effect_id}:{clean_phase}",
+                )
+                if request_id_collision is not None:
+                    return {
+                        "updated": False,
+                        "duplicate": False,
+                        "reason": "actor_scope_mismatch",
+                        "request_id": clean_request_id,
+                        "effect_id": clean_effect_id,
+                        "phase": clean_phase,
+                    }
+                ensured = _turn_execution_update_one(
+                    coll,
+                    record_scope_query,
+                    {"$setOnInsert": insert_payload},
+                    operation="record_effect_observation_phase.ensure_record",
+                    detail=f"{clean_effect_id}:{clean_phase}",
+                    upsert=True,
+                )
+                inserted = getattr(ensured, "upserted_id", None) is not None
+
+            result = _turn_execution_update_one(
+                coll,
+                phase_absent_query,
+                phase_update,
+                operation="record_effect_observation_phase.retry_update_one",
+                detail=f"{clean_effect_id}:{clean_phase}",
+                upsert=False,
+            )
+            updated = bool(getattr(result, "modified_count", 0) > 0)
+            matched = bool(getattr(result, "matched_count", 0) > 0)
+
+        if not updated and not matched:
+            return {
+                "updated": False,
+                "duplicate": False,
+                "inserted": inserted,
+                "matched": False,
+                "reason": "phase_write_not_acknowledged",
+                "request_id": clean_request_id,
+                "effect_id": clean_effect_id,
+                "phase": clean_phase,
+            }
+        return {
+            "updated": updated,
+            "duplicate": not updated and matched,
+            "inserted": inserted,
+            "matched": matched,
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "phase": clean_phase,
+        }
+    except DuplicateKeyError:
+        return {
+            "updated": False,
+            "duplicate": False,
+            "reason": "actor_scope_mismatch",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "phase": clean_phase,
+        }
+    except PyMongoError as exc:
+        logger.warning(
+            "Failed to persist effect observation phase request_id=%s "
+            "effect_id=%s phase=%s: %s",
+            clean_request_id,
+            clean_effect_id,
+            clean_phase,
+            exc,
+        )
+        return {
+            "updated": False,
+            "duplicate": False,
+            "reason": "mongo_error",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "phase": clean_phase,
         }
 
 
@@ -10867,49 +11141,32 @@ def append_late_effect_observation(
 
 
 def submit_late_effect_observation(**kwargs: Any) -> bool:
-    """Queue a durable append without occupying an MCP handler worker."""
+    """Synchronously persist a late receipt; never rerun its underlying effect.
 
-    if not _LATE_EFFECT_APPEND_SLOTS.acquire(blocking=False):
-        logger.warning(
-            "Late-effect observation queue is full; request_id=%s effect_id=%s",
-            _safe_str(kwargs.get("request_id")),
-            _safe_str(kwargs.get("effect_id")),
-        )
-        return False
-
-    def _append() -> None:
-        try:
-            outcome = append_late_effect_observation(**kwargs)
-            if not outcome.get("updated") and not outcome.get("duplicate"):
-                logger.warning(
-                    "Late-effect observation was not persisted; request_id=%s "
-                    "effect_id=%s reason=%s",
-                    _safe_str(kwargs.get("request_id")),
-                    _safe_str(kwargs.get("effect_id")),
-                    _safe_str(outcome.get("reason")) or "append_not_acknowledged",
-                )
-        except Exception:
-            logger.exception(
-                "Late-effect observation append failed; request_id=%s "
-                "effect_id=%s",
-                _safe_str(kwargs.get("request_id")),
-                _safe_str(kwargs.get("effect_id")),
-            )
-        finally:
-            _LATE_EFFECT_APPEND_SLOTS.release()
+    Retained as a compatibility wrapper for callers outside the adaptive path.
+    Unlike the former volatile executor queue, ``True`` means Mongo
+    acknowledged either the append or an idempotent duplicate.
+    """
 
     try:
-        _LATE_EFFECT_APPEND_EXECUTOR.submit(_append)
-    except RuntimeError:
-        _LATE_EFFECT_APPEND_SLOTS.release()
-        logger.warning(
-            "Late-effect observation executor is unavailable; request_id=%s "
-            "effect_id=%s",
+        outcome = append_late_effect_observation(**kwargs)
+    except Exception:
+        logger.exception(
+            "Late-effect observation append failed; request_id=%s effect_id=%s",
             _safe_str(kwargs.get("request_id")),
             _safe_str(kwargs.get("effect_id")),
         )
         return False
-    return True
+    acknowledged = bool(outcome.get("updated") or outcome.get("duplicate"))
+    if not acknowledged:
+        logger.warning(
+            "Late-effect observation was not persisted; request_id=%s "
+            "effect_id=%s reason=%s",
+            _safe_str(kwargs.get("request_id")),
+            _safe_str(kwargs.get("effect_id")),
+            _safe_str(outcome.get("reason")) or "append_not_acknowledged",
+        )
+    return acknowledged
 
 
 def get_latest_turn_execution_record_projection(

@@ -862,7 +862,10 @@ def _normalise_create_concepts_scope_mode(raw_value: Any) -> str | None:
 
 
 def _create_concepts(**kwargs):
-    from .transport import raise_if_internal_mcp_cancelled
+    from .transport import (
+        InternalMCPHandlerCancelled,
+        raise_if_internal_mcp_cancelled,
+    )
 
     # A handler may sit in the bounded executor queue until after its caller's
     # deadline. Never begin a write-side preflight in that state.
@@ -871,6 +874,7 @@ def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
     from ...services.create_concepts_duplicate_guard_service import (
+        build_canonical_identity_conflict_create_concepts_result,
         build_duplicate_prevented_create_concepts_result,
         find_existing_concept_for_create_concepts,
     )
@@ -1107,14 +1111,16 @@ def _create_concepts(**kwargs):
         )
     }
     if (
-        parent_resolution.resolved_parent_kind in {"individual", "instance"}
+        parent_resolution.resolved_parent_kind is not None
+        and parent_resolution.resolved_parent_kind != "type"
         and requested_non_predicate_kinds
     ):
         return make_error_response(
             "parent_is_not_a_type",
             (
-                f"Parent concept '{validated_parent_id}' is an individual, not "
-                "a semantic type. No concepts were created."
+                f"Parent concept '{validated_parent_id}' is "
+                f"{parent_resolution.resolved_parent_kind!r}, not a semantic "
+                "type. No concepts were created."
             ),
             details={
                 "original_parent_id": parent_id,
@@ -1138,11 +1144,25 @@ def _create_concepts(**kwargs):
         )
 
     results = []
+    cancelled_after_partial_error: str | None = None
+
+    def _cancelled_after_completed_items() -> bool:
+        nonlocal cancelled_after_partial_error
+        try:
+            raise_if_internal_mcp_cancelled()
+        except InternalMCPHandlerCancelled as exc:
+            if not results:
+                raise
+            cancelled_after_partial_error = str(exc)
+            return True
+        return False
+
     with defer_relationship_extent_index_sync():
         for concept_data in concepts:
             # This is both the batch boundary and the safe cancellation point after
             # the preceding concept's complete logical write bundle.
-            raise_if_internal_mcp_cancelled()
+            if _cancelled_after_completed_items():
+                break
             if not isinstance(concept_data, dict):
                 results.append(
                     {"error": "Concept must be an object", "data": concept_data}
@@ -1185,24 +1205,38 @@ def _create_concepts(**kwargs):
                 ),
             )
             if duplicate_match is not None:
-                result = build_duplicate_prevented_create_concepts_result(
-                    requested_name=str(name),
-                    requested_kind=kind,
-                    existing_concept_id=duplicate_match.existing_concept_id,
-                    guard_scope=duplicate_match.guard_scope,
-                    match_source=duplicate_match.match_source,
-                )
+                if duplicate_match.identity_conflict:
+                    result = build_canonical_identity_conflict_create_concepts_result(
+                        requested_name=str(name),
+                        requested_kind=kind,
+                        existing_concept_id=duplicate_match.existing_concept_id,
+                        guard_scope=duplicate_match.guard_scope,
+                        existing_kind=duplicate_match.existing_kind,
+                        existing_parent_ids=duplicate_match.existing_parent_ids,
+                        requested_parent_id=duplicate_match.requested_parent_id,
+                        mismatch_reasons=duplicate_match.mismatch_reasons,
+                    )
+                else:
+                    result = build_duplicate_prevented_create_concepts_result(
+                        requested_name=str(name),
+                        requested_kind=kind,
+                        existing_concept_id=duplicate_match.existing_concept_id,
+                        guard_scope=duplicate_match.guard_scope,
+                        match_source=duplicate_match.match_source,
+                    )
                 result["concept_id"] = duplicate_match.existing_concept_id
                 results.append(result)
                 continue
 
             # Duplicate preflights are read-only and may consume the entire
             # transport budget. Never start an insert after cancellation.
-            raise_if_internal_mcp_cancelled()
+            if _cancelled_after_completed_items():
+                break
             result = create_vontology_concept(
                 parent_id=parent_id_for_concept,
                 new_concept_name=name,
                 create_as_instance=create_as_instance,
+                allow_duplicate_instance_suffix=allow_duplicate_instances,
                 description=concept_data.get("description"),
                 notes=concept_data.get("notes"),
                 created_by_concept_id=actor_user_id,
@@ -1259,7 +1293,7 @@ def _create_concepts(**kwargs):
         for failure in (r.get("concept") or {}).get("partial_failures", [])
         if isinstance(failure, dict)
     ]
-    failed = len(concepts) - successful - already_exists
+    failed = len(results) - successful - already_exists
     if partial_failures or (failed > 0 and (successful > 0 or already_exists > 0)):
         effect_status = "partial"
     elif failed > 0:
@@ -1289,7 +1323,7 @@ def _create_concepts(**kwargs):
         }
     )
 
-    return {
+    response = {
         "success": failed == 0 and not partial_failures,
         "effect_status": effect_status,
         "changed": successful > 0,
@@ -1316,6 +1350,24 @@ def _create_concepts(**kwargs):
             "namespace": namespace,
         },
     }
+    if cancelled_after_partial_error is not None:
+        response.update(
+            {
+                "success": False,
+                "effect_status": "partial",
+                "error_code": "handler_cancelled_after_partial_completion",
+                "error": (
+                    "Concept creation was cancelled after one or more batch items "
+                    "had completed. Completed item receipts are preserved and no "
+                    "later item was started."
+                ),
+                "cancellation_requested": True,
+                "cancellation_error": cancelled_after_partial_error,
+                "completed_before_cancellation": len(results),
+                "unattempted_count": len(concepts) - len(results),
+            }
+        )
+    return response
 
 
 def _extract_annotations(**kwargs):
@@ -10183,6 +10235,131 @@ def _summarise_late_effect_observations(
             }
         summary.append(entry)
     return summary, len(raw_observations)
+
+
+def _summarise_effect_observation_journal(
+    raw_journal: Any,
+    *,
+    max_items: int = 32,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return a bounded mechanical lifecycle projection for ordinary effects."""
+
+    if not isinstance(raw_journal, Mapping):
+        return [], 0
+    items = [
+        (str(effect_id), value)
+        for effect_id, value in raw_journal.items()
+        if isinstance(effect_id, str) and isinstance(value, Mapping)
+    ]
+    summary: list[dict[str, Any]] = []
+    for effect_id, raw_entry in items[-max_items:]:
+        identity = (
+            raw_entry.get("identity")
+            if isinstance(raw_entry.get("identity"), Mapping)
+            else {}
+        )
+        entry: dict[str, Any] = {
+            "schema_version": identity.get("schema_version"),
+            "effect_id": effect_id,
+        }
+        for field_name in ("call_id", "capability_name", "created_at_utc"):
+            if field_name in identity:
+                entry[field_name] = identity.get(field_name)
+
+        available_phases: list[str] = []
+        for phase_name in (
+            "dispatch_intent",
+            "turn_terminal",
+            "late_terminal",
+        ):
+            raw_phase = raw_entry.get(phase_name)
+            if not isinstance(raw_phase, Mapping):
+                continue
+            available_phases.append(phase_name)
+            phase_projection = {
+                key: raw_phase.get(key)
+                for key in (
+                    "phase",
+                    "recorded_at_utc",
+                    "dispatch_state",
+                    "execution_id",
+                    "outcome",
+                    "effect_status",
+                    "changed",
+                    "output_schema_validation",
+                    "output_schema_valid",
+                    "payload_truncated",
+                    "error_type",
+                    "error",
+                )
+                if key in raw_phase
+            }
+            transport = raw_phase.get("transport")
+            if isinstance(transport, Mapping):
+                phase_projection["transport"] = {
+                    key: transport.get(key)
+                    for key in (
+                        "execution_id",
+                        "outcome",
+                        "timeout_sec",
+                        "configured_hard_timeout_sec",
+                        "minimum_execution_window_sec",
+                        "timeout_phase",
+                        "late_result_policy",
+                    )
+                    if key in transport
+                }
+            receipt = raw_phase.get("receipt")
+            if not isinstance(receipt, Mapping):
+                payload = raw_phase.get("payload")
+                receipt = payload if isinstance(payload, Mapping) else None
+            if isinstance(receipt, Mapping):
+                phase_projection["receipt"] = {
+                    key: receipt.get(key)
+                    for key in (
+                        "success",
+                        "status",
+                        "effect_status",
+                        "changed",
+                        "error",
+                        "error_code",
+                        "mutation_outcome",
+                        "partial_failures",
+                    )
+                    if key in receipt
+                }
+            entry[phase_name] = phase_projection
+        entry["available_phases"] = available_phases
+        entry["latest_phase"] = (
+            available_phases[-1] if available_phases else None
+        )
+        late_terminal = raw_entry.get("late_terminal")
+        turn_terminal = raw_entry.get("turn_terminal")
+        outcome_resolved = False
+        if isinstance(late_terminal, Mapping):
+            late_payload = late_terminal.get("payload")
+            outcome_resolved = bool(
+                late_terminal.get("outcome") == "late_success"
+                and late_terminal.get("effect_status")
+                not in {None, "indeterminate", "unknown"}
+                and isinstance(late_payload, Mapping)
+                and late_payload.get("mutation_outcome") != "unknown"
+            )
+        elif isinstance(turn_terminal, Mapping):
+            transport = turn_terminal.get("transport")
+            receipt = turn_terminal.get("receipt")
+            outcome_resolved = bool(
+                isinstance(transport, Mapping)
+                and transport.get("outcome")
+                not in {None, "timed_out"}
+                and turn_terminal.get("effect_status")
+                not in {None, "indeterminate", "unknown"}
+                and isinstance(receipt, Mapping)
+                and receipt.get("mutation_outcome") != "unknown"
+            )
+        entry["outcome_resolved"] = outcome_resolved
+        summary.append(entry)
+    return summary, len(items)
 
 
 def _extract_turn_execution_tool_invocation_summary(
@@ -21779,6 +21956,12 @@ def _rag_get_item(**kwargs):
         ) = _summarise_late_effect_observations(
             doc.get("late_effect_observations")
         )
+        (
+            effect_observation_journal,
+            effect_observation_journal_count,
+        ) = _summarise_effect_observation_journal(
+            doc.get("effect_observation_journal")
+        )
 
         payload = {
             "collection": collection,
@@ -21825,6 +22008,14 @@ def _rag_get_item(**kwargs):
             "late_effect_observations": late_effect_observations,
             "late_effect_observations_truncated": (
                 late_effect_observation_count > len(late_effect_observations)
+            ),
+            "effect_observation_journal_count": (
+                effect_observation_journal_count
+            ),
+            "effect_observation_journal": effect_observation_journal,
+            "effect_observation_journal_truncated": (
+                effect_observation_journal_count
+                > len(effect_observation_journal)
             ),
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,
@@ -30958,6 +31149,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             },
             ordinary_turn_fixed_arguments={"provenance": None},
             ordinary_turn_effect=True,
+            effect_admission_window_sec=8.0,
             ordinary_turn_mutation_subject_argument="concept_id",
             description="Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types. More general than add_names which is specialized for hasName relations only.",
         ),
@@ -31032,6 +31224,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             output_schema=_add_relationship_output_schema(),
             category="write",
             ordinary_turn_effect=True,
+            effect_admission_window_sec=5.0,
             ordinary_turn_mutation_subject_argument="source_id",
             description="Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
         ),

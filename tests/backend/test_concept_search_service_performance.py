@@ -240,3 +240,52 @@ def test_text_value_fingerprint_search_uses_partial_index_shape(monkeypatch) -> 
             "max_time_ms": svc.CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         }
     ]
+
+
+def test_exact_lookup_can_defer_scan_to_subsuming_prefix_stage(monkeypatch) -> None:
+    text_value_id = "507f1f77bcf86cd799439011"
+    concept_id = "#V#legacy_exact_name"
+    text_value_calls: list[dict[str, Any]] = []
+    relation_calls: list[dict[str, Any]] = []
+
+    def fake_text_values_find(query, *args, **kwargs):
+        text_value_calls.append({"query": query, **kwargs})
+        if query.get("text"):
+            return [{"_id": text_value_id}]
+        return []
+
+    def fake_text_relations_find(query, *args, **kwargs):
+        relation_calls.append({"query": query, **kwargs})
+        return [{"subject_concept_id": concept_id}]
+
+    monkeypatch.setattr(svc.TextValuesRepository, "find", fake_text_values_find)
+    monkeypatch.setattr(svc.TextRelationsRepository, "find", fake_text_relations_find)
+
+    exact_hits = svc._search_text_relations(
+        "Legacy exact name",
+        exact=True,
+        result_limit=5,
+        allow_fallback_scan=False,
+    )
+    prefix_hits = svc._search_text_relations(
+        "Legacy exact name",
+        prefix=True,
+        result_limit=5,
+    )
+
+    assert exact_hits == set()
+    assert prefix_hits == {concept_id}
+    assert len(text_value_calls) == 3
+    assert text_value_calls[0]["query"].get("fingerprint")
+    assert text_value_calls[1]["query"].get("fingerprint")
+    assert text_value_calls[2]["query"] == {
+        "text": {
+            "$regex": r"^Legacy\\s+exact\\s+name",
+            "$options": "i",
+        }
+    }
+    assert all(call["limit"] == 200 for call in text_value_calls)
+    assert len(relation_calls) == 1
+    assert relation_calls[0]["query"]["object_text_id"] == {
+        "$in": [text_value_id, text_value_id]
+    }

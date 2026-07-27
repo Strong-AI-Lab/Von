@@ -103,6 +103,11 @@ class MethodDefinition:
     # This is an access/effect ceiling, not a request classifier or preferred
     # solution route.
     ordinary_turn_effect: bool = False
+    # Minimum caller window required before an ordinary effect may start.  The
+    # hard timeout remains an upper bound; this separate mechanical threshold
+    # prevents a generic maximum from starving normally fast later effects.
+    # Omission retains the conservative full-hard-window requirement.
+    effect_admission_window_sec: float | None = None
     # Existing concepts may be changed only when this authoritative forward
     # subject is scoped to the trusted actor or organisation. Creation effects
     # leave this unset because their scope is fixed server-side.
@@ -116,6 +121,29 @@ class MethodDefinition:
         if self.category == "read":
             return transport.read_timeout_sec
         return transport.read_timeout_sec
+
+    def resolved_effect_admission_window(
+        self,
+        transport: InternalMCPTransport,
+    ) -> float:
+        hard_timeout = float(
+            self.resolved_timeout(transport) or transport.write_timeout_sec
+        )
+        raw_window = self.effect_admission_window_sec
+        if raw_window is None:
+            return hard_timeout
+        if self.category != "write":
+            raise ValueError(
+                "effect_admission_window_sec is valid only for write methods"
+            )
+        window = float(raw_window)
+        if window <= 0.0:
+            raise ValueError("effect_admission_window_sec must be positive")
+        if window > hard_timeout:
+            raise ValueError(
+                "effect_admission_window_sec cannot exceed the hard timeout"
+            )
+        return window
 
 
 @dataclass
@@ -228,6 +256,9 @@ class MethodCatalogue:
                     else None
                 ),
                 "ordinary_turn_effect": definition.ordinary_turn_effect,
+                "effect_admission_window_sec": (
+                    definition.effect_admission_window_sec
+                ),
                 "ordinary_turn_mutation_subject_argument": (
                     definition.ordinary_turn_mutation_subject_argument
                 ),
@@ -343,7 +374,7 @@ class InternalMCPGateway:
         payload: Optional[MutableMapping[str, Any]] = None,
         *,
         deadline_monotonic: float | None = None,
-        require_configured_timeout: bool = False,
+        require_effect_admission_window: bool = False,
         late_completion_observer: LateCompletionObserver | None = None,
     ) -> TransportResult:
         if not self._enabled:
@@ -384,6 +415,11 @@ class InternalMCPGateway:
             raise SchemaValidationError(error_message, stage="input_schema")
 
         timeout = definition.resolved_timeout(self._transport)
+        minimum_execution_window = (
+            definition.resolved_effect_admission_window(self._transport)
+            if require_effect_admission_window
+            else None
+        )
         advisory_timeout = self._transport.advisory_timeout_sec(
             definition.category,
             hard_timeout_sec=float(timeout or self._transport.read_timeout_sec),
@@ -521,7 +557,7 @@ class InternalMCPGateway:
                         category=definition.category,
                         advisory_timeout_sec=advisory_timeout,
                         deadline_monotonic=deadline_monotonic,
-                        require_configured_timeout=require_configured_timeout,
+                        minimum_execution_window_sec=minimum_execution_window,
                         log_tag=self._log_tag,
                         late_completion_observer=observed_late_completion,
                     )

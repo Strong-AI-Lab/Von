@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from threading import Event, Thread
 
@@ -27,6 +28,7 @@ def _gateway_for(
     category: str = "read",
     output_schema: Schema | None = None,
     timeout_sec: float | None = None,
+    effect_admission_window_sec: float | None = None,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -37,6 +39,7 @@ def _gateway_for(
             output_schema=output_schema,
             category=category,
             timeout_sec=timeout_sec,
+            effect_admission_window_sec=effect_admission_window_sec,
         )
     )
     return InternalMCPGateway(
@@ -189,7 +192,7 @@ def test_caller_deadline_shortens_the_registered_method_timeout() -> None:
     assert cancellation_seen.wait(timeout=1.0)
 
 
-def test_required_configured_write_window_is_denied_atomically_before_dispatch() -> None:
+def test_required_effect_window_is_denied_atomically_before_dispatch() -> None:
     handler_called = Event()
     executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
     transport = InternalMCPTransport(
@@ -209,17 +212,219 @@ def test_required_configured_write_window_is_denied_atomically_before_dispatch()
         "synthetic_full_window_write",
         {},
         deadline_monotonic=time.monotonic() + 0.19,
-        require_configured_timeout=True,
+        require_effect_admission_window=True,
     )
 
     assert result.outcome == "not_started"
     assert result.timeout_phase == "pre_dispatch"
     assert result.payload["error_code"] == "insufficient_effect_window"
     assert result.payload["mutation_outcome"] == "not_started"
-    assert result.payload["configured_execution_window_seconds"] == 0.2
+    assert result.payload["configured_hard_timeout_seconds"] == 0.2
+    assert result.payload["minimum_admission_window_seconds"] == 0.2
+    assert 0.0 < result.payload["effective_execution_window_seconds"] < 0.2
     assert 0.0 < result.payload["remaining_execution_window_seconds"] < 0.2
+    assert result.configured_hard_timeout_sec == 0.2
+    assert result.minimum_execution_window_sec == 0.2
     assert handler_called.is_set() is False
     assert executor.diagnostics()["submitted_count"] == 0
+
+
+def test_default_full_window_effect_starts_on_idle_executor() -> None:
+    handler_called = Event()
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.2,
+        write_advisory_timeout_sec=0.01,
+        handler_executor=executor,
+    )
+
+    def _handler() -> dict[str, bool]:
+        handler_called.set()
+        return {"success": True, "changed": True}
+
+    gateway = _gateway_for(
+        method_name="synthetic_default_full_window_effect",
+        handler=_handler,
+        transport=transport,
+        category="write",
+        timeout_sec=0.2,
+    )
+
+    result = gateway.invoke(
+        "synthetic_default_full_window_effect",
+        {},
+        require_effect_admission_window=True,
+    )
+
+    assert result.outcome == "completed"
+    assert result.payload == {"success": True, "changed": True}
+    assert result.minimum_execution_window_sec == 0.2
+    assert handler_called.is_set() is True
+
+
+def test_method_minimum_admits_effect_below_its_hard_timeout() -> None:
+    handler_called = Event()
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.5,
+        write_advisory_timeout_sec=0.01,
+    )
+
+    def _handler() -> dict[str, bool]:
+        handler_called.set()
+        return {"success": True, "changed": True}
+
+    gateway = _gateway_for(
+        method_name="synthetic_short_effect",
+        handler=_handler,
+        transport=transport,
+        category="write",
+        timeout_sec=0.2,
+        effect_admission_window_sec=0.02,
+    )
+
+    result = gateway.invoke(
+        "synthetic_short_effect",
+        {},
+        deadline_monotonic=time.monotonic() + 0.08,
+        require_effect_admission_window=True,
+    )
+
+    assert handler_called.is_set() is True
+    assert result.outcome == "completed"
+    assert result.payload == {"success": True, "changed": True}
+    assert result.timeout_sec is not None
+    assert 0.02 < result.timeout_sec < 0.2
+    assert result.configured_hard_timeout_sec == 0.2
+    assert result.minimum_execution_window_sec == 0.02
+    assert result.telemetry_metadata()["minimum_execution_window_sec"] == 0.02
+
+
+def test_method_minimum_denies_effect_below_its_admission_window() -> None:
+    handler_called = Event()
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.5,
+        write_advisory_timeout_sec=0.01,
+        handler_executor=executor,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_short_effect",
+        handler=lambda: handler_called.set(),
+        transport=transport,
+        category="write",
+        timeout_sec=0.2,
+        effect_admission_window_sec=0.05,
+    )
+
+    result = gateway.invoke(
+        "synthetic_short_effect",
+        {},
+        deadline_monotonic=time.monotonic() + 0.02,
+        require_effect_admission_window=True,
+    )
+
+    assert result.outcome == "not_started"
+    assert result.payload["minimum_admission_window_seconds"] == 0.05
+    assert result.payload["configured_hard_timeout_seconds"] == 0.2
+    assert handler_called.is_set() is False
+    assert executor.diagnostics()["submitted_count"] == 0
+
+
+def test_queued_effect_rechecks_minimum_before_handler_start() -> None:
+    blocker_started = Event()
+    release_blocker = Event()
+    effect_handler_called = Event()
+    observations: list[dict] = []
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.5,
+        write_timeout_sec=0.5,
+        read_advisory_timeout_sec=0.1,
+        write_advisory_timeout_sec=0.01,
+        handler_executor=executor,
+    )
+
+    def _blocker() -> dict[str, bool]:
+        blocker_started.set()
+        assert release_blocker.wait(timeout=1.0)
+        return {"success": True}
+
+    blocker_gateway = _gateway_for(
+        method_name="synthetic_admission_blocker",
+        handler=_blocker,
+        transport=transport,
+    )
+    blocker_results = []
+    blocker_thread = Thread(
+        target=lambda: blocker_results.append(
+            blocker_gateway.invoke("synthetic_admission_blocker", {})
+        )
+    )
+    blocker_thread.start()
+    assert blocker_started.wait(timeout=1.0)
+
+    def _effect_handler() -> dict[str, bool]:
+        effect_handler_called.set()
+        return {"success": True, "changed": True}
+
+    effect_gateway = _gateway_for(
+        method_name="synthetic_queued_minimum_effect",
+        handler=_effect_handler,
+        transport=transport,
+        category="write",
+        timeout_sec=0.3,
+        effect_admission_window_sec=0.2,
+    )
+    effect_results = []
+    effect_thread = Thread(
+        target=lambda: effect_results.append(
+            effect_gateway.invoke(
+                "synthetic_queued_minimum_effect",
+                {},
+                require_effect_admission_window=True,
+                late_completion_observer=observations.append,
+            )
+        )
+    )
+    effect_thread.start()
+
+    queue_deadline = time.monotonic() + 1.0
+    while (
+        executor.diagnostics()["queue_depth"] < 1
+        and time.monotonic() < queue_deadline
+    ):
+        time.sleep(0.002)
+    assert executor.diagnostics()["queue_depth"] == 1
+
+    # Consume enough of the admitted 0.3s window that less than the method's
+    # 0.2s minimum remains, while leaving time for a typed queue-phase denial.
+    time.sleep(0.13)
+    release_blocker.set()
+    blocker_thread.join(timeout=1.0)
+    effect_thread.join(timeout=1.0)
+
+    assert blocker_thread.is_alive() is False
+    assert effect_thread.is_alive() is False
+    assert blocker_results and blocker_results[0].outcome == "completed"
+    assert len(effect_results) == 1
+    result = effect_results[0]
+    assert result.outcome == "not_started"
+    assert result.timeout_phase == "queue"
+    assert result.payload["status"] == "not_started"
+    assert result.payload["error_code"] == "insufficient_effect_window"
+    assert result.payload["mutation_outcome"] == "not_started"
+    assert result.payload["timeout_phase"] == "queue"
+    assert result.payload["minimum_admission_window_seconds"] == 0.2
+    assert (
+        0.0
+        <= result.payload["remaining_execution_window_seconds"]
+        < 0.2
+    )
+    assert result.queue_duration_ms is not None
+    assert result.queue_duration_ms >= 100.0
+    assert effect_handler_called.is_set() is False
+    assert observations == []
+    assert transport.get_diagnostics()["late_completion_count"] == 0
 
 
 def test_result_completed_after_absolute_deadline_is_discarded() -> None:
@@ -232,6 +437,7 @@ def test_result_completed_after_absolute_deadline_is_discarded() -> None:
                 task.completed_at = time.perf_counter()
                 task.completed_monotonic = task.deadline_monotonic + 0.001
                 task.done_event.set()
+            task.on_late_completion(task)
             return True
 
         @staticmethod
@@ -258,6 +464,69 @@ def test_result_completed_after_absolute_deadline_is_discarded() -> None:
     diagnostics = transport.get_diagnostics()
     assert diagnostics["late_completion_count"] == 1
     assert diagnostics["late_completions"][0]["payload_discarded"] is True
+
+
+def test_late_observer_does_not_extend_caller_deadline() -> None:
+    observer_started = Event()
+    release_observer = Event()
+    observer_finished = Event()
+    observations: list[dict] = []
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.04,
+        write_advisory_timeout_sec=0.01,
+        handler_executor=executor,
+    )
+
+    def _handler() -> dict[str, bool]:
+        scope = get_internal_mcp_execution_scope()
+        assert scope is not None
+        # Holding the GIL across the deadline makes the completion/deadline race
+        # deterministic: the worker records completion before the caller can
+        # mark terminal_returned.
+        while time.monotonic() <= scope.deadline_monotonic + 0.005:
+            pass
+        return {"success": True, "changed": True}
+
+    def _blocking_observer(observation: dict) -> None:
+        observer_started.set()
+        release_observer.wait(timeout=2.0)
+        observations.append(observation)
+        observer_finished.set()
+
+    gateway = _gateway_for(
+        method_name="synthetic_deadline_race_write",
+        handler=_handler,
+        transport=transport,
+        category="write",
+    )
+    original_switch_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1.0)
+    started_at = time.perf_counter()
+    try:
+        result = gateway.invoke(
+            "synthetic_deadline_race_write",
+            {},
+            late_completion_observer=_blocking_observer,
+        )
+        elapsed = time.perf_counter() - started_at
+
+        assert result.outcome == "timed_out"
+        assert result.timeout_phase == "handler"
+        assert elapsed < 0.2
+        assert observer_started.wait(timeout=1.0)
+        assert observer_finished.is_set() is False
+        assert observations == []
+    finally:
+        release_observer.set()
+        sys.setswitchinterval(original_switch_interval)
+
+    assert observer_finished.wait(timeout=1.0)
+    assert len(observations) == 1
+    assert observations[0]["outcome"] == "late_success"
+    diagnostics = transport.get_diagnostics()
+    assert diagnostics["late_completion_count"] == 1
+    assert diagnostics["late_completions"][0]["observer_notified"] is True
 
 
 def test_expired_caller_deadline_returns_timeout_without_dispatch() -> None:

@@ -108,6 +108,229 @@ def test_resolve_concept_by_name_returns_ambiguous_on_tie():
     assert {c["concept_id"] for c in result["candidates"]} == {concept_a, concept_b}
 
 
+def test_resolve_concept_by_name_hydrates_candidate_names_in_one_batch(
+    monkeypatch,
+) -> None:
+    candidate_ids = ["#V#batch_candidate_a", "#V#batch_candidate_b"]
+    batch_calls: list[tuple[list[str], str | None, int]] = []
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        lambda *_args, **_kwargs: set(candidate_ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda ids: set(ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": concept_id, "relationships": {}}
+            for concept_id in candidate_ids
+        ],
+    )
+
+    def _get_texts_for_concepts(
+        concept_ids,
+        *,
+        predicate=None,
+        limit_per_concept=50,
+        **_kwargs,
+    ):
+        ordered_ids = list(concept_ids)
+        batch_calls.append((ordered_ids, predicate, limit_per_concept))
+        return {
+            concept_id: [
+                {
+                    "text": "Shared batch candidate",
+                    "lang": "en-NZ",
+                    "predicate": "hasName",
+                    "context": {"name_type": "NL"},
+                }
+            ]
+            for concept_id in ordered_ids
+        }
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        _get_texts_for_concepts,
+    )
+
+    result = resolve_concept_by_name(
+        name="Shared batch candidate",
+        match_code_strings=False,
+    )
+
+    assert result["status"] == "ambiguous"
+    assert {
+        candidate["concept_id"] for candidate in result["candidates"]
+    } == set(candidate_ids)
+    assert batch_calls == [(sorted(candidate_ids), "hasName", 200)]
+
+
+def test_resolve_concept_by_name_falls_back_when_batch_hydration_is_truncated(
+    monkeypatch,
+) -> None:
+    candidate_ids = ["#V#name_heavy_candidate", "#V#starved_candidate"]
+    query = "Shared complete candidate"
+    batch_calls: list[list[str]] = []
+    single_calls: list[tuple[str, str | None, int]] = []
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        lambda *_args, **_kwargs: set(candidate_ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda ids: set(ids),
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": concept_id, "relationships": {}}
+            for concept_id in candidate_ids
+        ],
+    )
+
+    def _truncated_batch(concept_ids, *, query_metadata, **_kwargs):
+        ordered_ids = list(concept_ids)
+        batch_calls.append(ordered_ids)
+        query_metadata["relation_query_truncated"] = True
+        return {
+            ordered_ids[0]: [
+                {
+                    "text": query,
+                    "lang": "en-NZ",
+                    "predicate": "hasName",
+                    "context": {"name_type": "NL"},
+                }
+            ]
+        }
+
+    def _complete_single(concept_id, *, predicate=None, limit=50, **_kwargs):
+        single_calls.append((concept_id, predicate, limit))
+        return [
+            {
+                "text": query,
+                "lang": "en-NZ",
+                "predicate": "hasName",
+                "context": {"name_type": "NL"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        _truncated_batch,
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concept",
+        _complete_single,
+    )
+
+    result = resolve_concept_by_name(
+        name=query,
+        match_code_strings=False,
+    )
+
+    assert result["status"] == "ambiguous"
+    assert {
+        candidate["concept_id"] for candidate in result["candidates"]
+    } == set(candidate_ids)
+    assert batch_calls == [sorted(candidate_ids)]
+    assert single_calls == [
+        (concept_id, "hasName", 200) for concept_id in sorted(candidate_ids)
+    ]
+
+
+def test_resolve_concept_by_name_bounds_each_stage_and_filters_before_fallback(
+    monkeypatch,
+) -> None:
+    private_concept_id = "#V#private_bounded_candidate"
+    public_concept_id = "#V#public_bounded_candidate"
+    query = "Bounded accessible match"
+    search_calls: list[tuple[str, dict[str, object]]] = []
+    access_calls: list[set[str]] = []
+
+    def _search(query_text, **kwargs):
+        search_calls.append((query_text, dict(kwargs)))
+        if kwargs.get("exact") or kwargs.get("prefix"):
+            return {private_concept_id}
+        return {public_concept_id}
+
+    def _filter_accessible(candidate_ids):
+        candidate_set = set(candidate_ids)
+        access_calls.append(candidate_set)
+        return candidate_set.intersection({public_concept_id})
+
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        _search,
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        _filter_accessible,
+    )
+    monkeypatch.setattr(
+        concept_resolution_service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": public_concept_id, "relationships": {}}
+        ],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        lambda concept_ids, **_kwargs: {
+            concept_id: [
+                {
+                    "text": query,
+                    "lang": "en-NZ",
+                    "predicate": "hasName",
+                    "context": {"name_type": "NL"},
+                }
+            ]
+            for concept_id in concept_ids
+        },
+    )
+
+    result = resolve_concept_by_name(
+        name=query,
+        match_code_strings=False,
+        max_results=7,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["resolved_concept_id"] == public_concept_id
+    assert search_calls == [
+        (
+            query,
+            {
+                "exact": True,
+                "result_limit": 7,
+                "allow_fallback_scan": False,
+            },
+        ),
+        (query, {"prefix": True, "result_limit": 7}),
+        (query, {"result_limit": 7}),
+    ]
+    assert access_calls == [
+        {private_concept_id},
+        {private_concept_id},
+        {public_concept_id},
+    ]
+
+
 def test_resolve_concept_by_name_honours_instance_of_filter():
     if TextValuesRepository.db() is None:
         pytest.skip("MongoDB not configured for this test run")
@@ -235,15 +458,18 @@ def test_resolve_concept_by_name_audit_counts_only_actor_accessible_candidates(
     )
     monkeypatch.setattr(
         concept_resolution_service,
-        "get_texts_for_concept",
-        lambda *_args, **_kwargs: [
-            {
-                "text": private_name,
-                "lang": "en-NZ",
-                "predicate": "hasName",
-                "context": {"name_type": "NL"},
-            }
-        ],
+        "get_texts_for_concepts",
+        lambda concept_ids, **_kwargs: {
+            concept_id: [
+                {
+                    "text": private_name,
+                    "lang": "en-NZ",
+                    "predicate": "hasName",
+                    "context": {"name_type": "NL"},
+                }
+            ]
+            for concept_id in concept_ids
+        },
     )
     monkeypatch.setattr(
         concept_resolution_service.TextRelationsRepository,

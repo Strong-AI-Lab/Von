@@ -43,6 +43,23 @@ from src.backend.services.adaptive_turn_service import (
 from src.backend.services.turn_evidence_store import TrustedTurnScope
 
 
+@pytest.fixture(autouse=True)
+def _acknowledge_effect_observation_journal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import turn_execution_record_service
+
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "record_effect_observation_phase",
+        lambda **kwargs: {
+            "updated": True,
+            "duplicate": False,
+            "phase": kwargs.get("phase"),
+        },
+    )
+
+
 class _SequenceClient:
     def __init__(self, *responses: Any) -> None:
         self.responses = list(responses)
@@ -208,6 +225,7 @@ def _effect_gateway(
     *,
     write_timeout_sec: float = 1.0,
     effect_output_schema: Schema | None = None,
+    effect_admission_window_sec: float | None = None,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -231,6 +249,7 @@ def _effect_gateway(
                 output_schema=effect_output_schema,
                 category="write",
                 ordinary_turn_effect=True,
+                effect_admission_window_sec=effect_admission_window_sec,
                 ordinary_turn_mutation_subject_argument=subject_argument,
                 ordinary_turn_trusted_argument_bindings=(
                     {
@@ -1031,15 +1050,16 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
             "created_ids": ["#V#late_real_concept"],
         }
 
-    def append_observation(**kwargs: Any) -> dict[str, Any]:
+    def persist_phase(**kwargs: Any) -> dict[str, Any]:
         persisted.append(dict(kwargs))
-        observation_persisted.set()
+        if kwargs.get("phase") == "late_terminal":
+            observation_persisted.set()
         return {"updated": True}
 
     monkeypatch.setattr(
         turn_execution_record_service,
-        "append_late_effect_observation",
-        append_observation,
+        "record_effect_observation_phase",
+        persist_phase,
     )
     client = _SequenceClient(
         LLMResponse(
@@ -1080,8 +1100,11 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
 
     release_handler.set()
     assert observation_persisted.wait(timeout=1.0)
-    assert len(persisted) == 1
-    durable = persisted[0]
+    late_phases = [
+        item for item in persisted if item.get("phase") == "late_terminal"
+    ]
+    assert len(late_phases) == 1
+    durable = late_phases[0]
     assert durable["request_id"] == "late-effect-request"
     assert durable["effect_id"] == result.tool_invocations[0]["effect_id"]
     assert durable["observation"]["effect_status"] == "succeeded"
@@ -1090,9 +1113,7 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
 
 
-def test_effect_is_not_started_without_its_configured_execution_window() -> None:
-    started = time.monotonic()
-    clock = _ManualClock(started)
+def test_effect_is_not_started_without_its_minimum_admission_window() -> None:
     invoked: list[str] = []
 
     def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1103,39 +1124,32 @@ def test_effect_is_not_started_without_its_configured_execution_window() -> None
             "changed": True,
         }
 
-    client = _TimedSequenceClient(
-        clock,
-        (
-            started + 7.5,
-            LLMResponse(
-                text_response="",
-                tool_calls=[
-                    ToolCall(
-                        tool_name="turn_invoke_capability",
-                        call_id="effect-with-clipped-window",
-                        payload={
-                            "name": "create_concepts",
-                            "arguments": {
-                                "concepts": [{"name": "Must not start late"}]
-                            },
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="effect-with-clipped-window",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "Must not start late"}]
                         },
-                    )
-                ],
-            ),
-        ),
-        (
-            started + 7.6,
-            LLMResponse(
-                text_response=(
-                    "The write was not started because its full bounded window "
-                    "was no longer available."
+                    },
                 )
-            ),
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "The write was not started because its full bounded window "
+                "was no longer available."
+            )
         ),
     )
 
     result = execute_adaptive_turn(
-        gateway=_effect_gateway(handler, write_timeout_sec=1.0),
+        gateway=_effect_gateway(handler, write_timeout_sec=0.2),
         prompt="Represent this concept.",
         context=[],
         llm_client=client,
@@ -1144,9 +1158,8 @@ def test_effect_is_not_started_without_its_configured_execution_window() -> None
         user_concept_id="#V#person",
         org_concept_id="#V#org",
         turn_id="effect-window-admission",
-        turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=2,
-        clock=clock,
+        turn_budget_seconds=0.2,
+        final_synthesis_reserve_seconds=0.15,
     )
 
     assert invoked == []
@@ -1157,6 +1170,135 @@ def test_effect_is_not_started_without_its_configured_execution_window() -> None
         result.tool_invocations[0]["evidence"]["preview"]
     )
     assert "not_started" in result.tool_invocations[0]["evidence"]["preview"]
+
+
+def test_per_method_minimum_admits_sequential_effects_below_hard_cap() -> None:
+    invoked: list[str] = []
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(name)
+        time.sleep(0.015)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="first-late-window-effect",
+                    payload={
+                        "name": "upsert_text_relation",
+                        "arguments": {"concept_id": "#V#person"},
+                    },
+                ),
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="second-late-window-effect",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {"source_id": "#V#person"},
+                    },
+                ),
+            ],
+        ),
+        LLMResponse(text_response="Both bounded effects completed."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            handler,
+            write_timeout_sec=0.2,
+            effect_admission_window_sec=0.01,
+        ),
+        prompt="Apply both bounded effects.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="sequential-effect-admission",
+        turn_budget_seconds=0.2,
+        final_synthesis_reserve_seconds=0.12,
+    )
+
+    assert invoked == ["upsert_text_relation", "add_relationship"]
+    assert [item["effect_status"] for item in result.tool_invocations] == [
+        "succeeded",
+        "succeeded",
+    ]
+
+
+def test_effect_is_not_dispatched_when_durable_intent_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import turn_execution_record_service
+
+    invoked: list[str] = []
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(name)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+        }
+
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "record_effect_observation_phase",
+        lambda **_kwargs: {
+            "updated": False,
+            "duplicate": False,
+            "reason": "collection_unavailable",
+        },
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="effect-without-durable-intent",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "Must not be dispatched"}]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "The effect was not started because its durable intent could "
+                "not be recorded."
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler),
+        prompt="Represent this concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="effect-intent-persistence-failure",
+    )
+
+    assert invoked == []
+    assert result.tool_invocations[0]["effect_status"] == "failed"
+    preview = result.tool_invocations[0]["evidence"]["preview"]
+    assert "effect_observation_unavailable" in preview
+    assert "not_started" in preview
 
 
 @pytest.mark.parametrize(
