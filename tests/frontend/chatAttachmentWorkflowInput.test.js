@@ -45,6 +45,11 @@ describe('chat attachment workflow input binding', () => {
             </div>
             <button id="sendButton"></button>
             <textarea id="promptInput"></textarea>
+            <div id="chatAttachmentStatus" class="chat-attachment-status hidden">
+                <span id="uploadFileStatus" class="upload-file-status"></span>
+                <span id="pendingAttachmentStatus" class="pending-attachment-status hidden"></span>
+            </div>
+            <button id="uploadFileButton">Upload File</button>
             <input type="checkbox" id="annotationToggle" />
         `;
 
@@ -130,13 +135,20 @@ describe('chat attachment workflow input binding', () => {
                 type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             }
         );
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'Represent the PhD students and supervision information.';
         await __testOnly_uploadFilesToVon([uploadedFile]);
 
-        const promptInput = document.getElementById('promptInput');
-        expect(promptInput.value).toContain('Attached file uploaded.');
+        expect(promptInput.value).toBe(
+            'Represent the PhD students and supervision information.'
+        );
         expect(promptInput.value).not.toContain('supervision.xlsx');
         expect(promptInput.value).not.toContain(fileCopyConceptId);
-        promptInput.value += '\nRepresent the PhD students and supervision information.';
+        const pendingAttachmentStatus = document.getElementById(
+            'pendingAttachmentStatus'
+        );
+        expect(pendingAttachmentStatus.classList.contains('hidden')).toBe(false);
+        expect(pendingAttachmentStatus.textContent).toContain('supervision.xlsx');
 
         await sendMessage();
 
@@ -146,12 +158,262 @@ describe('chat attachment workflow input binding', () => {
         });
         expect(generateBodies[0].prompt).not.toContain(fileCopyConceptId);
         expect(generateBodies[0].prompt).not.toContain('supervision.xlsx');
+        expect(pendingAttachmentStatus.classList.contains('hidden')).toBe(true);
 
         promptInput.value = 'A separate follow-up without an attachment.';
         await sendMessage();
 
         expect(generateBodies).toHaveLength(2);
         expect(generateBodies[1]).not.toHaveProperty('workflow_inputs');
+    }, 15000);
+
+    test('a slow upload exposes progress and coalesces repeated attachment actions', async () => {
+        const { __testOnly_uploadFilesToVon } = require(chatTabModulePath);
+        const fileCopyConceptId = '#V#uploaded_file_copy_slow_guard_test';
+        let resolveUpload;
+        let uploadFetchCount = 0;
+        const uploadResponse = new Promise((resolve) => {
+            resolveUpload = resolve;
+        });
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                uploadFetchCount += 1;
+                return uploadResponse;
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const uploadedFile = new File(
+            ['candidate,supervisor\nExample,Professor Example\n'],
+            'slow-supervision.xlsx',
+            {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                lastModified: 1785167279463
+            }
+        );
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'Keep this draft exactly as written.';
+
+        const firstUpload = __testOnly_uploadFilesToVon([uploadedFile]);
+        await Promise.resolve();
+        const repeatedUpload = __testOnly_uploadFilesToVon([uploadedFile]);
+
+        expect(repeatedUpload).toBe(firstUpload);
+        expect(uploadFetchCount).toBe(1);
+        expect(promptInput.value).toBe('Keep this draft exactly as written.');
+        expect(document.getElementById('chatAttachmentStatus').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('uploadFileStatus').textContent).toContain(
+            'already in progress'
+        );
+        expect(document.getElementById('uploadFileButton').disabled).toBe(true);
+
+        resolveUpload({
+            ok: true,
+            json: async () => ({
+                success: true,
+                uploaded: {
+                    concept_id: fileCopyConceptId,
+                    type_concept_id: '#V#computer_file_copy'
+                },
+                storage: {
+                    backend: 'test',
+                    key: 'uploads/test/slow-supervision.xlsx'
+                },
+                chat_history_recorded: true
+            })
+        });
+        await Promise.all([firstUpload, repeatedUpload]);
+        await Promise.resolve();
+
+        expect(uploadFetchCount).toBe(1);
+        expect(promptInput.value).toBe('Keep this draft exactly as written.');
+        expect(document.getElementById('uploadFileButton').disabled).toBe(false);
+        expect(document.getElementById('pendingAttachmentStatus').textContent).toContain(
+            'slow-supervision.xlsx'
+        );
+        const confirmationCount = (
+            document.getElementById('scrollableField').textContent.match(
+                /File uploaded and registered as/g
+            ) || []
+        ).length;
+        expect(confirmationCount).toBe(1);
+    }, 15000);
+
+    test('uploads independently in two conversations without discarding either file', async () => {
+        const {
+            __testOnly_setActiveChatSession,
+            __testOnly_uploadFilesToVon
+        } = require(chatTabModulePath);
+        const deferredUploads = new Map();
+        const uploadFileNames = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                const fileName = options.body.get('file').name;
+                uploadFileNames.push(fileName);
+                return new Promise((resolve) => {
+                    deferredUploads.set(fileName, resolve);
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const fileA = new File(['A'], 'conversation-a.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+        const fileB = new File(['B'], 'conversation-b.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+
+        const uploadA = __testOnly_uploadFilesToVon([fileA]);
+        await Promise.resolve();
+        __testOnly_setActiveChatSession('conversation-b', 'Conversation B');
+        expect(document.getElementById('uploadFileButton').disabled).toBe(false);
+
+        const uploadB = __testOnly_uploadFilesToVon([fileB]);
+        await Promise.resolve();
+
+        expect(uploadB).not.toBe(uploadA);
+        expect(uploadFileNames).toEqual([
+            'conversation-a.xlsx',
+            'conversation-b.xlsx'
+        ]);
+
+        deferredUploads.get('conversation-b.xlsx')({
+            ok: true,
+            json: async () => ({
+                success: true,
+                uploaded: {
+                    concept_id: '#V#uploaded_file_copy_conversation_b',
+                    type_concept_id: '#V#computer_file_copy'
+                },
+                storage: {
+                    backend: 'test',
+                    key: 'uploads/test/conversation-b.xlsx'
+                },
+                chat_history_recorded: true
+            })
+        });
+        await uploadB;
+        expect(document.getElementById('pendingAttachmentStatus').textContent).toContain(
+            'conversation-b.xlsx'
+        );
+
+        deferredUploads.get('conversation-a.xlsx')({
+            ok: true,
+            json: async () => ({
+                success: true,
+                uploaded: {
+                    concept_id: '#V#uploaded_file_copy_conversation_a',
+                    type_concept_id: '#V#computer_file_copy'
+                },
+                storage: {
+                    backend: 'test',
+                    key: 'uploads/test/conversation-a.xlsx'
+                },
+                chat_history_recorded: true
+            })
+        });
+        await uploadA;
+
+        expect(document.getElementById('pendingAttachmentStatus').textContent).toContain(
+            'conversation-b.xlsx'
+        );
+        __testOnly_setActiveChatSession('attachment-session', 'Attachment test');
+        expect(document.getElementById('pendingAttachmentStatus').textContent).toContain(
+            'conversation-a.xlsx'
+        );
+    }, 15000);
+
+    test('does not leak upload progress or completion into another conversation', async () => {
+        const {
+            __testOnly_setActiveChatSession,
+            __testOnly_uploadFilesToVon
+        } = require(chatTabModulePath);
+        let resolveUpload;
+        const uploadResponse = new Promise((resolve) => {
+            resolveUpload = resolve;
+        });
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                return uploadResponse;
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const uploadedFile = new File(['A'], 'stay-in-a.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+        const upload = __testOnly_uploadFilesToVon([uploadedFile]);
+        await Promise.resolve();
+        expect(document.getElementById('uploadFileStatus').textContent).toContain(
+            'stay-in-a.xlsx'
+        );
+
+        __testOnly_setActiveChatSession('conversation-b', 'Conversation B');
+        document.getElementById('scrollableField').textContent = '';
+        expect(document.getElementById('uploadFileStatus').textContent).toBe('');
+        expect(document.getElementById('uploadFileButton').disabled).toBe(false);
+
+        resolveUpload({
+            ok: true,
+            json: async () => ({
+                success: true,
+                uploaded: {
+                    concept_id: '#V#uploaded_file_copy_stay_in_a',
+                    type_concept_id: '#V#computer_file_copy'
+                },
+                storage: {
+                    backend: 'test',
+                    key: 'uploads/test/stay-in-a.xlsx'
+                },
+                chat_history_recorded: true
+            })
+        });
+        await upload;
+
+        expect(document.getElementById('uploadFileStatus').textContent).toBe('');
+        expect(document.getElementById('pendingAttachmentStatus').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('scrollableField').textContent).not.toContain(
+            'File uploaded and registered as'
+        );
+
+        __testOnly_setActiveChatSession('attachment-session', 'Attachment test');
+        expect(document.getElementById('uploadFileStatus').textContent).toContain(
+            'Upload complete'
+        );
+        expect(document.getElementById('pendingAttachmentStatus').textContent).toContain(
+            'stay-in-a.xlsx'
+        );
     }, 15000);
 
     test('a rejected generate request retains the attachment for retry', async () => {
@@ -220,11 +482,17 @@ describe('chat attachment workflow input binding', () => {
         await __testOnly_uploadFilesToVon([uploadedFile]);
 
         const promptInput = document.getElementById('promptInput');
-        promptInput.value += '\nRepresent this spreadsheet.';
+        const pendingAttachmentStatus = document.getElementById(
+            'pendingAttachmentStatus'
+        );
+        promptInput.value = 'Represent this spreadsheet.';
         await sendMessage();
+        expect(pendingAttachmentStatus.classList.contains('hidden')).toBe(false);
+        expect(pendingAttachmentStatus.textContent).toContain('retry.xlsx');
 
         promptInput.value = 'Retry the spreadsheet representation.';
         await sendMessage();
+        expect(pendingAttachmentStatus.classList.contains('hidden')).toBe(true);
 
         expect(generateBodies).toHaveLength(2);
         expect(generateBodies[0].workflow_inputs).toEqual({
@@ -295,11 +563,18 @@ describe('chat attachment workflow input binding', () => {
         await __testOnly_uploadFilesToVon([uploadedFile]);
 
         const promptInput = document.getElementById('promptInput');
+        const pendingAttachmentStatus = document.getElementById(
+            'pendingAttachmentStatus'
+        );
+        expect(pendingAttachmentStatus.textContent).toContain('session.xlsx');
         __testOnly_setActiveChatSession('unrelated-session', 'Unrelated');
+        expect(pendingAttachmentStatus.classList.contains('hidden')).toBe(true);
         promptInput.value = 'An unrelated question.';
         await sendMessage();
 
         __testOnly_setActiveChatSession('attachment-session', 'Attachment test');
+        expect(pendingAttachmentStatus.classList.contains('hidden')).toBe(false);
+        expect(pendingAttachmentStatus.textContent).toContain('session.xlsx');
         promptInput.value = 'Represent the uploaded spreadsheet.';
         await sendMessage();
 

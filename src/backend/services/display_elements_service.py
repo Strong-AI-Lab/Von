@@ -95,6 +95,7 @@ _RELATION_EXTENT_ARG1_TOKENS = frozenset({"arg1", "subject", "left", "source"})
 _RELATION_EXTENT_PREDICATE_TOKENS = frozenset({"predicate", "relation"})
 _RELATION_EXTENT_ARG2_TOKENS = frozenset({"arg2", "object", "right", "target"})
 _TABLE_COLUMN_VISIBILITY_DEFAULT_MODES = frozenset({"compact", "full"})
+_TABLE_PRESENTATION_MODES = frozenset({"augment", "inline_primary"})
 
 
 def _normalise_text(value: object) -> str | None:
@@ -482,7 +483,12 @@ def extract_markdown_tables(text: str | None) -> list[dict[str, Any]]:
         return []
 
     # Avoid treating pipe-delimited content inside code fences as table rows.
-    sanitised = _FENCED_CODE_BLOCK_PATTERN.sub("", text)
+    # Preserve newline positions so source spans continue to identify the
+    # untouched screen text even when an earlier code fence is removed.
+    sanitised = _FENCED_CODE_BLOCK_PATTERN.sub(
+        lambda match: "\n" * match.group(0).count("\n"),
+        text,
+    )
     lines = sanitised.splitlines()
     tables: list[dict[str, Any]] = []
 
@@ -2007,6 +2013,172 @@ _DISPLAY_ELEMENT_PAYLOAD_VALIDATORS: dict[str, Callable[..., None]] = {
 }
 
 
+def _validate_display_element_presentation(
+    *,
+    element: Mapping[str, Any],
+    element_type: object,
+    label: str,
+    errors: list[str],
+) -> None:
+    presentation = element.get("presentation")
+    if presentation is None:
+        return
+    if element_type != "table":
+        errors.append(f"{label}.presentation is currently supported only for table elements")
+        return
+    if not isinstance(presentation, Mapping):
+        errors.append(f"{label}.presentation must be a mapping when provided")
+        return
+
+    mode = presentation.get("mode")
+    if not isinstance(mode, str) or mode.strip() not in _TABLE_PRESENTATION_MODES:
+        errors.append(
+            f"{label}.presentation.mode must be one of {sorted(_TABLE_PRESENTATION_MODES)}"
+        )
+        return
+
+    if mode.strip() != "inline_primary":
+        return
+
+    source_element_id = presentation.get("source_element_id")
+    if not isinstance(source_element_id, str) or not source_element_id.strip():
+        errors.append(
+            f"{label}.presentation.source_element_id must be a non-empty string for inline_primary"
+        )
+
+    source_span = presentation.get("source_span")
+    if not isinstance(source_span, Mapping):
+        errors.append(
+            f"{label}.presentation.source_span must be a mapping for inline_primary"
+        )
+        return
+
+    start_line = source_span.get("start_line")
+    end_line = source_span.get("end_line")
+    if (
+        isinstance(start_line, bool)
+        or not isinstance(start_line, int)
+        or start_line < 1
+    ):
+        errors.append(
+            f"{label}.presentation.source_span.start_line must be a positive integer"
+        )
+    if (
+        isinstance(end_line, bool)
+        or not isinstance(end_line, int)
+        or end_line < 1
+    ):
+        errors.append(
+            f"{label}.presentation.source_span.end_line must be a positive integer"
+        )
+    if (
+        isinstance(start_line, int)
+        and not isinstance(start_line, bool)
+        and isinstance(end_line, int)
+        and not isinstance(end_line, bool)
+        and end_line < start_line
+    ):
+        errors.append(
+            f"{label}.presentation.source_span.end_line must not precede start_line"
+        )
+
+
+def _validate_inline_primary_table_relationships(
+    *,
+    elements: Sequence[object],
+    errors: list[str],
+) -> None:
+    elements_by_id: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
+    for index, element in enumerate(elements):
+        if not isinstance(element, Mapping):
+            continue
+        element_id = element.get("element_id")
+        if not isinstance(element_id, str) or not element_id.strip():
+            continue
+        elements_by_id.setdefault(element_id.strip(), []).append((index, element))
+
+    for index, element in enumerate(elements):
+        if not isinstance(element, Mapping) or element.get("element_type") != "table":
+            continue
+        presentation = element.get("presentation")
+        if (
+            not isinstance(presentation, Mapping)
+            or presentation.get("mode") != "inline_primary"
+        ):
+            continue
+
+        label = f"elements[{index}].presentation"
+        source_element_id = presentation.get("source_element_id")
+        if not isinstance(source_element_id, str) or not source_element_id.strip():
+            continue
+
+        source_matches = elements_by_id.get(source_element_id.strip(), [])
+        if len(source_matches) != 1:
+            errors.append(
+                f"{label}.source_element_id must identify exactly one element in the contract"
+            )
+            continue
+
+        _, source_element = source_matches[0]
+        if (
+            source_element.get("element_type") != "text_block"
+            or source_element.get("channel") != "screen"
+        ):
+            errors.append(
+                f"{label}.source_element_id must reference a screen text_block element"
+            )
+            continue
+
+        source_payload = source_element.get("payload")
+        source_text = (
+            source_payload.get("text")
+            if isinstance(source_payload, Mapping)
+            else None
+        )
+        if not isinstance(source_text, str) or not source_text.strip():
+            errors.append(
+                f"{label}.source_element_id must reference a non-empty text payload"
+            )
+            continue
+
+        source_span = presentation.get("source_span")
+        if not isinstance(source_span, Mapping):
+            continue
+        start_line = source_span.get("start_line")
+        end_line = source_span.get("end_line")
+        if (
+            isinstance(start_line, bool)
+            or not isinstance(start_line, int)
+            or start_line < 1
+            or isinstance(end_line, bool)
+            or not isinstance(end_line, int)
+            or end_line < start_line
+        ):
+            continue
+
+        source_line_count = len(source_text.splitlines())
+        if end_line > source_line_count:
+            errors.append(
+                f"{label}.source_span must fall within the referenced text payload"
+            )
+            continue
+
+        markdown_table_spans = {
+            (
+                candidate_span.get("start_line"),
+                candidate_span.get("end_line"),
+            )
+            for table_payload in extract_markdown_tables(source_text)
+            if isinstance(table_payload, Mapping)
+            for candidate_span in [table_payload.get("source_span")]
+            if isinstance(candidate_span, Mapping)
+        }
+        if (start_line, end_line) not in markdown_table_spans:
+            errors.append(
+                f"{label}.source_span must identify a Markdown table in the referenced text"
+            )
+
+
 def validate_turn_display_elements(
     contract: Mapping[str, Any] | None,
 ) -> tuple[bool, list[str]]:
@@ -2059,6 +2231,13 @@ def validate_turn_display_elements(
         if not isinstance(provenance, Mapping):
             errors.append(f"{label}.provenance must be a mapping")
 
+        _validate_display_element_presentation(
+            element=element,
+            element_type=element_type,
+            label=label,
+            errors=errors,
+        )
+
         if element_type in OPTIONAL_PAYLOAD_TITLE_ELEMENT_TYPES:
             _validate_optional_payload_title(
                 payload=payload,
@@ -2074,6 +2253,11 @@ def validate_turn_display_elements(
                 errors=errors,
             )
             continue
+
+    _validate_inline_primary_table_relationships(
+        elements=elements,
+        errors=errors,
+    )
 
     return len(errors) == 0, errors
 
@@ -2137,6 +2321,9 @@ def _normalise_supplied_screen_tables(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        presentation = metadata.get("presentation")
+        if not isinstance(presentation, Mapping):
+            presentation = {"mode": "augment"}
         canonical_payload = _with_default_table_column_visibility(
             _with_optional_payload_title(payload, metadata=metadata)
         )
@@ -2156,6 +2343,7 @@ def _normalise_supplied_screen_tables(
                         "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
+                        "presentation": dict(presentation),
                     }
                 ],
                 "reason_codes": [],
@@ -2173,6 +2361,7 @@ def _normalise_supplied_screen_tables(
                 "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
+                "presentation": dict(presentation),
             }
         )
 
@@ -3261,6 +3450,11 @@ def _build_structured_screen_specs(
                 "payload": spec.get("payload") or {},
                 "constraints": spec.get("constraints") or dict(default_constraints),
                 "provenance": provenance,
+                "presentation": (
+                    dict(spec["presentation"])
+                    if isinstance(spec.get("presentation"), Mapping)
+                    else None
+                ),
             }
         )
     return structured_specs
@@ -3298,18 +3492,20 @@ def _emit_structured_screen_elements(
             next_default_order += 1
 
         element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": element_type,
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
+        element = {
+            "element_id": element_id,
+            "element_type": element_type,
+            "channel": "screen",
+            "order": int(order),
+            "intent": str(spec["intent"]),
+            "payload": dict(spec["payload"]),
+            "constraints": dict(spec["constraints"]),
+            "provenance": dict(spec["provenance"]),
+        }
+        presentation = spec.get("presentation")
+        if isinstance(presentation, Mapping):
+            element["presentation"] = dict(presentation)
+        elements.append(element)
 
 
 def build_turn_display_elements(
@@ -3549,6 +3745,7 @@ def build_turn_display_elements(
 
     markdown_tables = extract_markdown_tables(effective_screen)
     for index, table_payload in enumerate(markdown_tables, start=1):
+        source_span = table_payload.get("source_span")
         table_specs.append(
             {
                 "element_id": f"screen_table_{index}",
@@ -3564,6 +3761,15 @@ def build_turn_display_elements(
                     "source": "screen_markdown_table",
                     "table_index": index,
                     "required_by_user_prompt": False,
+                },
+                "presentation": {
+                    "mode": "inline_primary",
+                    "source_element_id": "screen_text",
+                    "source_span": (
+                        dict(source_span)
+                        if isinstance(source_span, Mapping)
+                        else {}
+                    ),
                 },
             }
         )
