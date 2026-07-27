@@ -141,6 +141,11 @@
       <!-- Textarea for user prompt -->
       <textarea id="promptInput" rows="1" class="prompt-input" placeholder="Talk with Von here..."></textarea>
 
+      <div id="chatAttachmentStatus" class="chat-attachment-status hidden">
+        <span id="uploadFileStatus" class="upload-file-status" aria-live="polite"></span>
+        <span id="pendingAttachmentStatus" class="pending-attachment-status hidden" aria-live="polite"></span>
+      </div>
+
       <div class="chat-composer-actions">
         <div class="chat-composer-primary-actions">
           <button id="sendButton" class="btn btn-primary">Send Prompt</button>
@@ -158,7 +163,6 @@
 
             <button id="uploadFileButton" class="btn btn-secondary" type="button"
               title="Upload a file, drag and drop onto the conversation, or paste an image">Upload File</button>
-            <span id="uploadFileStatus" class="upload-file-status" aria-live="polite"></span>
             <input id="uploadFileInput" class="visually-hidden" type="file" aria-label="Upload file" />
 
             {% if expert_tabs_enabled %}

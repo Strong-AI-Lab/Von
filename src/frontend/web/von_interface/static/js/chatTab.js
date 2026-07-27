@@ -12207,6 +12207,7 @@ const RELATION_TRUTH_STATE_MAX_ASSERTIONS_PER_GROUP = 200;
 const RELATION_TRUTH_STATE_FALLBACK_MAX_LINES = 300;
 const RELATION_TRUTH_STATE_FALLBACK_MAX_ASSERTIONS = 120;
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
+const TABLE_PRESENTATION_MODES = new Set(['augment', 'inline_primary']);
 
 // Keep heading resolution centralised so new display element families stay consistent.
 function normaliseOptionalDisplayElementTitle(value) {
@@ -12224,6 +12225,71 @@ function resolveDisplayElementSectionTitle(explicitTitle, fallbackLabel, index, 
     const safeIndex = Number.isInteger(index) && index >= 0 ? index : 0;
     const multipleElements = Number.isInteger(totalElements) && totalElements > 1;
     return multipleElements ? `${fallbackLabel} ${safeIndex + 1}` : fallbackLabel;
+}
+
+function normaliseTableSourceSpan(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const startLine = Number(value.start_line);
+    const endLine = Number(value.end_line);
+    if (
+        !Number.isInteger(startLine)
+        || !Number.isInteger(endLine)
+        || startLine < 1
+        || endLine < startLine
+    ) {
+        return null;
+    }
+    return {
+        start_line: startLine,
+        end_line: endLine
+    };
+}
+
+function normaliseTablePresentation(element, payload) {
+    const presentation = (
+        element?.presentation
+        && typeof element.presentation === 'object'
+    ) ? element.presentation : null;
+    const provenance = (
+        element?.provenance
+        && typeof element.provenance === 'object'
+    ) ? element.provenance : null;
+    const provenanceSource = typeof provenance?.source === 'string'
+        ? provenance.source.trim()
+        : '';
+    const explicitMode = typeof presentation?.mode === 'string'
+        ? presentation.mode.trim()
+        : '';
+    const mode = TABLE_PRESENTATION_MODES.has(explicitMode)
+        ? explicitMode
+        : (
+            provenanceSource === 'screen_markdown_table'
+                ? 'inline_primary'
+                : 'augment'
+        );
+    const sourceSpan = normaliseTableSourceSpan(
+        presentation?.source_span ?? payload?.source_span
+    );
+    const sourceElementId = typeof presentation?.source_element_id === 'string'
+        ? presentation.source_element_id.trim()
+        : '';
+
+    if (mode === 'inline_primary' && !sourceSpan) {
+        return {
+            mode: 'augment',
+            source_element_id: null,
+            source_span: null
+        };
+    }
+    return {
+        mode,
+        source_element_id: sourceElementId || (
+            mode === 'inline_primary' ? 'screen_text' : null
+        ),
+        source_span: sourceSpan
+    };
 }
 
 function normaliseTableSortMetadata(value, columns) {
@@ -12518,6 +12584,7 @@ function normaliseTableDisplayElement(element) {
     const sort = normaliseTableSortMetadata(payload.sort, columns);
     const pagination = normaliseTablePaginationMetadata(payload.pagination, rows.length);
     const columnVisibility = normaliseTableColumnVisibilityMetadata(payload.column_visibility, columns);
+    const presentation = normaliseTablePresentation(element, payload);
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
@@ -12526,7 +12593,8 @@ function normaliseTableDisplayElement(element) {
         rows,
         sort,
         pagination,
-        column_visibility: columnVisibility
+        column_visibility: columnVisibility,
+        presentation
     };
 }
 
@@ -12545,6 +12613,98 @@ function resolveTableDisplayElements(debugData) {
         tables.push(tableElement);
     }
     return tables;
+}
+
+function partitionTableDisplayElementsByPresentation(container, debugData, tableElements) {
+    const inlinePrimaryCandidates = tableElements.filter(
+        (tableElement) => tableElement?.presentation?.mode === 'inline_primary'
+    );
+    if (!inlinePrimaryCandidates.length) {
+        return {
+            inlinePrimaryTableElements: [],
+            appendedTableElements: tableElements
+        };
+    }
+
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    const contractElements = Array.isArray(contract?.elements) ? contract.elements : [];
+    const sourceElementsById = new Map();
+    contractElements.forEach((element) => {
+        const elementId = typeof element?.element_id === 'string'
+            ? element.element_id.trim()
+            : '';
+        if (!elementId) {
+            return;
+        }
+        const existing = sourceElementsById.get(elementId) || [];
+        existing.push(element);
+        sourceElementsById.set(elementId, existing);
+    });
+
+    const originalText = typeof container?.dataset?.originalText === 'string'
+        ? container.dataset.originalText
+        : null;
+    const claimedSourceSpans = new Set();
+    const relationshipsAreValid = originalText !== null && inlinePrimaryCandidates.every(
+        (tableElement) => {
+            const sourceElementId = tableElement?.presentation?.source_element_id;
+            const sourceMatches = sourceElementsById.get(sourceElementId) || [];
+            if (sourceMatches.length !== 1) {
+                return false;
+            }
+            const sourceElement = sourceMatches[0];
+            const sourcePayload = (
+                sourceElement?.payload
+                && typeof sourceElement.payload === 'object'
+            ) ? sourceElement.payload : null;
+            const sourceText = typeof sourcePayload?.text === 'string'
+                ? sourcePayload.text
+                : null;
+            if (
+                sourceElement?.element_type !== 'text_block'
+                || sourceElement?.channel !== 'screen'
+                || sourceText !== originalText
+            ) {
+                return false;
+            }
+
+            const sourceSpan = tableElement?.presentation?.source_span;
+            const sourceLineCount = sourceText.split(/\r?\n/).length;
+            if (!sourceSpan || sourceSpan.end_line > sourceLineCount) {
+                return false;
+            }
+            const sourceSpanKey = [
+                sourceElementId,
+                sourceSpan.start_line,
+                sourceSpan.end_line
+            ].join(':');
+            if (claimedSourceSpans.has(sourceSpanKey)) {
+                return false;
+            }
+            claimedSourceSpans.add(sourceSpanKey);
+            return true;
+        }
+    );
+
+    const renderedPrimaryTableCount = container.querySelectorAll('table').length;
+    const primaryPresentationIsComplete = (
+        relationshipsAreValid
+        && renderedPrimaryTableCount === inlinePrimaryCandidates.length
+    );
+    if (!primaryPresentationIsComplete) {
+        return {
+            inlinePrimaryTableElements: [],
+            appendedTableElements: tableElements
+        };
+    }
+
+    const inlinePrimaryIds = new Set(inlinePrimaryCandidates);
+    return {
+        inlinePrimaryTableElements: inlinePrimaryCandidates,
+        appendedTableElements: tableElements.filter(
+            (tableElement) => !inlinePrimaryIds.has(tableElement)
+        )
+    };
 }
 
 function normaliseWorkflowTaskLink(rawLink) {
@@ -15675,7 +15835,15 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         return;
     }
 
-    const tableElements = resolveTableDisplayElements(debugData);
+    const resolvedTableElements = resolveTableDisplayElements(debugData);
+    const {
+        inlinePrimaryTableElements,
+        appendedTableElements: tableElements
+    } = partitionTableDisplayElementsByPresentation(
+        container,
+        debugData,
+        resolvedTableElements
+    );
     const workflowElements = resolveWorkflowDisplayElements(debugData);
     const taskViewElements = resolveTaskViewDisplayElements(debugData);
     const kanbanElements = resolveKanbanDisplayElements(debugData);
@@ -15703,6 +15871,9 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     try {
         container.dataset.relationTruthStateSource = relationTruthStateSource;
         container.dataset.relationTripleParseCount = String(relationTripleParseCount);
+        container.dataset.inlinePrimaryTableCount = String(
+            inlinePrimaryTableElements.length
+        );
     } catch (_) {
         // Ignore dataset assignment failures.
     }
@@ -17901,13 +18072,15 @@ function formatBytesForUi(sizeBytes) {
 let uploadUiState = {
     button: null,
     statusEl: null,
-    inFlight: 0,
-    lastStatusTimeoutId: null,
+    statusRegion: null,
+    pendingAttachmentEl: null,
     defaultButtonLabel: null
 };
 
 const PENDING_FILE_COPY_SESSION_FALLBACK_KEY = '__pending_chat_session__';
 const pendingFileCopyConceptIdsBySession = new Map();
+const pendingFileCopyDisplayNamesBySession = new Map();
+const uploadStatesBySession = new Map();
 
 function normaliseTrustedUploadedFileCopyConceptId(value) {
     if (typeof value !== 'string') return null;
@@ -17925,23 +18098,103 @@ function getPendingFileCopySessionKey(sessionId = activeChatSessionId) {
     return normaliseHistorySessionId(sessionId) || PENDING_FILE_COPY_SESSION_FALLBACK_KEY;
 }
 
-function rememberPendingUploadedFileCopyConceptId(conceptId, sessionId = activeChatSessionId) {
-    const normalisedConceptId = normaliseTrustedUploadedFileCopyConceptId(conceptId);
-    if (!normalisedConceptId) return;
-    pendingFileCopyConceptIdsBySession.set(
-        getPendingFileCopySessionKey(sessionId),
-        normalisedConceptId
+function normalisePendingAttachmentDisplayName(value) {
+    if (typeof value !== 'string') return null;
+    const displayName = value.trim();
+    if (!displayName) return null;
+    return displayName.slice(0, 240);
+}
+
+function resolveUploadUiElement(stateKey, elementId) {
+    const existing = uploadUiState[stateKey];
+    if (existing && existing.isConnected !== false) {
+        return existing;
+    }
+    const resolved = document.getElementById(elementId);
+    uploadUiState[stateKey] = resolved || null;
+    return uploadUiState[stateKey];
+}
+
+function refreshAttachmentStatusRegionVisibility() {
+    const region = resolveUploadUiElement('statusRegion', 'chatAttachmentStatus');
+    if (!region) return;
+    const statusEl = resolveUploadUiElement('statusEl', 'uploadFileStatus');
+    const pendingEl = resolveUploadUiElement(
+        'pendingAttachmentEl',
+        'pendingAttachmentStatus'
+    );
+    const hasUploadStatus = !!String(statusEl?.textContent || '').trim();
+    const hasPendingAttachment = !!(
+        pendingEl
+        && !pendingEl.classList.contains('hidden')
+        && String(pendingEl.textContent || '').trim()
+    );
+    region.classList.toggle(
+        'hidden',
+        !hasUploadStatus && !hasPendingAttachment
     );
 }
 
-function takePendingUploadedFileCopyConceptId(sessionId) {
+function renderPendingAttachmentState() {
+    const el = resolveUploadUiElement(
+        'pendingAttachmentEl',
+        'pendingAttachmentStatus'
+    );
+    if (!el) return;
+
+    const sessionKey = getPendingFileCopySessionKey(activeChatSessionId);
+    const conceptId = pendingFileCopyConceptIdsBySession.get(sessionKey) || null;
+    const displayName = pendingFileCopyDisplayNamesBySession.get(sessionKey) || null;
+    if (!conceptId) {
+        el.textContent = '';
+        el.removeAttribute('title');
+        el.classList.add('hidden');
+        refreshAttachmentStatusRegionVisibility();
+        return;
+    }
+
+    el.textContent = displayName
+        ? `Attachment ready: ${displayName}`
+        : 'Attachment ready for the next prompt';
+    el.title = 'This attachment will be sent with the next accepted prompt.';
+    el.classList.remove('hidden');
+    refreshAttachmentStatusRegionVisibility();
+}
+
+function rememberPendingUploadedFileCopyConceptId(
+    conceptId,
+    sessionId = activeChatSessionId,
+    displayName = null
+) {
+    const normalisedConceptId = normaliseTrustedUploadedFileCopyConceptId(conceptId);
+    if (!normalisedConceptId) return;
+    const targetKey = getPendingFileCopySessionKey(sessionId);
+    pendingFileCopyConceptIdsBySession.set(targetKey, normalisedConceptId);
+    const normalisedDisplayName = normalisePendingAttachmentDisplayName(displayName);
+    if (normalisedDisplayName) {
+        pendingFileCopyDisplayNamesBySession.set(targetKey, normalisedDisplayName);
+    } else {
+        pendingFileCopyDisplayNamesBySession.delete(targetKey);
+    }
+    renderPendingAttachmentState();
+}
+
+function takePendingUploadedFileCopyBinding(sessionId) {
     const targetKey = getPendingFileCopySessionKey(sessionId);
     const targetConceptId = pendingFileCopyConceptIdsBySession.get(targetKey) || null;
-    if (targetConceptId) {
-        pendingFileCopyConceptIdsBySession.delete(targetKey);
-        return targetConceptId;
-    }
-    return null;
+    if (!targetConceptId) return null;
+    const displayName = pendingFileCopyDisplayNamesBySession.get(targetKey) || null;
+    pendingFileCopyConceptIdsBySession.delete(targetKey);
+    pendingFileCopyDisplayNamesBySession.delete(targetKey);
+    renderPendingAttachmentState();
+    return {
+        conceptId: targetConceptId,
+        displayName
+    };
+}
+
+function takePendingUploadedFileCopyConceptId(sessionId) {
+    return takePendingUploadedFileCopyBinding(sessionId)?.conceptId || null;
 }
 
 function restorePendingUploadedFileCopyConceptId(
@@ -17959,6 +18212,11 @@ function restorePendingUploadedFileCopyConceptId(
         return false;
     }
     pendingFileCopyConceptIdsBySession.set(targetKey, normalisedConceptId);
+    const displayName = normalisePendingAttachmentDisplayName(options.displayName);
+    if (displayName) {
+        pendingFileCopyDisplayNamesBySession.set(targetKey, displayName);
+    }
+    renderPendingAttachmentState();
     return true;
 }
 
@@ -17974,19 +18232,15 @@ function releaseRequestFileCopyBinding(request) {
     }
     request.attachmentBindingReleased = restorePendingUploadedFileCopyConceptId(
         request.pendingFileCopyConceptId,
-        request.sessionId
+        request.sessionId,
+        { displayName: request.pendingFileCopyDisplayName }
     );
     return request.attachmentBindingReleased;
 }
 
-function setUploadStatus(message, type = 'info') {
-    const el = uploadUiState.statusEl;
+function renderUploadStatus(message, type = 'info') {
+    const el = resolveUploadUiElement('statusEl', 'uploadFileStatus');
     if (!el) return;
-
-    if (uploadUiState.lastStatusTimeoutId) {
-        clearTimeout(uploadUiState.lastStatusTimeoutId);
-        uploadUiState.lastStatusTimeoutId = null;
-    }
 
     el.textContent = message || '';
     el.classList.remove('is-uploading', 'is-success', 'is-error');
@@ -17997,21 +18251,56 @@ function setUploadStatus(message, type = 'info') {
     } else if (type === 'error') {
         el.classList.add('is-error');
     }
+    refreshAttachmentStatusRegionVisibility();
 }
 
-function clearUploadStatusAfterDelay(delayMs = 5000) {
-    if (!uploadUiState.statusEl) return;
-    if (uploadUiState.lastStatusTimeoutId) {
-        clearTimeout(uploadUiState.lastStatusTimeoutId);
+function renderActiveUploadUi() {
+    const activeSessionKey = getPendingFileCopySessionKey(activeChatSessionId);
+    const activeUploadState = uploadStatesBySession.get(activeSessionKey) || null;
+    renderUploadStatus(
+        activeUploadState?.message || '',
+        activeUploadState?.tone || 'info'
+    );
+    setUploadButtonBusy(activeUploadState?.inFlight === true);
+}
+
+function setUploadStatusForState(uploadState, message, tone = 'info') {
+    if (!uploadState) return;
+    if (uploadState.clearTimerId) {
+        clearTimeout(uploadState.clearTimerId);
+        uploadState.clearTimerId = null;
     }
-    uploadUiState.lastStatusTimeoutId = window.setTimeout(() => {
-        setUploadStatus('');
-        uploadUiState.lastStatusTimeoutId = null;
+    uploadState.message = message || '';
+    uploadState.tone = tone;
+    if (
+        uploadStatesBySession.get(uploadState.sessionKey) === uploadState
+        && uploadState.sessionKey === getPendingFileCopySessionKey(activeChatSessionId)
+    ) {
+        renderActiveUploadUi();
+    }
+}
+
+function clearUploadStatusAfterDelay(uploadState, delayMs = 5000) {
+    if (!uploadState) return;
+    if (uploadState.clearTimerId) {
+        clearTimeout(uploadState.clearTimerId);
+    }
+    uploadState.clearTimerId = window.setTimeout(() => {
+        uploadState.clearTimerId = null;
+        if (uploadStatesBySession.get(uploadState.sessionKey) !== uploadState) {
+            return;
+        }
+        if (uploadState.inFlight) {
+            setUploadStatusForState(uploadState, '', 'info');
+            return;
+        }
+        uploadStatesBySession.delete(uploadState.sessionKey);
+        renderActiveUploadUi();
     }, delayMs);
 }
 
 function setUploadButtonBusy(isBusy) {
-    const btn = uploadUiState.button;
+    const btn = resolveUploadUiElement('button', 'uploadFileButton');
     if (!btn) return;
 
     if (!uploadUiState.defaultButtonLabel) {
@@ -18025,6 +18314,37 @@ function setUploadButtonBusy(isBusy) {
         btn.disabled = false;
         btn.textContent = uploadUiState.defaultButtonLabel;
     }
+}
+
+function rekeyUploadStateForSession(uploadState, sessionId) {
+    if (!uploadState) return;
+    const nextSessionId = normaliseHistorySessionId(sessionId);
+    const nextSessionKey = getPendingFileCopySessionKey(nextSessionId);
+    if (uploadState.sessionKey !== nextSessionKey) {
+        if (uploadStatesBySession.get(uploadState.sessionKey) === uploadState) {
+            uploadStatesBySession.delete(uploadState.sessionKey);
+        }
+        uploadState.sessionKey = nextSessionKey;
+        uploadStatesBySession.set(nextSessionKey, uploadState);
+    }
+    uploadState.targetSessionId = nextSessionId;
+    renderActiveUploadUi();
+}
+
+function appendUploadMessageForSession(sessionId, ...appendMessageArgs) {
+    const targetSessionId = normaliseHistorySessionId(sessionId);
+    if (
+        targetSessionId
+        && targetSessionId === normaliseHistorySessionId(activeChatSessionId)
+    ) {
+        appendMessage(...appendMessageArgs);
+        return true;
+    }
+    if (targetSessionId) {
+        invalidateSessionHistoryCache(targetSessionId);
+        refreshChatSessionTabActivityIndicators();
+    }
+    return false;
 }
 
 function isFileDragEvent(event) {
@@ -18204,7 +18524,11 @@ function buildUploadFailureDiagnosticPayload(file, error, context = {}) {
         upload_context: {
             index: Number.isFinite(context.index) ? Number(context.index) : null,
             total: Number.isFinite(context.total) ? Number(context.total) : null,
-            active_chat_session_id: activeChatSessionId || null
+            active_chat_session_id: (
+                normaliseHistorySessionId(context.targetSessionId)
+                || normaliseHistorySessionId(activeChatSessionId)
+                || null
+            )
         },
         error: {
             message: String(error?.message || error || 'Upload failed'),
@@ -18228,10 +18552,10 @@ function buildTurnDiagnosticDebugPayload(errorMessage, diagnosticPayload) {
     };
 }
 
-async function uploadFilesToVon(files) {
-    const list = Array.from(files || []).filter(Boolean);
-    if (!list.length) return;
-    let uploadTargetSessionId = normaliseHistorySessionId(activeChatSessionId);
+async function performUploadFilesToVon(list, uploadState) {
+    let uploadTargetSessionId = normaliseHistorySessionId(
+        uploadState?.targetSessionId
+    );
     if (!uploadTargetSessionId) {
         try {
             const ensuredTarget = await ensurePromptTargetChatSession();
@@ -18240,20 +18564,24 @@ async function uploadFilesToVon(files) {
             );
         } catch (error) {
             console.error('[chatTab] Unable to prepare an upload conversation:', error);
-            setUploadStatus('Unable to prepare a conversation for this upload.', 'error');
-            clearUploadStatusAfterDelay();
+            setUploadStatusForState(
+                uploadState,
+                'Unable to prepare a conversation for this upload.',
+                'error'
+            );
+            clearUploadStatusAfterDelay(uploadState);
             return;
         }
         if (!uploadTargetSessionId) {
-            setUploadStatus('Unable to prepare a conversation for this upload.', 'error');
-            clearUploadStatusAfterDelay();
+            setUploadStatusForState(
+                uploadState,
+                'Unable to prepare a conversation for this upload.',
+                'error'
+            );
+            clearUploadStatusAfterDelay(uploadState);
             return;
         }
-    }
-
-    uploadUiState.inFlight += 1;
-    if (uploadUiState.inFlight === 1) {
-        setUploadButtonBusy(true);
+        rekeyUploadStateForSession(uploadState, uploadTargetSessionId);
     }
 
     const total = list.length;
@@ -18264,9 +18592,16 @@ async function uploadFilesToVon(files) {
     for (const file of list) {
         index += 1;
         const sizeLabel = formatBytesForUi(file.size);
-        appendMessage('User', `Uploading file: ${file.name}${sizeLabel ? ` (${sizeLabel})` : ''}`);
-
-        setUploadStatus(`Uploading ${index}/${total}: ${file.name}`, 'uploading');
+        appendUploadMessageForSession(
+            uploadTargetSessionId,
+            'User',
+            `Uploading file: ${file.name}${sizeLabel ? ` (${sizeLabel})` : ''}`
+        );
+        setUploadStatusForState(
+            uploadState,
+            `Uploading ${index}/${total}: ${file.name}`,
+            'uploading'
+        );
 
         try {
             const result = await uploadSingleFileToVon(file);
@@ -18286,7 +18621,8 @@ async function uploadFilesToVon(files) {
             if (historyRecorded) details.push('Recorded in Conversation history.');
             if (downloadUrl) details.push(`[Download attachment](${downloadUrl})`);
 
-            appendMessage(
+            appendUploadMessageForSession(
+                uploadTargetSessionId,
                 'Von',
                 `File uploaded and registered as ${conceptId || '(unknown)'}${details.length ? `\n${details.join('\n')}` : ''}`
             );
@@ -18296,23 +18632,25 @@ async function uploadFilesToVon(files) {
             if (conceptId) {
                 rememberPendingUploadedFileCopyConceptId(
                     conceptId,
-                    uploadTargetSessionId
+                    uploadTargetSessionId,
+                    file.name
                 );
-                insertTextIntoChatPrompt('Attached file uploaded.');
             }
         } catch (error) {
             console.error('[chatTab] file upload error', error);
             const errorMessage = `File upload failed: ${String(error?.message || error)}`;
             const diagnosticsPayload = buildUploadFailureDiagnosticPayload(file, error, {
                 index,
-                total
+                total,
+                targetSessionId: uploadTargetSessionId
             });
             const errorTurnId = `e-upload-${Date.now()}-${index}`;
             setLlmDebugDataEntry(
                 errorTurnId,
                 buildTurnDiagnosticDebugPayload(errorMessage, diagnosticsPayload)
             );
-            appendMessage(
+            appendUploadMessageForSession(
+                uploadTargetSessionId,
                 'Error',
                 errorMessage,
                 errorTurnId,
@@ -18324,18 +18662,94 @@ async function uploadFilesToVon(files) {
                 { diagnosticsPayload }
             );
             failureCount += 1;
-            setUploadStatus(`Upload failed: ${file.name}`, 'error');
+            setUploadStatusForState(
+                uploadState,
+                `Upload failed: ${file.name}`,
+                'error'
+            );
         }
     }
 
     const summary = `Upload complete: ${successCount} succeeded${failureCount ? `, ${failureCount} failed` : ''}.`;
-    setUploadStatus(summary, failureCount ? 'error' : 'success');
-    clearUploadStatusAfterDelay();
+    setUploadStatusForState(
+        uploadState,
+        summary,
+        failureCount ? 'error' : 'success'
+    );
+    clearUploadStatusAfterDelay(uploadState);
+}
 
-    uploadUiState.inFlight = Math.max(0, uploadUiState.inFlight - 1);
-    if (uploadUiState.inFlight === 0) {
-        setUploadButtonBusy(false);
+function buildUploadSelectionFingerprint(list) {
+    return list.map((file) => [
+        String(file?.name || ''),
+        Number.isFinite(file?.size) ? Number(file.size) : '',
+        Number.isFinite(file?.lastModified) ? Number(file.lastModified) : '',
+        String(file?.type || '')
+    ].join('|')).join('\n');
+}
+
+function uploadFilesToVon(files) {
+    const list = Array.from(files || []).filter(Boolean);
+    if (!list.length) return Promise.resolve();
+
+    const targetSessionId = normaliseHistorySessionId(activeChatSessionId);
+    const sessionKey = getPendingFileCopySessionKey(targetSessionId);
+    const selectionFingerprint = buildUploadSelectionFingerprint(list);
+    const existingState = uploadStatesBySession.get(sessionKey) || null;
+    if (existingState?.inFlight && existingState.promise) {
+        const repeatedSelection = (
+            existingState.selectionFingerprint === selectionFingerprint
+        );
+        setUploadStatusForState(
+            existingState,
+            repeatedSelection
+                ? 'Upload already in progress; repeated action ignored.'
+                : 'Another upload is already in progress; this additional selection was not uploaded.',
+            'uploading'
+        );
+        return existingState.promise;
     }
+
+    const preparingLabel = list.length === 1
+        ? `Preparing upload: ${String(list[0]?.name || 'file')}`
+        : `Preparing ${list.length} uploads…`;
+
+    if (existingState?.clearTimerId) {
+        clearTimeout(existingState.clearTimerId);
+    }
+    const uploadState = {
+        sessionKey,
+        targetSessionId,
+        selectionFingerprint,
+        message: preparingLabel,
+        tone: 'uploading',
+        inFlight: true,
+        promise: null,
+        clearTimerId: null
+    };
+    const uploadPromise = Promise.resolve()
+        .then(() => performUploadFilesToVon(list, uploadState))
+        .catch((error) => {
+            console.error('[chatTab] unexpected file upload error', error);
+            setUploadStatusForState(
+                uploadState,
+                `Upload failed: ${String(error?.message || error)}`,
+                'error'
+            );
+            clearUploadStatusAfterDelay(uploadState);
+        });
+    uploadState.promise = uploadPromise;
+    uploadStatesBySession.set(sessionKey, uploadState);
+    renderActiveUploadUi();
+
+    const settleUploadState = () => {
+        uploadState.inFlight = false;
+        if (uploadStatesBySession.get(uploadState.sessionKey) === uploadState) {
+            renderActiveUploadUi();
+        }
+    };
+    void uploadPromise.then(settleUploadState, settleUploadState);
+    return uploadPromise;
 }
 
 function convertJustSayInstructionsToButtons(root) {
@@ -21235,6 +21649,8 @@ function setActiveChatSession(sessionId, sessionName) {
     }
 
     refreshConversationInfoCopyButtonState();
+    renderPendingAttachmentState();
+    renderActiveUploadUi();
 }
 
 function getChatSessionTabsContainer() {
@@ -28592,6 +29008,8 @@ export function initializeChatTab() {
     const uploadFileButton = document.getElementById('uploadFileButton');
     const uploadFileInput = document.getElementById('uploadFileInput');
     const uploadFileStatus = document.getElementById('uploadFileStatus');
+    const chatAttachmentStatus = document.getElementById('chatAttachmentStatus');
+    const pendingAttachmentStatus = document.getElementById('pendingAttachmentStatus');
     const chatTab = document.getElementById('chatTab');
     const inviteButton = document.getElementById('inviteConversationBtn');
     const inviteCloseButton = document.getElementById('closeInviteConversation');
@@ -28636,6 +29054,10 @@ export function initializeChatTab() {
 
     uploadUiState.button = uploadFileButton || null;
     uploadUiState.statusEl = uploadFileStatus || null;
+    uploadUiState.statusRegion = chatAttachmentStatus || null;
+    uploadUiState.pendingAttachmentEl = pendingAttachmentStatus || null;
+    renderPendingAttachmentState();
+    renderActiveUploadUi();
 
     if (uploadFileButton && uploadFileInput) {
         uploadFileButton.addEventListener('click', () => {
@@ -29509,6 +29931,9 @@ function retryActiveChatRequest() {
     const fileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
         request.pendingFileCopyConceptId
     );
+    const fileCopyDisplayName = normalisePendingAttachmentDisplayName(
+        request.pendingFileCopyDisplayName
+    );
     request.attachmentBindingTransferred = !!fileCopyConceptId;
     abortActiveChatRequest();
     if (!prompt.trim()) {
@@ -29520,7 +29945,8 @@ function retryActiveChatRequest() {
             promptOverride: prompt,
             sessionId: request.sessionId || null,
             sessionName: request.sessionName || null,
-            fileCopyConceptId
+            fileCopyConceptId,
+            fileCopyDisplayName
         });
     }, 0);
 }
@@ -30668,11 +31094,15 @@ async function handleSendPrompt(options = {}) {
     const explicitFileCopyConceptId = normaliseTrustedUploadedFileCopyConceptId(
         options?.fileCopyConceptId
     );
-    const pendingFileCopyConceptId = explicitFileCopyConceptId || (
-        fromQueue
-            ? null
-            : takePendingUploadedFileCopyConceptId(targetSessionId)
-    );
+    const pendingFileCopyBinding = (!explicitFileCopyConceptId && !fromQueue)
+        ? takePendingUploadedFileCopyBinding(targetSessionId)
+        : null;
+    const pendingFileCopyConceptId = explicitFileCopyConceptId
+        || pendingFileCopyBinding?.conceptId
+        || null;
+    const pendingFileCopyDisplayName = explicitFileCopyConceptId
+        ? normalisePendingAttachmentDisplayName(options?.fileCopyDisplayName)
+        : (pendingFileCopyBinding?.displayName || null);
     const request = {
         abortController: new AbortController(),
         sessionId: targetSessionId,
@@ -30683,6 +31113,7 @@ async function handleSendPrompt(options = {}) {
         selectionStart,
         selectionEnd,
         pendingFileCopyConceptId,
+        pendingFileCopyDisplayName,
         attachmentBindingAccepted: false,
         attachmentBindingTransferred: false,
         attachmentBindingReleased: false,
@@ -33867,6 +34298,15 @@ export function __testOnly_resetChatRequestState() {
     liveChatRequestsBySession.clear();
     finishedThinkingCardsBySession.clear();
     pendingFileCopyConceptIdsBySession.clear();
+    pendingFileCopyDisplayNamesBySession.clear();
+    for (const uploadState of uploadStatesBySession.values()) {
+        if (uploadState?.clearTimerId) {
+            clearTimeout(uploadState.clearTimerId);
+        }
+    }
+    uploadStatesBySession.clear();
+    renderActiveUploadUi();
+    renderPendingAttachmentState();
     queuedChatPrompts = [];
     if (queuedChatPromptDrainTimer !== null) {
         clearTimeout(queuedChatPromptDrainTimer);
@@ -34006,7 +34446,7 @@ export function __testOnly_setTranscriptTurns(turns = []) {
 export function __testOnly_extractImageFilesFromClipboardEvent(event) {
     return extractImageFilesFromClipboardEvent(event);
 }
-export async function __testOnly_uploadFilesToVon(files) {
+export function __testOnly_uploadFilesToVon(files) {
     return uploadFilesToVon(files);
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
