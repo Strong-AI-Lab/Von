@@ -13,8 +13,8 @@ Policy:
 - Callers with deterministic stable identities can select
   ``duplicate_resolution_mode="canonical_id_only"`` to retain exact identity
   reuse while skipping semantic name resolution after an exact miss.
-- Explicit external identifiers, and conservative leading arXiv labels on
-  instances, are checked before title-derived canonical or semantic reuse.
+- Explicit external identifiers are checked before title-derived canonical or
+  semantic reuse. Domain-specific identifiers are never inferred from names.
 """
 
 from __future__ import annotations
@@ -59,6 +59,7 @@ class CreateConceptDuplicateGuardMatch:
     existing_parent_ids: tuple[str, ...] = ()
     requested_parent_id: str | None = None
     mismatch_reasons: tuple[str, ...] = ()
+    resolution_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class CreateConceptDuplicateGuardBlock:
     candidate_concept_ids: tuple[str, ...] = ()
     external_identifier_scheme: str | None = None
     external_identifier_value: str | None = None
+    resolution_source: str | None = None
     retryable: bool = False
 
 
@@ -123,10 +125,7 @@ def _normalised_relationships(doc: dict[str, Any]) -> dict[str, Any]:
 
 def _infer_kind(doc: dict[str, Any]) -> str | None:
     relationships = _normalised_relationships(doc)
-    if any(
-        relationships.get(key)
-        for key in ("is_a_type_of", "is_an_instance_of")
-    ):
+    if any(relationships.get(key) for key in ("is_a_type_of", "is_an_instance_of")):
         inferred = compute_kind_from_relationships(relationships)
         return "instance" if inferred == "individual" else inferred
 
@@ -195,10 +194,6 @@ def _external_identity_mismatch_details(
     scope: str,
     parent_id_for_concept: str | None,
 ) -> tuple[str | None, str, tuple[str, ...], str | None, tuple[str, ...]]:
-    from .concept_external_identity_service import (
-        arxiv_paper_parent_scopes_compatible,
-    )
-
     requested_kind = "instance" if scope == "workflow_instance" else scope
     existing_kind = _infer_kind(doc)
     existing_parent_ids = _existing_parent_ids(doc, requested_kind)
@@ -207,11 +202,6 @@ def _external_identity_mismatch_details(
     mismatch_reasons: list[str] = []
     if existing_kind != requested_kind:
         mismatch_reasons.append("kind_mismatch")
-    if requested_kind == "instance" and not arxiv_paper_parent_scopes_compatible(
-        existing_parent_ids=existing_parent_ids,
-        requested_parent_id=requested_parent_id,
-    ):
-        mismatch_reasons.append("parent_mismatch")
     return (
         existing_kind,
         requested_kind,
@@ -289,6 +279,8 @@ def find_existing_concept_for_create_concepts(
     duplicate_resolution_mode: str | None = None,
     external_identifiers: Any = None,
     external_identity_concept_ids: Sequence[str] = (),
+    identity_candidate_concept_ids: Sequence[str] = (),
+    identity_rejected_candidate_concept_ids: Sequence[str] = (),
 ) -> CreateConceptDuplicateGuardMatch | CreateConceptDuplicateGuardBlock | None:
     """Return an existing concept match when duplicate creation should be blocked.
 
@@ -326,6 +318,10 @@ def find_existing_concept_for_create_concepts(
             external_resolution = resolve_external_identity_candidates(
                 external_identifier,
                 canonical_concept_id_candidates=external_identity_concept_ids,
+                asserted_candidate_concept_ids=identity_candidate_concept_ids,
+                rejected_candidate_concept_ids=(
+                    identity_rejected_candidate_concept_ids
+                ),
             )
         except Exception:
             return CreateConceptDuplicateGuardBlock(
@@ -338,6 +334,7 @@ def find_existing_concept_for_create_concepts(
                 guard_scope=scope,
                 external_identifier_scheme=external_identifier.scheme,
                 external_identifier_value=external_identifier.value,
+                resolution_source="lookup_error",
                 retryable=True,
             )
 
@@ -347,17 +344,51 @@ def find_existing_concept_for_create_concepts(
             return None
 
         if external_resolution.status == "ambiguous":
+            marker_lookup_incomplete = (
+                external_resolution.resolution_source
+                == "persisted_identity_marker_lookup_incomplete"
+            )
             return CreateConceptDuplicateGuardBlock(
-                error_code="ambiguous_external_identity",
+                error_code=(
+                    "external_identity_marker_lookup_incomplete"
+                    if marker_lookup_incomplete
+                    else "ambiguous_external_identity"
+                ),
                 message=(
-                    "More than one visible concept carries the requested external "
-                    "identity. No concept was selected or created."
+                    (
+                        "The bounded exact-marker lookup was not exhaustive. No "
+                        "concept was selected or created."
+                    )
+                    if marker_lookup_incomplete
+                    else (
+                        "More than one visible concept carries the requested "
+                        "external identity. No concept was selected or created."
+                    )
                 ),
                 match_source=match_source,
                 guard_scope=scope,
                 candidate_concept_ids=external_resolution.candidate_concept_ids,
                 external_identifier_scheme=external_identifier.scheme,
                 external_identifier_value=external_identifier.value,
+                resolution_source=external_resolution.resolution_source,
+            )
+
+        if external_resolution.status == "unverified":
+            return CreateConceptDuplicateGuardBlock(
+                error_code="external_identity_candidates_require_confirmation",
+                message=(
+                    "Visible concepts contain possible references to the requested "
+                    "external identity, but no exact identity marker or "
+                    "caller-confirmed candidate establishes which entity to reuse. "
+                    "No concept was selected or created."
+                ),
+                match_source=match_source,
+                guard_scope=scope,
+                candidate_concept_ids=external_resolution.candidate_concept_ids,
+                external_identifier_scheme=external_identifier.scheme,
+                external_identifier_value=external_identifier.value,
+                resolution_source=external_resolution.resolution_source,
+                retryable=True,
             )
 
         if (
@@ -377,6 +408,7 @@ def find_existing_concept_for_create_concepts(
                     guard_scope=scope,
                     external_identifier_scheme=external_identifier.scheme,
                     external_identifier_value=external_identifier.value,
+                    resolution_source=external_resolution.resolution_source,
                     retryable=True,
                 )
             (
@@ -400,6 +432,7 @@ def find_existing_concept_for_create_concepts(
                 existing_parent_ids=existing_parent_ids,
                 requested_parent_id=requested_parent_id,
                 mismatch_reasons=mismatch_reasons,
+                resolution_source=external_resolution.resolution_source,
             )
 
         return CreateConceptDuplicateGuardBlock(
@@ -412,6 +445,7 @@ def find_existing_concept_for_create_concepts(
             guard_scope=scope,
             external_identifier_scheme=external_identifier.scheme,
             external_identifier_value=external_identifier.value,
+            resolution_source=external_resolution.resolution_source,
             retryable=True,
         )
 
@@ -605,10 +639,26 @@ def build_duplicate_guard_block_create_concepts_result(
             "scheme": block.external_identifier_scheme,
             "value": block.external_identifier_value,
         },
+        "external_identity_resolution_source": block.resolution_source,
         "retryable": block.retryable,
         "suggestion": (
-            "Inspect the candidate concepts and explicitly reconcile their "
-            "identity evidence before retrying."
+            (
+                "Inspect every returned candidate. If grounded evidence "
+                "establishes one as this entity, retry with that ID in "
+                "identity_candidate_concept_ids. If none matches, retry with "
+                "the exact returned set in "
+                "identity_rejected_candidate_concept_ids."
+            )
+            if (
+                block.candidate_concept_ids
+                and block.resolution_source == "legacy_text_reference"
+            )
+            else (
+                "Inspect the candidate concepts. If grounded evidence "
+                "establishes one candidate as this entity, retry with that ID "
+                "in identity_candidate_concept_ids; otherwise retain the "
+                "ambiguity."
+            )
             if block.candidate_concept_ids
             else "Retry after the external identity lookup is available."
         ),

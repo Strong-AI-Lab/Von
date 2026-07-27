@@ -35,6 +35,7 @@ from src.backend.services.adaptive_turn_service import (
     _compact_context_after_limit,
     _compact_evidence_index,
     _effect_subject_authorised,
+    _effect_result_target_ids,
     _final_synthesis_context,
     _json_bytes,
     _trusted_tool_payload,
@@ -83,6 +84,27 @@ class _SequenceClient:
         if isinstance(next_response, BaseException):
             raise next_response
         return next_response
+
+
+def test_effect_receipt_targets_require_explicit_generic_target_fields() -> None:
+    assert _effect_result_target_ids(
+        {
+            "created_concept_ids": ["#V#created_a", "#V#created_b"],
+            "result": {
+                "concept_id": "#V#nested_result",
+                "type_concept_id": "#V#context_type",
+                "candidate_concept_ids": ["#V#candidate"],
+                "missing_concept_ids": ["#V#missing"],
+                "arguments": {
+                    "invented_concept_id": "#V#echoed_argument_claim",
+                },
+            },
+        }
+    ) == [
+        "#V#created_a",
+        "#V#created_b",
+        "#V#nested_result",
+    ]
 
 
 def _gateway(handler: Any) -> InternalMCPGateway:

@@ -18,6 +18,7 @@ from src.backend.services.turn_execution_record_service import (
     record_effect_observation_phase,
     upsert_turn_execution_record_projection,
     _classify_tool_invocation_status,
+    _extract_tool_invocation_target_ids,
     _normalise_projection_field_entries,
     _summarise_tool_execution_context,
 )
@@ -37,6 +38,43 @@ _KR_REQUIRED_TOOLS = [
     "fetch_concept",
     "get_text_relations_summary",
 ]
+
+
+def test_tool_receipt_targets_require_explicit_generic_target_fields() -> None:
+    targets = _extract_tool_invocation_target_ids(
+        {
+            "effective_arguments": {
+                "invented_concept_id": "#V#argument_claim",
+            },
+            "result_target_ids": ["#V#declared_result"],
+            "payload": {
+                "result": {
+                    "concept_id": "#V#nested_result",
+                    "type_concept_id": "#V#context_type",
+                    "candidate_concept_ids": ["#V#candidate"],
+                    "missing_concept_ids": ["#V#missing"],
+                    "arguments": {
+                        "invented_concept_id": "#V#echoed_argument_claim",
+                    },
+                }
+            },
+        }
+    )
+
+    assert targets == [
+        "#V#declared_result",
+        "#V#nested_result",
+    ]
+    assert (
+        _extract_tool_invocation_target_ids(
+            {
+                "effective_arguments": {
+                    "invented_concept_id": "#V#argument_only_claim",
+                }
+            }
+        )
+        == []
+    )
 
 
 def _build_effect_projection_record(

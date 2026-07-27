@@ -58,14 +58,16 @@ def test_canonical_override_disables_suffixing_and_preserves_atomic_identity(
     monkeypatch.setattr(concept_service, "create_concept", _create)
 
     result = create_vontology_concept(
-        parent_id="#V#scholarly_article",
-        new_concept_name="A title that may change",
+        parent_id="#V#archival_record",
+        new_concept_name="A label that may change",
         create_as_instance=True,
         allow_duplicate_instance_suffix=True,
-        canonical_concept_id_override="#V#paper_on_arxiv_2506_03346_1234abcd",
+        canonical_concept_id_override="#V#external_id_catalogue_record_42_1234abcd",
     )
 
-    assert attempted_ids == ["#V#paper_on_arxiv_2506_03346_1234abcd"]
+    assert attempted_ids == ["#V#external_id_catalogue_record_42_1234abcd"]
     assert repository_reads == []
     assert result["success"] is True
-    assert result["canonical_concept_id"] == "#V#paper_on_arxiv_2506_03346_1234abcd"
+    assert (
+        result["canonical_concept_id"] == "#V#external_id_catalogue_record_42_1234abcd"
+    )

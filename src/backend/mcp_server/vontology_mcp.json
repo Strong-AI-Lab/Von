@@ -25,7 +25,7 @@
         },
         {
             "name": "add_relationship",
-            "description": "Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' \u2192 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
+            "description": "Add one concept-to-concept or concept-to-text relationship. Structural predicates use their existing aliases; a custom predicate uses its exact #V# concept ID. If that exact custom predicate is missing, predicate_if_missing={name, description?} can canonically create or reuse and verify it before this relationship attempt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -37,6 +37,19 @@
                     },
                     "target": {
                         "type": "string"
+                    },
+                    "predicate_if_missing": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -45,7 +58,7 @@
                     "target"
                 ],
                 "additionalProperties": true,
-                "description": "add_relationship input: source_id (str, concept ID like '#V#nikola_k._kasabov'), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'), target (str, target concept ID like '#V#professor' or text value for text predicates like 'Auckland University')"
+                "description": "add_relationship input: source_id (str), predicate (str, structural relationship name or exact #V# predicate concept ID), target (str). For a missing dynamic predicate only, predicate_if_missing may be {name: str, description?: str}; its name must canonically identify the exact requested predicate. The capability creates or reuses and verifies that predicate before attempting the edge."
             }
         },
         {
@@ -766,7 +779,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts an array of {name, kind?, description?, notes?, external_identifiers?, identity_candidate_concept_ids?, identity_rejected_candidate_concept_ids?}. An external identity is one explicit opaque {scheme, canonical_value, role:'identity'} pair grounded by the caller; this tool does not infer or normalise domain-specific IDs from names. Preserve that same pair on repair/retry. Unverified actor-visible candidates may be explicitly confirmed through identity_candidate_concept_ids. If every returned legacy candidate was inspected and none matches, supply the exact set in identity_rejected_candidate_concept_ids. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -826,7 +839,7 @@
                     "concepts"
                 ],
                 "additionalProperties": true,
-                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Scope defaults to authenticated user+organisation visibility when context is available. Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
+                "description": "create_concepts input: parent_id (str, semantic type concept_id; not an owner, organisation, user, or container individual), concepts (list of {name, kind?, description?, notes?, external_identifiers?, identity_candidate_concept_ids?, identity_rejected_candidate_concept_ids?}). external_identifiers accepts at most one explicit identity object, for example {scheme:'registry.example', canonical_value:'record-1234', role:'identity'}. The value must already be the canonical stable value established by grounded evidence; create_concepts does not infer or normalise domain-specific identifier syntax from names. Preserve the same explicit identity on every repair or retry rather than falling back to a title-derived create. A cited source is provenance, not necessarily the target entity's identity. Legacy textual references are returned only as unverified candidates. When grounded evidence establishes one candidate as the identified entity, repeat the call with its actor-visible concept ID in identity_candidate_concept_ids. When every returned legacy candidate has been inspected and none matches, repeat the exact returned set in identity_rejected_candidate_concept_ids; partial or stale sets do not bypass review. An exact identity may reuse a same-kind concept under another parent without silently changing its classifications. kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Scope defaults to authenticated user+organisation visibility when context is available. Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
             }
         },
         {

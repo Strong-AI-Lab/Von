@@ -884,7 +884,7 @@ def _create_concepts(**kwargs):
         ExternalIdentityInputError,
         canonical_concept_id_for_external_identifiers,
         normalise_create_external_identifiers,
-        persist_external_identity_names,
+        persist_external_identity_markers,
     )
     from ...services.create_concepts_parent_resolution_service import (
         resolve_parent_for_create_concepts,
@@ -1158,6 +1158,88 @@ def _create_concepts(**kwargs):
     results = []
     cancelled_after_partial_error: str | None = None
 
+    def _identity_persistence_outcome(
+        receipt: Mapping[str, Any],
+    ) -> tuple[str, bool | None, list[dict[str, Any]], list[dict[str, Any]]]:
+        failures = [
+            dict(item)
+            for item in (receipt.get("failures") or [])
+            if isinstance(item, Mapping)
+        ]
+        indeterminate_failures = [
+            dict(item)
+            for item in (receipt.get("indeterminate_failures") or [])
+            if isinstance(item, Mapping)
+        ]
+        raw_status = str(receipt.get("effect_status") or "").strip().lower()
+        if indeterminate_failures or raw_status == "indeterminate":
+            effect_status = "indeterminate"
+        elif raw_status in {"failed", "partial", "succeeded"}:
+            effect_status = raw_status
+        elif failures or receipt.get("success") is False:
+            effect_status = "failed"
+        else:
+            effect_status = "succeeded"
+
+        if "changed" in receipt and (
+            isinstance(receipt.get("changed"), bool)
+            or receipt.get("changed") is None
+        ):
+            changed = receipt.get("changed")
+        else:
+            writes = receipt.get("writes")
+            changed = bool(
+                isinstance(writes, list)
+                and any(
+                    isinstance(write, Mapping)
+                    and (
+                        write.get("relation_created")
+                        or write.get("context_updated")
+                    )
+                    for write in writes
+                )
+            )
+        return effect_status, changed, failures, indeterminate_failures
+
+    def _identity_candidate_ids(
+        concept_data: Mapping[str, Any],
+        *,
+        field_name: str,
+    ) -> tuple[tuple[str, ...], bool]:
+        raw_values = concept_data.get(field_name)
+        if raw_values is None:
+            return (), False
+        error_suffix = field_name.removeprefix("identity_")
+        if not isinstance(raw_values, list):
+            raise ExternalIdentityInputError(
+                f"invalid_identity_{error_suffix}",
+                f"{field_name} must be a list of actor-visible concept IDs.",
+            )
+        invalid_indexes = [
+            index
+            for index, candidate_id in enumerate(raw_values)
+            if not isinstance(candidate_id, str) or not candidate_id.strip()
+        ]
+        if invalid_indexes:
+            raise ExternalIdentityInputError(
+                f"invalid_identity_{error_suffix}",
+                f"{field_name} entries must be non-empty concept ID strings.",
+                details={"invalid_indexes": invalid_indexes[:50]},
+            )
+        candidate_ids = tuple(
+            dict.fromkeys(
+                str(candidate_id).strip()
+                for candidate_id in raw_values
+                if isinstance(candidate_id, str) and candidate_id.strip()
+            )
+        )
+        if len(candidate_ids) > 50:
+            raise ExternalIdentityInputError(
+                f"too_many_identity_{error_suffix}",
+                f"{field_name} accepts at most 50 distinct concept IDs.",
+            )
+        return candidate_ids, True
+
     def _cancelled_after_completed_items() -> bool:
         nonlocal cancelled_after_partial_error
         try:
@@ -1249,11 +1331,11 @@ def _create_concepts(**kwargs):
                             "success": False,
                             "effect_status": "failed",
                             "changed": False,
-                            "error_code": "external_identity_parent_incompatible",
+                            "error_code": "external_identity_creation_incompatible",
                             "message": (
-                                "The external identity identifies an arXiv paper, "
-                                "but the requested kind or parent is not a supported "
-                                "scholarly-paper identity scope. No concept was created."
+                                "The external identity could not be mapped to a "
+                                "stable concept identity for the requested concept "
+                                "kind. No concept was created."
                             ),
                             "concept": None,
                             "input_name": str(name),
@@ -1267,6 +1349,95 @@ def _create_concepts(**kwargs):
                         }
                     )
                     continue
+
+            try:
+                (
+                    identity_candidate_concept_ids,
+                    identity_candidates_supplied,
+                ) = _identity_candidate_ids(
+                    concept_data,
+                    field_name="identity_candidate_concept_ids",
+                )
+                (
+                    identity_rejected_candidate_concept_ids,
+                    identity_rejected_candidates_supplied,
+                ) = _identity_candidate_ids(
+                    concept_data,
+                    field_name="identity_rejected_candidate_concept_ids",
+                )
+            except ExternalIdentityInputError as exc:
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": exc.error_code,
+                        "message": str(exc),
+                        "error_details": dict(exc.details),
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
+
+            if (
+                (
+                    identity_candidates_supplied
+                    or identity_rejected_candidates_supplied
+                )
+                and not external_identifiers
+            ):
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": (
+                            "identity_candidates_require_external_identifier"
+                        ),
+                        "message": (
+                            "Identity candidate decisions can only apply to an "
+                            "explicit external identity. Include the same "
+                            "external_identifiers value used in the original "
+                            "create or repair attempt."
+                        ),
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
+            conflicting_candidate_ids = sorted(
+                set(identity_candidate_concept_ids).intersection(
+                    identity_rejected_candidate_concept_ids
+                )
+            )
+            if conflicting_candidate_ids:
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": "conflicting_identity_candidate_review",
+                        "message": (
+                            "The same concept cannot be both confirmed and "
+                            "rejected for one external identity."
+                        ),
+                        "error_details": {
+                            "conflicting_candidate_concept_ids": (
+                                conflicting_candidate_ids
+                            )
+                        },
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
 
             duplicate_match = find_existing_concept_for_create_concepts(
                 concept_name=str(name),
@@ -1284,6 +1455,10 @@ def _create_concepts(**kwargs):
                     (canonical_concept_id_override,)
                     if canonical_concept_id_override
                     else ()
+                ),
+                identity_candidate_concept_ids=identity_candidate_concept_ids,
+                identity_rejected_candidate_concept_ids=(
+                    identity_rejected_candidate_concept_ids
                 ),
             )
             if duplicate_match is not None:
@@ -1325,6 +1500,97 @@ def _create_concepts(**kwargs):
                         existing_concept_id=duplicate_match.existing_concept_id,
                         guard_scope=duplicate_match.guard_scope,
                         match_source=duplicate_match.match_source,
+                    )
+                    if duplicate_match.match_source.startswith(
+                        "external_identifier:"
+                    ):
+                        # Duplicate resolution is read-only and may consume the
+                        # remaining transport budget. Do not begin the marker
+                        # repair after cancellation.
+                        if _cancelled_after_completed_items():
+                            break
+                        identity_persistence = persist_external_identity_markers(
+                            concept_id=duplicate_match.existing_concept_id,
+                            identifiers=external_identifiers,
+                        )
+                        (
+                            identity_effect_status,
+                            identity_changed,
+                            identity_failures,
+                            identity_indeterminate_failures,
+                        ) = _identity_persistence_outcome(
+                            identity_persistence
+                        )
+                        result["effect_status"] = identity_effect_status
+                        result["changed"] = identity_changed
+                        result["external_identity"] = {
+                            "identifiers": [
+                                identifier.to_dict()
+                                for identifier in external_identifiers
+                            ],
+                            "persistence": identity_persistence,
+                        }
+                        result["requested_parent_id"] = (
+                            duplicate_match.requested_parent_id
+                        )
+                        result["existing_parent_ids"] = list(
+                            duplicate_match.existing_parent_ids
+                        )
+                        result["requested_parent_already_present"] = bool(
+                            duplicate_match.requested_parent_id
+                            and duplicate_match.requested_parent_id
+                            in set(duplicate_match.existing_parent_ids)
+                        )
+                        if identity_effect_status == "indeterminate":
+                            result.update(
+                                {
+                                    "success": False,
+                                    "error_code": (
+                                        "external_identity_persistence_indeterminate"
+                                    ),
+                                    "indeterminate_failures": (
+                                        identity_indeterminate_failures
+                                        or [
+                                            {
+                                                "stage": (
+                                                    "external_identity_persistence"
+                                                ),
+                                                "outcome": "indeterminate",
+                                            }
+                                        ]
+                                    ),
+                                }
+                            )
+                        elif (
+                            identity_failures
+                            or identity_effect_status in {"failed", "partial"}
+                        ):
+                            persistence_failures = (
+                                identity_failures
+                                or [
+                                    {
+                                        "stage": "external_identity_persistence",
+                                        "outcome": identity_effect_status,
+                                    }
+                                ]
+                            )
+                            result.update(
+                                {
+                                    "success": False,
+                                    "effect_status": (
+                                        "partial"
+                                        if identity_changed is True
+                                        else "failed"
+                                    ),
+                                    "error_code": (
+                                        "external_identity_persistence_failed"
+                                    ),
+                                    "partial_failures": persistence_failures,
+                                }
+                            )
+                if duplicate_match.resolution_source:
+                    result["external_identity_resolution_source"] = (
+                        duplicate_match.resolution_source
                     )
                 result["concept_id"] = duplicate_match.existing_concept_id
                 results.append(result)
@@ -1395,7 +1661,52 @@ def _create_concepts(**kwargs):
             if isinstance(concept_id_value, str) and concept_id_value.strip():
                 result["concept_id"] = concept_id_value.strip()
                 if result.get("success") and external_identifiers:
-                    identity_persistence = persist_external_identity_names(
+                    try:
+                        raise_if_internal_mcp_cancelled()
+                    except InternalMCPHandlerCancelled as exc:
+                        # The primary concept is already durable. Preserve that
+                        # receipt, but do not begin the logically subsequent
+                        # identity-marker write after cancellation.
+                        persistence_failure = {
+                            "stage": "external_identity_persistence",
+                            "error_code": (
+                                "external_identity_persistence_not_started_"
+                                "after_concept_creation"
+                            ),
+                            "effect_status": "not_started",
+                            "dispatched": False,
+                        }
+                        identity_persistence = {
+                            "success": False,
+                            "effect_status": "not_started",
+                            "changed": False,
+                            "writes": [],
+                            "failures": [],
+                            "indeterminate_failures": [],
+                            "error_code": persistence_failure["error_code"],
+                            "cancellation": str(exc),
+                        }
+                        result["external_identity"] = {
+                            "identifiers": [
+                                identifier.to_dict()
+                                for identifier in external_identifiers
+                            ],
+                            "canonical_concept_id_override": (
+                                canonical_concept_id_override
+                            ),
+                            "persistence": identity_persistence,
+                        }
+                        result["partial_failures"] = [persistence_failure]
+                        if isinstance(result.get("concept"), dict):
+                            result["concept"]["partial_failures"] = [
+                                persistence_failure
+                            ]
+                        result["effect_status"] = "partial"
+                        result["changed"] = True
+                        results.append(result)
+                        cancelled_after_partial_error = str(exc)
+                        break
+                    identity_persistence = persist_external_identity_markers(
                         concept_id=concept_id_value.strip(),
                         identifiers=external_identifiers,
                     )
@@ -1408,18 +1719,50 @@ def _create_concepts(**kwargs):
                         ),
                         "persistence": identity_persistence,
                     }
-                    identity_failures = identity_persistence.get("failures")
-                    if (
-                        isinstance(identity_failures, list)
-                        and identity_failures
-                        and isinstance(result.get("concept"), dict)
-                    ):
-                        concept_partial_failures = result["concept"].setdefault(
-                            "partial_failures",
-                            [],
+                    (
+                        identity_effect_status,
+                        _identity_changed,
+                        identity_failures,
+                        identity_indeterminate_failures,
+                    ) = _identity_persistence_outcome(identity_persistence)
+                    if identity_effect_status == "indeterminate":
+                        # Concept creation is known durable, while marker
+                        # finality is unknown. Preserve both facts and force
+                        # canonical inspection before another effect.
+                        result["effect_status"] = "indeterminate"
+                        result["changed"] = True
+                        result["indeterminate_failures"] = (
+                            identity_indeterminate_failures
+                            or [
+                                {
+                                    "stage": "external_identity_persistence",
+                                    "outcome": "indeterminate",
+                                }
+                            ]
                         )
-                        if isinstance(concept_partial_failures, list):
-                            concept_partial_failures.extend(identity_failures)
+                    elif (
+                        identity_failures
+                        or identity_effect_status in {"failed", "partial"}
+                    ):
+                        persistence_failures = (
+                            identity_failures
+                            or [
+                                {
+                                    "stage": "external_identity_persistence",
+                                    "outcome": identity_effect_status,
+                                }
+                            ]
+                        )
+                        result["partial_failures"] = persistence_failures
+                        if isinstance(result.get("concept"), dict):
+                            concept_partial_failures = result["concept"].setdefault(
+                                "partial_failures",
+                                [],
+                            )
+                            if isinstance(concept_partial_failures, list):
+                                concept_partial_failures.extend(
+                                    persistence_failures
+                                )
                         result["effect_status"] = "partial"
                         result["changed"] = True
             results.append(result)
@@ -1439,18 +1782,47 @@ def _create_concepts(**kwargs):
         and isinstance(r.get("concept_id"), str)
         and str(r.get("concept_id")).strip()
     ]
-    partial_failures = [
-        {
-            "concept_id": str(r.get("concept_id") or "").strip() or None,
-            **dict(failure),
-        }
-        for r in results
-        if isinstance(r, dict) and isinstance(r.get("concept"), dict)
-        for failure in (r.get("concept") or {}).get("partial_failures", [])
-        if isinstance(failure, dict)
-    ]
+
+    def _collect_item_failures(field: str) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item_result in results:
+            if not isinstance(item_result, dict):
+                continue
+            concept_id = str(item_result.get("concept_id") or "").strip() or None
+            sources: list[Any] = [item_result.get(field)]
+            nested_concept = item_result.get("concept")
+            if isinstance(nested_concept, dict):
+                sources.append(nested_concept.get(field))
+            for source in sources:
+                if not isinstance(source, list):
+                    continue
+                for failure in source:
+                    if not isinstance(failure, Mapping):
+                        continue
+                    row = {"concept_id": concept_id, **dict(failure)}
+                    signature = repr(sorted(row.items(), key=lambda pair: pair[0]))
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    collected.append(row)
+        return collected
+
+    partial_failures = _collect_item_failures("partial_failures")
+    indeterminate_failures = _collect_item_failures("indeterminate_failures")
+    item_effect_statuses = {
+        str(item.get("effect_status") or "").strip().lower()
+        for item in results
+        if isinstance(item, dict)
+    }
     failed = len(results) - successful - already_exists
-    if partial_failures or (failed > 0 and (successful > 0 or already_exists > 0)):
+    if indeterminate_failures or "indeterminate" in item_effect_statuses:
+        effect_status = "indeterminate"
+    elif (
+        partial_failures
+        or "partial" in item_effect_statuses
+        or (failed > 0 and (successful > 0 or already_exists > 0))
+    ):
         effect_status = "partial"
     elif failed > 0:
         effect_status = "failed"
@@ -1479,10 +1851,37 @@ def _create_concepts(**kwargs):
         }
     )
 
+    item_changed_values: list[bool | None] = []
+    for item_result in results:
+        if not isinstance(item_result, dict):
+            continue
+        raw_changed = item_result.get("changed")
+        if isinstance(raw_changed, bool) or (
+            "changed" in item_result and raw_changed is None
+        ):
+            item_changed_values.append(raw_changed)
+        elif item_result.get("effect_status") == "indeterminate":
+            item_changed_values.append(None)
+        elif item_result.get("success"):
+            item_changed_values.append(True)
+        else:
+            item_changed_values.append(False)
+    changed: bool | None
+    if any(value is True for value in item_changed_values):
+        changed = True
+    elif any(value is None for value in item_changed_values):
+        changed = None
+    else:
+        changed = False
     response = {
-        "success": failed == 0 and not partial_failures,
+        "success": (
+            failed == 0
+            and not partial_failures
+            and not indeterminate_failures
+            and effect_status == "succeeded"
+        ),
         "effect_status": effect_status,
-        "changed": successful > 0,
+        "changed": changed,
         "results": results,
         "total": len(concepts),
         "successful": successful,
@@ -1490,6 +1889,8 @@ def _create_concepts(**kwargs):
         "failed": failed,
         "partial_failure_count": len(partial_failures),
         "partial_failures": partial_failures,
+        "indeterminate_failure_count": len(indeterminate_failures),
+        "indeterminate_failures": indeterminate_failures,
         "created_concept_ids": created_concept_ids,
         "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
         "parent_resolution": parent_resolution.to_dict(),
@@ -1510,7 +1911,11 @@ def _create_concepts(**kwargs):
         response.update(
             {
                 "success": False,
-                "effect_status": "partial",
+                "effect_status": (
+                    "indeterminate"
+                    if effect_status == "indeterminate"
+                    else "partial"
+                ),
                 "error_code": "handler_cancelled_after_partial_completion",
                 "error": (
                     "Concept creation was cancelled after one or more batch items "
@@ -2192,11 +2597,82 @@ def _add_relationship(**kwargs):
     """Add a relationship between two concepts or from concept to text value."""
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...services.text_value_service import upsert_text_for_concept
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from .transport import (
+        InternalMCPHandlerCancelled,
+        raise_if_internal_mcp_cancelled,
+    )
+
+    raise_if_internal_mcp_cancelled()
 
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
+    predicate_if_missing = kwargs.get("predicate_if_missing")
     mutation_dispatched = False
+    predicate_dependency: dict[str, Any] | None = None
+    predicate_dependency_changed = False
+    predicate_dependency_partial_failures: list[dict[str, Any]] = []
+    actor_user_id = get_effective_user_concept_id()
+    actor_org_id = get_effective_organisation_concept_id()
+    raw_namespace = kwargs.get("namespace")
+    namespace = (
+        raw_namespace.strip()
+        if isinstance(raw_namespace, str) and raw_namespace.strip()
+        else None
+    )
+
+    def _cancellation_after_predicate_dependency() -> dict[str, Any] | None:
+        try:
+            raise_if_internal_mcp_cancelled()
+        except InternalMCPHandlerCancelled as exc:
+            if predicate_dependency is None:
+                raise
+            dependency_changed = predicate_dependency_changed
+            dependency_was_partial = bool(
+                dependency_changed or predicate_dependency_partial_failures
+            )
+            response = make_error_response(
+                "relationship_not_started_after_predicate_dependency",
+                (
+                    "The predicate dependency was resolved, but cancellation "
+                    "arrived before the relationship write started."
+                ),
+                details={
+                    "source_id": source_id,
+                    "predicate": predicate,
+                    "target": target,
+                    "cancellation": str(exc),
+                },
+            )
+            response.update(
+                {
+                    "effect_status": (
+                        "partial" if dependency_was_partial else "not_started"
+                    ),
+                    "changed": dependency_changed,
+                    "mutation_outcome": (
+                        "partial" if dependency_was_partial else "not_started"
+                    ),
+                    "outcome_finality": "terminal_for_turn",
+                    "predicate_dependency": predicate_dependency,
+                    "partial_failures": [
+                        *predicate_dependency_partial_failures,
+                        {
+                            "stage": "relationship",
+                            "error_code": (
+                                "relationship_not_started_after_predicate_dependency"
+                            ),
+                            "dispatched": False,
+                        },
+                    ],
+                }
+            )
+            return response
+        return None
 
     if not source_id:
         return make_error_response(
@@ -2232,13 +2708,53 @@ def _add_relationship(**kwargs):
             suggestions=["Use different concept IDs for source and target"],
         )
 
+    predicate_dependency_name: str | None = None
+    predicate_dependency_description: str | None = None
+    if predicate_if_missing is not None:
+        if not isinstance(predicate_if_missing, Mapping):
+            return make_error_response(
+                "invalid_predicate_if_missing",
+                "predicate_if_missing must be an object.",
+                details={
+                    "value_type": type(predicate_if_missing).__name__,
+                    "required_fields": ["name"],
+                    "optional_fields": ["description"],
+                },
+            )
+        raw_dependency_name = predicate_if_missing.get("name")
+        if not isinstance(raw_dependency_name, str) or not raw_dependency_name.strip():
+            return make_error_response(
+                "invalid_predicate_if_missing",
+                "predicate_if_missing.name must be a non-empty string.",
+                details={"required_fields": ["name"]},
+            )
+        predicate_dependency_name = raw_dependency_name.strip()
+        raw_dependency_description = predicate_if_missing.get("description")
+        if raw_dependency_description is not None and not isinstance(
+            raw_dependency_description, str
+        ):
+            return make_error_response(
+                "invalid_predicate_if_missing",
+                "predicate_if_missing.description must be a string when supplied.",
+                details={
+                    "field": "description",
+                    "value_type": type(raw_dependency_description).__name__,
+                },
+            )
+        if isinstance(raw_dependency_description, str):
+            predicate_dependency_description = (
+                raw_dependency_description.strip() or None
+            )
+
     try:
         repo = ConceptsRepository
 
         from ...services.relationship_write_service import (
             add_relationship,
             normalise_structural_predicate,
+            validate_predicate_concept,
         )
+        from ...utils.concept_id_utils import canonicalise_vontology_concept_id
 
         # Check if source exists
         src = repo.find_one({"concept_id": source_id})
@@ -2265,8 +2781,246 @@ def _add_relationship(**kwargs):
             predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
         )
         well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
+        if predicate_dependency_name is not None:
+            canonical_dependency_id = canonicalise_vontology_concept_id(
+                predicate_dependency_name
+            )
+            if (
+                not predicate_str.startswith("#V#")
+                or predicate_normalised in well_known_text_predicates
+            ):
+                return make_error_response(
+                    "predicate_dependency_requires_dynamic_predicate",
+                    (
+                        "predicate_if_missing can only ensure an exact dynamic "
+                        "predicate identified by a #V# concept ID."
+                    ),
+                    details={
+                        "predicate": predicate_str,
+                        "canonical_dependency_id": canonical_dependency_id,
+                    },
+                )
+            if canonical_dependency_id != predicate_str:
+                return make_error_response(
+                    "predicate_dependency_identity_mismatch",
+                    (
+                        "predicate_if_missing.name does not canonically identify "
+                        "the requested predicate."
+                    ),
+                    details={
+                        "predicate": predicate_str,
+                        "predicate_if_missing_name": predicate_dependency_name,
+                        "canonical_dependency_id": canonical_dependency_id,
+                    },
+                    related_concept_ids=[predicate_str],
+                )
+
+            (
+                predicate_is_valid,
+                predicate_error_code,
+                predicate_error_details,
+            ) = validate_predicate_concept(predicate_str, repo)
+            if not predicate_is_valid:
+                if predicate_error_code != "predicate_concept_not_found":
+                    return make_error_response(
+                        str(predicate_error_code or "predicate_dependency_invalid"),
+                        (
+                            "The requested predicate exists but is not a valid "
+                            "predicate dependency. It was not changed."
+                        ),
+                        details={
+                            "predicate": predicate_str,
+                            "predicate_validation": predicate_error_details or {},
+                        },
+                        related_concept_ids=[predicate_str],
+                    )
+
+                target_id = str(target).strip()
+                target_doc = repo.find_one(
+                    {"concept_id": target_id},
+                    {"concept_id": 1},
+                )
+                if not target_doc:
+                    return make_error_response(
+                        "target_concept_not_found",
+                        (
+                            f"Target concept '{target_id}' was not found. The "
+                            "predicate dependency and relationship were not "
+                            "created."
+                        ),
+                        details={
+                            "role": "target",
+                            "concept_id": target_id,
+                            "predicate": predicate_str,
+                        },
+                        suggestions=[
+                            "Create or resolve the target concept before retrying "
+                            "the relationship."
+                        ],
+                        related_concept_ids=[target_id],
+                    )
+
+                predicate_concept: dict[str, Any] = {
+                    "name": predicate_dependency_name,
+                    "kind": "predicate",
+                }
+                if predicate_dependency_description is not None:
+                    predicate_concept["description"] = predicate_dependency_description
+
+                mutation_dispatched = True
+                try:
+                    creation_result = _create_concepts(
+                        parent_id="#V#predicate",
+                        concepts=[predicate_concept],
+                        duplicate_resolution_mode=(
+                            _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                        ),
+                        namespace=namespace,
+                        created_by_concept_id=actor_user_id,
+                        organisation_concept_id=actor_org_id,
+                    )
+                except InternalMCPHandlerCancelled:
+                    raise
+                except Exception as exc:
+                    response = _indeterminate_effect_error(
+                        (
+                            "Predicate dependency creation raised unexpectedly; "
+                            "the predicate may already exist. The relationship was "
+                            "not attempted."
+                        ),
+                        details={
+                            "stage": "predicate_dependency_creation",
+                            "predicate": predicate_str,
+                            "source_id": source_id,
+                            "target": target,
+                            "exception_type": type(exc).__name__,
+                            "exception": str(exc),
+                        },
+                    )
+                    response["predicate_dependency"] = {
+                        "concept_id": predicate_str,
+                        "name": predicate_dependency_name,
+                        "status": "indeterminate",
+                        "verified": False,
+                        "changed": None,
+                    }
+                    return response
+
+                if (
+                    creation_result.get("effect_status") == "indeterminate"
+                    or creation_result.get("changed") is None
+                ):
+                    response = _indeterminate_effect_error(
+                        (
+                            "Predicate dependency creation has an indeterminate "
+                            "outcome. The relationship was not attempted."
+                        ),
+                        details={
+                            "stage": "predicate_dependency_creation",
+                            "predicate": predicate_str,
+                            "source_id": source_id,
+                            "target": target,
+                            "creation_result": creation_result,
+                        },
+                    )
+                    response["predicate_dependency"] = {
+                        "concept_id": predicate_str,
+                        "name": predicate_dependency_name,
+                        "status": "indeterminate",
+                        "verified": False,
+                        "changed": None,
+                        "creation_result": creation_result,
+                    }
+                    return response
+
+                predicate_dependency_changed = creation_result.get("changed") is True
+                creation_effect_status = str(
+                    creation_result.get("effect_status") or ""
+                ).strip()
+                predicate_dependency = {
+                    "concept_id": predicate_str,
+                    "name": predicate_dependency_name,
+                    "status": "unverified",
+                    "verified": False,
+                    "changed": predicate_dependency_changed,
+                    "creation_result": creation_result,
+                }
+                if creation_effect_status == "partial" or not creation_result.get(
+                    "success"
+                ):
+                    predicate_dependency_partial_failures.append(
+                        {
+                            "stage": "predicate_dependency",
+                            "error_code": (
+                                creation_result.get("error_code")
+                                or "predicate_dependency_creation_partial"
+                            ),
+                            "details": creation_result,
+                        }
+                    )
+                (
+                    predicate_is_valid,
+                    predicate_error_code,
+                    predicate_error_details,
+                ) = validate_predicate_concept(predicate_str, repo)
+                if not predicate_is_valid:
+                    response = make_error_response(
+                        (
+                            "predicate_dependency_verification_failed"
+                            if creation_result.get("success")
+                            else "predicate_dependency_creation_failed"
+                        ),
+                        (
+                            "The predicate dependency could not be verified after "
+                            "the canonical create/reuse attempt. The relationship "
+                            "was not attempted."
+                        ),
+                        details={
+                            "predicate": predicate_str,
+                            "predicate_validation_error": predicate_error_code,
+                            "predicate_validation": predicate_error_details or {},
+                            "creation_result": creation_result,
+                        },
+                        related_concept_ids=[predicate_str],
+                    )
+                    response.update(
+                        {
+                            "effect_status": (
+                                "partial" if predicate_dependency_changed else "failed"
+                            ),
+                            "changed": predicate_dependency_changed,
+                            "predicate_dependency": predicate_dependency,
+                        }
+                    )
+                    if predicate_dependency_partial_failures:
+                        response["partial_failures"] = list(
+                            predicate_dependency_partial_failures
+                        )
+                    return response
+
+                predicate_dependency.update(
+                    {
+                        "status": (
+                            "created"
+                            if predicate_dependency_changed
+                            else "reused_existing"
+                        ),
+                        "verified": True,
+                    }
+                )
+            else:
+                predicate_dependency = {
+                    "concept_id": predicate_str,
+                    "name": predicate_dependency_name,
+                    "status": "reused_existing",
+                    "verified": True,
+                    "changed": False,
+                }
+
         if predicate_normalised in well_known_text_predicates:
             target_text = target if isinstance(target, str) else str(target)
+            if cancellation_response := _cancellation_after_predicate_dependency():
+                return cancellation_response
             mutation_dispatched = True
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
@@ -2288,6 +3042,11 @@ def _add_relationship(**kwargs):
                 "target": target_text,
                 "text_value_id": str(result.get("text_value_id")),
                 "relation_id": str(result.get("relation_id")),
+                **(
+                    {"predicate_dependency": predicate_dependency}
+                    if predicate_dependency is not None
+                    else {}
+                ),
             }
 
         # Determine if this is a text predicate (binary_text_predicate instance)
@@ -2306,6 +3065,8 @@ def _add_relationship(**kwargs):
 
         # Handle text predicates (target is text value, not concept)
         if is_text_predicate:
+            if cancellation_response := _cancellation_after_predicate_dependency():
+                return cancellation_response
             mutation_dispatched = True
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
@@ -2326,9 +3087,16 @@ def _add_relationship(**kwargs):
                 "target": target,
                 "text_value_id": str(result.get("text_value_id")),
                 "relation_id": str(result.get("relation_id")),
+                **(
+                    {"predicate_dependency": predicate_dependency}
+                    if predicate_dependency is not None
+                    else {}
+                ),
             }
 
         # Concept-to-concept relationships use the single authoritative pathway.
+        if cancellation_response := _cancellation_after_predicate_dependency():
+            return cancellation_response
         mutation_dispatched = True
         result = add_relationship(
             source_id=source_id,
@@ -2339,7 +3107,7 @@ def _add_relationship(**kwargs):
 
         if not result.get("success"):
             error_code = result.get("error") or "relationship_add_failed"
-            return make_error_response(
+            response = make_error_response(
                 str(error_code),
                 str(error_code),
                 details={
@@ -2352,6 +3120,40 @@ def _add_relationship(**kwargs):
                     [source_id, target] if target.startswith("#V#") else [source_id]
                 ),
             )
+            if predicate_dependency is not None:
+                response["predicate_dependency"] = predicate_dependency
+            if (
+                predicate_dependency_changed
+                or predicate_dependency_partial_failures
+            ):
+                response.update(
+                    {
+                        "effect_status": "partial",
+                        "changed": predicate_dependency_changed,
+                        "mutation_outcome": "partial",
+                        "message": (
+                            (
+                                "The predicate dependency persisted, but the "
+                                "relationship was not added."
+                            )
+                            if predicate_dependency_changed
+                            else (
+                                "Predicate dependency resolution reported a "
+                                "partial failure, and the relationship was not "
+                                "added."
+                            )
+                        ),
+                        "partial_failures": [
+                            *predicate_dependency_partial_failures,
+                            {
+                                "stage": "relationship",
+                                "error_code": str(error_code),
+                                "details": result,
+                            },
+                        ],
+                    }
+                )
+            return response
 
         predicate_out = result.get("predicate") or predicate_str
         target_out = result.get("target_id") or target
@@ -2371,7 +3173,9 @@ def _add_relationship(**kwargs):
                 else result.get("modified")
             ),
         }
-        response["changed"] = response["added"]
+        response["changed"] = bool(response["added"] or predicate_dependency_changed)
+        if predicate_dependency is not None:
+            response["predicate_dependency"] = predicate_dependency
         if "inverse_predicate" in result or "inverse_modified" in result:
             response["inverse"] = {
                 "predicate": result.get("inverse_predicate"),
@@ -2387,8 +3191,16 @@ def _add_relationship(**kwargs):
                     "error": str(result["inverse_error"]),
                 }
             ]
+        if predicate_dependency_partial_failures:
+            response["effect_status"] = "partial"
+            response["partial_failures"] = [
+                *predicate_dependency_partial_failures,
+                *list(response.get("partial_failures") or []),
+            ]
         return response
 
+    except InternalMCPHandlerCancelled:
+        raise
     except Exception as e:
         if not mutation_dispatched:
             return make_error_response(
@@ -2401,7 +3213,7 @@ def _add_relationship(**kwargs):
                     "exception_type": type(e).__name__,
                 },
             )
-        return _indeterminate_effect_error(
+        response = _indeterminate_effect_error(
             (
                 "The relationship operation raised unexpectedly; canonical "
                 "state may already have changed."
@@ -2414,6 +3226,26 @@ def _add_relationship(**kwargs):
                 "exception": str(e),
             },
         )
+        if predicate_dependency is not None:
+            response["predicate_dependency"] = predicate_dependency
+        if predicate_dependency_changed:
+            response["changed"] = True
+            response["known_changes"] = [
+                {
+                    "stage": "predicate_dependency",
+                    "concept_id": (
+                        predicate_dependency.get("concept_id")
+                        if predicate_dependency is not None
+                        else predicate_str
+                    ),
+                    "changed": True,
+                }
+            ]
+        if predicate_dependency_partial_failures:
+            response["partial_failures"] = list(
+                predicate_dependency_partial_failures
+            )
+        return response
 
 
 def _remove_relationship(**kwargs):
@@ -7424,14 +8256,26 @@ def _concepts_create_input_schema() -> Schema:
         allow_unknown=True,
         description=(
             "create_concepts input: parent_id (str, semantic type concept_id; not an owner, organisation, user, or container individual), "
-            "concepts (list of {name, kind?, description?, notes?, external_identifiers?}). "
-            "external_identifiers is a list of identity objects such as "
-            "{scheme:'arxiv', value:'2506.03346v1', role:'identity'}; arXiv "
-            "URLs and versioned IDs are normalised to the base identifier. "
-            "A leading 'arXiv:ID — title' instance name is supported only as a "
-            "legacy compatibility form. Identified arXiv entities must use a "
-            "supported scholarly-paper parent. Arbitrary description citations "
-            "are not identities. "
+            "concepts (list of {name, kind?, description?, notes?, "
+            "external_identifiers?, identity_candidate_concept_ids?, "
+            "identity_rejected_candidate_concept_ids?}). "
+            "external_identifiers accepts at most one explicit identity object, "
+            "for example {scheme:'registry.example', canonical_value:'record-1234', "
+            "role:'identity'}. The value must already be the canonical stable value "
+            "established by grounded evidence; create_concepts does not infer or "
+            "normalise domain-specific identifier syntax from names. Preserve the "
+            "same explicit identity on every repair or retry rather than falling "
+            "back to a title-derived create. A cited source is provenance, not "
+            "necessarily the target entity's identity. Legacy textual references "
+            "are returned only as unverified candidates. When grounded evidence "
+            "establishes one candidate as the identified entity, repeat the call "
+            "with its actor-visible concept ID in identity_candidate_concept_ids. "
+            "When every returned legacy candidate has been inspected and none "
+            "matches, repeat the exact returned set in "
+            "identity_rejected_candidate_concept_ids; partial or stale sets do "
+            "not bypass review. "
+            "An exact identity may reuse a same-kind concept under another parent "
+            "without silently changing its classifications. "
             "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
             "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
@@ -7457,9 +8301,11 @@ def _concepts_create_output_schema() -> Schema:
             "scope_selection": (dict,),
             "success": (bool,),
             "effect_status": (str,),
-            "changed": (bool,),
+            "changed": (bool, type(None)),
             "partial_failure_count": (int,),
             "partial_failures": (list,),
+            "indeterminate_failure_count": (int,),
+            "indeterminate_failures": (list,),
         },
         allow_unknown=True,
         description="create_concepts output: results (list of creation results), total (int), successful (int)",
@@ -8195,9 +9041,19 @@ def _add_relationship_input_schema() -> Schema:
             "predicate": str,
             "target": str,
         },
-        optional={},
+        optional={
+            "predicate_if_missing": (dict, type(None)),
+            "namespace": (str, type(None)),
+        },
         allow_unknown=True,
-        description="add_relationship input: source_id (str, concept ID like '#V#nikola_k._kasabov'), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'), target (str, target concept ID like '#V#professor' or text value for text predicates like 'Auckland University')",
+        description=(
+            "add_relationship input: source_id (str), predicate (str, structural "
+            "relationship name or exact #V# predicate concept ID), target (str). "
+            "For a missing dynamic predicate only, predicate_if_missing may be "
+            "{name: str, description?: str}; its name must canonically identify "
+            "the exact requested predicate. The capability creates or reuses and "
+            "verifies that predicate before attempting the edge."
+        ),
     )
 
 
@@ -8217,6 +9073,7 @@ def _add_relationship_output_schema() -> Schema:
             "effect_status": (str, type(None)),
             "changed": (bool, type(None)),
             "partial_failures": (list, type(None)),
+            "predicate_dependency": (dict, type(None)),
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "error": (str, type(None)),
@@ -8224,7 +9081,11 @@ def _add_relationship_output_schema() -> Schema:
             "error_details": (dict, type(None)),
         },
         allow_unknown=True,
-        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str), error_code (str), error_details (dict)",
+        description=(
+            "add_relationship output: success, effect_status, changed, edge "
+            "details, optional predicate_dependency create/reuse verification, "
+            "and typed partial or indeterminate failure evidence."
+        ),
     )
 
 
@@ -31186,7 +32047,32 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "visibility_scope_mode": None,
             },
             ordinary_turn_effect=True,
-            description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            description=(
+                "Create one or more concepts (instances, types, or predicates). "
+                "Each concept needs name and kind ('instance' for individuals, "
+                "'type' for subtypes/default, 'predicate' for relationships). "
+                "Accepts an array of {name, kind?, description?, notes?, "
+                "external_identifiers?, identity_candidate_concept_ids?, "
+                "identity_rejected_candidate_concept_ids?}. An "
+                "external identity is one explicit opaque {scheme, "
+                "canonical_value, role:'identity'} pair grounded by the caller; "
+                "this tool does not infer or normalise domain-specific IDs from "
+                "names. Preserve that same pair on repair/retry. Unverified "
+                "actor-visible candidates may be explicitly confirmed through "
+                "identity_candidate_concept_ids. If every returned legacy "
+                "candidate was inspected and none matches, supply the exact set "
+                "in identity_rejected_candidate_concept_ids. For deterministic stable "
+                "identities, duplicate_resolution_mode='canonical_id_only' skips "
+                "semantic name resolution after an exact concept-id miss; "
+                "omitting it preserves the default semantic fallback. Default "
+                "visibility is user+organisation scoped when authenticated "
+                "context exists. Override with "
+                "scope_mode='organisation_general' for organisation-shared "
+                "concepts, or scope_mode='global_general' for broadly visible "
+                "concepts when the concept is clearly general. Supports "
+                "singleton arrays. Use add_names afterward for alternative "
+                "names/translations."
+            ),
         ),
         MethodDefinition(
             name="get_source_processing_marker",
@@ -31386,10 +32272,20 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_add_relationship_input_schema(),
             output_schema=_add_relationship_output_schema(),
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
             ordinary_turn_effect=True,
             effect_admission_window_sec=5.0,
             ordinary_turn_mutation_subject_argument="source_id",
-            description="Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
+            description=(
+                "Add one concept-to-concept or concept-to-text relationship. "
+                "Structural predicates use their existing aliases; a custom "
+                "predicate uses its exact #V# concept ID. If that exact custom "
+                "predicate is missing, predicate_if_missing={name, description?} "
+                "can canonically create or reuse and verify it before this "
+                "relationship attempt."
+            ),
         ),
         MethodDefinition(
             name="upsert_uncertain_relationship_assertion",

@@ -1632,7 +1632,6 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
         "existing_concept_id",
         "file_copy_concept_id",
         "object_id",
-        "paper_concept_id",
         "relation_id",
         "source_concept_id",
         "source_id",
