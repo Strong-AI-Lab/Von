@@ -9323,8 +9323,19 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     }
 }
 
+.chat-attachment-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-height: 1.6rem;
+}
+
+.chat-attachment-status.hidden {
+    display: none;
+}
+
 .upload-file-status {
-    margin-left: 10px;
     font-size: 0.85rem;
     color: #475569;
     min-height: 1.1em;
@@ -9343,6 +9354,24 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 .upload-file-status.is-error {
     color: #b91c1c;
     font-weight: 600;
+}
+
+.pending-attachment-status {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 3px 9px;
+    border: 1px solid #93c5fd;
+    border-radius: 999px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 0.82rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.pending-attachment-status.hidden {
+    display: none;
 }
 
 /* Legacy loading-indicator-sep removed - replaced by thinking-card design */

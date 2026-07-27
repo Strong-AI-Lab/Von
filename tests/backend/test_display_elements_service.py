@@ -137,6 +137,29 @@ def test_extract_markdown_tables_parses_rows_and_typed_cells() -> None:
     assert second_row_types == ["text", "boolean", "date", "number"]
 
 
+def test_extract_markdown_tables_preserves_source_lines_after_code_fences() -> None:
+    tables = extract_markdown_tables(
+        (
+            "Before\n"
+            "```text\n"
+            "| not | a table |\n"
+            "| --- | --- |\n"
+            "```\n"
+            "Between\n"
+            "| Task | Status |\n"
+            "| --- | --- |\n"
+            "| Alpha | done |\n"
+            "After\n"
+        )
+    )
+
+    assert len(tables) == 1
+    assert tables[0]["source_span"] == {
+        "start_line": 7,
+        "end_line": 9,
+    }
+
+
 def test_build_turn_display_elements_includes_table_elements_for_markdown_tables() -> None:
     contract = build_turn_display_elements(
         response_text=(
@@ -166,6 +189,15 @@ def test_build_turn_display_elements_includes_table_elements_for_markdown_tables
     table_element = table_elements[0]
     assert table_element["payload"]["columns"][0]["label"] == "Task"
     assert table_element["payload"]["rows"][0]["cells"][1]["value_raw"] == "done"
+    assert table_element["presentation"] == {
+        "mode": "inline_primary",
+        "source_element_id": "screen_text",
+        "source_span": {
+            "start_line": 1,
+            "end_line": 4,
+        },
+    }
+    assert table_element["provenance"]["source"] == "screen_markdown_table"
     assert "screen_markdown_tables_detected" in contract["reason_codes"]
     assert contract["validation"]["valid"] is True
 
@@ -210,6 +242,8 @@ def test_build_turn_display_elements_includes_supplied_table_elements() -> None:
         table_element["payload"]["rows"][0]["provenance"]["source_concept_id"]
         == "#V#task_alpha"
     )
+    assert table_element["presentation"] == {"mode": "augment"}
+    assert table_element["provenance"]["source"] == "screen_structured_table"
     assert "screen_structured_tables_supplied" in contract["reason_codes"]
     assert contract["validation"]["valid"] is True
 
@@ -1326,6 +1360,121 @@ def test_validate_turn_display_elements_rejects_invalid_table_shape() -> None:
 
     assert valid is False
     assert any("must reference a declared column" in message for message in errors)
+
+
+def _table_presentation_validation_contract(
+    *,
+    source_element_id: str = "screen_text",
+    source_element_type: str = "text_block",
+    source_channel: str = "screen",
+    source_text: str = "| Task | Status |\n| --- | --- |\n| Alpha | done |",
+    source_span: dict[str, int] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": "turn_display_elements_v1",
+        "elements": [
+            {
+                "element_id": "screen_text",
+                "element_type": source_element_type,
+                "channel": source_channel,
+                "order": 10,
+                "intent": "primary_response",
+                "payload": {"text": source_text},
+                "provenance": {"source": "response_text"},
+            },
+            {
+                "element_id": "screen_table_1",
+                "element_type": "table",
+                "channel": "screen",
+                "order": 16,
+                "intent": "structured_tabular_view",
+                "payload": {
+                    "columns": [
+                        {
+                            "column_id": "task",
+                            "label": "Task",
+                            "data_type": "text",
+                        }
+                    ],
+                    "rows": [
+                        {
+                            "row_id": "row_1",
+                            "cells": [
+                                {
+                                    "column_id": "task",
+                                    "value_raw": "Alpha",
+                                    "value_display": "Alpha",
+                                    "value_type": "text",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "presentation": {
+                    "mode": "inline_primary",
+                    "source_element_id": source_element_id,
+                    "source_span": source_span or {
+                        "start_line": 1,
+                        "end_line": 3,
+                    },
+                },
+                "provenance": {"source": "screen_markdown_table"},
+            },
+        ],
+        "reason_codes": [],
+    }
+
+
+def test_validate_turn_display_elements_rejects_reversed_table_presentation_span() -> None:
+    valid, errors = validate_turn_display_elements(
+        _table_presentation_validation_contract(
+            source_span={"start_line": 4, "end_line": 2},
+        )
+    )
+
+    assert valid is False
+    assert any("must not precede start_line" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_missing_table_presentation_source() -> None:
+    valid, errors = validate_turn_display_elements(
+        _table_presentation_validation_contract(source_element_id="missing_text")
+    )
+
+    assert valid is False
+    assert any("must identify exactly one element" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_wrong_table_presentation_source_type() -> None:
+    valid, errors = validate_turn_display_elements(
+        _table_presentation_validation_contract(source_element_type="json_block")
+    )
+
+    assert valid is False
+    assert any("must reference a screen text_block" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_table_presentation_span_outside_source() -> None:
+    valid, errors = validate_turn_display_elements(
+        _table_presentation_validation_contract(
+            source_span={"start_line": 1, "end_line": 4},
+        )
+    )
+
+    assert valid is False
+    assert any("must fall within the referenced text" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_span_without_markdown_table() -> None:
+    valid, errors = validate_turn_display_elements(
+        _table_presentation_validation_contract(
+            source_text="Before\nNot a table\nAfter",
+            source_span={"start_line": 1, "end_line": 3},
+        )
+    )
+
+    assert valid is False
+    assert any("must identify a Markdown table" in message for message in errors)
 
 
 def test_validate_turn_display_elements_rejects_invalid_workflow_links() -> None:

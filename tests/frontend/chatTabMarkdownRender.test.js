@@ -767,6 +767,63 @@ describe('chat markdown rendering (assistant)', () => {
             '</tbody>',
             '</table>'
         ].join('');
+        const displayElements = {
+            schema_version: 'turn_display_elements_v1',
+            elements: [
+                {
+                    element_id: 'screen_text',
+                    element_type: 'text_block',
+                    channel: 'screen',
+                    order: 10,
+                    intent: 'primary_response',
+                    payload: { text: assistantResponse },
+                    provenance: { source: 'response_text' }
+                },
+                {
+                    element_id: 'screen_table_1',
+                    element_type: 'table',
+                    channel: 'screen',
+                    order: 16,
+                    intent: 'structured_tabular_view',
+                    payload: {
+                        columns: [
+                            { column_id: 'name', label: 'Name', data_type: 'text' },
+                            { column_id: 'degree', label: 'Degree', data_type: 'text' },
+                            { column_id: 'role', label: 'Role', data_type: 'text' }
+                        ],
+                        rows: [
+                            {
+                                row_id: 'row_1',
+                                cells: [
+                                    { column_id: 'name', value_raw: 'Alice', value_display: 'Alice', value_type: 'text' },
+                                    { column_id: 'degree', value_raw: 'PhD', value_display: 'PhD', value_type: 'text' },
+                                    { column_id: 'role', value_raw: 'Student', value_display: 'Student', value_type: 'text' }
+                                ]
+                            },
+                            {
+                                row_id: 'row_2',
+                                cells: [
+                                    { column_id: 'name', value_raw: 'Bob', value_display: 'Bob', value_type: 'text' },
+                                    { column_id: 'degree', value_raw: 'MSc', value_display: 'MSc', value_type: 'text' },
+                                    { column_id: 'role', value_raw: 'Tutor', value_display: 'Tutor', value_type: 'text' }
+                                ]
+                            }
+                        ]
+                    },
+                    presentation: {
+                        mode: 'inline_primary',
+                        source_element_id: 'screen_text',
+                        source_span: { start_line: 1, end_line: 4 }
+                    },
+                    provenance: {
+                        source: 'screen_markdown_table',
+                        table_index: 1
+                    }
+                }
+            ],
+            reason_codes: ['screen_markdown_tables_detected'],
+            validation: { valid: true, errors: [] }
+        };
 
         global.fetch = jest.fn((url) => {
             const common = mockCommonChatSessionResponse(url);
@@ -791,7 +848,11 @@ describe('chat markdown rendering (assistant)', () => {
                     ok: true,
                     json: async () => ({
                         response: assistantResponse,
-                        llm_debug: { model: 'gpt-5.4-mini-2026-03-17' }
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.4-mini-2026-03-17',
+                            display_elements: displayElements
+                        }
                     })
                 });
             }
@@ -806,6 +867,9 @@ describe('chat markdown rendering (assistant)', () => {
         const assistantMarkdown = scrollableField.querySelector('.chat-markdown.markdown-rendered');
         expect(assistantMarkdown).not.toBeNull();
         expect(assistantMarkdown.querySelector('table')).not.toBeNull();
+        expect(assistantMarkdown.querySelectorAll('table')).toHaveLength(1);
+        expect(assistantMarkdown.querySelector('.chat-display-elements-table')).toBeNull();
+        expect(assistantMarkdown.dataset.inlinePrimaryTableCount).toBe('1');
         expect(assistantMarkdown.textContent).toContain('Alice');
 
         const assistantContainer = assistantMarkdown.closest('.message-container');
@@ -829,6 +893,8 @@ describe('chat markdown rendering (assistant)', () => {
         expect(assistantMarkdown.dataset.renderMode).toBe('rendered');
         expect(assistantMarkdown.classList.contains('chat-markdown')).toBe(true);
         expect(assistantMarkdown.querySelector('table')).not.toBeNull();
+        expect(assistantMarkdown.querySelectorAll('table')).toHaveLength(1);
+        expect(assistantMarkdown.querySelector('.chat-display-elements-table')).toBeNull();
         expect(renderBadge.textContent).toContain('View: Rendered');
         expect(toggleButton.textContent).toBe('Text');
     });
