@@ -240,6 +240,13 @@ Runtime semantics:
   transport facts under `mcp_transport`, including execution identity,
   queue/handler/transport timing, deadline, timeout phase, and the explicit
   `discard_from_turn` late-result policy;
+- the transport applies the same remaining hard-deadline budget as a PyMongo
+  client-side operation timeout around the handler. Nested Vontology database
+  operations therefore release their bounded isolation worker at the deadline
+  instead of continuing under a succession of independent driver timeouts. A
+  small bounded part of that budget is reserved for caught database exceptions
+  to unwind into the typed terminal outcome. Non-database handlers remain
+  bounded by the fixed worker pool and cooperative cancellation scope;
 - a late handler completion cannot rewrite the workflow action outcome. Reads
   expose represented recovery affordances such as bounded retry or alternate
   path selection; writes report an indeterminate mutation outcome and require
