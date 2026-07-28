@@ -350,6 +350,48 @@ def test_apply_workflow_authoring_spec_updates_existing_workflow_without_root_cr
     assert publication_calls[0]["purpose"] == "Updated description"
 
 
+def test_authoring_preflight_rejects_child_visibility_narrower_than_workflow(
+    monkeypatch,
+) -> None:
+    workflow_id = "#V#public_workflow"
+    child_id = "#V#private_step"
+    concepts = {
+        workflow_id: {
+            "concept_id": workflow_id,
+            "relationships": {},
+        },
+        child_id: {
+            "concept_id": child_id,
+            "relationships": {
+                "#V#specific_to_user": ["#V#studio_author"]
+            },
+        },
+    }
+    monkeypatch.setattr(
+        mod,
+        "_actor_visible_raw_concept",
+        lambda concept_id: concepts.get(concept_id),
+    )
+
+    with pytest.raises(
+        mod.WorkflowStudioAuthorityError,
+        match="workflow_child_visibility_narrower_than_parent",
+    ):
+        mod._preflight_explicit_authored_concept_ids(
+            workflow_id,
+            {
+                "workflow_id": workflow_id,
+                "steps": [
+                    {
+                        "state_id": child_id,
+                        "concept_id": child_id,
+                        "terminal": True,
+                    }
+                ],
+            },
+        )
+
+
 def test_apply_workflow_authoring_spec_creates_missing_workflow_when_absent(
     monkeypatch,
 ) -> None:

@@ -76,6 +76,7 @@ from .workflow_concept_authority_service import (
     publish_workflow_definition_from_definition,
     upsert_workflow_json_policy_text,
     upsert_workflow_publication_lifecycle,
+    workflow_child_visibility_covers_parent,
     WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE,
     WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE,
     WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE,
@@ -210,10 +211,10 @@ def _workflow_definition_loader(workflow_id: str):
         return None
 
 
-def _actor_visible_concept_exists(concept_id: str) -> bool:
+def _actor_visible_raw_concept(concept_id: str) -> dict[str, Any] | None:
     concept_id_clean = _clean_text(concept_id)
     if not concept_id_clean:
-        return False
+        return None
     try:
         from ..services.concept_service import _find_raw_concept_by_exact_concept_id
 
@@ -232,10 +233,10 @@ def _actor_visible_concept_exists(concept_id: str) -> bool:
             "workflow_concept_existence_authority_unavailable"
         ) from exc
     if raw_concept is None:
-        return False
+        return None
     try:
         if can_access_concept(concept_id_clean):
-            return True
+            return dict(raw_concept)
     except Exception as exc:
         logger.warning(
             "workflow studio concept visibility authority unavailable for %s",
@@ -248,6 +249,10 @@ def _actor_visible_concept_exists(concept_id: str) -> bool:
     raise WorkflowStudioAuthorityError(
         "workflow_definition_not_loadable_for_actor"
     )
+
+
+def _actor_visible_concept_exists(concept_id: str) -> bool:
+    return _actor_visible_raw_concept(concept_id) is not None
 
 
 def _workflow_concept_exists(workflow_id: str) -> bool:
@@ -2132,15 +2137,31 @@ def _collect_explicit_authored_concept_ids(
 
 
 def _preflight_explicit_authored_concept_ids(
+    workflow_id: str,
     authoring_spec: Mapping[str, Any],
 ) -> None:
-    """Fail before publication when an authored child ID is hidden or unknown."""
+    """Fail before publication for hidden or audience-narrower authored children."""
 
-    for concept_id in _collect_explicit_authored_concept_ids(authoring_spec):
+    concept_ids = _collect_explicit_authored_concept_ids(authoring_spec)
+    if not concept_ids:
+        return
+    workflow_doc = _actor_visible_raw_concept(workflow_id)
+    for concept_id in concept_ids:
         # A provably absent child may be created by canonical publication.
         # Existing children must be visible to the ambient actor; the helper
         # raises a concealment-safe authority error when they are not.
-        _actor_visible_concept_exists(concept_id)
+        child_doc = _actor_visible_raw_concept(concept_id)
+        if (
+            workflow_doc is not None
+            and child_doc is not None
+            and not workflow_child_visibility_covers_parent(
+                workflow_doc,
+                child_doc,
+            )
+        ):
+            raise WorkflowStudioAuthorityError(
+                "workflow_child_visibility_narrower_than_parent"
+            )
 
 
 def apply_workflow_authoring_spec(
@@ -2171,7 +2192,7 @@ def apply_workflow_authoring_spec(
     create_missing_workflow = bool(
         runtime_definition is None and _runtime_source == "new_workflow"
     )
-    _preflight_explicit_authored_concept_ids(authoring_spec)
+    _preflight_explicit_authored_concept_ids(workflow_id, authoring_spec)
     publication = publish_workflow_definition_from_definition(
         definition=definition,
         create_missing=create_missing_workflow,

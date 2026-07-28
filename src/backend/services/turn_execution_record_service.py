@@ -5286,6 +5286,13 @@ def _summarise_tool_invocations(
             "timeout_phase",
             "effect_id",
             "effect_status",
+            "capability_kind",
+            "execution_method",
+            "represented_workflow_id",
+            "workflow_id",
+            "instance_id",
+            "durable_submission_status",
+            "final_status",
         ):
             identifier_value = _safe_str(invocation.get(identifier_key))
             if identifier_value:

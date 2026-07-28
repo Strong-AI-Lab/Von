@@ -1782,6 +1782,7 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
         "created_concept_id",
         "existing_concept_id",
         "file_copy_concept_id",
+        "instance_id",
         "object_id",
         "relation_id",
         "source_concept_id",
@@ -3232,6 +3233,43 @@ def execute_adaptive_turn(
                         ),
                     )
                     continue
+                if turn_id:
+                    stable_launch_inputs = dict(
+                        trusted_arguments.get("inputs") or {}
+                    )
+                    # Tool results appended to the adaptive context must not
+                    # change the identity of an otherwise identical retry.
+                    stable_launch_inputs.pop("augmented_context", None)
+                    idempotency_material = _json_bytes(
+                        {
+                            "turn_id": turn_id,
+                            "workflow_id": str(workflow_capability.workflow_id),
+                            "launch_inputs": stable_launch_inputs,
+                        }
+                    )
+                    trusted_arguments.update(
+                        {
+                            "source_event_type": "conversation_turn",
+                            "source_event_id": turn_id,
+                            "event_idempotency_key": (
+                                "conversation_turn_workflow:"
+                                + hashlib.sha256(idempotency_material).hexdigest()
+                            ),
+                        }
+                    )
+                    binding_diagnostics = {
+                        **dict(binding_diagnostics or {}),
+                        "durable_idempotency": {
+                            "schema_version": (
+                                "workflow_turn_durable_idempotency.v1"
+                            ),
+                            "source_event_type": "conversation_turn",
+                            "source_event_id": turn_id,
+                            "event_idempotency_key_source": (
+                                "turn_workflow_inputs_fingerprint"
+                            ),
+                        },
+                    }
             else:
                 trusted_arguments = _trusted_tool_payload(
                     gateway=gateway,
@@ -3818,6 +3856,11 @@ def execute_adaptive_turn(
                             "mutation_outcome",
                             "outcome_finality",
                             "error_code",
+                            "instance_id",
+                            "workflow_id",
+                            "durable_submission_status",
+                            "final_status",
+                            "created_new",
                         ):
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):
@@ -3865,6 +3908,11 @@ def execute_adaptive_turn(
                             "mutation_outcome",
                             "outcome_finality",
                             "error_code",
+                            "instance_id",
+                            "workflow_id",
+                            "durable_submission_status",
+                            "final_status",
+                            "created_new",
                         ):
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):

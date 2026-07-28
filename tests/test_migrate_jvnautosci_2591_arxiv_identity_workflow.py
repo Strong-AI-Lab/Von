@@ -89,3 +89,52 @@ def test_rewrite_is_idempotent() -> None:
     assert changed is True
     assert changed_again is False
     assert second == first
+
+
+def test_visibility_repair_aligns_ensure_step_and_mappings_with_root(
+    monkeypatch,
+) -> None:
+    rewritten, _changed = (
+        mod.rewrite_metadata_workflow_for_canonical_arxiv_identity(_base_spec())
+    )
+    child_ids = mod._ensure_visibility_child_ids(rewritten)
+    documents = {
+        mod.WORKFLOW_ID: {
+            "concept_id": mod.WORKFLOW_ID,
+            "relationships": {},
+        },
+        **{
+            child_id: {
+                "concept_id": child_id,
+                "relationships": {
+                    "#V#specific_to_user": [mod.DEFAULT_ACTOR_USER_ID]
+                },
+            }
+            for child_id in child_ids
+        },
+    }
+    monkeypatch.setattr(
+        mod,
+        "_find_raw_concept_by_exact_concept_id",
+        lambda concept_id: documents.get(concept_id),
+    )
+
+    def _update(concept_id, payload, **_kwargs):
+        documents[concept_id]["relationships"] = payload["relationships"]
+
+    monkeypatch.setattr(mod.concept_service, "update_concept", _update)
+
+    preview = mod.repair_ensure_arxiv_visibility_closure(
+        rewritten,
+        apply=False,
+    )
+    applied = mod.repair_ensure_arxiv_visibility_closure(
+        rewritten,
+        apply=True,
+    )
+
+    assert set(preview["repair_required_ids"]) == set(child_ids)
+    assert preview["closure_verified"] is False
+    assert set(applied["repair_required_ids"]) == set(child_ids)
+    assert applied["closure_verified"] is True
+    assert all(documents[child_id]["relationships"] == {} for child_id in child_ids)
