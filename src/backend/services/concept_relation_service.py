@@ -35,6 +35,7 @@ _ARG_INDEX_SUBJECT = 1  # Align with example payloads (1-based indexing)
 _ARG_INDEX_FIRST_OBJECT = 2
 _DEFAULT_LIMIT = 200
 _MAX_LIMIT = 500
+_CANONICAL_EXACT_PREDICATE_FALLBACK_MAX_TIME_MS = 8_000
 _UNCERTAINTY_MODE_ASSERTED_ONLY = "asserted_only"
 _UNCERTAINTY_MODE_UNCERTAIN_ONLY = "uncertain_only"
 _UNCERTAINTY_MODE_INCLUDE_UNCERTAIN = "include_uncertain"
@@ -401,30 +402,31 @@ def find_relations_with_argument(
                         True,
                         preview_cache,
                     )
-                hits.append(
-                    {
-                        "source_concept_id": resolved_concept_id,
-                        "predicate_concept_id": predicate_id,
-                        "relation_kind": "binary",
-                        "argument_indexes": matched_indexes,
-                        "target_value": target_value,
-                        "target_concept_preview": target_preview,
-                        "relation_metadata": {
-                            "relation_id": f"struct::{resolved_concept_id}::{predicate_id}::{target_index}",
-                            "updated_at": source_updated_at,
-                            "match_type": "exact",
-                        },
-                        "access_granted": source_preview is not None
-                        or not include_concept_preview,
-                        "follow_up_actions": _build_follow_up_actions(
-                            [target_value],
-                            exclude={resolved_concept_id},
-                        ),
-                        "score": 1.0,
-                        "is_asserted": True,
-                        "relation_state": "asserted",
-                    }
-                )
+                hit = {
+                    "source_concept_id": resolved_concept_id,
+                    "predicate_concept_id": predicate_id,
+                    "relation_kind": "binary",
+                    "argument_indexes": matched_indexes,
+                    "target_value": target_value,
+                    "target_concept_preview": target_preview,
+                    "relation_metadata": {
+                        "relation_id": f"struct::{resolved_concept_id}::{predicate_id}::{target_index}",
+                        "updated_at": source_updated_at,
+                        "match_type": "exact",
+                    },
+                    "access_granted": source_preview is not None
+                    or not include_concept_preview,
+                    "follow_up_actions": _build_follow_up_actions(
+                        [target_value],
+                        exclude={resolved_concept_id},
+                    ),
+                    "score": 1.0,
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                }
+                if include_concept_preview:
+                    hit["source_concept_preview"] = source_preview
+                hits.append(hit)
 
     if include_asserted_rows and include_structural and include_arg2_or_later:
         incoming_candidates: List[Tuple[str, Any, int, Any]] = []
@@ -483,55 +485,136 @@ def find_relations_with_argument(
                     continue
                 incoming_candidates.append(candidate)
         else:
-            incoming_asserted_binary_diagnostics.update(
-                {
-                    "path": "canonical_aggregation",
-                    "fallback_reason": "relationship_extent_index_unavailable",
-                }
+            exact_predicate_ids = _canonical_exact_predicate_filter_ids(
+                predicate_filter
             )
-            incoming_pipeline = [
-                {"$match": {"relationships": {"$type": "object"}}},
-                {
-                    "$project": {
-                        "concept_id": 1,
-                        "updated_at": 1,
-                        "relationship_items": {"$objectToArray": "$relationships"},
+            if exact_predicate_ids:
+                incoming_asserted_binary_diagnostics.update(
+                    {
+                        "path": "canonical_exact_predicate_query",
+                        "fallback_reason": (
+                            "relationship_extent_index_unavailable"
+                        ),
                     }
-                },
-                {"$unwind": "$relationship_items"},
-                {
-                    "$project": {
-                        "concept_id": 1,
-                        "updated_at": 1,
-                        "predicate": "$relationship_items.k",
-                        "targets": "$relationship_items.v",
-                    }
-                },
-                {"$match": {"targets": resolved_concept_id}},
-            ]
-            for row in ConceptsRepository.aggregate(incoming_pipeline):
-                incoming_asserted_binary_diagnostics[
-                    "canonical_rows_returned"
-                ] += 1
-                source_id = row.get("concept_id")
-                if not isinstance(source_id, str) or not source_id.strip():
-                    continue
-                source_id = source_id.strip()
-                targets = _normalise_relationship_targets(row.get("targets"))
-                if not targets:
-                    continue
-                for target_index, target_value in enumerate(targets):
-                    if target_value != resolved_concept_id:
+                )
+                exact_query = {
+                    "$or": [
+                        {
+                            f"relationships.{predicate_id}": (
+                                resolved_concept_id
+                            )
+                        }
+                        for predicate_id in exact_predicate_ids
+                    ]
+                }
+                exact_projection = {
+                    "_id": 0,
+                    "concept_id": 1,
+                    "updated_at": 1,
+                    **{
+                        f"relationships.{predicate_id}": 1
+                        for predicate_id in exact_predicate_ids
+                    },
+                }
+                exact_documents = ConceptsRepository.find(
+                    exact_query,
+                    exact_projection,
+                    max_time_ms=(
+                        _CANONICAL_EXACT_PREDICATE_FALLBACK_MAX_TIME_MS
+                    ),
+                )
+                for document in exact_documents:
+                    source_id = document.get("concept_id")
+                    if not isinstance(source_id, str) or not source_id.strip():
                         continue
-                    incoming_candidates.append(
-                        (
-                            source_id,
-                            row.get("predicate"),
-                            target_index,
-                            row.get("updated_at"),
+                    source_id = source_id.strip()
+                    relationships = document.get("relationships")
+                    if not isinstance(relationships, Mapping):
+                        continue
+                    for predicate_id in exact_predicate_ids:
+                        targets = _normalise_relationship_targets(
+                            relationships.get(predicate_id)
                         )
+                        if not targets:
+                            continue
+                        incoming_asserted_binary_diagnostics[
+                            "canonical_rows_returned"
+                        ] += 1
+                        for target_index, target_value in enumerate(targets):
+                            if target_value != resolved_concept_id:
+                                continue
+                            incoming_candidates.append(
+                                (
+                                    source_id,
+                                    predicate_id,
+                                    target_index,
+                                    document.get("updated_at"),
+                                )
+                            )
+            else:
+                incoming_asserted_binary_diagnostics.update(
+                    {
+                        "path": "canonical_aggregation",
+                        "fallback_reason": (
+                            "relationship_extent_index_unavailable"
+                        ),
+                    }
+                )
+                incoming_pipeline = [
+                    {"$match": {"relationships": {"$type": "object"}}},
+                    {
+                        "$project": {
+                            "concept_id": 1,
+                            "updated_at": 1,
+                            "relationship_items": {
+                                "$objectToArray": "$relationships"
+                            },
+                        }
+                    },
+                    {"$unwind": "$relationship_items"},
+                    {
+                        "$project": {
+                            "concept_id": 1,
+                            "updated_at": 1,
+                            "predicate": "$relationship_items.k",
+                            "targets": "$relationship_items.v",
+                        }
+                    },
+                    {"$match": {"targets": resolved_concept_id}},
+                ]
+                for row in ConceptsRepository.aggregate(incoming_pipeline):
+                    incoming_asserted_binary_diagnostics[
+                        "canonical_rows_returned"
+                    ] += 1
+                    source_id = row.get("concept_id")
+                    if not isinstance(source_id, str) or not source_id.strip():
+                        continue
+                    source_id = source_id.strip()
+                    targets = _normalise_relationship_targets(
+                        row.get("targets")
                     )
+                    if not targets:
+                        continue
+                    for target_index, target_value in enumerate(targets):
+                        if target_value != resolved_concept_id:
+                            continue
+                        incoming_candidates.append(
+                            (
+                                source_id,
+                                row.get("predicate"),
+                                target_index,
+                                row.get("updated_at"),
+                            )
+                        )
 
+        _prime_concept_preview_cache(
+            [
+                resolved_concept_id,
+                *(source_id for source_id, _, _, _ in incoming_candidates),
+            ],
+            include_preview=include_concept_preview,
+            preview_cache=preview_cache,
+        )
         for source_id, predicate_id, target_index, source_updated_at in (
             incoming_candidates
         ):
@@ -545,38 +628,39 @@ def find_relations_with_argument(
                 include_concept_preview,
                 preview_cache,
             )
-            hits.append(
-                {
-                    "source_concept_id": source_id,
-                    "predicate_concept_id": predicate_id,
-                    "relation_kind": "binary",
-                    "argument_indexes": matched_indexes,
-                    "target_value": resolved_concept_id,
-                    "target_concept_preview": (
-                        _resolve_concept_preview(
-                            resolved_concept_id,
-                            True,
-                            preview_cache,
-                        )
-                        if include_concept_preview
-                        else None
-                    ),
-                    "relation_metadata": {
-                        "relation_id": f"struct::{source_id}::{predicate_id}::incoming::{target_index}",
-                        "updated_at": _isoformat(source_updated_at),
-                        "match_type": "exact",
-                    },
-                    "access_granted": source_preview is not None
-                    or not include_concept_preview,
-                    "follow_up_actions": _build_follow_up_actions(
-                        [source_id],
-                        exclude={resolved_concept_id},
-                    ),
-                    "score": 1.0,
-                    "is_asserted": True,
-                    "relation_state": "asserted",
-                }
-            )
+            hit = {
+                "source_concept_id": source_id,
+                "predicate_concept_id": predicate_id,
+                "relation_kind": "binary",
+                "argument_indexes": matched_indexes,
+                "target_value": resolved_concept_id,
+                "target_concept_preview": (
+                    _resolve_concept_preview(
+                        resolved_concept_id,
+                        True,
+                        preview_cache,
+                    )
+                    if include_concept_preview
+                    else None
+                ),
+                "relation_metadata": {
+                    "relation_id": f"struct::{source_id}::{predicate_id}::incoming::{target_index}",
+                    "updated_at": _isoformat(source_updated_at),
+                    "match_type": "exact",
+                },
+                "access_granted": source_preview is not None
+                or not include_concept_preview,
+                "follow_up_actions": _build_follow_up_actions(
+                    [source_id],
+                    exclude={resolved_concept_id},
+                ),
+                "score": 1.0,
+                "is_asserted": True,
+                "relation_state": "asserted",
+            }
+            if include_concept_preview:
+                hit["source_concept_preview"] = source_preview
+            hits.append(hit)
 
     if include_asserted_rows and include_text and include_arg1:
         source_preview = _resolve_concept_preview(
@@ -614,6 +698,8 @@ def find_relations_with_argument(
                 "is_asserted": True,
                 "relation_state": "asserted",
             }
+            if include_concept_preview:
+                hit["source_concept_preview"] = source_preview
             snippet = _make_argument_match_snippet(
                 text=text_value,
                 needle=resolved_concept_id,
@@ -694,6 +780,7 @@ def find_relations_with_argument(
                     "relation_state": "asserted",
                 }
                 if include_concept_preview:
+                    hit["source_concept_preview"] = source_preview
                     hit["target_concept_preview"] = _resolve_concept_preview(
                         resolved_concept_id,
                         True,
@@ -2779,6 +2866,60 @@ def _resolve_concept_preview(
     return preview
 
 
+def _prime_concept_preview_cache(
+    concept_ids: Iterable[str],
+    *,
+    include_preview: bool,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+) -> None:
+    """Batch preview reads when more than one related concept is unresolved."""
+
+    if not include_preview:
+        return
+    pending_ids = list(
+        dict.fromkeys(
+            concept_id.strip()
+            for concept_id in concept_ids
+            if isinstance(concept_id, str)
+            and concept_id.strip()
+            and concept_id.strip() not in preview_cache
+        )
+    )
+    if len(pending_ids) < 2:
+        return
+
+    accessible_id_set = (
+        filter_accessible_concept_ids(pending_ids)
+        if should_enforce_access_control()
+        else set(pending_ids)
+    )
+    accessible_ids = [
+        concept_id
+        for concept_id in pending_ids
+        if concept_id in accessible_id_set
+    ]
+    for concept_id in pending_ids:
+        if concept_id not in accessible_id_set:
+            preview_cache[concept_id] = None
+
+    with bypass_access_control():
+        documents = list(
+            ConceptsRepository.find(
+                {"concept_id": {"$in": accessible_ids}},
+                _PREVIEW_DOC_PROJECTION,
+            )
+        )
+    for document in documents:
+        concept_id = document.get("concept_id")
+        if not isinstance(concept_id, str) or not concept_id.strip():
+            continue
+        preview_cache[concept_id.strip()] = _build_concept_preview_from_document(
+            document
+        )
+    for concept_id in accessible_ids:
+        preview_cache.setdefault(concept_id, None)
+
+
 def _load_accessible_preview_document(concept_id: str) -> Optional[Dict[str, Any]]:
     if should_enforce_access_control() and not can_access_concept(concept_id):
         return None
@@ -3264,6 +3405,8 @@ def _collect_uncertain_argument_hits_for_subject(
             "relation_state": "uncertain",
             "uncertainty": _coerce_uncertainty_entry(assertion),
         }
+        if include_concept_preview:
+            hit["source_concept_preview"] = source_preview
         if include_concept_preview and target_value.startswith("#V#"):
             hit["target_concept_preview"] = _resolve_concept_preview(
                 target_value,
@@ -3346,6 +3489,7 @@ def _collect_uncertain_argument_hits_for_targets(
                 "uncertainty": _coerce_uncertainty_entry(assertion),
             }
             if include_concept_preview:
+                hit["source_concept_preview"] = source_preview
                 hit["target_concept_preview"] = target_preview
             hits.append(hit)
     return hits
@@ -3391,6 +3535,23 @@ def _normalise_predicate_display_terms(
     predicate_filter: Optional[Sequence[str]],
 ) -> List[str]:
     return _iter_predicate_filter_tokens(predicate_filter)
+
+
+def _canonical_exact_predicate_filter_ids(
+    predicate_filter: Optional[Sequence[str]],
+) -> List[str]:
+    """Return exact safe field IDs only when the whole filter is canonical."""
+
+    tokens = _iter_predicate_filter_tokens(predicate_filter)
+    if not tokens or any(
+        not token.startswith("#V#")
+        or "." in token
+        or "$" in token
+        or "\x00" in token
+        for token in tokens
+    ):
+        return []
+    return list(dict.fromkeys(tokens))
 
 
 def _predicate_matches_terms(predicate_id: Any, terms: Sequence[str]) -> bool:

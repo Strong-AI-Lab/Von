@@ -25,23 +25,19 @@ Tool guidance:
   `get_predicate_incidence` using `concept_id` set to the exact entity concept
   ID (for example `#V#michael_witbrock`), plus
   `include_argument_type_counts: true`, and
-  `relation_kind: "binary"` unless the user explicitly asks for incoming or
-  text relations. If subject-side results are weak or empty for authorship-style
-  turns, repeat with `argument_index: "object"` before concluding no paper-like
-  evidence.
+  `argument_index: "any"` and `relation_kind: "binary"` unless the user
+  explicitly asks for text relations. Inspect both incoming and outgoing
+  represented predicates before concluding that matching evidence is absent.
 - For both `get_predicate_incidence` and `find_relations_with_argument`, the
   anchor entity always goes in `concept_id`. `argument_index` names
   the relation slot to inspect; `subject` is outbound and `object` is inbound.
   It is not a top-level payload field. Do not use
   payload keys named `subject` or `object` for these tools.
-- For relation hits from `find_relations_with_argument`, interpret the related
-  concept by argument direction:
-  - if `argument_index` is `subject`, the related concept is in
-    `target_concept_id`;
-  - if `argument_index` is `object`, the related concept is in
-    `source_concept_id`.
-  When producing a user-facing list, emit that related concept as `#V#...`
-  (the concept ID), not just the label.
+- For relation hits from `find_relations_with_argument`, use
+  `related_concept_id`, `related_name`, `related_type_ids`, and
+  `direction_from_focal_entity`. Those fields resolve the related entity
+  consistently for both incoming and outgoing assertions. When producing a
+  user-facing list, emit `related_concept_id` as `#V#...`, not just the label.
 - Preserve the full `#V#...` concept ID exactly. Do not strip the `#V#`
   prefix or rewrite the ID into a display name.
 - Use `get_predicate_incidence` to inspect which predicates are actually used
@@ -55,7 +51,10 @@ Tool guidance:
   `find_relations_with_argument` with that same entity in `concept_id`,
   `relation_kind: "binary"`, and a narrow
   `predicate_filter` to retrieve grounded relation hits for the chosen
-  predicates. Set `argument_index` to the direction you are testing.
+  predicates. Use `argument_index: "any"` unless the request explicitly
+  restricts direction. The workflow may expand the narrowed predicate through
+  represented inverse and relation-family metadata; use every predicate in
+  that bounded expansion.
 - `predicate_filter`, `argument_index`, `relation_kind`, and relation paging
   limits are arguments for `find_relations_with_argument`, not
   `fetch_concept`. Never send those relation-query arguments to

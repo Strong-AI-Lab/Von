@@ -19714,6 +19714,73 @@ class InternalMCPChatOrchestrator:
                                 }
                             )
 
+        if (
+            lowered_tool_name == "find_relations_with_argument"
+            and isinstance(matched_tool_defaults, Mapping)
+            and bool(
+                matched_tool_defaults.get(
+                    "__expand_predicate_family_from_vontology",
+                    False,
+                )
+            )
+        ):
+            raw_predicate_filter = payload.get("predicate_filter")
+            predicate_filter = [
+                str(item).strip()
+                for item in (
+                    raw_predicate_filter
+                    if isinstance(raw_predicate_filter, Sequence)
+                    and not isinstance(
+                        raw_predicate_filter,
+                        (str, bytes, bytearray),
+                    )
+                    else []
+                )
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if predicate_filter:
+                from ...services.predicate_family_vontology_service import (
+                    expand_relation_predicate_family,
+                )
+
+                expansion = expand_relation_predicate_family(
+                    predicate_filter,
+                    max_predicates=matched_tool_defaults.get(
+                        "__predicate_family_max_predicates",
+                        32,
+                    ),
+                )
+                expanded_predicate_ids = [
+                    str(item).strip()
+                    for item in (expansion.get("predicate_ids") or [])
+                    if isinstance(item, str) and str(item).strip()
+                ]
+                if expanded_predicate_ids:
+                    payload["predicate_filter"] = expanded_predicate_ids
+                if isinstance(data, MutableMapping):
+                    data["relation_predicate_family_context"] = dict(expansion)
+                    events = data.setdefault("tool_payload_support_events", [])
+                    if isinstance(events, list):
+                        events.append(
+                            {
+                                "tool": lowered_tool_name,
+                                "field": "predicate_filter",
+                                "source": "vontology_predicate_schema",
+                                "seed_predicate_ids": predicate_filter,
+                                "predicate_ids": expanded_predicate_ids,
+                                "family_concept_ids": list(
+                                    expansion.get("family_concept_ids") or []
+                                ),
+                                "status": expansion.get("status"),
+                                "relationship_extent_index_status": expansion.get(
+                                    "relationship_extent_index_status"
+                                ),
+                                "family_discovery_source": expansion.get(
+                                    "family_discovery_source"
+                                ),
+                            }
+                        )
+
         if lowered_tool_name != "search_knowledge_base":
             return
 
@@ -20848,6 +20915,9 @@ class InternalMCPChatOrchestrator:
         )
         compact_hits: list[dict[str, Any]] = []
         predicate_values: list[str] = []
+        focal_concept_id = str(payload.get("concept_id") or "").strip() or None
+        subject_argument_index = 1
+        first_object_argument_index = 2
 
         def _preview_name(preview: Any) -> str | None:
             if not isinstance(preview, Mapping):
@@ -20889,7 +20959,73 @@ class InternalMCPChatOrchestrator:
                 if predicate_value not in predicate_values:
                     predicate_values.append(predicate_value)
 
-        for hit in hits[:max_hits]:
+        selected_hits: list[Mapping[str, Any]] = []
+        seen_related_concept_ids: set[str] = set()
+        related_predicates_by_concept_id: dict[str, list[str]] = {}
+        related_directions_by_concept_id: dict[str, list[str]] = {}
+        compacted_duplicate_hit_count = 0
+        for hit in hits:
+            source_id = str(hit.get("source_concept_id") or "").strip()
+            target_preview = hit.get("target_concept_preview")
+            target_id = (
+                _preview_concept_id(target_preview)
+                or str(hit.get("target_value") or "").strip()
+            )
+            raw_indexes = hit.get("argument_indexes")
+            indexes = (
+                [int(index) for index in raw_indexes if isinstance(index, (int, float))]
+                if isinstance(raw_indexes, list)
+                else []
+            )
+            related_concept_id: str | None = None
+            direction_from_focal_entity: str | None = None
+            if (
+                focal_concept_id
+                and source_id == focal_concept_id
+                and target_id.startswith("#V#")
+                and (not indexes or subject_argument_index in indexes)
+            ):
+                related_concept_id = target_id
+                direction_from_focal_entity = "outgoing"
+            elif (
+                focal_concept_id
+                and target_id == focal_concept_id
+                and source_id.startswith("#V#")
+                and (
+                    not indexes
+                    or any(index >= first_object_argument_index for index in indexes)
+                )
+            ):
+                related_concept_id = source_id
+                direction_from_focal_entity = "incoming"
+            if related_concept_id:
+                predicate_id = str(
+                    hit.get("predicate_concept_id") or ""
+                ).strip()
+                related_predicates = related_predicates_by_concept_id.setdefault(
+                    related_concept_id,
+                    [],
+                )
+                if predicate_id and predicate_id not in related_predicates:
+                    related_predicates.append(predicate_id)
+                related_directions = related_directions_by_concept_id.setdefault(
+                    related_concept_id,
+                    [],
+                )
+                if (
+                    direction_from_focal_entity
+                    and direction_from_focal_entity not in related_directions
+                ):
+                    related_directions.append(direction_from_focal_entity)
+                if related_concept_id in seen_related_concept_ids:
+                    compacted_duplicate_hit_count += 1
+                    continue
+                seen_related_concept_ids.add(related_concept_id)
+            if len(selected_hits) >= max_hits:
+                continue
+            selected_hits.append(hit)
+
+        for hit in selected_hits:
             compact_hit: dict[str, Any] = {}
             source_concept_id = hit.get("source_concept_id")
             if isinstance(source_concept_id, str) and source_concept_id.strip():
@@ -20944,6 +21080,62 @@ class InternalMCPChatOrchestrator:
             if target_type_ids:
                 compact_hit["target_type_ids"] = target_type_ids
 
+            compact_source_id = compact_hit.get("source_concept_id")
+            compact_target_id = compact_hit.get("target_concept_id")
+            compact_indexes = compact_hit.get("argument_indexes") or []
+            if (
+                focal_concept_id
+                and compact_source_id == focal_concept_id
+                and isinstance(compact_target_id, str)
+                and compact_target_id.startswith("#V#")
+                and (not compact_indexes or subject_argument_index in compact_indexes)
+            ):
+                compact_hit["direction_from_focal_entity"] = "outgoing"
+                compact_hit["related_concept_id"] = compact_target_id
+                if target_name:
+                    compact_hit["related_name"] = target_name
+                if target_type_ids:
+                    compact_hit["related_type_ids"] = target_type_ids
+            elif (
+                focal_concept_id
+                and compact_target_id == focal_concept_id
+                and isinstance(compact_source_id, str)
+                and compact_source_id.startswith("#V#")
+                and (
+                    not compact_indexes
+                    or any(
+                        index >= first_object_argument_index
+                        for index in compact_indexes
+                        if isinstance(index, int)
+                    )
+                )
+            ):
+                compact_hit["direction_from_focal_entity"] = "incoming"
+                compact_hit["related_concept_id"] = compact_source_id
+                if source_name:
+                    compact_hit["related_name"] = source_name
+                if source_type_ids:
+                    compact_hit["related_type_ids"] = source_type_ids
+
+            related_concept_id = compact_hit.get("related_concept_id")
+            if isinstance(related_concept_id, str):
+                related_predicate_ids = related_predicates_by_concept_id.get(
+                    related_concept_id,
+                    [],
+                )
+                if related_predicate_ids:
+                    compact_hit["related_predicate_concept_ids"] = list(
+                        related_predicate_ids
+                    )
+                related_directions = related_directions_by_concept_id.get(
+                    related_concept_id,
+                    [],
+                )
+                if related_directions:
+                    compact_hit["directions_from_focal_entity"] = list(
+                        related_directions
+                    )
+
             text_snippet = hit.get("text_snippet")
             if isinstance(text_snippet, str) and text_snippet.strip():
                 compact_hit["text_preview"] = text_snippet.strip()[:max_text_chars]
@@ -20970,7 +21162,7 @@ class InternalMCPChatOrchestrator:
             if not hits
             else (
                 f"{len(predicate_values)} distinct predicate(s) were observed across "
-                f"{len(compact_hits)} shown relation hit(s)."
+                f"{len(compact_hits)} shown unique related concept(s)."
             )
         )
 
@@ -20984,6 +21176,18 @@ class InternalMCPChatOrchestrator:
             "hits": compact_hits,
             "retrieval_diagnostics": {"note": diagnostics_note},
         }
+        omitted_related_concept_count = max(
+            0,
+            len(seen_related_concept_ids) - len(compact_hits),
+        )
+        if compacted_duplicate_hit_count:
+            compact_payload["compacted_duplicate_hit_count"] = (
+                compacted_duplicate_hit_count
+            )
+        if omitted_related_concept_count:
+            compact_payload["omitted_related_concept_count"] = (
+                omitted_related_concept_count
+            )
         return {
             key: value
             for key, value in compact_payload.items()
@@ -28074,6 +28278,22 @@ class InternalMCPChatOrchestrator:
         for hit in hits[:8]:
             if not isinstance(hit, Mapping):
                 continue
+            related_name = hit.get("related_name")
+            related_concept_id = hit.get("related_concept_id")
+            if (
+                isinstance(related_name, str)
+                and related_name.strip()
+                and isinstance(related_concept_id, str)
+                and related_concept_id.strip()
+            ):
+                related_label = f"{related_name.strip()} [{related_concept_id.strip()}]"
+            else:
+                related_label = related_name or related_concept_id
+            related_types = [
+                str(type_id).strip()
+                for type_id in (hit.get("related_type_ids") or [])[:3]
+                if isinstance(type_id, str) and str(type_id).strip()
+            ]
             source_label = hit.get("source_name") or hit.get("source_concept_id")
             predicate = hit.get("predicate_concept_id")
             target_label = (
@@ -28090,16 +28310,21 @@ class InternalMCPChatOrchestrator:
                 and isinstance(target_label, str)
                 and target_label.strip()
             ):
-                target_types = [
-                    str(type_id).strip()
-                    for type_id in (hit.get("target_type_ids") or [])[:3]
-                    if isinstance(type_id, str) and str(type_id).strip()
-                ]
                 type_suffix = (
-                    f" [types: {', '.join(target_types)}]" if target_types else ""
+                    f" [related types: {', '.join(related_types)}]"
+                    if related_types
+                    else ""
+                )
+                direction = hit.get("direction_from_focal_entity")
+                related_prefix = (
+                    f"related={related_label.strip()}; "
+                    if isinstance(related_label, str) and related_label.strip()
+                    else ""
                 )
                 fragments.append(
-                    f"{source_label.strip()} via {predicate.strip()} -> {target_label.strip()}{type_suffix}"
+                    f"{related_prefix}{source_label.strip()} via {predicate.strip()} "
+                    f"-> {target_label.strip()} ({direction or 'direction unspecified'})"
+                    f"{type_suffix}"
                 )
                 continue
             if (

@@ -655,6 +655,87 @@ def test_format_tool_result_shapes_find_relations_payload_with_target_type_ids()
     ]
 
 
+def test_format_tool_result_projects_unique_related_entities_in_both_directions():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "find_relations_with_argument",
+        {
+            "concept_id": "#V#focal_entity",
+            "total_hits": 3,
+            "hits": [
+                {
+                    "source_concept_id": "#V#focal_entity",
+                    "predicate_concept_id": "#V#outgoing_relation",
+                    "relation_kind": "binary",
+                    "argument_indexes": [1],
+                    "target_value": "#V#related_one",
+                    "target_concept_preview": {
+                        "concept_id": "#V#related_one",
+                        "name": "Related One",
+                        "type_ids": ["#V#requested_type"],
+                    },
+                },
+                {
+                    "source_concept_id": "#V#related_two",
+                    "predicate_concept_id": "#V#incoming_relation",
+                    "relation_kind": "binary",
+                    "argument_indexes": [2],
+                    "target_value": "#V#focal_entity",
+                    "source_concept_preview": {
+                        "concept_id": "#V#related_two",
+                        "name": "Related Two",
+                        "type_ids": ["#V#requested_type"],
+                    },
+                    "target_concept_preview": {
+                        "concept_id": "#V#focal_entity",
+                        "name": "Focal Entity",
+                    },
+                },
+                {
+                    "source_concept_id": "#V#focal_entity",
+                    "predicate_concept_id": "#V#duplicate_relation",
+                    "relation_kind": "binary",
+                    "argument_indexes": [1],
+                    "target_value": "#V#related_one",
+                    "target_concept_preview": {
+                        "concept_id": "#V#related_one",
+                        "name": "Related One",
+                        "type_ids": ["#V#requested_type"],
+                    },
+                },
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    payload = json.loads(encoded)["payload"]
+    assert payload["shown_hit_count"] == 2
+    assert [hit["related_concept_id"] for hit in payload["hits"]] == [
+        "#V#related_one",
+        "#V#related_two",
+    ]
+    assert payload["hits"][0]["direction_from_focal_entity"] == "outgoing"
+    assert payload["hits"][0]["related_name"] == "Related One"
+    assert payload["hits"][0]["related_type_ids"] == ["#V#requested_type"]
+    assert payload["hits"][0]["related_predicate_concept_ids"] == [
+        "#V#outgoing_relation",
+        "#V#duplicate_relation",
+    ]
+    assert payload["hits"][0]["directions_from_focal_entity"] == ["outgoing"]
+    assert payload["hits"][1]["direction_from_focal_entity"] == "incoming"
+    assert payload["hits"][1]["related_name"] == "Related Two"
+    assert payload["hits"][1]["related_type_ids"] == ["#V#requested_type"]
+    assert payload["compacted_duplicate_hit_count"] == 1
+
+
 def test_turn_scoped_tool_payload_support_applies_workflow_tool_argument_defaults():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),
@@ -702,6 +783,79 @@ def test_turn_scoped_tool_payload_support_applies_workflow_tool_argument_default
     assert payload_with_explicit_values["argument_index"] == "subject"
     assert payload_with_explicit_values["relation_kind"] == "binary"
     assert payload_with_explicit_values["limit"] == 3
+
+
+def test_turn_scoped_tool_payload_support_expands_represented_predicate_family(
+    monkeypatch,
+):
+    from src.backend.services import predicate_family_vontology_service as service
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_context_chars=80_000,
+    )
+    monkeypatch.setattr(
+        service,
+        "expand_relation_predicate_family",
+        lambda predicate_ids, *, max_predicates: {
+            "schema_version": "relation_predicate_family_expansion.v1",
+            "seed_predicate_ids": list(predicate_ids),
+            "predicate_ids": [
+                "#V#direct_relation",
+                "#V#inverse_relation",
+                "#V#role_relation",
+            ],
+            "family_concept_ids": ["#V#represented_relation_family"],
+            "status": "expanded",
+            "relationship_extent_index_status": "available",
+            "family_discovery_source": "relationship_extent_index",
+        },
+    )
+    payload = {
+        "concept_id": "#V#focal_entity",
+        "predicate_filter": ["#V#direct_relation"],
+    }
+    data: dict[str, Any] = {
+        "tool_argument_defaults": {
+            "find_relations_with_argument": {
+                "__expand_predicate_family_from_vontology": True,
+                "__predicate_family_max_predicates": 12,
+            }
+        }
+    }
+
+    orchestrator._apply_turn_scoped_tool_payload_support(
+        tool_name="find_relations_with_argument",
+        payload=payload,
+        data=data,
+    )
+
+    assert payload["predicate_filter"] == [
+        "#V#direct_relation",
+        "#V#inverse_relation",
+        "#V#role_relation",
+    ]
+    assert data["relation_predicate_family_context"]["family_concept_ids"] == [
+        "#V#represented_relation_family"
+    ]
+    assert data["tool_payload_support_events"] == [
+        {
+            "tool": "find_relations_with_argument",
+            "field": "predicate_filter",
+            "source": "vontology_predicate_schema",
+            "seed_predicate_ids": ["#V#direct_relation"],
+            "predicate_ids": [
+                "#V#direct_relation",
+                "#V#inverse_relation",
+                "#V#role_relation",
+            ],
+            "family_concept_ids": ["#V#represented_relation_family"],
+            "status": "expanded",
+            "relationship_extent_index_status": "available",
+            "family_discovery_source": "relationship_extent_index",
+        }
+    ]
 
 
 def test_turn_scoped_tool_payload_support_uses_represented_predicate_follow_up_profile():
