@@ -117,35 +117,6 @@ def test_annotate_python_decision_event_envelope() -> None:
     assert event["type"] == "episode_evaluation_autotrigger_gate"
 
 
-def test_workflow_gap_recovery_annotation_envelope() -> None:
-    """annotate_python_decision_event produces correct envelope for gap recovery."""
-    from src.backend.services.python_decision_authority_service import (
-        annotate_python_decision_event,
-    )
-
-    event = annotate_python_decision_event(
-        {
-            "type": "workflow_gap_recovery",
-            "status": "applied",
-            "workflow_id": "#V#test_workflow_gap",
-        },
-        stage="workflow_dispatch",
-        component="internal_mcp_orchestrator",
-        function="_maybe_apply_workflow_gap_recovery",
-        decision_class="workflow_gap_recovery_gate",
-        decision_source="gate_check",
-        changed_outcome=True,
-        reason_code="workflow_gap_recovery_applied",
-        possible_inappropriate_python_code_use=False,
-    )
-
-    assert event["decision_authority_origin"] == "python"
-    assert event["decision_class"] == "workflow_gap_recovery_gate"
-    assert event["changed_outcome"] is True
-    assert event["stage"] == "workflow_dispatch"
-    assert event["status"] == "applied"
-
-
 # ---- Phase 10: Presenter / completion fallback authority ----------------
 
 def test_completion_ledger_injection_annotation_envelope() -> None:

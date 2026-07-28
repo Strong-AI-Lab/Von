@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence, cast
 
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import OperationFailure, PyMongoError
+from pymongo.errors import DuplicateKeyError, OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
@@ -80,6 +80,8 @@ logger = logging.getLogger(__name__)
 
 TURN_EXECUTION_RECORD_SCHEMA_VERSION = "turn_execution_record.v1"
 TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION = "turn_execution_correctness.v1"
+LATE_EFFECT_OBSERVATION_SCHEMA_VERSION = "late_effect_observation.v1"
+EFFECT_OBSERVATION_JOURNAL_SCHEMA_VERSION = "effect_observation_journal.v1"
 WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION = "workflow_routing_diagnostics.v1"
 FINAL_ANSWER_SYNTHESIS_TELEMETRY_SCHEMA_VERSION = "final_answer_synthesis_telemetry.v1"
 TOOL_EVIDENCE_PROJECTION_REACHABILITY_SCHEMA_VERSION = (
@@ -120,6 +122,11 @@ _FINAL_ANSWER_PROJECTION_PAYLOAD_MAX_STRING_CHARS = 700
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_ENTRIES = 16
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_FIELD_ENTRIES = 32
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_IDENTIFIERS = 32
+_LATE_EFFECT_OBSERVATION_MAX_ID_CHARS = 512
+_EFFECT_OBSERVATION_PHASES = frozenset(
+    {"dispatch_intent", "turn_terminal", "late_terminal"}
+)
+_SAFE_EFFECT_JOURNAL_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _FINAL_ANSWER_PROJECTION_SECRET_KEY_PARTS = (
     "access_token",
     "api_key",
@@ -5115,19 +5122,80 @@ def _classify_tool_invocation_status(
         if isinstance(raw_success, bool):
             payload_success = raw_success
 
-    if blocked:
-        return "blocked"
     invocation_status = (_safe_str(invocation.get("status")) or "").lower()
-    error_code = (_safe_str(invocation.get("error_code")) or "").lower()
+    effect_status = (
+        _safe_str(invocation.get("effect_status"))
+        or (
+            _safe_str(payload_value.get("effect_status"))
+            if isinstance(payload_value, Mapping)
+            else None
+        )
+        or ""
+    ).lower()
+    mutation_outcome = (
+        _safe_str(invocation.get("mutation_outcome"))
+        or (
+            _safe_str(payload_value.get("mutation_outcome"))
+            if isinstance(payload_value, Mapping)
+            else None
+        )
+        or ""
+    ).lower()
+    transport_value = invocation.get("transport")
+    transport_outcome = (
+        (_safe_str(transport_value.get("outcome")) or "").lower()
+        if isinstance(transport_value, Mapping)
+        else ""
+    )
+    error_code = (
+        _safe_str(invocation.get("error_code"))
+        or (
+            _safe_str(payload_value.get("error_code"))
+            if isinstance(payload_value, Mapping)
+            else None
+        )
+        or ""
+    ).lower()
+
+    if blocked or invocation_status == "blocked":
+        return "blocked"
     if (
         invocation_status in {"timeout", "timed_out"}
         or payload_status in {"timeout", "timed_out"}
         or error_code in {"tool_timeout", "tool_timeout_outcome_unknown"}
+        or transport_outcome in {"timeout", "timed_out"}
     ):
         return "timeout"
     if (
+        invocation_status == "not_started"
+        or payload_status == "not_started"
+        or mutation_outcome == "not_started"
+        or transport_outcome == "not_started"
+    ):
+        return "not_started"
+    if (
+        invocation_status == "indeterminate"
+        or payload_status == "indeterminate"
+        or effect_status == "indeterminate"
+        or mutation_outcome == "unknown"
+        or transport_outcome == "unknown"
+    ):
+        return "indeterminate"
+    if (
+        invocation_status == "partial"
+        or payload_status == "partial"
+        or effect_status == "partial"
+        or mutation_outcome == "partial"
+        or transport_outcome == "partial"
+    ):
+        return "partial"
+    if (
         error_value
+        or invocation_status in {"error", "failed", "failure"}
         or payload_status in {"error", "failed", "failure"}
+        or effect_status in {"error", "failed", "failure"}
+        or mutation_outcome in {"error", "failed", "failure"}
+        or transport_outcome in {"error", "failed", "failure", "cancelled"}
         or payload_success is False
     ):
         return "error"
@@ -5169,6 +5237,11 @@ def _summarise_tool_invocations(
             invocation=invocation, payload=payload_value
         )
         error_value = _safe_str(invocation.get("error"))
+        payload_error_code = (
+            _safe_str(payload_value.get("error_code"))
+            if isinstance(payload_value, Mapping)
+            else None
+        )
 
         result_summary = _safe_str(invocation.get("result_summary"))
         if not result_summary and isinstance(payload_value, Mapping):
@@ -5183,10 +5256,18 @@ def _summarise_tool_invocations(
             "started_at_utc": _safe_str(invocation.get("started_at_utc")),
             "completed_at_utc": _safe_str(invocation.get("completed_at_utc")),
             "error": error_value,
-            "error_code": _safe_str(invocation.get("error_code")),
+            "error_code": (
+                _safe_str(invocation.get("error_code")) or payload_error_code
+            ),
             "result_summary": result_summary,
             "payload_fingerprint": _hash_payload(payload_value),
         }
+        for receipt_key in ("mutation_outcome", "outcome_finality"):
+            receipt_value = _safe_str(invocation.get(receipt_key))
+            if not receipt_value and isinstance(payload_value, Mapping):
+                receipt_value = _safe_str(payload_value.get(receipt_key))
+            if receipt_value:
+                serialised_invocation[receipt_key] = receipt_value
         for timing_key in (
             "duration_ms",
             "queue_duration_ms",
@@ -5199,10 +5280,18 @@ def _summarise_tool_invocations(
             timing_value = _safe_float(invocation.get(timing_key))
             if timing_value is not None:
                 serialised_invocation[timing_key] = timing_value
-        for identifier_key in ("call_id", "execution_id", "timeout_phase"):
+        for identifier_key in (
+            "call_id",
+            "execution_id",
+            "timeout_phase",
+            "effect_id",
+            "effect_status",
+        ):
             identifier_value = _safe_str(invocation.get(identifier_key))
             if identifier_value:
                 serialised_invocation[identifier_key] = identifier_value
+        if isinstance(invocation.get("changed"), bool):
+            serialised_invocation["changed"] = invocation.get("changed")
         if isinstance(invocation.get("advisory_budget_exceeded"), bool):
             serialised_invocation["advisory_budget_exceeded"] = invocation.get(
                 "advisory_budget_exceeded"
@@ -5228,8 +5317,31 @@ def _summarise_tool_invocations(
                 )
                 if key in transport_metadata
             }
+            if (
+                "mutation_outcome" not in serialised_invocation
+                and (_safe_str(transport_metadata.get("outcome")) or "").lower()
+                == "not_started"
+            ):
+                serialised_invocation["mutation_outcome"] = "not_started"
         if target_ids:
             serialised_invocation["target_ids"] = target_ids
+        predicate_ids = _extract_tool_invocation_predicate_ids(invocation)
+        if predicate_ids:
+            serialised_invocation["predicate_ids"] = predicate_ids
+        argument_relation_tuples = _extract_tool_invocation_relation_tuples(
+            invocation,
+            include_results=False,
+        )
+        if argument_relation_tuples:
+            serialised_invocation["argument_relation_tuples"] = (
+                argument_relation_tuples
+            )
+        result_relation_tuples = _extract_tool_invocation_relation_tuples(
+            invocation,
+            include_arguments=False,
+        )
+        if result_relation_tuples:
+            serialised_invocation["result_relation_tuples"] = result_relation_tuples
         serialised.append(serialised_invocation)
 
         lowered = tool_name.lower()
@@ -7563,7 +7675,7 @@ def _extract_tool_invocation_target_ids(invocation: Mapping[str, Any]) -> list[s
         raw_arguments = invocation.get("arguments")
         arguments = raw_arguments if isinstance(raw_arguments, Mapping) else None
 
-    return _normalise_representation_target_tokens(
+    raw_targets: list[Any] = [
         payload.get("concept_id") if isinstance(payload, Mapping) else None,
         payload.get("instance_of") if isinstance(payload, Mapping) else None,
         payload.get("file_copy_concept_id") if isinstance(payload, Mapping) else None,
@@ -7590,7 +7702,294 @@ def _extract_tool_invocation_target_ids(invocation: Mapping[str, Any]) -> list[s
         arguments.get("url") if isinstance(arguments, Mapping) else None,
         arguments.get("source_url") if isinstance(arguments, Mapping) else None,
         arguments.get("arxiv_id") if isinstance(arguments, Mapping) else None,
+    ]
+    for source in (payload, arguments):
+        if not isinstance(source, Mapping):
+            continue
+        for key in (
+            "canonical_concept_id",
+            "created_concept_id",
+            "existing_concept_id",
+            "object_id",
+            "relation_id",
+            "source",
+            "source_concept_id",
+            "source_id",
+            "subject",
+            "subject_id",
+            "target",
+            "target_concept_id",
+            "target_id",
+        ):
+            raw_targets.append(source.get(key))
+        for key in (
+            "concept_ids",
+            "created_concept_ids",
+            "relation_ids",
+            "source_ids",
+            "target_ids",
+        ):
+            value = source.get(key)
+            if isinstance(value, Sequence) and not isinstance(
+                value,
+                (str, bytes, bytearray),
+            ):
+                raw_targets.extend(list(value)[:100])
+
+    for invocation_key in ("result_target_ids", "target_ids"):
+        result_target_ids = invocation.get(invocation_key)
+        if isinstance(result_target_ids, Sequence) and not isinstance(
+            result_target_ids,
+            (str, bytes, bytearray),
+        ):
+            raw_targets.extend(list(result_target_ids)[:100])
+
+    def collect_nested(value: Any, *, depth: int = 0) -> None:
+        if depth > 5 or len(raw_targets) >= 500:
+            return
+        if isinstance(value, Mapping):
+            for raw_key, item in list(value.items())[:100]:
+                key = str(raw_key).strip().lower()
+                if key in {
+                    "canonical_concept_id",
+                    "computer_file_copy_concept_id",
+                    "concept_id",
+                    "created_concept_id",
+                    "existing_concept_id",
+                    "file_copy_concept_id",
+                    "object_id",
+                    "relation_id",
+                    "source_concept_id",
+                    "source_id",
+                    "subject_id",
+                    "target_concept_id",
+                    "target_id",
+                }:
+                    raw_targets.append(item)
+                elif key in {
+                    "concept_ids",
+                    "created_concept_ids",
+                    "relation_ids",
+                    "source_ids",
+                    "target_ids",
+                } and isinstance(item, Sequence) and not isinstance(
+                    item,
+                    (str, bytes, bytearray),
+                ):
+                    raw_targets.extend(list(item)[:100])
+                if key in {
+                    "arguments",
+                    "concept",
+                    "created",
+                    "data",
+                    "hits",
+                    "items",
+                    "relationship",
+                    "relationships",
+                    "result",
+                    "results",
+                }:
+                    collect_nested(item, depth=depth + 1)
+        elif isinstance(value, Sequence) and not isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            for item in list(value)[:100]:
+                collect_nested(item, depth=depth + 1)
+
+    collect_nested(payload)
+    return _normalise_representation_target_tokens(*raw_targets)
+
+
+def _extract_tool_invocation_predicate_ids(
+    invocation: Mapping[str, Any],
+) -> list[str]:
+    raw_predicate_ids = invocation.get("predicate_ids")
+    values: list[Any] = (
+        list(raw_predicate_ids)
+        if isinstance(raw_predicate_ids, Sequence)
+        and not isinstance(raw_predicate_ids, (str, bytes, bytearray))
+        else []
     )
+    sources = (
+        invocation.get("effective_arguments"),
+        invocation.get("arguments"),
+        invocation.get("effective_payload"),
+        invocation.get("payload"),
+    )
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("predicate", "predicate_concept_id", "predicate_id"):
+            values.append(source.get(key))
+
+    def collect_nested(value: Any, *, depth: int = 0) -> None:
+        if depth > 5 or len(values) >= 500:
+            return
+        if isinstance(value, Mapping):
+            for raw_key, item in list(value.items())[:100]:
+                key = str(raw_key).strip().lower()
+                if key in {"predicate", "predicate_concept_id", "predicate_id"}:
+                    values.append(item)
+                if key in {
+                    "arguments",
+                    "data",
+                    "hits",
+                    "items",
+                    "relationship",
+                    "relationships",
+                    "result",
+                    "results",
+                }:
+                    collect_nested(item, depth=depth + 1)
+        elif isinstance(value, Sequence) and not isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            for item in list(value)[:100]:
+                collect_nested(item, depth=depth + 1)
+
+    for source in sources:
+        collect_nested(source)
+    return _dedupe_string_sequence(values)
+
+
+def _relation_identifier(
+    row: Mapping[str, Any],
+    keys: Sequence[str],
+) -> str | None:
+    for key in keys:
+        value = row.get(key)
+        identifier = _safe_str(value)
+        if identifier:
+            return identifier
+        if not isinstance(value, Mapping):
+            continue
+        for nested_key in (
+            "canonical_concept_id",
+            "concept_id",
+            "id",
+            "predicate_concept_id",
+        ):
+            identifier = _safe_str(value.get(nested_key))
+            if identifier:
+                return identifier
+    return None
+
+
+def _relation_tuple_from_mapping(
+    row: Mapping[str, Any],
+) -> dict[str, str] | None:
+    source_id = _relation_identifier(
+        row,
+        (
+            "source_concept_id",
+            "source_id",
+            "source",
+            "subject_concept_id",
+            "subject_id",
+            "subject",
+        ),
+    )
+    predicate_id = _relation_identifier(
+        row,
+        ("predicate_concept_id", "predicate_id", "predicate"),
+    )
+    target_id = _relation_identifier(
+        row,
+        (
+            "target_concept_id",
+            "target_id",
+            "target",
+            "object_concept_id",
+            "object_id",
+            "object",
+        ),
+    )
+    if not source_id or not predicate_id or not target_id:
+        return None
+    return {
+        "source_id": source_id,
+        "predicate_id": predicate_id,
+        "target_id": target_id,
+    }
+
+
+def _relation_tuple_key(relation: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    normalised = _relation_tuple_from_mapping(relation)
+    if normalised is None:
+        return None
+    return (
+        normalised["source_id"].lower(),
+        normalised["predicate_id"].lower(),
+        normalised["target_id"].lower(),
+    )
+
+
+def _extract_tool_invocation_relation_tuples(
+    invocation: Mapping[str, Any],
+    *,
+    include_arguments: bool = True,
+    include_results: bool = True,
+) -> list[dict[str, str]]:
+    """Retain source-predicate-target membership from individual mappings."""
+
+    relations: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    visited_mappings = 0
+
+    def collect(value: Any, *, depth: int = 0) -> None:
+        nonlocal visited_mappings
+        if depth > 6 or visited_mappings >= 500:
+            return
+        if isinstance(value, Mapping):
+            visited_mappings += 1
+            relation = _relation_tuple_from_mapping(value)
+            if relation is not None:
+                key = _relation_tuple_key(relation)
+                if key is not None and key not in seen:
+                    seen.add(key)
+                    relations.append(relation)
+            for item in list(value.values())[:100]:
+                if isinstance(item, Mapping) or (
+                    isinstance(item, Sequence)
+                    and not isinstance(item, (str, bytes, bytearray))
+                ):
+                    collect(item, depth=depth + 1)
+        elif isinstance(value, Sequence) and not isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            for item in list(value)[:100]:
+                collect(item, depth=depth + 1)
+
+    sources: list[Any] = []
+    raw_payload = invocation.get("payload")
+    payload_arguments = (
+        raw_payload.get("arguments") if isinstance(raw_payload, Mapping) else None
+    )
+    if include_arguments:
+        sources.extend(
+            (
+                invocation.get("effective_arguments"),
+                invocation.get("arguments"),
+                payload_arguments,
+            )
+        )
+    if include_results:
+        sources.extend(
+            (
+                invocation.get("effective_payload"),
+                invocation.get("result"),
+                invocation.get("output"),
+            )
+        )
+        if not isinstance(payload_arguments, Mapping):
+            sources.append(raw_payload)
+
+    for source in sources:
+        collect(source)
+    return relations
 
 
 def _normalise_representation_target_tokens(*raw_values: Any) -> list[str]:
@@ -8266,44 +8665,69 @@ def _extract_mutation_metadata_from_invocation(
     payload = _extract_tool_invocation_payload(invocation)
     status = _classify_tool_invocation_status(invocation=invocation, payload=payload)
     targets = _extract_tool_invocation_target_ids(invocation)
+    transport = invocation.get("transport")
 
-    predicates: list[str] = []
-    for source in (
-        invocation.get("effective_arguments"),
-        invocation.get("arguments"),
-        payload,
+    def _receipt_text(field_name: str) -> str | None:
+        value = _safe_str(invocation.get(field_name))
+        if value:
+            return value
+        if isinstance(payload, Mapping):
+            value = _safe_str(payload.get(field_name))
+            if value:
+                return value
+        return None
+
+    mutation_outcome = _receipt_text("mutation_outcome")
+    if (
+        not mutation_outcome
+        and isinstance(transport, Mapping)
+        and (_safe_str(transport.get("outcome")) or "").lower() == "not_started"
     ):
-        if not isinstance(source, Mapping):
-            continue
-        for key in ("predicate_concept_id", "predicate"):
-            val = _safe_str(source.get(key))
-            if val and val not in predicates:
-                predicates.append(val)
+        mutation_outcome = "not_started"
+
+    predicates = _extract_tool_invocation_predicate_ids(invocation)
+    relation_tuples = _extract_tool_invocation_relation_tuples(
+        invocation,
+        include_results=False,
+    )
+    if not relation_tuples:
+        relation_tuples = _extract_tool_invocation_relation_tuples(
+            invocation,
+            include_arguments=False,
+        )
 
     return {
         "tool_name": tool_name,
         "status": status,
         "targets": targets,
         "predicates": predicates,
+        "relation_tuples": relation_tuples,
         "payload": payload if isinstance(payload, Mapping) else None,
+        "effect_id": _safe_str(invocation.get("effect_id")),
+        "effect_status": _receipt_text("effect_status"),
+        "mutation_outcome": mutation_outcome,
+        "outcome_finality": _receipt_text("outcome_finality"),
+        "error_code": _receipt_text("error_code"),
     }
 
 
 def _build_tool_authored_mutation_effects(
     *,
     tool_invocations: Sequence[Mapping[str, Any]] | None,
+    include_legacy_without_effect_id: bool = True,
 ) -> list[dict[str, Any]]:
     """Build mutation effects from tool-authored invocation metadata.
 
-    Groups write tool invocations by tool name, collecting targets and
-    predicates from each invocation's arguments/payload.  Each group
-    yields one effect with ``intent_origin: "tool_authored"``.
+    Durable adaptive effects are projected independently by their stable
+    ``effect_id`` so one successful invocation cannot mask another attempted
+    effect that was not started, partial, or indeterminate. Legacy invocations
+    without an effect identifier retain the existing per-tool grouping.
     """
     if not tool_invocations:
         return []
 
     groups: dict[str, dict[str, Any]] = {}
-    tool_order: list[str] = []
+    group_order: list[str] = []
 
     for invocation in tool_invocations:
         if not isinstance(invocation, Mapping):
@@ -8312,31 +8736,91 @@ def _build_tool_authored_mutation_effects(
         if metadata is None:
             continue
 
-        canonical_key = _tool_requirement_key(metadata["tool_name"])
-        if canonical_key not in groups:
-            groups[canonical_key] = {
+        canonical_tool_key = _tool_requirement_key(metadata["tool_name"])
+        stable_effect_id = _safe_str(metadata.get("effect_id"))
+        if not stable_effect_id and not include_legacy_without_effect_id:
+            continue
+        group_key = (
+            f"effect:{stable_effect_id}"
+            if stable_effect_id
+            else f"tool:{canonical_tool_key}"
+        )
+        if group_key not in groups:
+            groups[group_key] = {
                 "tool_name": metadata["tool_name"],
+                "effect_id": stable_effect_id,
                 "targets": [],
                 "predicates": [],
+                "relation_tuples": [],
                 "any_success": False,
                 "any_failure": False,
                 "any_blocked": False,
+                "any_not_started": False,
+                "any_partial": False,
+                "any_indeterminate": False,
                 "payloads": [],
+                "effect_statuses": [],
+                "mutation_outcomes": [],
+                "outcome_finalities": [],
+                "error_codes": [],
             }
-            tool_order.append(canonical_key)
+            group_order.append(group_key)
 
-        group = groups[canonical_key]
+        group = groups[group_key]
         for t in metadata["targets"]:
             if t not in group["targets"]:
                 group["targets"].append(t)
         for p in metadata["predicates"]:
             if p not in group["predicates"]:
                 group["predicates"].append(p)
+        existing_relation_keys = {
+            _relation_tuple_key(relation)
+            for relation in group["relation_tuples"]
+            if isinstance(relation, Mapping)
+        }
+        for relation in metadata["relation_tuples"]:
+            relation_key = _relation_tuple_key(relation)
+            if relation_key is not None and relation_key not in existing_relation_keys:
+                group["relation_tuples"].append(dict(relation))
+                existing_relation_keys.add(relation_key)
         payload = metadata.get("payload")
         if isinstance(payload, Mapping):
             group["payloads"].append(payload)
 
-        if metadata["status"] == "ok":
+        for field_name, group_field in (
+            ("effect_status", "effect_statuses"),
+            ("mutation_outcome", "mutation_outcomes"),
+            ("outcome_finality", "outcome_finalities"),
+            ("error_code", "error_codes"),
+        ):
+            field_value = _safe_str(metadata.get(field_name))
+            if field_value and field_value not in group[group_field]:
+                group[group_field].append(field_value)
+
+        normalised_effect_status = (
+            _safe_str(metadata.get("effect_status")) or ""
+        ).lower()
+        normalised_mutation_outcome = (
+            _safe_str(metadata.get("mutation_outcome")) or ""
+        ).lower()
+        if (
+            metadata["status"] == "not_started"
+            or normalised_mutation_outcome == "not_started"
+        ):
+            group["any_not_started"] = True
+        elif (
+            metadata["status"] == "indeterminate"
+            or normalised_effect_status == "indeterminate"
+            or normalised_mutation_outcome == "unknown"
+        ):
+            group["any_indeterminate"] = True
+        elif (
+            metadata["status"] == "partial"
+            or normalised_effect_status == "partial"
+            or normalised_mutation_outcome == "partial"
+        ):
+            group["any_partial"] = True
+        elif metadata["status"] == "ok":
             group["any_success"] = True
         elif metadata["status"] == "blocked":
             group["any_blocked"] = True
@@ -8344,13 +8828,30 @@ def _build_tool_authored_mutation_effects(
             group["any_failure"] = True
 
     effects: list[dict[str, Any]] = []
-    for index, lowered in enumerate(tool_order):
-        group = groups[lowered]
+    for index, group_key in enumerate(group_order):
+        group = groups[group_key]
         tool_name = group["tool_name"]
         targets = group["targets"][:5]
         predicates = group["predicates"][:5]
+        relation_tuples = group["relation_tuples"][:5]
+        independently_observed = bool(group["effect_id"])
 
-        if group["any_success"]:
+        if independently_observed and group["any_not_started"]:
+            effect_status = "not_executed"
+            status_reason = f"{tool_name} invocation was not started."
+        elif independently_observed and group["any_indeterminate"]:
+            effect_status = "not_satisfied"
+            status_reason = f"{tool_name} invocation outcome is indeterminate."
+        elif independently_observed and group["any_partial"]:
+            effect_status = "not_satisfied"
+            status_reason = f"{tool_name} invocation completed only partially."
+        elif independently_observed and group["any_blocked"]:
+            effect_status = "not_satisfied"
+            status_reason = f"{tool_name} invocation was blocked."
+        elif independently_observed and group["any_failure"]:
+            effect_status = "not_satisfied"
+            status_reason = f"{tool_name} invocation failed."
+        elif group["any_success"]:
             effect_status = "satisfied"
             status_reason = f"Successful {tool_name} invocation observed."
         elif group["any_blocked"]:
@@ -8363,15 +8864,21 @@ def _build_tool_authored_mutation_effects(
             effect_status = "not_executed"
             status_reason = f"No {tool_name} invocation completed."
 
-        failure_codes: list[str] = []
-        if effect_status == "not_satisfied":
-            failure_codes = [f"kb_mutation_{tool_name.lower()}_failed"]
+        failure_codes: list[str] = _dedupe_string_sequence(group["error_codes"])
+        if effect_status in {"not_satisfied", "not_executed"} and not failure_codes:
+            failure_codes = [
+                (
+                    f"kb_mutation_{tool_name.lower()}_not_started"
+                    if effect_status == "not_executed"
+                    else f"kb_mutation_{tool_name.lower()}_failed"
+                )
+            ]
 
         target_detail = f" targeting {', '.join(targets[:2])}" if targets else ""
         predicate_detail = f" ({', '.join(predicates[:2])})" if predicates else ""
 
         effect: dict[str, Any] = {
-            "effect_id": f"mutation_{index + 1}",
+            "effect_id": group["effect_id"] or f"mutation_{index + 1}",
             "intent_origin": "tool_authored",
             "effect_type": "kb_mutation",
             "description": (
@@ -8386,13 +8893,32 @@ def _build_tool_authored_mutation_effects(
             "status_reason": status_reason,
             "failure_codes": failure_codes,
         }
+        if relation_tuples:
+            effect["required_relation_tuples"] = relation_tuples
+        if independently_observed and (
+            group["any_partial"] or group["any_indeterminate"]
+        ):
+            effect["repeat_eligible"] = False
+        for source_field, effect_field in (
+            ("effect_statuses", "observed_effect_status"),
+            ("mutation_outcomes", "mutation_outcome"),
+            ("outcome_finalities", "outcome_finality"),
+        ):
+            observed_values = group[source_field]
+            if len(observed_values) == 1:
+                effect[effect_field] = observed_values[0]
+            elif observed_values:
+                effect[f"{effect_field}s"] = list(observed_values)
         if failure_codes:
             effect["failure_code"] = failure_codes[0]
 
         if tool_name.lower() == "materialise_scholarly_representation_for_file_copy":
             effect.update(
                 {
-                    "effect_id": f"effect_paper_representation_tool_{index + 1}",
+                    "effect_id": (
+                        group["effect_id"]
+                        or f"effect_paper_representation_tool_{index + 1}"
+                    ),
                     "effect_type": "scholarly_representation",
                     "representation_domain_id": "paper",
                     "description": (
@@ -8431,11 +8957,181 @@ def _build_tool_authored_mutation_effects(
     return effects
 
 
+def _effect_postcondition_readback(
+    *,
+    effect: Mapping[str, Any],
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Correlate successful verification reads to one effect's exact targets."""
+
+    required_targets = _dedupe_string_sequence(effect.get("targets") or [])
+    required_predicates = _dedupe_string_sequence(
+        effect.get("required_predicates") or []
+    )
+    required_relation_tuples: list[dict[str, str]] = []
+    required_relation_keys: set[tuple[str, str, str]] = set()
+    raw_required_relations = effect.get("required_relation_tuples")
+    if isinstance(raw_required_relations, Sequence) and not isinstance(
+        raw_required_relations,
+        (str, bytes, bytearray),
+    ):
+        for raw_relation in raw_required_relations:
+            if not isinstance(raw_relation, Mapping):
+                continue
+            relation = _relation_tuple_from_mapping(raw_relation)
+            relation_key = (
+                _relation_tuple_key(relation) if relation is not None else None
+            )
+            if relation is None or relation_key is None:
+                continue
+            if relation_key not in required_relation_keys:
+                required_relation_keys.add(relation_key)
+                required_relation_tuples.append(relation)
+    if required_relation_tuples:
+        required_targets = _dedupe_string_sequence(
+            [
+                *required_targets,
+                *(
+                    endpoint
+                    for relation in required_relation_tuples
+                    for endpoint in (
+                        relation["source_id"],
+                        relation["target_id"],
+                    )
+                ),
+            ]
+        )
+        required_predicates = _dedupe_string_sequence(
+            [
+                *required_predicates,
+                *(
+                    relation["predicate_id"]
+                    for relation in required_relation_tuples
+                ),
+            ]
+        )
+    target_lookup = {value.lower() for value in required_targets}
+    predicate_lookup = {value.lower() for value in required_predicates}
+    observations: list[dict[str, Any]] = []
+
+    for invocation in tool_invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if not tool_name or not _is_verification_read_tool(tool_name):
+            continue
+        payload = _extract_tool_invocation_payload(invocation)
+        if _classify_tool_invocation_status(
+            invocation=invocation,
+            payload=payload,
+        ) != "ok":
+            continue
+        targets = _extract_tool_invocation_target_ids(invocation)
+        predicates = _extract_tool_invocation_predicate_ids(invocation)
+        relation_tuples = _extract_tool_invocation_relation_tuples(
+            invocation,
+            include_arguments=False,
+        )
+        observations.append(
+            {
+                "tool": tool_name,
+                "targets": targets,
+                "predicates": predicates,
+                "relation_tuples": relation_tuples,
+                "relation_tuple_keys": {
+                    key
+                    for relation in relation_tuples
+                    if (key := _relation_tuple_key(relation)) is not None
+                },
+                "target_lookup": {value.lower() for value in targets},
+                "predicate_lookup": {value.lower() for value in predicates},
+            }
+        )
+
+    observed_targets = _dedupe_string_sequence(
+        target
+        for observation in observations
+        for target in observation["targets"]
+    )
+    observed_predicates = _dedupe_string_sequence(
+        predicate
+        for observation in observations
+        for predicate in observation["predicates"]
+    )
+    observed_relation_tuples: list[dict[str, str]] = []
+    observed_relation_keys: set[tuple[str, str, str]] = set()
+    for observation in observations:
+        for relation in observation["relation_tuples"]:
+            relation_key = _relation_tuple_key(relation)
+            if relation_key is None or relation_key in observed_relation_keys:
+                continue
+            observed_relation_keys.add(relation_key)
+            observed_relation_tuples.append(dict(relation))
+    correlated_tools: list[str] = []
+    correlated = False
+    if target_lookup:
+        if required_relation_keys:
+            matched_relation_keys: set[tuple[str, str, str]] = set()
+            for observation in observations:
+                matches = required_relation_keys.intersection(
+                    observation["relation_tuple_keys"]
+                )
+                if not matches:
+                    continue
+                matched_relation_keys.update(matches)
+                correlated_tools.append(observation["tool"])
+            correlated = required_relation_keys.issubset(matched_relation_keys)
+            if not correlated:
+                correlated_tools = []
+        elif predicate_lookup:
+            matched_predicates: set[str] = set()
+            candidate_tools: list[str] = []
+            for observation in observations:
+                matched_observation = False
+                for source_id, predicate_id, target_id in observation[
+                    "relation_tuple_keys"
+                ]:
+                    if predicate_id not in predicate_lookup:
+                        continue
+                    if not target_lookup.issubset({source_id, target_id}):
+                        continue
+                    matched_predicates.add(predicate_id)
+                    matched_observation = True
+                if matched_observation:
+                    candidate_tools.append(observation["tool"])
+            correlated = predicate_lookup.issubset(matched_predicates)
+            if correlated:
+                correlated_tools = candidate_tools
+        else:
+            aggregate_targets = {value.lower() for value in observed_targets}
+            correlated = target_lookup.issubset(aggregate_targets)
+            if correlated:
+                correlated_tools = _dedupe_string_sequence(
+                    observation["tool"]
+                    for observation in observations
+                    if target_lookup.intersection(observation["target_lookup"])
+                )
+
+    return {
+        "correlated": correlated,
+        "correlated_tools": correlated_tools,
+        "required_targets": required_targets,
+        "required_predicates": required_predicates,
+        "required_relation_tuples": required_relation_tuples,
+        "observed_targets": observed_targets,
+        "observed_predicates": observed_predicates,
+        "observed_relation_tuples": observed_relation_tuples,
+    }
+
+
 def _build_postcondition_checks(
     *,
     required_effects: Sequence[Mapping[str, Any]],
     successful_write_tools: Sequence[str],
     successful_verification_tools: Sequence[str],
+    tool_invocations: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     for effect in required_effects:
@@ -8445,6 +9141,10 @@ def _build_postcondition_checks(
         postcondition_strategy = (
             _safe_str(effect.get("postcondition_strategy")) or ""
         ).lower()
+        readback = _effect_postcondition_readback(
+            effect=effect,
+            tool_invocations=tool_invocations,
+        )
         if effect_type == "tool_execution":
             if effect_status == "satisfied":
                 check_status = "verified"
@@ -8501,6 +9201,25 @@ def _build_postcondition_checks(
                 check_status = "inconclusive"
                 evidence = f"{representation_label} verification is inconclusive."
                 verification_mode = "execution_inconclusive"
+        elif _is_evidence_effect_type(effect_type):
+            if effect_status == "satisfied":
+                check_status = "verified"
+                evidence = (
+                    _safe_str(effect.get("status_reason"))
+                    or "Required evidence retrieval was observed."
+                )
+                verification_mode = "evidence_execution_observed"
+            elif effect_status in {"not_satisfied", "not_executed"}:
+                check_status = "not_verified"
+                evidence = (
+                    _safe_str(effect.get("status_reason"))
+                    or "Required evidence retrieval was not observed."
+                )
+                verification_mode = "evidence_execution_missing"
+            else:
+                check_status = "inconclusive"
+                evidence = "Evidence retrieval verification is inconclusive."
+                verification_mode = "evidence_execution_inconclusive"
         else:
             if postcondition_strategy == "execution_observed":
                 if effect_status == "satisfied":
@@ -8522,20 +9241,35 @@ def _build_postcondition_checks(
                     evidence = "Execution-observed verification is inconclusive."
                     verification_mode = "execution_inconclusive"
             elif effect_status == "satisfied" and successful_write_tools:
-                if successful_verification_tools:
-                    check_status = "verified"
-                    evidence = (
-                        "Observed postcondition verification read/check tool(s): "
-                        + ", ".join(successful_verification_tools[:3])
-                    )
-                    verification_mode = "state_requery_observed"
-                else:
+                if not successful_verification_tools:
                     check_status = "inconclusive"
                     evidence = (
                         "Write tool invocation succeeded but explicit state "
                         "re-query/check tool invocation was not observed."
                     )
                     verification_mode = "state_requery_missing"
+                elif not readback["required_targets"]:
+                    check_status = "inconclusive"
+                    evidence = (
+                        "A verification read was observed, but the write receipt "
+                        "did not expose a concrete target for correlation."
+                    )
+                    verification_mode = "state_requery_target_unavailable"
+                elif readback["correlated"]:
+                    check_status = "verified"
+                    evidence = (
+                        "Observed target-correlated postcondition read/check "
+                        "tool(s): "
+                        + ", ".join(readback["correlated_tools"][:3])
+                    )
+                    verification_mode = "state_requery_correlated"
+                else:
+                    check_status = "inconclusive"
+                    evidence = (
+                        "Verification reads were observed, but none correlated "
+                        "with this effect's concrete targets and predicates."
+                    )
+                    verification_mode = "state_requery_target_mismatch"
             elif effect_status in {"not_satisfied", "not_executed"}:
                 check_status = "not_verified"
                 evidence = "Required mutation effect is unresolved."
@@ -8559,9 +9293,14 @@ def _build_postcondition_checks(
                             "scholarly_representation_observed"
                             if _is_representation_effect_type(effect_type)
                             else (
-                                "effect_execution_observed"
-                                if postcondition_strategy == "execution_observed"
-                                else "predicate_exists"
+                                "evidence_retrieval_observed"
+                                if _is_evidence_effect_type(effect_type)
+                                else (
+                                    "effect_execution_observed"
+                                    if postcondition_strategy
+                                    == "execution_observed"
+                                    else "predicate_exists"
+                                )
                             )
                         )
                     )
@@ -8572,6 +9311,23 @@ def _build_postcondition_checks(
                     "successful_write_tools": list(successful_write_tools),
                     "successful_verification_tools": list(
                         successful_verification_tools
+                    ),
+                    "correlated_verification_tools": list(
+                        readback["correlated_tools"]
+                    ),
+                    "required_targets": list(readback["required_targets"]),
+                    "required_predicates": list(readback["required_predicates"]),
+                    "required_relation_tuples": list(
+                        readback["required_relation_tuples"]
+                    ),
+                    "observed_verification_targets": list(
+                        readback["observed_targets"]
+                    ),
+                    "observed_verification_predicates": list(
+                        readback["observed_predicates"]
+                    ),
+                    "observed_verification_relation_tuples": list(
+                        readback["observed_relation_tuples"]
                     ),
                     "effect_status": effect_status,
                     "effect_type": effect_type,
@@ -8809,7 +9565,16 @@ def _derive_completion_gate(
             blocking_failure_codes = ["postcondition_inconclusive"]
 
     execution_signal_blocker = None
-    repeat_eligible = True
+    repeat_ineligible_effect_ids = sorted(
+        {
+            _safe_str(effect.get("effect_id")) or "effect_1"
+            for effect in required_effects
+            if (_safe_str(effect.get("status")) or "")
+            in {"not_satisfied", "not_executed"}
+            and effect.get("repeat_eligible") is False
+        }
+    )
+    repeat_eligible = not repeat_ineligible_effect_ids
     if decision == "completed":
         execution_signal_blocker = _derive_execution_signal_completion_blocker(
             execution_summary=execution_summary
@@ -8885,6 +9650,7 @@ def _derive_completion_gate(
             if isinstance(execution_signal_blocker, Mapping)
             else None
         ),
+        "repeat_ineligible_effect_ids": repeat_ineligible_effect_ids,
         "repeat_eligible": repeat_eligible,
         "completion_outcome": (
             "success"
@@ -9395,13 +10161,16 @@ def build_turn_execution_record(
         validation_failure_context=tool_call_validation_failure_context,
     )
 
-    mutation_effects: list[dict[str, Any]] = []
-    if not representation_effects and not workflow_required_effects:
-        # Mutation effects must remain tool-authored or workflow-authored.
-        # Do not fall back to generic observed-tool mutation contracts.
-        mutation_effects = _build_tool_authored_mutation_effects(
-            tool_invocations=tool_invocations,
-        )
+    # Stable durable receipts remain independently visible even when a
+    # represented/workflow contract also describes the intended outcome. Only
+    # legacy invocations without an effect ID are suppressed in that case, so
+    # generic observed-tool inference does not duplicate the authored contract.
+    mutation_effects = _build_tool_authored_mutation_effects(
+        tool_invocations=tool_invocations,
+        include_legacy_without_effect_id=(
+            not representation_effects and not workflow_required_effects
+        ),
+    )
     required_effects.extend(mutation_effects)
 
     required_tool_effect = required_tool_obligation_effect(
@@ -9526,6 +10295,7 @@ def build_turn_execution_record(
         required_effects=required_effects,
         successful_write_tools=effective_successful_write_tools,
         successful_verification_tools=successful_verification_tools,
+        tool_invocations=tool_invocations,
     )
     critic_summary = _summarise_check_counts(postcondition_checks)
 
@@ -10451,15 +11221,20 @@ def upsert_turn_execution_record_projection(
 
     now = _now_utc()
     payload = ensure_turn_execution_record_execution_correctness(record)
+    # Effect observations arrive independently around the ordinary projection.
+    # They must not be replaced by a later whole-turn snapshot containing no,
+    # or stale, observation state.
+    payload.pop("late_effect_observations", None)
+    payload.pop("effect_observation_journal", None)
     payload["request_id"] = request_id
     if _safe_str(user_id):
-        payload.setdefault("user_id", _safe_str(user_id))
+        payload["user_id"] = _safe_str(user_id)
     if _safe_str(session_id):
-        payload.setdefault("session_id", _safe_str(session_id))
+        payload["session_id"] = _safe_str(session_id)
     if _safe_str(namespace):
-        payload.setdefault("namespace", _safe_str(namespace))
+        payload["namespace"] = _safe_str(namespace)
     if _safe_str(org_id):
-        payload.setdefault("org_id", _safe_str(org_id))
+        payload["org_id"] = _safe_str(org_id)
     payload.setdefault("schema_version", TURN_EXECUTION_RECORD_SCHEMA_VERSION)
     payload.setdefault("created_at_utc", _iso_utc(now))
     payload["updated_at_utc"] = _iso_utc(now)
@@ -10473,13 +11248,31 @@ def upsert_turn_execution_record_projection(
     if isinstance(compacted_payload.payload, Mapping):
         payload = dict(compacted_payload.payload)
     payload["request_id"] = request_id
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            payload[field_name] = clean_value
     payload.setdefault("schema_version", TURN_EXECUTION_RECORD_SCHEMA_VERSION)
     payload["updated_at_utc"] = _iso_utc(now)
+
+    scope_query: dict[str, Any] = {"request_id": request_id}
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            scope_query[field_name] = clean_value
 
     try:
         result = _turn_execution_update_one(
             coll,
-            {"request_id": request_id},
+            scope_query,
             {
                 "$set": payload,
                 "$setOnInsert": {"inserted_at": now},
@@ -10496,6 +11289,19 @@ def upsert_turn_execution_record_projection(
             "matched": matched,
             "request_id": request_id,
         }
+    except DuplicateKeyError:
+        # request_id is globally unique. A scoped upsert that collides with an
+        # existing record therefore denotes a different actor scope, not a
+        # record this caller may replace.
+        logger.warning(
+            "Refused turn_execution_records scope collision for request_id=%s",
+            request_id,
+        )
+        return {
+            "updated": False,
+            "reason": "actor_scope_mismatch",
+            "request_id": request_id,
+        }
     except PyMongoError as exc:
         logger.warning(
             "Failed to upsert turn_execution_records projection for request_id=%s: %s",
@@ -10507,6 +11313,615 @@ def upsert_turn_execution_record_projection(
             "reason": "mongo_error",
             "request_id": request_id,
         }
+
+
+def record_effect_observation_phase(
+    *,
+    request_id: Any,
+    effect_id: Any,
+    phase: Any,
+    observation: Mapping[str, Any],
+    user_id: Any = None,
+    session_id: Any = None,
+    namespace: Any = None,
+    org_id: Any = None,
+) -> dict[str, Any]:
+    """Persist one immutable mechanical phase for an ordinary effect.
+
+    The journal is embedded in the actor-scoped turn record and keyed by the
+    server-generated effect ID.  Each phase is written at most once.  Recovery
+    and read-back may inspect these receipts, but this service never invokes,
+    retries, requeues, or otherwise executes the underlying effect.
+    """
+
+    clean_request_id = _safe_str(request_id)
+    clean_effect_id = _safe_str(effect_id)
+    clean_phase = _safe_str(phase)
+    if not clean_request_id:
+        return {"updated": False, "reason": "missing_request_id"}
+    if (
+        not clean_effect_id
+        or len(clean_effect_id) > _LATE_EFFECT_OBSERVATION_MAX_ID_CHARS
+        or not _SAFE_EFFECT_JOURNAL_KEY_RE.fullmatch(clean_effect_id)
+    ):
+        return {
+            "updated": False,
+            "reason": "invalid_effect_id",
+            "request_id": clean_request_id,
+        }
+    if clean_phase not in _EFFECT_OBSERVATION_PHASES:
+        return {
+            "updated": False,
+            "reason": "invalid_phase",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+    if not isinstance(observation, Mapping):
+        return {
+            "updated": False,
+            "reason": "invalid_observation",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+
+    actor_scope: dict[str, str] = {}
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            actor_scope[field_name] = clean_value
+    if not actor_scope:
+        return {
+            "updated": False,
+            "reason": "missing_actor_scope",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+
+    coll = get_turn_execution_records_collection()
+    if coll is None:
+        return {
+            "updated": False,
+            "reason": "collection_unavailable",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+        }
+
+    bounded = _compact_final_answer_projection_payload(
+        dict(observation),
+        max_depth=4,
+        max_items=32,
+        max_string_chars=2_000,
+    )
+    if not isinstance(bounded, Mapping):
+        bounded = {"value": bounded}
+    now = _now_utc()
+    recorded_at_utc = _iso_utc(now)
+    phase_entry = dict(bounded)
+    phase_entry.update(
+        {
+            "schema_version": EFFECT_OBSERVATION_JOURNAL_SCHEMA_VERSION,
+            "phase": clean_phase,
+            "effect_id": clean_effect_id,
+            "recorded_at_utc": recorded_at_utc,
+        }
+    )
+
+    journal_root = f"effect_observation_journal.{clean_effect_id}"
+    phase_path = f"{journal_root}.{clean_phase}"
+    identity_path = f"{journal_root}.identity"
+    record_scope_query = {"request_id": clean_request_id, **actor_scope}
+    phase_absent_query = {
+        **record_scope_query,
+        phase_path: {"$exists": False},
+    }
+    identity_entry = {
+        "schema_version": EFFECT_OBSERVATION_JOURNAL_SCHEMA_VERSION,
+        "effect_id": clean_effect_id,
+        "created_at_utc": recorded_at_utc,
+    }
+    for field_name in ("call_id", "capability_name"):
+        clean_value = _safe_str(observation.get(field_name))
+        if clean_value:
+            identity_entry[field_name] = clean_value
+    phase_set: dict[str, Any] = {phase_path: phase_entry}
+    # Dispatch intent is durably acknowledged before the handler can start, so
+    # it is the authoritative creation point for stable effect identity.  Later
+    # terminal receipts must never replace its creation time or call identity.
+    if clean_phase == "dispatch_intent":
+        phase_set[identity_path] = identity_entry
+    phase_update = {
+        "$set": phase_set,
+        "$max": {
+            "updated_at_utc": recorded_at_utc,
+            "effect_observation_updated_at_utc": recorded_at_utc,
+        },
+    }
+    insert_payload: dict[str, Any] = {
+        "request_id": clean_request_id,
+        "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
+        "created_at_utc": recorded_at_utc,
+        "updated_at_utc": recorded_at_utc,
+        "inserted_at": now,
+    }
+    for field_name, raw_value in (
+        ("user_id", user_id),
+        ("session_id", session_id),
+        ("namespace", namespace),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            insert_payload[field_name] = clean_value
+
+    try:
+        result = _turn_execution_update_one(
+            coll,
+            phase_absent_query,
+            phase_update,
+            operation="record_effect_observation_phase.update_one",
+            detail=f"{clean_effect_id}:{clean_phase}",
+            upsert=False,
+        )
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        inserted = False
+        if not matched:
+            existing = _turn_execution_find_one(
+                coll,
+                record_scope_query,
+                projection={
+                    "_id": 0,
+                    phase_path: 1,
+                },
+                operation="record_effect_observation_phase.find_existing",
+                detail=f"{clean_effect_id}:{clean_phase}",
+            )
+            if isinstance(existing, Mapping):
+                journal = existing.get("effect_observation_journal")
+                effect_entry = (
+                    journal.get(clean_effect_id)
+                    if isinstance(journal, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(effect_entry, Mapping)
+                    and isinstance(effect_entry.get(clean_phase), Mapping)
+                ):
+                    return {
+                        "updated": False,
+                        "duplicate": True,
+                        "matched": True,
+                        "inserted": False,
+                        "request_id": clean_request_id,
+                        "effect_id": clean_effect_id,
+                        "phase": clean_phase,
+                    }
+            if existing is None:
+                request_id_collision = _turn_execution_find_one(
+                    coll,
+                    {"request_id": clean_request_id},
+                    projection={
+                        "_id": 0,
+                        "namespace": 1,
+                        "user_id": 1,
+                        "org_id": 1,
+                    },
+                    operation=(
+                        "record_effect_observation_phase.find_scope_collision"
+                    ),
+                    detail=f"{clean_effect_id}:{clean_phase}",
+                )
+                if request_id_collision is not None:
+                    return {
+                        "updated": False,
+                        "duplicate": False,
+                        "reason": "actor_scope_mismatch",
+                        "request_id": clean_request_id,
+                        "effect_id": clean_effect_id,
+                        "phase": clean_phase,
+                    }
+                ensured = _turn_execution_update_one(
+                    coll,
+                    record_scope_query,
+                    {"$setOnInsert": insert_payload},
+                    operation="record_effect_observation_phase.ensure_record",
+                    detail=f"{clean_effect_id}:{clean_phase}",
+                    upsert=True,
+                )
+                inserted = getattr(ensured, "upserted_id", None) is not None
+
+            result = _turn_execution_update_one(
+                coll,
+                phase_absent_query,
+                phase_update,
+                operation="record_effect_observation_phase.retry_update_one",
+                detail=f"{clean_effect_id}:{clean_phase}",
+                upsert=False,
+            )
+            updated = bool(getattr(result, "modified_count", 0) > 0)
+            matched = bool(getattr(result, "matched_count", 0) > 0)
+
+        if not updated and not matched:
+            return {
+                "updated": False,
+                "duplicate": False,
+                "inserted": inserted,
+                "matched": False,
+                "reason": "phase_write_not_acknowledged",
+                "request_id": clean_request_id,
+                "effect_id": clean_effect_id,
+                "phase": clean_phase,
+            }
+        return {
+            "updated": updated,
+            "duplicate": not updated and matched,
+            "inserted": inserted,
+            "matched": matched,
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "phase": clean_phase,
+        }
+    except DuplicateKeyError:
+        return {
+            "updated": False,
+            "duplicate": False,
+            "reason": "actor_scope_mismatch",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "phase": clean_phase,
+        }
+    except PyMongoError as exc:
+        logger.warning(
+            "Failed to persist effect observation phase request_id=%s "
+            "effect_id=%s phase=%s: %s",
+            clean_request_id,
+            clean_effect_id,
+            clean_phase,
+            exc,
+        )
+        return {
+            "updated": False,
+            "duplicate": False,
+            "reason": "mongo_error",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "phase": clean_phase,
+        }
+
+
+def append_late_effect_observation(
+    *,
+    request_id: Any,
+    effect_id: Any,
+    execution_id: Any,
+    observation: Mapping[str, Any],
+    user_id: Any = None,
+    session_id: Any = None,
+    namespace: Any = None,
+    org_id: Any = None,
+) -> dict[str, Any]:
+    """Append one bounded, identity-bearing late-effect observation.
+
+    The entry is additive to the ordinary turn projection: a later full-record
+    ``$set`` upsert does not remove it.  The conditional append is idempotent
+    by ``observation_id``, including when a retry changes volatile receipt
+    fields.  The caller remains responsible for interpreting a handler receipt
+    versus canonical state.
+
+    Entries are individually bounded, but the array has no arbitrary count
+    ceiling.  A per-turn retention limit should therefore use an atomic
+    pipeline or a separately indexed collection if observed growth
+    demonstrates the need.
+    """
+
+    clean_request_id = _safe_str(request_id)
+    clean_effect_id = _safe_str(effect_id)
+    clean_execution_id = _safe_str(execution_id)
+    identities = {
+        "request_id": clean_request_id,
+        "effect_id": clean_effect_id,
+        "execution_id": clean_execution_id,
+    }
+    for field_name, value in identities.items():
+        if not value:
+            return {"updated": False, "reason": f"missing_{field_name}"}
+        if len(value) > _LATE_EFFECT_OBSERVATION_MAX_ID_CHARS:
+            return {"updated": False, "reason": f"invalid_{field_name}"}
+    if not isinstance(observation, Mapping):
+        return {"updated": False, "reason": "invalid_observation"}
+
+    actor_scope: dict[str, str] = {}
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            actor_scope[field_name] = clean_value
+    if not actor_scope:
+        return {
+            "updated": False,
+            "reason": "missing_actor_scope",
+            "request_id": clean_request_id,
+        }
+
+    coll = get_turn_execution_records_collection()
+    if coll is None:
+        return {
+            "updated": False,
+            "reason": "collection_unavailable",
+            "request_id": clean_request_id,
+        }
+
+    source_observation = dict(observation)
+    bounded_observation = _compact_final_answer_projection_payload(
+        source_observation,
+        max_depth=4,
+        max_items=32,
+        max_string_chars=2_000,
+    )
+    if not isinstance(bounded_observation, Mapping):
+        bounded_observation = {"value": bounded_observation}
+    bounded_observation = dict(bounded_observation)
+    storage_transformed = _hash_payload(source_observation) != _hash_payload(
+        bounded_observation
+    )
+
+    observed_at_utc = (
+        _safe_str(bounded_observation.get("observed_at_utc"))
+        or _iso_utc(_now_utc())
+    )
+    observation_identity = "\0".join(
+        (clean_request_id, clean_effect_id, clean_execution_id)
+    )
+    observation_id = hashlib.sha256(
+        observation_identity.encode("utf-8")
+    ).hexdigest()
+    entry = dict(bounded_observation)
+    entry.update(
+        {
+            "schema_version": LATE_EFFECT_OBSERVATION_SCHEMA_VERSION,
+            "observation_id": observation_id,
+            "effect_id": clean_effect_id,
+            "execution_id": clean_execution_id,
+            "observed_at_utc": observed_at_utc,
+            "storage_transformed": storage_transformed,
+        }
+    )
+
+    now = _now_utc()
+    insert_payload: dict[str, Any] = {
+        "request_id": clean_request_id,
+        "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
+        "created_at_utc": _iso_utc(now),
+        "updated_at_utc": _iso_utc(now),
+        "inserted_at": now,
+    }
+    for field_name, raw_value in (
+        ("user_id", user_id),
+        ("session_id", session_id),
+        ("namespace", namespace),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            insert_payload[field_name] = clean_value
+
+    record_scope_query = {
+        "request_id": clean_request_id,
+        **actor_scope,
+    }
+    append_query = {
+        **record_scope_query,
+        "late_effect_observations": {
+            "$not": {"$elemMatch": {"observation_id": observation_id}}
+        },
+    }
+    persisted_at_utc = _iso_utc(now)
+    append_update = {
+        "$push": {"late_effect_observations": entry},
+        "$max": {
+            "updated_at_utc": persisted_at_utc,
+            "late_effect_updated_at_utc": persisted_at_utc,
+        },
+    }
+
+    try:
+        result = _turn_execution_update_one(
+            coll,
+            append_query,
+            append_update,
+            operation="append_late_effect_observation.update_one",
+            detail=clean_execution_id,
+            upsert=False,
+        )
+        appended = bool(getattr(result, "modified_count", 0) > 0)
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        inserted = False
+        if not matched:
+            existing = _turn_execution_find_one(
+                coll,
+                record_scope_query,
+                projection={
+                    "_id": 0,
+                    "late_effect_observations.observation_id": 1,
+                },
+                operation="append_late_effect_observation.find_existing",
+                detail=clean_execution_id,
+            )
+            existing_observations = (
+                existing.get("late_effect_observations")
+                if isinstance(existing, Mapping)
+                and isinstance(existing.get("late_effect_observations"), list)
+                else []
+            )
+            duplicate = any(
+                isinstance(item, Mapping)
+                and item.get("observation_id") == observation_id
+                for item in existing_observations
+            )
+            if duplicate:
+                return {
+                    "updated": False,
+                    "appended": False,
+                    "duplicate": True,
+                    "inserted": False,
+                    "matched": True,
+                    "request_id": clean_request_id,
+                    "effect_id": clean_effect_id,
+                    "execution_id": clean_execution_id,
+                    "observation_id": observation_id,
+                }
+
+            if existing is None:
+                request_id_collision = _turn_execution_find_one(
+                    coll,
+                    {"request_id": clean_request_id},
+                    projection={
+                        "_id": 0,
+                        "namespace": 1,
+                        "user_id": 1,
+                        "org_id": 1,
+                    },
+                    operation="append_late_effect_observation.find_scope_collision",
+                    detail=clean_execution_id,
+                )
+                if request_id_collision is not None:
+                    return {
+                        "updated": False,
+                        "appended": False,
+                        "duplicate": False,
+                        "inserted": False,
+                        "matched": False,
+                        "reason": "actor_scope_mismatch",
+                        "request_id": clean_request_id,
+                        "effect_id": clean_effect_id,
+                        "execution_id": clean_execution_id,
+                        "observation_id": observation_id,
+                    }
+                ensured = _turn_execution_update_one(
+                    coll,
+                    record_scope_query,
+                    {"$setOnInsert": insert_payload},
+                    operation="append_late_effect_observation.ensure_record",
+                    detail=clean_execution_id,
+                    upsert=True,
+                )
+                inserted = getattr(ensured, "upserted_id", None) is not None
+
+            # Re-evaluate the identity predicate after the record existence
+            # check so concurrent submissions still admit at most one entry.
+            result = _turn_execution_update_one(
+                coll,
+                append_query,
+                append_update,
+                operation="append_late_effect_observation.retry_update_one",
+                detail=clean_execution_id,
+                upsert=False,
+            )
+            appended = bool(getattr(result, "modified_count", 0) > 0)
+            matched = bool(getattr(result, "matched_count", 0) > 0)
+
+        duplicate = False
+        if not appended and not matched:
+            final_existing = _turn_execution_find_one(
+                coll,
+                record_scope_query,
+                projection={
+                    "_id": 0,
+                    "late_effect_observations.observation_id": 1,
+                },
+                operation="append_late_effect_observation.confirm_identity",
+                detail=clean_execution_id,
+            )
+            final_observations = (
+                final_existing.get("late_effect_observations")
+                if isinstance(final_existing, Mapping)
+                and isinstance(
+                    final_existing.get("late_effect_observations"), list
+                )
+                else []
+            )
+            duplicate = any(
+                isinstance(item, Mapping)
+                and item.get("observation_id") == observation_id
+                for item in final_observations
+            )
+            if not duplicate:
+                return {
+                    "updated": False,
+                    "appended": False,
+                    "duplicate": False,
+                    "inserted": inserted,
+                    "matched": False,
+                    "reason": "append_not_acknowledged",
+                    "request_id": clean_request_id,
+                    "effect_id": clean_effect_id,
+                    "execution_id": clean_execution_id,
+                    "observation_id": observation_id,
+                }
+
+        return {
+            "updated": appended,
+            "appended": appended,
+            "duplicate": duplicate,
+            "inserted": inserted,
+            "matched": matched,
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "execution_id": clean_execution_id,
+            "observation_id": observation_id,
+        }
+    except PyMongoError as exc:
+        logger.warning(
+            "Failed to append late effect observation for request_id=%s "
+            "effect_id=%s execution_id=%s: %s",
+            clean_request_id,
+            clean_effect_id,
+            clean_execution_id,
+            exc,
+        )
+        return {
+            "updated": False,
+            "reason": "mongo_error",
+            "request_id": clean_request_id,
+            "effect_id": clean_effect_id,
+            "execution_id": clean_execution_id,
+        }
+
+
+def submit_late_effect_observation(**kwargs: Any) -> bool:
+    """Synchronously persist a late receipt; never rerun its underlying effect.
+
+    Retained as a compatibility wrapper for callers outside the adaptive path.
+    Unlike the former volatile executor queue, ``True`` means Mongo
+    acknowledged either the append or an idempotent duplicate.
+    """
+
+    try:
+        outcome = append_late_effect_observation(**kwargs)
+    except Exception:
+        logger.exception(
+            "Late-effect observation append failed; request_id=%s effect_id=%s",
+            _safe_str(kwargs.get("request_id")),
+            _safe_str(kwargs.get("effect_id")),
+        )
+        return False
+    acknowledged = bool(outcome.get("updated") or outcome.get("duplicate"))
+    if not acknowledged:
+        logger.warning(
+            "Late-effect observation was not persisted; request_id=%s "
+            "effect_id=%s reason=%s",
+            _safe_str(kwargs.get("request_id")),
+            _safe_str(kwargs.get("effect_id")),
+            _safe_str(outcome.get("reason")) or "append_not_acknowledged",
+        )
+    return acknowledged
 
 
 def get_latest_turn_execution_record_projection(

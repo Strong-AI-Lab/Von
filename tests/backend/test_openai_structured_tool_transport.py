@@ -14,6 +14,7 @@ from src.backend.languagemodels.structured_tool_calling import (
     LLMContinuation,
     LLMClientConfig,
     StructuredToolCapabilityRejectedError,
+    StructuredToolContextLimitError,
     StructuredToolProtocolError,
     ToolDefinition,
     ToolResult,
@@ -78,6 +79,16 @@ class _ToolCallLineageError(RuntimeError):
             "param": "input",
             "code": None,
         }
+    }
+
+
+class _ContextLengthError(RuntimeError):
+    status_code = 400
+    body = {
+        "message": "Request context is too large.",
+        "type": "invalid_request_error",
+        "param": "input",
+        "code": "context_length_exceeded",
     }
 
 
@@ -175,6 +186,102 @@ def _install_fake_openai(
         lambda **_kwargs: object(),
     )
     return captured
+
+
+def test_sync_calls_close_each_async_client_before_its_loop_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.languagemodels.structured_tool_calling.providers import (
+        openai_client as provider_module,
+    )
+
+    model = "loop-owned-responses-model"
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    lifecycles: list[dict[str, Any]] = []
+
+    class LoopBoundClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            lifecycle: dict[str, Any] = {}
+            lifecycles.append(lifecycle)
+            self.responses = types.SimpleNamespace(create=self._create)
+            self.chat = types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=self._create)
+            )
+            self._lifecycle = lifecycle
+
+        def with_options(self, **_kwargs: Any) -> "LoopBoundClient":
+            return self
+
+        async def _create(self, **_kwargs: Any) -> Any:
+            self._lifecycle["request_loop"] = asyncio.get_running_loop()
+            return _text_response(
+                model=model,
+                text="loop-safe",
+                response_id=f"resp_{len(lifecycles)}",
+            )
+
+        async def close(self) -> None:
+            self._lifecycle["close_loop"] = asyncio.get_running_loop()
+            self._lifecycle["closed_before_loop_close"] = not (
+                self._lifecycle["close_loop"].is_closed()
+            )
+
+    monkeypatch.setattr(provider_module.openai, "AsyncOpenAI", LoopBoundClient)
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    first = client.generate_with_tools_sync("first", [_tool()])
+    second = client.generate_with_tools_sync("second", [_tool()])
+
+    assert first.text_response == second.text_response == "loop-safe"
+    assert len(lifecycles) == 2
+    assert all(
+        item["request_loop"] is item["close_loop"]
+        and item["closed_before_loop_close"] is True
+        and item["close_loop"].is_closed()
+        for item in lifecycles
+    )
+
+
+def test_sync_client_constructor_failure_still_closes_the_one_shot_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.languagemodels.structured_tool_calling.providers import (
+        openai_client as provider_module,
+    )
+
+    constructor_loops: list[asyncio.AbstractEventLoop] = []
+
+    def fail_client_construction(**_kwargs: Any) -> Any:
+        constructor_loops.append(asyncio.get_running_loop())
+        raise RuntimeError("simulated client construction failure")
+
+    monkeypatch.setattr(
+        provider_module.openai,
+        "AsyncOpenAI",
+        fail_client_construction,
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model="constructor-failure-model",
+            provider="openai",
+            api_key="test-key",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="simulated client construction failure"):
+        client.generate_with_tools_sync("test", [])
+
+    assert len(constructor_loops) == 1
+    assert constructor_loops[0].is_closed()
+    with pytest.raises(RuntimeError):
+        asyncio.get_event_loop()
 
 
 def test_chat_completions_continuation_replays_assistant_call_before_tool_result(
@@ -567,6 +674,30 @@ def test_arbitrary_model_responses_profile_selects_responses_and_flat_schema(
     )
 
 
+def test_responses_serialises_actual_adaptive_tools_with_explicit_strictness() -> None:
+    from src.backend.services.adaptive_turn_service import _tool_definitions
+
+    client = OpenAIClient(
+        LLMClientConfig(
+            model="deployment-blue-42",
+            provider="openai",
+            api_key="test-key",
+        )
+    )
+    tools = [
+        client._tool_definition_to_responses_dict(tool)
+        for tool in _tool_definitions()
+    ]
+    read_tool = next(
+        tool for tool in tools if tool["name"] == "turn_invoke_capability"
+    )
+    assert read_tool["strict"] is False
+    assert (
+        read_tool["parameters"]["properties"]["arguments"]["additionalProperties"]
+        is True
+    )
+
+
 def test_responses_maps_reasoning_effort_and_disables_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -913,6 +1044,47 @@ def test_provider_tool_call_lineage_rejection_is_typed_and_never_surface_falls_b
     )
     assert exc_info.value.decision["provider_status_code"] == 400
     assert exc_info.value.decision["provider_error_param"] == "input"
+
+
+def test_exact_provider_context_length_code_becomes_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "deployment-context-limited"
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    provider_error = _ContextLengthError("Request context is too large.")
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[provider_error],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    with pytest.raises(StructuredToolContextLimitError) as exc_info:
+        asyncio.run(
+            client.generate_with_tools(
+                prompt="Inspect the available evidence.",
+                available_tools=[_tool("lookup")],
+            )
+        )
+
+    assert len(captured["responses"]) == 1
+    assert captured["chat"] == []
+    error = exc_info.value
+    assert error.failure_kind == "structured_tool_context_limit_exceeded"
+    assert error.retryable is False
+    assert error.retryable_after_context_change is True
+    assert error.requires_material_context_change is True
+    assert error.decision["failure_kind"] == "provider_context_length_exceeded"
+    assert error.decision["provider_status_code"] == 400
+    assert error.decision["provider_error_code"] == "context_length_exceeded"
+    assert error.decision["provider_error_param"] == "input"
+    assert error.__cause__ is provider_error
 
 
 def test_responses_continuation_emits_exact_call_outputs_and_reasoning_items(
@@ -1343,6 +1515,58 @@ def test_advertised_chat_to_responses_fallback_uses_pristine_surface_parameters(
     assert result.transport_metadata["advertised_surface_attempts"] == [
         "chat_completions",
         "responses",
+    ]
+
+
+def test_advertised_surface_attempts_share_one_request_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.languagemodels.structured_tool_calling.providers import (
+        openai_client as provider_module,
+    )
+
+    model = "gpt-5.6-deadline-fallback"
+    _install_profiles(
+        monkeypatch,
+        _registry_profiles(
+            _chat_profile(),
+            _responses_profile(capability="supported"),
+        ),
+    )
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[_text_response(model=model)],
+        chat_response=_CapabilityError(
+            "Function tools are not supported; use /v1/responses."
+        ),
+    )
+    monotonic_values = iter((100.0, 100.0, 104.0))
+    monkeypatch.setattr(
+        provider_module,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Use the tool",
+            available_tools=[_tool()],
+            llm_params={"request_timeout_seconds": 10},
+        )
+    )
+
+    assert result.text_response == "ok"
+    assert captured["client_options"] == [
+        {"timeout": 10.0, "max_retries": 0},
+        {"timeout": 6.0, "max_retries": 0},
     ]
 
 
@@ -2156,9 +2380,11 @@ def test_malformed_structured_transport_profile_fails_closed_before_request(
 
 
 @pytest.mark.parametrize("unsupported_first", [False, True])
+@pytest.mark.parametrize("tools_present", [False, True], ids=["answer_only", "tools"])
 def test_conflicting_same_surface_capabilities_fail_closed_before_request(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_first: bool,
+    tools_present: bool,
 ) -> None:
     supported = _responses_profile(capability="supported")
     unsupported = _responses_profile(capability="unsupported")
@@ -2179,8 +2405,8 @@ def test_conflicting_same_surface_capabilities_fail_closed_before_request(
     with pytest.raises(UnsupportedStructuredToolTransportError) as exc_info:
         asyncio.run(
             client.generate_with_tools(
-                prompt="Use the tool.",
-                available_tools=[_tool()],
+                prompt="Answer or use the tool.",
+                available_tools=[_tool()] if tools_present else [],
             )
         )
 
@@ -2264,11 +2490,394 @@ def test_legacy_profile_without_structured_capability_remains_conservative(
     )
 
 
-def test_no_tool_request_preserves_chat_surface_even_with_responses_profile(
+def test_no_tool_request_preserves_required_responses_profile_and_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = "responses-profile-without-tools"
-    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    from src.backend.services import model_registry_service
+
+    model = "gpt-5.6-terra"
+    responses_profile = _responses_profile()
+    responses_profile["profile_concept_id"] = (
+        "#V#openai_gpt_5_6_terra_responses_profile"
+    )
+    responses_profile["parameter_constraints"] = [
+        {
+            "constraint_concept_id": "#V#terra_responses_temperature_omit",
+            "parameter_concept_id": "#V#temperature_parameter",
+            "parameter": "temperature",
+            "action": "omit",
+        }
+    ]
+    chat_profile = _chat_profile(capability="unsupported")
+    _install_profiles(
+        monkeypatch,
+        _registry_profiles(responses_profile, chat_profile),
+    )
+    monkeypatch.setattr(
+        model_registry_service,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: {
+            "source": "vontology_graph",
+            "registry_concept_id": "#V#default_model_registry",
+            "models": [
+                {
+                    "model_id": model,
+                    "provider": "openai",
+                    "concept_id": "#V#openai_gpt_5_6_terra",
+                    "registry_entry_id": "#V#terra_registry_entry",
+                    "api_profiles": [responses_profile, chat_profile],
+                }
+            ],
+        },
+    )
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[_text_response(model=model, text="grounded answer")],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=0.7,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Answer without tools",
+            available_tools=[],
+            temperature=0.7,
+        )
+    )
+
+    assert captured["chat"] == []
+    assert len(captured["responses"]) == 1
+    assert "temperature" not in captured["responses"][0]
+    assert result.text_response == "grounded answer"
+    assert result.transport_metadata["tools_present"] is False
+    assert result.transport_metadata["effective_api_surface"] == "responses"
+    assert result.transport_metadata["profile_concept_id"] == (
+        "#V#openai_gpt_5_6_terra_responses_profile"
+    )
+    assert result.transport_metadata["reason"] == "represented_profile_required"
+    assert result.transport_metadata["requested_model_parameters"] == {
+        "temperature": 0.7
+    }
+    assert result.transport_metadata["effective_provider_parameters"] == {}
+    assert result.transport_metadata["omitted_model_parameter_names"] == [
+        "temperature"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("connection_id", "expected_temperature"),
+    [
+        ("#V#connection_a", None),
+        ("#V#connection_b", 0.25),
+    ],
+)
+def test_temperature_policy_follows_exact_selected_connection_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    connection_id: str,
+    expected_temperature: float | None,
+) -> None:
+    from src.backend.services import model_registry_service
+
+    model = "same-surface-connection-model"
+    connection_a = _responses_profile()
+    connection_a.update(
+        {
+            "profile_concept_id": "#V#connection_a_responses",
+            "connection_id": "#V#connection_a",
+            "parameter_constraints": [
+                {"parameter": "temperature", "action": "omit"}
+            ],
+        }
+    )
+    connection_b = _responses_profile()
+    connection_b.update(
+        {
+            "profile_concept_id": "#V#connection_b_responses",
+            "connection_id": "#V#connection_b",
+            "parameter_constraints": [
+                {
+                    "parameter": "temperature",
+                    "action": "fixed_value",
+                    "fixed_value": "0.25",
+                }
+            ],
+        }
+    )
+    registry = _registry_profiles(connection_a, connection_b)
+    _install_profiles(monkeypatch, registry)
+    monkeypatch.setattr(
+        model_registry_service,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: {
+            "source": "vontology_graph",
+            "models": [
+                {
+                    "model_id": model,
+                    "provider": "openai",
+                    "registry_entry_id": "#V#same_surface_connection_entry",
+                    "api_profiles": [connection_a, connection_b],
+                }
+            ],
+        },
+    )
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[_text_response(model=model)],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            connection_id=connection_id,
+            temperature=0.7,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Answer without tools",
+            available_tools=[],
+        )
+    )
+
+    request = captured["responses"][0]
+    if expected_temperature is None:
+        assert "temperature" not in request
+        assert result.transport_metadata["effective_provider_parameters"] == {}
+    else:
+        assert request["temperature"] == expected_temperature
+        assert result.transport_metadata["effective_provider_parameters"] == {
+            "temperature": expected_temperature
+        }
+    assert result.transport_metadata["profile_concept_id"] == (
+        f"#V#{connection_id.removeprefix('#V#')}_responses"
+    )
+
+
+@pytest.mark.parametrize(
+    ("connection_id", "expected_effort"),
+    [
+        ("#V#connection_a", None),
+        ("#V#connection_b", "medium"),
+    ],
+)
+def test_answer_only_chat_direct_reasoning_uses_exact_connection_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    connection_id: str,
+    expected_effort: str | None,
+) -> None:
+    from src.backend.services import model_registry_service
+
+    model = "gpt-5-answer-only-chat"
+    connection_a = _chat_profile(capability="unsupported")
+    connection_a.update(
+        {
+            "profile_concept_id": "#V#connection_a_chat",
+            "connection_id": "#V#connection_a",
+            "parameter_constraints": [
+                {"parameter": "reasoning_effort", "action": "omit"}
+            ],
+        }
+    )
+    connection_b = _chat_profile(capability="unsupported")
+    connection_b.update(
+        {
+            "profile_concept_id": "#V#connection_b_chat",
+            "connection_id": "#V#connection_b",
+            "parameter_constraints": [
+                {
+                    "parameter": "reasoning_effort",
+                    "action": "fixed_value",
+                    "fixed_value": "medium",
+                }
+            ],
+        }
+    )
+    profiles = [connection_a, connection_b]
+    _install_profiles(monkeypatch, _registry_profiles(*profiles))
+    monkeypatch.setattr(
+        model_registry_service,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: {
+            "source": "vontology_graph",
+            "models": [
+                {
+                    "model_id": model,
+                    "provider": "openai",
+                    "registry_entry_id": "#V#answer_only_chat_entry",
+                    "api_profiles": profiles,
+                }
+            ],
+        },
+    )
+    captured = _install_fake_openai(monkeypatch)
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            connection_id=connection_id,
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Answer without tools",
+            available_tools=[],
+            reasoning_effort="high",
+        )
+    )
+
+    request = captured["chat"][0]
+    if expected_effort is None:
+        assert "reasoning_effort" not in request
+        assert result.transport_metadata["effective_provider_parameters"] == {}
+    else:
+        assert request["reasoning_effort"] == expected_effort
+        assert result.transport_metadata["effective_provider_parameters"] == {
+            "reasoning_effort": expected_effort
+        }
+    assert result.transport_metadata["profile_concept_id"] == (
+        f"#V#{connection_id.removeprefix('#V#')}_chat"
+    )
+    assert result.transport_metadata["requested_model_parameters"] == {
+        "reasoning_effort": "high"
+    }
+
+
+@pytest.mark.parametrize(
+    ("action", "fixed_value", "expected_effort"),
+    [
+        ("omit", None, None),
+        ("fixed_value", "medium", "medium"),
+    ],
+)
+def test_direct_responses_reasoning_obeys_selected_profile_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    fixed_value: str | None,
+    expected_effort: str | None,
+) -> None:
+    from src.backend.services import model_registry_service
+
+    model = "gpt-5-direct-responses-reasoning"
+    profile = _responses_profile()
+    constraint = {
+        "parameter": "reasoning_effort",
+        "action": action,
+    }
+    if fixed_value is not None:
+        constraint["fixed_value"] = fixed_value
+    profile["parameter_constraints"] = [constraint]
+    _install_profiles(monkeypatch, _registry_profiles(profile))
+    monkeypatch.setattr(
+        model_registry_service,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: {
+            "source": "vontology_graph",
+            "models": [
+                {
+                    "model_id": model,
+                    "provider": "openai",
+                    "registry_entry_id": "#V#direct_responses_reasoning_entry",
+                    "api_profiles": [profile],
+                }
+            ],
+        },
+    )
+    captured = _install_fake_openai(
+        monkeypatch,
+        responses=[_text_response(model=model)],
+    )
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Answer without tools",
+            available_tools=[],
+            reasoning={"effort": "high", "summary": "auto"},
+        )
+    )
+
+    request_reasoning = captured["responses"][0]["reasoning"]
+    if expected_effort is None:
+        assert request_reasoning == {"summary": "auto"}
+        assert result.transport_metadata["effective_provider_parameters"] == {}
+    else:
+        assert request_reasoning == {
+            "summary": "auto",
+            "effort": expected_effort,
+        }
+        assert result.transport_metadata["effective_provider_parameters"] == {
+            "reasoning": {"effort": expected_effort}
+        }
+    assert result.transport_metadata["requested_model_parameters"] == {
+        "reasoning_effort": "high"
+    }
+
+
+def test_unknown_profile_no_tool_request_preserves_conservative_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "unknown-text-model"
+    _install_profiles(monkeypatch, None)
+    captured = _install_fake_openai(monkeypatch)
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(
+            prompt="Answer without tools",
+            available_tools=[],
+            temperature=0.2,
+        )
+    )
+
+    assert len(captured["chat"]) == 1
+    assert captured["chat"][0]["temperature"] == 0.2
+    assert captured["responses"] == []
+    assert result.transport_metadata["effective_api_surface"] == "chat_completions"
+    assert result.transport_metadata["capability_source"] == (
+        "conservative_client_default"
+    )
+    assert result.transport_metadata["reason"] == "no_structured_tools_in_request"
+    assert result.transport_metadata["requested_model_parameters"] == {
+        "temperature": 0.2
+    }
+    assert result.transport_metadata["effective_provider_parameters"] == {
+        "temperature": 0.2
+    }
+
+
+def test_chat_tools_unsupported_profile_still_allows_text_only_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "chat-text-only-model"
+    _install_profiles(
+        monkeypatch,
+        _registry_profiles(_chat_profile(capability="unsupported")),
+    )
     captured = _install_fake_openai(monkeypatch)
     client = OpenAIClient(
         LLMClientConfig(
@@ -2288,7 +2897,8 @@ def test_no_tool_request_preserves_chat_surface_even_with_responses_profile(
 
     assert len(captured["chat"]) == 1
     assert captured["responses"] == []
-    assert result.transport_metadata["effective_api_surface"] == ("chat_completions")
+    assert result.text_response == "chat ok"
+    assert result.transport_metadata["effective_api_surface"] == "chat_completions"
     assert result.transport_metadata["reason"] == "no_structured_tools_in_request"
 
 
@@ -2315,7 +2925,6 @@ def test_responses_request_timeout_is_transport_option_not_model_parameter(
             prompt="Use the tool if needed.",
             available_tools=[_tool()],
             llm_params={
-                "reasoning_effort": "none",
                 "request_timeout_seconds": 17,
             },
         )
@@ -2325,7 +2934,12 @@ def test_responses_request_timeout_is_transport_option_not_model_parameter(
     assert "timeout" not in request
     assert "request_timeout_seconds" not in request
     assert "timeout_seconds" not in request
-    assert captured["client_options"] == [{"timeout": 17.0, "max_retries": 0}]
+    assert len(captured["client_options"]) == 1
+    assert captured["client_options"][0]["max_retries"] == 0
+    assert captured["client_options"][0]["timeout"] == pytest.approx(
+        17.0,
+        abs=0.1,
+    )
 
 
 def test_explicitly_unsupported_profile_raises_typed_error_before_request(

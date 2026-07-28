@@ -1,8 +1,4 @@
-"""Regression coverage for non-blocking internal orchestrator startup.
-
-JVNAUTOSCI-1304: Server startup must not block HTTP bind for minutes while the
-internal MCP orchestrator constructs heavy workflow registries.
-"""
+"""Regression coverage for retired controller and deferred workflow startup."""
 
 from __future__ import annotations
 
@@ -69,8 +65,8 @@ def _install_google_oauth_stubs() -> None:
     sys.modules["google.oauth2.service_account"] = fake_service_account_module
 
 
-def _install_internal_mcp_stubs(monkeypatch, internal_mcp_module, orchestrator_cls) -> None:
-    """Install lightweight internal MCP implementations for startup tests."""
+def _install_internal_mcp_gateway_stubs(monkeypatch, internal_mcp_module) -> None:
+    """Install lightweight internal MCP gateway implementations."""
 
     class _StubCatalogue:
         def list_methods(self):
@@ -90,57 +86,31 @@ def _install_internal_mcp_stubs(monkeypatch, internal_mcp_module, orchestrator_c
     )
     monkeypatch.setattr(internal_mcp_module, "InternalMCPGateway", _StubGateway)
     monkeypatch.setattr(internal_mcp_module, "InternalMCPTransport", _StubTransport)
-    monkeypatch.setattr(
-        internal_mcp_module, "InternalMCPChatOrchestrator", orchestrator_cls
-    )
 
 
-def test_create_flask_app_defers_orchestrator_initialisation(monkeypatch):
+def test_retired_orchestrator_startup_does_not_build_or_spawn(monkeypatch):
     _install_google_oauth_stubs()
 
-    import src.backend.integrations.internal_mcp as internal_mcp
     import src.backend.server.utils_flask as utils_flask
 
-    monkeypatch.setenv("VON_INTERNAL_MCP_ENABLE", "1")
-    monkeypatch.setenv("VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0")
-    monkeypatch.setenv("VON_PREWARM_DISABLE", "1")
-    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "0")
+    def _forbidden_thread(*_args, **_kwargs):
+        raise AssertionError("retired controller must not start a thread")
 
-    monkeypatch.setattr(utils_flask, "ensure_monitor_started", lambda: None)
-    monkeypatch.setattr(
-        utils_flask,
-        "prompt_concept_health_status",
-        lambda: {"available": True, "source_field": "stub"},
+    monkeypatch.setattr(utils_flask.threading, "Thread", _forbidden_thread)
+    monkeypatch.setenv("VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "1")
+    app = types.SimpleNamespace(config={})
+
+    utils_flask._configure_internal_mcp_orchestrator_startup(
+        app,
+        gateway_instance=object(),
     )
 
-    class _SlowOrchestrator:
-        def __init__(self, *args, **kwargs):
-            time.sleep(1.0)
-
-    _install_internal_mcp_stubs(monkeypatch, internal_mcp, _SlowOrchestrator)
-
-    started = time.perf_counter()
-    app = utils_flask.create_flask_app(
-        list_models_func=lambda: ["dummy-model"],
-        generate_func=lambda prompt, context, model: "ok",
-    )
-    elapsed = time.perf_counter() - started
-
-    # If orchestration startup blocks request-serving startup, this takes >= 1s.
-    assert elapsed < 0.8
-
-    status = app.config.get("INTERNAL_MCP_ORCHESTRATOR_STATUS")
-    assert isinstance(status, dict)
-    assert status.get("state") in {"pending", "initialising", "ready"}
-
-    deadline = time.time() + 4.0
-    while time.time() < deadline and app.config.get("INTERNAL_MCP_ORCHESTRATOR") is None:
-        time.sleep(0.02)
-
-    assert app.config.get("INTERNAL_MCP_ORCHESTRATOR") is not None
-    final_status = app.config.get("INTERNAL_MCP_ORCHESTRATOR_STATUS") or {}
-    assert final_status.get("state") == "ready"
-    assert final_status.get("ready") is True
+    assert app.config["INTERNAL_MCP_ORCHESTRATOR"] is None
+    status = app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"]
+    assert status["state"] == "retired"
+    assert status["ready"] is False
+    assert status["replacement"] == "direct_adaptive_turn"
+    assert isinstance(status["started_at"], str)
 
 
 def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
@@ -163,11 +133,7 @@ def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
         lambda: {"available": True, "source_field": "stub"},
     )
 
-    class _FastOrchestrator:
-        def __init__(self, *args, **kwargs):
-            return None
-
-    _install_internal_mcp_stubs(monkeypatch, internal_mcp, _FastOrchestrator)
+    _install_internal_mcp_gateway_stubs(monkeypatch, internal_mcp)
 
     def _slow_durable_startup(_app_logger):
         time.sleep(1.0)

@@ -128,8 +128,6 @@ def build_coding_agent_mcp_access_profile() -> dict[str, Any]:
         write_mode = "blocked_unknown_environment"
         write_reason_codes.extend(["unknown_environment"])
 
-    default_dry_run = not default_write_tools_allowed
-
     return {
         "success": True,
         "profile_id": PROFILE_ID,
@@ -188,12 +186,12 @@ def build_coding_agent_mcp_access_profile() -> dict[str, Any]:
             ],
         },
         "von_chat_run_policy": {
-            "default_allow_writes": default_write_tools_allowed,
-            "default_dry_run": default_dry_run,
+            "default_allow_writes": False,
+            "default_dry_run": True,
             "requires_internal_mcp_enabled": True,
             "notes": [
-                "When write-category tools are allowed by profile, von_chat_run defaults to write-enabled unless dry_run is explicitly requested.",
-                "When write-category tools are blocked by profile, von_chat_run remains read-only by default and may still allow preview-safe dry-run calls.",
+                "von_chat_run is always adaptive and read-only.",
+                "Use an explicit authorised effect tool or workflow for writes.",
             ],
         },
     }

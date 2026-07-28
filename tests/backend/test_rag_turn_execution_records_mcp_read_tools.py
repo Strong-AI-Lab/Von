@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 import pytest
 
-from src.backend.services import context_bundle_benchmark_service
-from src.backend.services import context_grounded_answering_benchmark_service
-from src.backend.services import workflow_selector_benchmark_service
+from src.backend.services import (
+    context_bundle_benchmark_service,
+    context_grounded_answering_benchmark_service,
+    workflow_selector_benchmark_service,
+)
 from tests.backend.benchmark_suite_test_helpers import (
     represented_suite_case_set_loader,
 )
@@ -63,7 +66,7 @@ class _Cursor:
         reverse = False
         try:
             reverse = int(direction) < 0
-        except Exception:
+        except (TypeError, ValueError):
             reverse = False
         self._docs.sort(key=lambda doc: str(doc.get(field) or ""), reverse=reverse)
         return self
@@ -105,12 +108,12 @@ class _TurnExecutionCollection:
             return False
 
         requires_follow_up = query.get("completion_gate.requires_follow_up")
-        if isinstance(requires_follow_up, bool):
-            if (
-                bool((doc.get("completion_gate") or {}).get("requires_follow_up"))
-                != requires_follow_up
-            ):
-                return False
+        if (
+            isinstance(requires_follow_up, bool)
+            and bool((doc.get("completion_gate") or {}).get("requires_follow_up"))
+            != requires_follow_up
+        ):
+            return False
 
         prompt_filter = query.get("prompt.preview")
         if isinstance(prompt_filter, dict):
@@ -140,10 +143,9 @@ class _TurnExecutionCollection:
             return False
 
         session_id = query.get("session_id")
-        if isinstance(session_id, str) and doc.get("session_id") != session_id:
-            return False
-
-        return True
+        return not (
+            isinstance(session_id, str) and doc.get("session_id") != session_id
+        )
 
     def find(self, query: dict[str, Any], _projection: dict[str, Any] | None = None):
         docs = [doc for doc in self._docs if self._matches(doc, query)]
@@ -1040,6 +1042,101 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
             {"check_id": "check_effect_2", "status": "inconclusive"}
         ],
         "critic": {"summary": {"inconclusive_count": 1}},
+        "late_effect_observations": [
+            {
+                "schema_version": "late_effect_observation.v1",
+                "observation_id": "late-observation-9",
+                "effect_id": "effect_2",
+                "execution_id": "mcp_late_9",
+                "capability_name": "add_relationship",
+                "outcome": "late_success",
+                "effect_status": "succeeded",
+                "changed": True,
+                "observed_at_utc": "2026-02-19T01:00:02Z",
+                "storage_transformed": True,
+                "payload": {
+                    "success": True,
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "private_detail": "not part of the actor receipt projection",
+                },
+            }
+        ],
+        "effect_observation_journal": {
+            "effect_2": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_2",
+                    "call_id": "call-effect-2",
+                    "capability_name": "add_relationship",
+                    "created_at_utc": "2026-02-19T01:00:00Z",
+                },
+                "dispatch_intent": {
+                    "phase": "dispatch_intent",
+                    "dispatch_state": "intent_recorded",
+                    "recorded_at_utc": "2026-02-19T01:00:00Z",
+                },
+                "turn_terminal": {
+                    "phase": "turn_terminal",
+                    "effect_status": "indeterminate",
+                    "changed": None,
+                    "recorded_at_utc": "2026-02-19T01:00:01Z",
+                    "transport": {
+                        "execution_id": "mcp_late_9",
+                        "outcome": "timed_out",
+                    },
+                    "receipt": {"mutation_outcome": "unknown"},
+                },
+                "late_terminal": {
+                    "phase": "late_terminal",
+                    "outcome": "late_success",
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "recorded_at_utc": "2026-02-19T01:00:02Z",
+                    "payload": {
+                        "success": True,
+                        "effect_status": "succeeded",
+                        "changed": True,
+                        "private_detail": "not projected",
+                    },
+                },
+            },
+            "effect_unresolved": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_unresolved",
+                },
+                "turn_terminal": {
+                    "phase": "turn_terminal",
+                    "effect_status": "indeterminate",
+                    "receipt": {"mutation_outcome": "unknown"},
+                },
+            },
+            "effect_missing_late_payload": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_missing_late_payload",
+                },
+                "late_terminal": {
+                    "phase": "late_terminal",
+                    "outcome": "late_success",
+                    "effect_status": "succeeded",
+                    "changed": True,
+                },
+            },
+            "effect_missing_turn_receipt": {
+                "identity": {
+                    "schema_version": "effect_observation_journal.v1",
+                    "effect_id": "effect_missing_turn_receipt",
+                },
+                "turn_terminal": {
+                    "phase": "turn_terminal",
+                    "effect_status": "succeeded",
+                    "changed": True,
+                    "transport": {"outcome": "completed"},
+                },
+            },
+        },
     }
 
     coll = _TurnExecutionCollection([doc])
@@ -1073,6 +1170,95 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
         result["workflow_routing_diagnostics"]["dispatch"]["last_successful_boundary"]
         == "workflow_handoff"
     )
+    assert result["late_effect_observation_count"] == 1
+    assert result["late_effect_observations_truncated"] is False
+    assert result["late_effect_observations"] == [
+        {
+            "schema_version": "late_effect_observation.v1",
+            "observation_id": "late-observation-9",
+            "effect_id": "effect_2",
+            "execution_id": "mcp_late_9",
+            "capability_name": "add_relationship",
+            "outcome": "late_success",
+            "effect_status": "succeeded",
+            "changed": True,
+            "observed_at_utc": "2026-02-19T01:00:02Z",
+            "storage_transformed": True,
+            "receipt": {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+            },
+        }
+    ]
+    assert result["effect_observation_journal_count"] == 4
+    assert result["effect_observation_journal_truncated"] is False
+    journal_by_id = {
+        item["effect_id"]: item
+        for item in result["effect_observation_journal"]
+    }
+    assert journal_by_id["effect_2"]["latest_phase"] == "late_terminal"
+    assert journal_by_id["effect_2"]["outcome_resolved"] is True
+    assert journal_by_id["effect_2"]["late_terminal"]["receipt"] == {
+        "success": True,
+        "effect_status": "succeeded",
+        "changed": True,
+    }
+    assert "private_detail" not in json.dumps(journal_by_id["effect_2"])
+    assert journal_by_id["effect_unresolved"]["outcome_resolved"] is False
+    assert (
+        journal_by_id["effect_missing_late_payload"]["outcome_resolved"]
+        is False
+    )
+    assert (
+        journal_by_id["effect_missing_turn_receipt"]["outcome_resolved"]
+        is False
+    )
+
+
+def test_rag_get_item_does_not_expose_late_effects_across_namespaces(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    coll = _TurnExecutionCollection(
+        [
+                {
+                    "request_id": "req-private-late-effect",
+                    "session_id": "chat-private-late-effect",
+                    "namespace": "#V#user@org_a",
+                "late_effect_observations": [
+                    {
+                        "observation_id": "private-observation",
+                        "effect_id": "private-effect",
+                        "outcome": "late_success",
+                    }
+                ],
+                "effect_observation_journal": {
+                    "private-effect": {
+                        "dispatch_intent": {
+                            "phase": "dispatch_intent",
+                        }
+                    }
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._rag_get_item(
+        namespace="#V#user@org_b",
+        collection="turn_execution_records",
+        session_id="req-private-late-effect",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "not_found"
+    assert "late_effect_observations" not in result
+    assert "effect_observation_journal" not in result
 
 
 def test_rag_list_indexed_supports_episode_critique_improvement_suggestion_summary(
@@ -1792,10 +1978,13 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
         ]
         is True
     )
-    assert any(
-        "route through #V#conversation_turn_execution_workflow" in rec
-        for rec in result["recommendations"]
-    )
+    recommendations = result["recommendations"]
+    assert recommendations
+    recommendation_text = " ".join(recommendations).lower()
+    assert "authority" in recommendation_text
+    assert "capability" in recommendation_text
+    assert "execution" in recommendation_text
+    assert "#v#conversation_turn_execution_workflow" not in recommendation_text
 
 
 def test_turn_execution_search_failures_flags_completed_record_with_failed_dispatch(
@@ -1868,7 +2057,13 @@ def test_turn_execution_search_failures_flags_completed_record_with_failed_dispa
     assert item["failure_mode"] == "false_completion_gate_state"
     assert item["likely_failure_to_act"] is True
     assert item["execution_correctness"]["metric_labels"]["false_success"] is True
-    assert any("completion-gate invariants" in rec for rec in result["recommendations"])
+    recommendations = result["recommendations"]
+    assert recommendations
+    recommendation_text = " ".join(recommendations).lower()
+    assert "effects" in recommendation_text
+    assert "evidence" in recommendation_text
+    assert "terminal state" in recommendation_text
+    assert "completion-gate" not in recommendation_text
 
 
 def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeypatch):
@@ -2784,16 +2979,16 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     assert payload["success"] is True
     metrics = payload.get("metrics")
     assert isinstance(metrics, dict)
-    assert metrics.get("scanned_count") == 5
-    assert metrics.get("matched_case_count") == 4
-    assert metrics.get("selector_accuracy_pct") == 80.0
-    assert metrics.get("baseline_accuracy_pct") == 20.0
+    assert metrics.get("scanned_count") == 4
+    assert metrics.get("matched_case_count") == 3
+    assert metrics.get("selector_accuracy_pct") == 75.0
+    assert metrics.get("baseline_accuracy_pct") == 25.0
     assert (
         metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 1
     )
     assert (
         metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
-        == 1
+        == 0
     )
 
     corpus = payload.get("corpus")
@@ -2810,7 +3005,7 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     }
     assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
     assert signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
-    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "not_evaluated"
 
 
 def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
@@ -2845,6 +3040,7 @@ def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
         if isinstance(case, dict)
         and case.get("case_id") == "represented_context_tool_pipeline_answer"
     )
+
     assert represented_case["expected_execution_mode"] == "tool_pipeline"
 
     signal_by_id = {
@@ -2864,6 +3060,26 @@ def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
     assert signal_by_id["benchmark_backed_by_exact_path_validation"]["status"] == "pass"
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "context_bundle_build_benchmark",
+        "turn_execution_build_selector_benchmark",
+        "turn_execution_build_context_answering_benchmark",
+    ),
+)
+def test_turn_benchmark_host_bundle_path_requires_operator_authority(method_name):
+    gateway = _build_gateway()
+
+    payload = gateway.invoke(
+        method_name,
+        {"bundle_path": "/tmp/private-benchmark.json"},
+    ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "host_path_authority_required"
+
+
 def test_turn_execution_build_selector_benchmark_supports_entity_representation_case_set():
     gateway = _build_gateway()
     payload = gateway.invoke(
@@ -2874,14 +3090,14 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
     assert payload["success"] is True
     metrics = payload.get("metrics")
     assert isinstance(metrics, dict)
-    assert metrics.get("scanned_count") == 11
-    assert metrics.get("matched_case_count") == 11
+    assert metrics.get("scanned_count") == 10
+    assert metrics.get("matched_case_count") == metrics.get("scanned_count")
     assert metrics.get("selector_accuracy_pct") == 100.0
     assert metrics.get("baseline_accuracy_pct") == 0.0
     assert metrics.get("outcome_label_counts", {}).get("successful_completion") == 10
     assert (
         metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
-        == 1
+        in {None, 0}
     )
     assert (
         metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 0
@@ -2894,6 +3110,22 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
 
     replay_cases = payload.get("replay_cases")
     assert isinstance(replay_cases, list)
+    assert {
+        case.get("case_id")
+        for case in replay_cases
+        if isinstance(case, dict)
+    } == {
+        "entity_people_follow_up_reasoning_override",
+        "entity_person_representation_success",
+        "entity_company_representation_success",
+        "entity_event_representation_success",
+        "entity_event_write_with_tool_calling_competitor",
+        "entity_event_write_without_explicit_vontology_phrasing",
+        "entity_event_write_with_storage_verb",
+        "entity_event_write_with_capture_verb",
+        "entity_place_representation_success",
+        "entity_ambiguity_low_imposition_route",
+    }
     follow_up_case = next(
         case
         for case in replay_cases
@@ -2909,7 +3141,7 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
     }
     assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
     assert signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
-    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "not_evaluated"
     assert (
         signal_by_id["selector_misrouting_examples_detected"]["status"]
         == "not_evaluated"

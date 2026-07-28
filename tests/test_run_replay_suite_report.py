@@ -25,6 +25,10 @@ def test_discovery_includes_prompt_bank_and_workflow_seed_cases() -> None:
     )
     assert replay_suite._safe_text(prompt_case.get("prompt_id"))
     assert isinstance(prompt_case.get("required_tools"), list)
+    assert (
+        "#V#live_prompt_sampler_replay_evaluation_rubric_v1"
+        not in (prompt_case["required_concepts"])
+    )
 
 
 def test_email_arxiv_prompt_bank_replay_is_discoverable() -> None:
@@ -95,7 +99,6 @@ def test_non_runnable_case_is_classified_without_execution() -> None:
         timeout_seconds=5.0,
         dry_run=False,
         model="gemma4:26b",
-        allow_premium_model=False,
         allow_non_agent_test_server=False,
     )
 
@@ -103,7 +106,9 @@ def test_non_runnable_case_is_classified_without_execution() -> None:
     assert "No dedicated harness" in result["failure_stall_reason"]
 
 
-def test_timeout_is_classified_when_subprocess_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_timeout_is_classified_when_subprocess_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def _raise_timeout(*_args: object, **_kwargs: object) -> None:
         raise subprocess.TimeoutExpired(cmd="python", timeout=0.01)
 
@@ -119,7 +124,6 @@ def test_timeout_is_classified_when_subprocess_expires(monkeypatch: pytest.Monke
         timeout_seconds=0.01,
         dry_run=False,
         model="gemma4:26b",
-        allow_premium_model=False,
         allow_non_agent_test_server=False,
     )
 
@@ -139,8 +143,8 @@ def test_prompt_sampler_subprocess_timeout_allows_post_cancel_reporting(
             command,
             0,
             stdout=(
-                '{"status":"ok","repeat":{"successful_attempt_count":1,'
-                '"attempt_count":1,"meets_minimum_success_rate":true}}'
+                '{"status":"ok","repeat":{"collected_attempt_count":1,'
+                '"attempt_count":1,"meets_minimum_collection_rate":true}}'
             ),
             stderr="",
         )
@@ -157,11 +161,10 @@ def test_prompt_sampler_subprocess_timeout_allows_post_cancel_reporting(
         timeout_seconds=5.0,
         dry_run=False,
         model="gemma4:26b",
-        allow_premium_model=False,
         allow_non_agent_test_server=False,
     )
 
-    assert result["result"] == "passed"
+    assert result["result"] == "collected"
     assert captured["timeout"] == pytest.approx(25.0)
 
 
@@ -193,21 +196,51 @@ def test_prompt_sampler_failure_reason_reports_post_cancel_status(
         timeout_seconds=5.0,
         dry_run=False,
         model="gemma4:26b",
-        allow_premium_model=False,
         allow_non_agent_test_server=False,
     )
 
     assert result["result"] == "failed"
-    assert "post-cancellation status=cancelled terminal=true" in result[
-        "failure_stall_reason"
-    ]
+    assert (
+        "post-cancellation status=cancelled terminal=true"
+        in result["failure_stall_reason"]
+    )
 
 
-def test_local_only_policy_blocks_premium_model_without_opt_in() -> None:
-    with pytest.raises(RuntimeError, match="Local-only policy blocks premium model"):
-        replay_suite._enforce_local_only_policy("gpt-5.4-mini", False)
+def test_explicit_stronger_model_is_forwarded_without_a_premium_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
 
-    replay_suite._enforce_local_only_policy("gpt-5.4-mini", True)
+    def _fake_run(*args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        command = list(args[0])
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"status":"ok"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    result = replay_suite.execute_replay_case(
+        case={
+            "replay_id": "prompt-bank:case-1",
+            "runnable": True,
+            "execution_kind": "prompt_sampler",
+            "prompt_id": "case-1",
+        },
+        base_url="http://127.0.0.1:5010",
+        timeout_seconds=5.0,
+        dry_run=False,
+        model="openai:gpt-frontier",
+        allow_non_agent_test_server=False,
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--model") + 1] == "openai:gpt-frontier"
+    assert "--allow-premium-model" not in command
+    assert result["result"] == "collected"
 
 
 def test_filter_replay_cases_respects_explicit_source_filter() -> None:
@@ -234,9 +267,7 @@ def test_extract_prompt_sampler_failure_reason_prefers_nested_failure_message() 
                     "message": "Background generate task did not complete before timeout"
                 }
             },
-            "evaluation": {
-                "reasons": ["fallback reason should not be used"]
-            },
+            "evaluation": {"reasons": ["fallback reason should not be used"]},
         },
         stderr_text="stderr fallback",
         fallback="default fallback",
@@ -251,7 +282,7 @@ def test_extract_prompt_sampler_failure_reason_strips_note_wrapped_json_error() 
             "error": (
                 "NOTE: Use this random prompt sampler together with "
                 "docs/engineering/real_path_server_replay_and_telemetry_loop.md\n"
-                "{\"status\": \"error\", \"error\": \"model 'gemma4:26b' not found\"}"
+                '{"status": "error", "error": "model \'gemma4:26b\' not found"}'
             )
         },
         stderr_text="",

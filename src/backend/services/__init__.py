@@ -44,7 +44,6 @@ _SERVICE_EXPORT_MODULES = {
     "vontology_service": ".vontology_service",
     "workflow_continuation_service": ".workflow_continuation_service",
     "workflow_authoring_request_interpretation_vontology_service": ".workflow_authoring_request_interpretation_vontology_service",
-    "workflow_gap_vontology_service": ".workflow_gap_vontology_service",
 }
 
 if TYPE_CHECKING:
@@ -127,7 +126,6 @@ if TYPE_CHECKING:
     from . import (
         workflow_authoring_request_interpretation_vontology_service as workflow_authoring_request_interpretation_vontology_service,
     )
-    from . import workflow_gap_vontology_service as workflow_gap_vontology_service
 
 
 def __getattr__(name: str):
@@ -177,5 +175,4 @@ __all__ = [
     "vontology_service",
     "workflow_authoring_request_interpretation_vontology_service",
     "workflow_continuation_service",
-    "workflow_gap_vontology_service",
 ]

@@ -1,8 +1,9 @@
-"""Run one sampled KB+tool-sensitive prompt against a live Von server.
+"""Collect one sampled KB+tool-sensitive turn from a live Von server.
 
 This script exercises the real `/von/generate` route in a fresh test
-conversation, fetches persisted turn telemetry, and emits a conservative
-verdict about whether the resulting answer would likely satisfy a user.
+conversation, fetches persisted turn telemetry, and records what happened.
+It deliberately does not implement a second semantic policy or evaluator in
+Python.  A completed collection is not a claim that the answer was useful.
 
 Use `--complexity-class` to constrain random selection to easier direct
 questions, KB-grounded questions, or harder tool-augmented questions.
@@ -20,16 +21,13 @@ Use this sampler together with
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import platform
 import random
-import re
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -48,68 +46,34 @@ from scripts.live_test_server_defaults import (
     get_default_agent_test_base_url,
     resolve_live_test_base_url,
 )
-from src.backend.services.model_registry_service import (
-    DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION,
-    MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION,
-    assess_model_stage_certification,
-    build_model_stage_suitability_evidence,
-    get_model_registry_snapshot,
-)
 from src.backend.services import (
     replay_arm_planning_service,
     replay_experiment_observation_service,
-)
-from src.backend.services.agent_test_replay_mode_service import (
-    AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY,
-    AGENT_TEST_SELECTOR_REPLAY_MODE_FAST_PATH,
-    AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM,
-)
-from src.backend.services.turn_decision_attribution_service import (
-    aggregate_turn_decision_attributions,
-    build_turn_decision_attribution,
-)
-from src.backend.services.turn_context_adjudication_projection_service import (
-    build_turn_context_adjudication_projection,
 )
 from src.backend.services.tool_observation_ledger_service import (
     TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION,
     build_tool_observation_ledger,
 )
 
-DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
 DEFAULT_MODEL = "gemma4:31b"
-DEFAULT_MINIMUM_REPLAY_SUCCESS_RATE = 0.95
+DEFAULT_MINIMUM_COLLECTION_RATE = 0.95
 DEFAULT_REPLAY_SET_ID = "JVNAUTOSCI-1894"
 DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
 DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
 ACTIVE_AUTHENTICATED_MODEL_LABEL = "active_authenticated_model"
 LOCAL_MODEL_PROVIDER_NAME = "ollama"
-PREMIUM_MODEL_PROVIDER_NAMES = frozenset(
-    {"openai", "anthropic", "gemini", "azure_openai"}
-)
 KNOWN_MODEL_PROVIDER_NAMES = frozenset(
-    {LOCAL_MODEL_PROVIDER_NAME, *PREMIUM_MODEL_PROVIDER_NAMES}
+    {LOCAL_MODEL_PROVIDER_NAME, "openai", "anthropic", "gemini", "azure_openai"}
 )
-PREMIUM_MODEL_PREFIXES = (
+OPENAI_MODEL_PREFIXES = (
     "gpt-",
     "gpt4",
     "gpt5",
     "o1",
     "o3",
     "o4",
-    "claude",
-    "gemini",
     "text-davinci",
-)
-MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION = "model_portfolio_replay_report.v1"
-LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE_SCHEMA_VERSION = (
-    "local_ollama_replay_model_catalogue.v1"
-)
-LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION = "local_ollama_replay_probe.v1"
-REPLAY_ACTION_OUTCOME_SCHEMA_VERSION = "replay_action_outcome.v1"
-DEFAULT_LOCAL_MODEL_PROBE_CACHE_PATH = Path(
-    "artifacts/local_ollama_replay_model_probe_cache.json"
 )
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
 CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID = "#V#von_system"
@@ -127,62 +91,6 @@ REAL_PATH_REPLAY_GUIDE_NOTE = (
 )
 SERVER_METADATA_TIMEOUT_SECONDS = 15.0
 ACTIVE_LLM_INFO_TIMEOUT_SECONDS = 15.0
-LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE: tuple[dict[str, Any], ...] = (
-    {
-        "model": "granite3.3:2b",
-        "strength_rank": 10,
-        "relative_cost_rank": 10,
-        "notes": "Small local smoke-test candidate; often too weak for workflow selection.",
-    },
-    {
-        "model": "llama3.2:latest",
-        "strength_rank": 20,
-        "relative_cost_rank": 15,
-        "notes": "Small local general-purpose candidate.",
-    },
-    {
-        "model": "llama3:latest",
-        "strength_rank": 35,
-        "relative_cost_rank": 25,
-        "notes": "Mid-small local general-purpose candidate.",
-    },
-    {
-        "model": "gemma4:e4b",
-        "strength_rank": 50,
-        "relative_cost_rank": 40,
-        "notes": "Default replay-local candidate observed in prior Von replay work.",
-    },
-    {
-        "model": "gpt-oss:20b",
-        "strength_rank": 65,
-        "relative_cost_rank": 55,
-        "notes": "Local Ollama open-weight candidate; not an OpenAI API model.",
-    },
-    {
-        "model": "gemma4:26b",
-        "strength_rank": 75,
-        "relative_cost_rank": 65,
-        "notes": "Stronger local replay candidate; slower but useful for workflow reasoning.",
-    },
-    {
-        "model": "gemma4:31b",
-        "strength_rank": 78,
-        "relative_cost_rank": 68,
-        "notes": "Current default local replay candidate on origin/main.",
-    },
-    {
-        "model": "qwen3.5:27b",
-        "strength_rank": 80,
-        "relative_cost_rank": 70,
-        "notes": "Stronger local reasoning candidate when installed.",
-    },
-    {
-        "model": "llama3.3:70b",
-        "strength_rank": 95,
-        "relative_cost_rank": 95,
-        "notes": "High-cost local fallback; use only after cheaper installed candidates fail.",
-    },
-)
 PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS: dict[str, str] = {
     "direct_context_or_background": (
         "Questions that a capable direct-response LLM should usually answer from "
@@ -204,714 +112,6 @@ PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS: dict[str, str] = {
         "use, especially web, Jira, arXiv, or other external/operational surfaces."
     ),
 }
-HARD_FAILURE_RESPONSE_MARKERS = (
-    "i couldn't complete",
-    "i could not complete",
-    "i can't access",
-    "i cannot access",
-    "not authenticated",
-    "workflow not runnable",
-    "instance was not created",
-    "authoritative conversation-turn workflow failed",
-    "did not produce a user-visible response",
-    "workflow_llm_step_timeout",
-    "llm call timed out",
-    "i am unable to retrieve",
-    "i am unable to provide",
-    "unable to retrieve the information",
-    "unable to access the necessary data",
-    "necessary tool was not permitted",
-    "execution status: required grounded evidence was not retrieved",
-)
-SOFT_FAILURE_RESPONSE_MARKERS = (
-    "i don't currently have",
-    "i do not currently have",
-    "i don't have enough information",
-    "i do not have enough information",
-    "i don't know",
-    "i do not know",
-)
-GROUNDED_EMPTY_RESULT_MARKERS = (
-    "no pending von tasks",
-    "no pending tasks",
-    "no unread von messages",
-    "no unread messages",
-    "no von messages",
-    "no messages",
-    "don't currently have any pending von tasks",
-    "do not currently have any pending von tasks",
-    "don't currently have any unread von messages",
-    "do not currently have any unread von messages",
-    "no matching tasks",
-    "couldn't find any matching tasks",
-    "could not find any matching tasks",
-    "didn't find any matching tasks",
-    "did not find any matching tasks",
-)
-ACTION_OUTCOME_INVALID_TOOL_ARGUMENT_MARKERS = (
-    "input validation error",
-    "invalid argument",
-    "invalid tool argument",
-    "schema validation",
-    "validation error",
-    "not one of",
-    "enum",
-)
-ACTION_OUTCOME_TOOL_UNAVAILABLE_MARKERS = (
-    "not authenticated",
-    "authentication failed",
-    "auth failed",
-    "authorisation failed",
-    "authorization failed",
-    "access denied",
-    "permission denied",
-    "not permitted",
-    "tool unavailable",
-    "tool is unavailable",
-    "oauth",
-)
-ACTION_OUTCOME_EMPTY_OBSERVATION_MARKERS = (
-    "no results",
-    "no result",
-    "no matching",
-    "no candidate",
-    "no candidates",
-    "empty result",
-    "returned an empty",
-    "papers: []",
-    "items: []",
-    "messages: []",
-    "issues: []",
-    "nothing i can ground",
-    "nothing to ground",
-)
-ACTION_OUTCOME_SKIP_SCAN_KEYS = frozenset(
-    {
-        "content",
-        "messages",
-        "prompt",
-        "raw_prompt",
-        "raw_response",
-        "tool_contracts",
-        "tool_names",
-    }
-)
-INVENTORY_ONLY_TOOLS = frozenset({"list_papers"})
-DISCOVERY_SUMMARY_TO_CONTENT_TOOL = {
-    "get_text_relations_summary": "get_text_relations",
-}
-RELATIONSHIP_CLAIM_MARKERS = (
-    "your papers",
-    "papers of yours",
-    "my papers",
-    "our papers",
-)
-VONTOLOGY_CONCEPT_ID_RE = re.compile(r"#V#[-A-Za-z0-9_./:]+")
-TERMINAL_CONCEPT_ID_PUNCTUATION = ".,;:!?"
-CONSERVATIVE_CANONICAL_ID_NEAR_MISS_DISTANCE = 2
-EXPLICIT_CANONICAL_CONCEPT_ID_KEYS = (
-    "canonical_concept_id",
-    "canonical_subject_concept_id",
-    "expected_canonical_concept_id",
-    "expected_subject_concept_id",
-    "expected_concept_id",
-)
-EXPLICIT_CANONICAL_CONCEPT_IDS_KEYS = (
-    "canonical_concept_ids",
-    "canonical_subject_concept_ids",
-    "expected_canonical_concept_ids",
-    "expected_subject_concept_ids",
-    "expected_concept_ids",
-)
-AUTHENTICATED_USER_CONCEPT_ID_KEYS = (
-    "authenticated_user_concept_id",
-    "server_effective_user_concept_id",
-    "server_header_user_concept_id",
-    "server_session_user_concept_id",
-)
-DIAGNOSTIC_EVIDENCE_EFFECT_TYPE = "diagnostic_evidence"
-DIAGNOSTIC_EVIDENCE_KNOWLEDGE_SURFACES = frozenset(
-    {
-        "conversation_diagnostics",
-        "conversation_history",
-        "conversation_telemetry",
-        "stored_chat_context",
-        "turn_execution_diagnostics",
-        "turn_telemetry",
-    }
-)
-DIAGNOSTIC_EVIDENCE_TOOLS = frozenset(
-    {
-        "conversation_telemetry_get_locator",
-        "chat_history_get_segments",
-        "chat_history_get_debug_entry",
-        "turn_execution_get_diagnostics",
-        "workflow_get_execution_trace",
-    }
-)
-PROMPT_BANK_PAYLOAD: dict[str, Any] = {
-    "schema_version": "live_kb_tool_prompt_bank.v3",
-    "description": (
-        "Prompt bank for live /von/generate sampling of turns that range from "
-        "easy direct-response questions through KB-grounded questions to "
-        "tool-augmented prompts, including local operational prompts for Von "
-        "task and message creation/manipulation."
-    ),
-    "complexity_classes": PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS,
-    "prompts": [
-        {
-            "id": "who_am_i_in_this_conversation",
-            "category": "identity_context",
-            "complexity_class": "direct_context_or_background",
-            "prompt": "Who am I in this conversation?",
-            "knowledge_surfaces": ["turn_context"],
-            "likely_tools": [],
-        },
-        {
-            "id": "what_is_my_organisation_here",
-            "category": "identity_context",
-            "complexity_class": "direct_context_or_background",
-            "prompt": "What organisation am I currently working in here?",
-            "knowledge_surfaces": ["turn_context"],
-            "likely_tools": [],
-        },
-        {
-            "id": "what_time_is_it_here_right_now",
-            "category": "runtime_context",
-            "complexity_class": "direct_context_or_background",
-            "prompt": "What time is it here right now?",
-            "knowledge_surfaces": ["runtime_context"],
-            "likely_tools": [],
-        },
-        {
-            "id": "what_is_the_capital_of_france",
-            "category": "general_knowledge",
-            "complexity_class": "direct_context_or_background",
-            "prompt": "What is the capital of France?",
-            "knowledge_surfaces": ["background_knowledge"],
-            "likely_tools": [],
-        },
-        {
-            "id": "key_predicates_for_scientific_papers",
-            "category": "ontology_predicate_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "What are key predicates for scientific papers in Vontology?",
-            "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts", "get_predicate_incidence"],
-        },
-        {
-            "id": "key_predicates_for_sail_students",
-            "category": "ontology_predicate_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "What are key predicates or represented relationships for SAIL "
-                "students?"
-            ),
-            "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts", "get_predicate_incidence"],
-        },
-        {
-            "id": "salient_predicates_for_sail_students",
-            "category": "ontology_predicate_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "What predicates are salient to SAIL students?",
-            "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts", "get_predicate_incidence"],
-        },
-        {
-            "id": "text_relations_for_michael_witbrock_concept",
-            "category": "represented_relation_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "What text relations are used with the concept for Michael Witbrock?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["get_text_relations_summary"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "list_my_papers",
-            "category": "entity_relative_kb_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "List my papers.",
-            "knowledge_surfaces": ["turn_context", "kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "list_publications_in_2026_from_people_in_sail",
-            "category": "organisational_publication_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "List publications in 2026 from people in SAIL.",
-            "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "what_papers_of_mine_do_you_know_about",
-            "category": "entity_relative_kb_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "What papers of mine do you know about?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "tell_me_who_i_am_and_list_my_papers",
-            "category": "entity_relative_kb_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": "Tell me who I am and list my papers.",
-            "knowledge_surfaces": ["turn_context", "kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "research_interests_and_collaborators",
-            "category": "profile_and_network_summary",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "What do you know about my current research interests, and how do "
-                "they connect to my collaborators?"
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "most_relevant_people_for_my_neurosymbolic_work",
-            "category": "network_ranking",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "Who in my network seems most relevant to my work on "
-                "neuro-symbolic agents, and why?"
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "students_or_collaborators_and_relationships",
-            "category": "relation_lookup",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "What students or collaborators of mine are represented in the KB, "
-                "and what is my relationship to each?"
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "papers_talks_projects_clustered_by_theme",
-            "category": "theme_synthesis",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "What talks, papers, and projects of mine seem to cluster around "
-                "the same theme?"
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "represented_self_facts_vs_inferences",
-            "category": "epistemic_summary",
-            "complexity_class": "vontology_grounded",
-            "prompt": (
-                "Tell me about myself as represented here, but separate "
-                "established facts from likely inferences."
-            ),
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-        },
-        {
-            "id": "one_recent_arxiv_paper_for_my_agent_memory_work",
-            "category": "single_tool_arxiv_recommendation",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": (
-                "Given what is represented about my work, find one recent arXiv "
-                "paper on agent memory that I should read next."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_arxiv"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "one_recent_arxiv_paper_for_my_neurosymbolic_work",
-            "category": "single_tool_arxiv_recommendation",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": (
-                "Given what is represented about my work, find one recent arXiv "
-                "paper on neuro-symbolic agents that looks relevant."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_arxiv"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "one_recent_arxiv_paper_for_sail_workflow_work",
-            "category": "single_tool_arxiv_recommendation",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": (
-                "Using the represented SAIL context, find one recent arXiv paper "
-                "on workflow orchestration that looks relevant to our work."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_arxiv"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "summarise_jvnautosci_1894_parent_replay_programme",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": (
-                "Summarise JVNAUTOSCI-1894 as the parent replay programme for "
-                "these tests."
-            ),
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "what_does_jvnautosci_1925_ask_to_record",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "What does JVNAUTOSCI-1925 ask the replayer to record?",
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "tell_me_about_jvnautosci_150_in_jira",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "parent_and_subtasks_for_jvnautosci_150",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "What parent and subtasks are recorded for JVNAUTOSCI-150?",
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "summarise_jvnautosci_2097_tool_plan_repair_task",
-            "category": "single_tool_jira_summary",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": (
-                "Summarise JVNAUTOSCI-2097 and explain the tool-calling failure "
-                "it asks us to fix."
-            ),
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_get_issue"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "which_open_jira_issue_is_the_parent_replay_programme",
-            "category": "single_tool_jira_search",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": (
-                "Which open Jira issue is the parent replay programme for these "
-                "KB and tool stability subtasks?"
-            ),
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_search"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "which_jira_task_tracks_tool_call_repair_critic",
-            "category": "single_tool_jira_search",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": (
-                "Which Jira task tracks adding a one-shot tool-call repair critic "
-                "for malformed required tool plans?"
-            ),
-            "knowledge_surfaces": ["turn_context", "jira"],
-            "likely_tools": ["jira_search"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "list_last_ten_zhan_gmail_messages",
-            "category": "single_tool_gmail_listing",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "List the last ten email messages received by "
-                "zhanvonwitbrock@gmail.com the zhan-gmail identity"
-            ),
-            "knowledge_surfaces": ["turn_context", "gmail"],
-            "likely_tools": ["gmail_list_messages", "gmail_get_message"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "what_research_interests_of_mine_are_explicitly_represented_here",
-            "category": "single_tool_rag_lookup",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "What research interests of mine are explicitly represented here?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "what_collaborators_of_mine_are_explicitly_represented_here",
-            "category": "single_tool_rag_lookup",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "What collaborators of mine are explicitly represented here?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "what_projects_of_mine_are_explicitly_represented_here",
-            "category": "single_tool_rag_lookup",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "What projects of mine are explicitly represented here?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "what_sail_people_or_roles_are_explicitly_represented_here",
-            "category": "single_tool_rag_lookup",
-            "complexity_class": "vontology_plus_single_tool",
-            "prompt": "What SAIL people or roles are explicitly represented here?",
-            "knowledge_surfaces": ["kb"],
-            "likely_tools": ["search_knowledge_base"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "create_von_task_for_replay_review",
-            "category": "von_task_creation",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Create a Von task for me titled 'Review replay results' with a "
-                "short description saying it came from the JVNAUTOSCI-1894 "
-                "replay programme."
-            ),
-            "knowledge_surfaces": ["turn_context", "von_tasks"],
-            "likely_tools": ["task_create"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "list_my_pending_von_tasks",
-            "category": "von_task_listing",
-            "complexity_class": "tool_augmented",
-            "prompt": "List my pending Von tasks.",
-            "knowledge_surfaces": ["turn_context", "von_tasks"],
-            "likely_tools": ["task_list"],
-            "requires_tool_use": True,
-            "allows_grounded_empty_result": True,
-        },
-        {
-            "id": "search_my_von_tasks_for_replay_or_thinking_card_work",
-            "category": "von_task_search",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Search my Von tasks for anything about replay testing or the "
-                "thinking card."
-            ),
-            "knowledge_surfaces": ["turn_context", "von_tasks"],
-            "likely_tools": ["task_search"],
-            "requires_tool_use": True,
-            "allows_grounded_empty_result": True,
-        },
-        {
-            "id": "mark_replay_related_von_task_in_progress",
-            "category": "von_task_status_update",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "If I have a pending Von task about replay testing, mark it in "
-                "progress and tell me which task you changed."
-            ),
-            "knowledge_surfaces": ["turn_context", "von_tasks"],
-            "likely_tools": ["task_search", "task_update_status"],
-            "requires_tool_use": True,
-            "allows_grounded_empty_result": True,
-        },
-        {
-            "id": "send_myself_a_von_message_about_replay_results",
-            "category": "von_message_creation",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Send me a Von message reminding me to review the latest replay "
-                "results."
-            ),
-            "knowledge_surfaces": ["turn_context", "von_messages"],
-            "likely_tools": ["message_create"],
-            "requires_tool_use": True,
-        },
-        {
-            "id": "count_my_unread_von_messages",
-            "category": "von_message_listing",
-            "complexity_class": "tool_augmented",
-            "prompt": "How many unread Von messages do I have right now?",
-            "knowledge_surfaces": ["turn_context", "von_messages"],
-            "likely_tools": ["message_list"],
-            "requires_tool_use": True,
-            "allows_grounded_empty_result": True,
-        },
-        {
-            "id": "closest_kb_papers_to_recent_arxiv_interests",
-            "category": "personalised_arxiv_recommendation",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Which papers in my KB are closest to my recent arXiv interests, "
-                "and what newer arXiv papers should I read next?"
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv"],
-        },
-        {
-            "id": "compare_my_papers_with_latest_arxiv_reasoning_work",
-            "category": "external_comparison",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Compare the papers of mine you know about with the latest arXiv "
-                "work on neuro-symbolic reasoning."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv"],
-        },
-        {
-            "id": "recent_arxiv_like_my_continual_learning_and_symbolic_memory_interests",
-            "category": "personalised_arxiv_recommendation",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "I’m interested in papers like mine on continual learning and "
-                "symbolic memory. Find recent arXiv papers and explain the overlap."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv"],
-        },
-        {
-            "id": "which_arxiv_papers_should_i_ingest_into_the_kb",
-            "category": "kb_growth_recommendation",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "What arXiv papers should I ingest into the KB because they are "
-                "especially relevant to my existing work?"
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv"],
-        },
-        {
-            "id": "my_papers_with_follow_on_work_this_year",
-            "category": "external_follow_on_search",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Do you know about any of my papers that have likely follow-on work "
-                "on arXiv this year?"
-            ),
-            "knowledge_surfaces": ["kb", "arxiv"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv"],
-        },
-        {
-            "id": "recent_developments_i_should_care_about",
-            "category": "personalised_web_relevance",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Given what you know about my work, what are the most relevant "
-                "developments this month in agent memory and workflow orchestration?"
-            ),
-            "knowledge_surfaces": ["kb", "web"],
-            "likely_tools": ["search_knowledge_base", "search_web"],
-        },
-        {
-            "id": "companies_labs_projects_outside_kb_closest_to_ours",
-            "category": "external_landscape_scan",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "What companies, labs, or projects outside our KB are working on "
-                "ideas closest to ours?"
-            ),
-            "knowledge_surfaces": ["kb", "web"],
-            "likely_tools": ["search_knowledge_base", "search_web"],
-        },
-        {
-            "id": "recent_news_or_releases_i_should_care_about",
-            "category": "personalised_web_relevance",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Based on my represented interests, what recent news or releases "
-                "should I probably care about?"
-            ),
-            "knowledge_surfaces": ["kb", "web"],
-            "likely_tools": ["search_knowledge_base", "search_web"],
-        },
-        {
-            "id": "open_source_projects_relevant_to_my_represented_themes",
-            "category": "external_landscape_scan",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "What open-source projects released recently look most aligned "
-                "with the research themes already in my KB?"
-            ),
-            "knowledge_surfaces": ["kb", "web"],
-            "likely_tools": ["search_knowledge_base", "search_web"],
-        },
-        {
-            "id": "which_open_jira_tasks_connect_to_my_papers_and_projects",
-            "category": "kb_jira_cross_reference",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Which of my open Jira tasks seem most closely connected to the "
-                "papers and projects you know about me?"
-            ),
-            "knowledge_surfaces": ["kb", "jira"],
-            "likely_tools": [
-                "search_knowledge_base",
-                "jira_search",
-                "jira_get_issue",
-            ],
-        },
-        {
-            "id": "summarise_jvnautosci_1891_in_context_of_my_work",
-            "category": "jira_contextual_summary",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Summarise JVNAUTOSCI-1891 in the context of my existing papers, "
-                "workflows, and research goals."
-            ),
-            "knowledge_surfaces": ["kb", "jira"],
-            "likely_tools": ["search_knowledge_base", "jira_get_issue"],
-        },
-        {
-            "id": "open_jira_issues_relevant_to_paper_ingestion_retrieval_or_recommendation",
-            "category": "jira_contextual_summary",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "What open Jira issues are most relevant to my represented work on "
-                "paper ingestion, retrieval, or recommendation?"
-            ),
-            "knowledge_surfaces": ["kb", "jira"],
-            "likely_tools": ["search_knowledge_base", "jira_search"],
-        },
-        {
-            "id": "research_briefing_my_papers_recent_arxiv_and_jira",
-            "category": "multi_surface_briefing",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Prepare a short research briefing for me: my represented papers, "
-                "relevant recent arXiv work, and any linked Jira tasks."
-            ),
-            "knowledge_surfaces": ["kb", "arxiv", "jira"],
-            "likely_tools": ["search_knowledge_base", "search_arxiv", "jira_search"],
-        },
-        {
-            "id": "next_three_research_actions_using_kb_jira_and_recent_literature",
-            "category": "multi_surface_planning",
-            "complexity_class": "tool_augmented",
-            "prompt": (
-                "Given what you know about me, what should be my next three "
-                "research actions, supported by KB evidence, Jira state, and "
-                "recent external literature?"
-            ),
-            "knowledge_surfaces": ["kb", "jira", "arxiv", "web"],
-            "likely_tools": [
-                "search_knowledge_base",
-                "jira_search",
-                "search_arxiv",
-                "search_web",
-            ],
-        },
-    ],
-}
-
-EMBEDDED_PROMPT_BANK_PAYLOAD = PROMPT_BANK_PAYLOAD
 
 
 def _load_prompt_bank_payload_from_file() -> dict[str, Any]:
@@ -979,114 +179,11 @@ def _infer_provider_from_model_identifier(value: Any) -> str | None:
         return "anthropic"
     if lowered.startswith("gemini"):
         return "gemini"
-    if any(lowered.startswith(prefix) for prefix in PREMIUM_MODEL_PREFIXES):
+    if any(lowered.startswith(prefix) for prefix in OPENAI_MODEL_PREFIXES):
         return "openai"
     if ":" in bare_model and not lowered.startswith("ft:"):
         return LOCAL_MODEL_PROVIDER_NAME
     return None
-
-
-def _model_identifier_looks_premium(value: Any) -> bool:
-    provider, bare_model = _split_model_provider_prefix(value)
-    if provider == LOCAL_MODEL_PROVIDER_NAME:
-        return False
-    if _provider_looks_premium(provider):
-        return True
-    lowered = bare_model.lower()
-    return bool(lowered) and any(
-        lowered.startswith(prefix) for prefix in PREMIUM_MODEL_PREFIXES
-    )
-
-
-def _provider_looks_premium(value: Any) -> bool:
-    cleaned = _safe_text(value).lower()
-    return cleaned in PREMIUM_MODEL_PROVIDER_NAMES
-
-
-def _build_model_policy_report(
-    *,
-    requested_model_arms: Sequence[Mapping[str, Any]],
-    run_environment: Mapping[str, Any],
-    allow_premium_model: bool,
-) -> dict[str, Any]:
-    active_provider = (
-        _safe_text(run_environment.get("server_resolved_active_llm_provider")) or None
-    )
-    active_model = (
-        _safe_text(run_environment.get("server_resolved_active_llm_model")) or None
-    )
-    active_lookup_error = (
-        _safe_text(run_environment.get("server_resolved_active_llm_lookup_error"))
-        or None
-    )
-    arms: list[dict[str, Any]] = []
-    for arm in requested_model_arms:
-        requested_model = _safe_text(arm.get("requested_model")) or None
-        requested_provider = _safe_text(arm.get("requested_provider")) or None
-        if requested_model and not requested_provider:
-            requested_provider = _infer_provider_from_model_identifier(requested_model)
-        source = (
-            "explicit_model_override"
-            if requested_model
-            else "active_authenticated_model"
-        )
-        effective_model = requested_model or active_model
-        effective_provider = requested_provider if requested_model else active_provider
-        premium = _model_identifier_looks_premium(
-            effective_model
-        ) or _provider_looks_premium(effective_provider)
-        unverifiable_active_model = (
-            requested_model is None and not active_model and bool(active_lookup_error)
-        )
-        arms.append(
-            {
-                "arm_id": _safe_text(arm.get("arm_id")) or None,
-                "label": _safe_text(arm.get("label")) or None,
-                "source": source,
-                "requested_model": requested_model,
-                "requested_provider": requested_provider,
-                "effective_model": effective_model,
-                "effective_provider": effective_provider,
-                "premium_model_deviation": premium,
-                "active_model_unverified": unverifiable_active_model,
-            }
-        )
-    premium_arm_count = sum(
-        1 for arm in arms if bool(arm.get("premium_model_deviation"))
-    )
-    unverified_active_arm_count = sum(
-        1 for arm in arms if bool(arm.get("active_model_unverified"))
-    )
-    return {
-        "default_model": DEFAULT_MODEL,
-        "local_only_default": True,
-        "premium_model_allowed": bool(allow_premium_model),
-        "premium_model_deviation": premium_arm_count > 0,
-        "premium_model_deviation_count": premium_arm_count,
-        "unverified_active_model_arm_count": unverified_active_arm_count,
-        "arms": arms,
-    }
-
-
-def _enforce_model_policy(report: Mapping[str, Any]) -> None:
-    if bool(report.get("premium_model_allowed")):
-        return
-    premium_arms = [
-        arm
-        for arm in _as_list(report.get("arms"))
-        if isinstance(arm, Mapping)
-        and (
-            bool(arm.get("premium_model_deviation"))
-            or bool(arm.get("active_model_unverified"))
-        )
-    ]
-    if not premium_arms:
-        return
-    raise RuntimeError(
-        "Replay sampler defaults to local-only model execution. Premium or "
-        "unverified active-model arms require --allow-premium-model. "
-        f"Model policy report: {json.dumps(dict(report), ensure_ascii=True, sort_keys=True)}"
-    )
 
 
 def _load_json_mapping_argument(value: str, *, argument_name: str) -> dict[str, Any]:
@@ -1237,164 +334,6 @@ def _collect_failure_case_prompt_entry(
     )
 
 
-def _optional_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "yes", "1"}:
-            return True
-        if lowered in {"false", "no", "0"}:
-            return False
-    return None
-
-
-def _normalise_concept_id(value: Any) -> str | None:
-    text = _safe_text(value)
-    if not text:
-        return None
-    text = text.rstrip(TERMINAL_CONCEPT_ID_PUNCTUATION)
-    if text.startswith("#v#"):
-        text = f"#V#{text[3:]}"
-    elif text.startswith("V#") or text.startswith("v#"):
-        text = f"#V#{text[2:]}"
-    if not text.startswith("#V#"):
-        return None
-    if VONTOLOGY_CONCEPT_ID_RE.fullmatch(text) is None:
-        return None
-    return text
-
-
-def _append_unique_concept_id(target: list[str], value: Any) -> None:
-    concept_id = _normalise_concept_id(value)
-    if concept_id and concept_id not in target:
-        target.append(concept_id)
-
-
-def _collect_expected_canonical_concept_ids(
-    *,
-    prompt_entry: Mapping[str, Any],
-    run_environment: Mapping[str, Any] | None,
-    llm_debug_data: Mapping[str, Any],
-) -> list[str]:
-    expected_ids: list[str] = []
-
-    for key in EXPLICIT_CANONICAL_CONCEPT_ID_KEYS:
-        _append_unique_concept_id(expected_ids, prompt_entry.get(key))
-    for key in EXPLICIT_CANONICAL_CONCEPT_IDS_KEYS:
-        for value in _as_list(prompt_entry.get(key)):
-            _append_unique_concept_id(expected_ids, value)
-
-    environment = _as_mapping(run_environment)
-    for key in AUTHENTICATED_USER_CONCEPT_ID_KEYS:
-        _append_unique_concept_id(expected_ids, environment.get(key))
-
-    namespace_context = _as_mapping(llm_debug_data.get("namespace_context"))
-    _append_unique_concept_id(expected_ids, namespace_context.get("user_id"))
-
-    for key in (
-        "authenticated_user_concept_id",
-        "effective_user_concept_id",
-        "user_concept_id",
-    ):
-        _append_unique_concept_id(expected_ids, llm_debug_data.get(key))
-
-    return expected_ids
-
-
-def _extract_vontology_concept_ids(text: str) -> list[str]:
-    concept_ids: list[str] = []
-    for match in VONTOLOGY_CONCEPT_ID_RE.finditer(text or ""):
-        concept_id = _normalise_concept_id(match.group(0))
-        if concept_id and concept_id not in concept_ids:
-            concept_ids.append(concept_id)
-    return concept_ids
-
-
-def _bounded_edit_distance(left: str, right: str, max_distance: int) -> int:
-    if abs(len(left) - len(right)) > max_distance:
-        return max_distance + 1
-    previous = list(range(len(right) + 1))
-    for left_index, left_char in enumerate(left, start=1):
-        current = [left_index]
-        row_min = current[0]
-        for right_index, right_char in enumerate(right, start=1):
-            substitution_cost = 0 if left_char == right_char else 1
-            value = min(
-                previous[right_index] + 1,
-                current[right_index - 1] + 1,
-                previous[right_index - 1] + substitution_cost,
-            )
-            current.append(value)
-            row_min = min(row_min, value)
-        if row_min > max_distance:
-            return max_distance + 1
-        previous = current
-    return previous[-1]
-
-
-def _concept_id_near_miss_distance(expected_id: str, observed_id: str) -> int | None:
-    if expected_id == observed_id:
-        return None
-    expected_slug = expected_id[3:] if expected_id.startswith("#V#") else expected_id
-    observed_slug = observed_id[3:] if observed_id.startswith("#V#") else observed_id
-    distance = _bounded_edit_distance(
-        expected_slug,
-        observed_slug,
-        CONSERVATIVE_CANONICAL_ID_NEAR_MISS_DISTANCE,
-    )
-    if 0 < distance <= CONSERVATIVE_CANONICAL_ID_NEAR_MISS_DISTANCE:
-        return distance
-    return None
-
-
-def _evaluate_canonical_concept_id_fidelity(
-    *,
-    prompt_entry: Mapping[str, Any],
-    response_text: str,
-    run_environment: Mapping[str, Any] | None,
-    llm_debug_data: Mapping[str, Any],
-) -> dict[str, Any]:
-    expected_ids = _collect_expected_canonical_concept_ids(
-        prompt_entry=prompt_entry,
-        run_environment=run_environment,
-        llm_debug_data=llm_debug_data,
-    )
-    observed_ids = _extract_vontology_concept_ids(response_text)
-    findings: list[dict[str, Any]] = []
-
-    if expected_ids and observed_ids:
-        for expected_id in expected_ids:
-            if expected_id in observed_ids:
-                continue
-            for observed_id in observed_ids:
-                distance = _concept_id_near_miss_distance(expected_id, observed_id)
-                if distance is None:
-                    continue
-                findings.append(
-                    {
-                        "reason_code": "canonical_concept_id_mismatch",
-                        "severity": "failed",
-                        "expected_concept_id": expected_id,
-                        "observed_concept_id": observed_id,
-                        "edit_distance": distance,
-                        "message": (
-                            "Response displayed a near-miss Vontology concept ID "
-                            f"{observed_id} where canonical ID {expected_id} was "
-                            "the expected grounded subject."
-                        ),
-                    }
-                )
-
-    status = "failed" if findings else "passed" if expected_ids else "not_applicable"
-    return {
-        "status": status,
-        "expected_concept_ids": expected_ids,
-        "observed_concept_ids": observed_ids,
-        "findings": findings,
-    }
-
-
 def _assert(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
@@ -1492,297 +431,6 @@ def _write_json_output(output_json: str, payload: Mapping[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-
-
-def _normalise_ollama_model_name(model_name: str | None) -> str:
-    provider, bare_model = _split_model_provider_prefix(model_name)
-    if provider == LOCAL_MODEL_PROVIDER_NAME:
-        return bare_model.lower()
-    return _safe_text(model_name).lower()
-
-
-def _build_local_ollama_generate_model_override(model_name: str | None) -> str:
-    cleaned = _safe_text(model_name)
-    if not cleaned:
-        return ""
-    provider, _bare_model = _split_model_provider_prefix(cleaned)
-    if provider == LOCAL_MODEL_PROVIDER_NAME:
-        return cleaned
-    return f"{LOCAL_MODEL_PROVIDER_NAME}:{cleaned}"
-
-
-def _parse_ollama_list_output(output: str) -> set[str]:
-    installed: set[str] = set()
-    for raw_line in output.splitlines():
-        line = raw_line.strip()
-        if not line or line.lower().startswith("name"):
-            continue
-        model_name = line.split()[0].strip()
-        if model_name:
-            installed.add(_normalise_ollama_model_name(model_name))
-    return installed
-
-
-def _list_installed_ollama_models() -> set[str]:
-    try:
-        completed = subprocess.run(
-            ["ollama", "list"],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return set()
-    return _parse_ollama_list_output(completed.stdout)
-
-
-def _pull_ollama_model(model_name: str) -> dict[str, Any]:
-    started = time.time()
-    try:
-        completed = subprocess.run(
-            ["ollama", "pull", model_name],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=3600,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {
-            "model": model_name,
-            "status": "error",
-            "error": str(exc),
-            "duration_seconds": round(time.time() - started, 3),
-        }
-    return {
-        "model": model_name,
-        "status": "ok" if completed.returncode == 0 else "failed",
-        "exit_code": completed.returncode,
-        "stdout_tail": completed.stdout[-1000:],
-        "stderr_tail": completed.stderr[-1000:],
-        "duration_seconds": round(time.time() - started, 3),
-    }
-
-
-def _coerce_rank(value: Any, *, fallback: int) -> int:
-    if isinstance(value, bool):
-        return fallback
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
-    return fallback
-
-
-def _registry_local_ollama_model_entries() -> list[dict[str, Any]]:
-    try:
-        snapshot = get_model_registry_snapshot()
-    except Exception:
-        return []
-    snapshot_source = _safe_text(snapshot.get("source")) or "model_registry"
-    entries: list[dict[str, Any]] = []
-    for index, entry in enumerate(_as_list(snapshot.get("models"))):
-        if not isinstance(entry, Mapping):
-            continue
-        provider = _safe_text(entry.get("provider")).lower()
-        locality = _safe_text(entry.get("locality")).lower()
-        if provider != LOCAL_MODEL_PROVIDER_NAME and locality != "local":
-            continue
-        model = _safe_text(entry.get("model_id"))
-        if not model:
-            aliases = _as_list(entry.get("model_aliases"))
-            model = _safe_text(aliases[0]) if aliases else ""
-        if not model:
-            continue
-        entries.append(
-            {
-                "model": _normalise_ollama_model_name(model),
-                "provider": LOCAL_MODEL_PROVIDER_NAME,
-                "registry_source": snapshot_source,
-                "registry_entry_id": _safe_text(entry.get("registry_entry_id")) or None,
-                "concept_id": _safe_text(entry.get("concept_id")) or None,
-                "strength_rank": _coerce_rank(
-                    entry.get("strength_rank")
-                    or entry.get("replay_strength_rank")
-                    or entry.get("capability_rank"),
-                    fallback=1000 + index,
-                ),
-                "relative_cost_rank": _coerce_rank(
-                    entry.get("relative_cost_rank")
-                    or entry.get("cost_rank")
-                    or entry.get("replay_cost_rank"),
-                    fallback=1000 + index,
-                ),
-                "notes": _safe_text(entry.get("notes")) or None,
-            }
-        )
-    return entries
-
-
-def _build_local_ollama_replay_model_candidates(
-    *,
-    requested_candidates: Sequence[str],
-    installed_models: set[str] | None,
-    pull_missing_models: bool,
-) -> list[dict[str, Any]]:
-    requested = [_safe_text(entry) for entry in requested_candidates]
-    requested = [entry for entry in requested if entry]
-    installed = (
-        installed_models
-        if installed_models is not None
-        else _list_installed_ollama_models()
-    )
-    catalogue_by_model = {
-        _normalise_ollama_model_name(entry.get("model")): dict(entry)
-        for entry in LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE
-    }
-    registry_by_model = {
-        _normalise_ollama_model_name(entry.get("model")): dict(entry)
-        for entry in _registry_local_ollama_model_entries()
-    }
-    if requested:
-        source_models = requested
-    elif registry_by_model:
-        source_models = list(registry_by_model)
-    else:
-        source_models = [
-            entry["model"] for entry in LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE
-        ]
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    pull_results: dict[str, Any] = {}
-    for index, model_name in enumerate(source_models):
-        cleaned_model = _safe_text(model_name)
-        model_key = _normalise_ollama_model_name(cleaned_model)
-        if not cleaned_model or model_key in seen:
-            continue
-        seen.add(model_key)
-        registry_entry = registry_by_model.get(model_key, {})
-        catalogue_entry = catalogue_by_model.get(model_key, {})
-        installed_now = model_key in installed if installed else False
-        if not installed_now and pull_missing_models:
-            pull_result = _pull_ollama_model(cleaned_model)
-            pull_results[model_key] = pull_result
-            if pull_result.get("status") == "ok":
-                installed.add(model_key)
-                installed_now = True
-        if not installed_now:
-            continue
-        strength_rank = registry_entry.get(
-            "strength_rank", catalogue_entry.get("strength_rank")
-        )
-        relative_cost_rank = registry_entry.get(
-            "relative_cost_rank", catalogue_entry.get("relative_cost_rank")
-        )
-        candidates.append(
-            {
-                "schema_version": LOCAL_OLLAMA_REPLAY_MODEL_CATALOGUE_SCHEMA_VERSION,
-                "model": model_key,
-                "provider": LOCAL_MODEL_PROVIDER_NAME,
-                "installed": installed_now,
-                "strength_rank": _coerce_rank(strength_rank, fallback=1000 + index),
-                "relative_cost_rank": _coerce_rank(
-                    relative_cost_rank, fallback=1000 + index
-                ),
-                "catalogue_source": (
-                    "vontology_model_registry"
-                    if registry_entry
-                    else "replay_local_catalogue"
-                ),
-                "registry_source": registry_entry.get("registry_source"),
-                "registry_entry_id": registry_entry.get("registry_entry_id"),
-                "concept_id": registry_entry.get("concept_id"),
-                "notes": _safe_text(
-                    registry_entry.get("notes") or catalogue_entry.get("notes")
-                )
-                or None,
-                "pull_result": pull_results.get(model_key),
-            }
-        )
-    return sorted(
-        candidates,
-        key=lambda entry: (
-            int(entry.get("strength_rank") or 10_000),
-            int(entry.get("relative_cost_rank") or 10_000),
-            _safe_text(entry.get("model")),
-        ),
-    )
-
-
-def _resolve_scoped_active_llm_setting(
-    *, user_concept_id: str | None, organisation_concept_id: str | None
-) -> Mapping[str, Any] | None:
-    from src.backend.services.settings_service import resolve_llm_setting
-
-    resolved = resolve_llm_setting(
-        user_concept_id=_safe_text(user_concept_id) or None,
-        org_concept_id=_safe_text(organisation_concept_id) or None,
-    )
-    return dict(resolved) if isinstance(resolved, Mapping) else None
-
-
-def _set_scoped_active_llm_setting(
-    *,
-    user_concept_id: str | None,
-    organisation_concept_id: str | None,
-    provider: str,
-    model: str,
-) -> bool:
-    from src.backend.services.settings_service import (
-        set_org_llm_setting,
-        set_user_llm_setting,
-    )
-
-    user_id = _safe_text(user_concept_id) or None
-    organisation_id = _safe_text(organisation_concept_id) or None
-    if user_id:
-        return bool(set_user_llm_setting(user_id, provider, model))
-    if organisation_id:
-        return bool(set_org_llm_setting(organisation_id, provider, model))
-    raise RuntimeError(
-        "A user or organisation concept id is required to override scoped active LLM."
-    )
-
-
-@contextmanager
-def _temporary_scoped_active_llm(
-    *,
-    user_concept_id: str | None,
-    organisation_concept_id: str | None,
-    provider: str,
-    model: str,
-) -> Any:
-    previous = _resolve_scoped_active_llm_setting(
-        user_concept_id=user_concept_id,
-        organisation_concept_id=organisation_concept_id,
-    )
-    if not previous:
-        raise RuntimeError(
-            "Cannot safely restore scoped active LLM because no previous setting resolved."
-        )
-    if not _set_scoped_active_llm_setting(
-        user_concept_id=user_concept_id,
-        organisation_concept_id=organisation_concept_id,
-        provider=provider,
-        model=model,
-    ):
-        raise RuntimeError(f"Failed to set scoped active LLM to {provider}:{model}.")
-    try:
-        yield previous
-    finally:
-        previous_provider = _safe_text(previous.get("provider"))
-        previous_model = _safe_text(previous.get("model"))
-        if previous_provider and previous_model:
-            _set_scoped_active_llm_setting(
-                user_concept_id=user_concept_id,
-                organisation_concept_id=organisation_concept_id,
-                provider=previous_provider,
-                model=previous_model,
-            )
 
 
 def _git_capture(*args: str) -> str | None:
@@ -2072,61 +720,6 @@ def _request_task_cancellation(
     return result
 
 
-def _build_turn_expected_outcome_contract_for_prompt_entry(
-    prompt_entry: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    required_tools = _dedupe_texts(
-        [
-            name
-            for name in _as_list(prompt_entry.get("likely_tools"))
-            if _safe_text(name)
-        ]
-    )
-    if not bool(prompt_entry.get("requires_tool_use")) or not required_tools:
-        return None
-
-    prompt_id = _safe_text(prompt_entry.get("id"))
-    category = _safe_text(prompt_entry.get("category"))
-    knowledge_surfaces = _dedupe_texts(_as_list(prompt_entry.get("knowledge_surfaces")))
-    fields = {
-        "summary": (
-            "Satisfy the replay prompt using the required grounded tools recorded "
-            "by the replay prompt entry."
-        ),
-        "grounding_requirement": (
-            "Use the required replay tools before finalising; report unavailable "
-            "evidence explicitly."
-        ),
-        "selector_guidance": (
-            "Prefer a workflow or tool route that can execute the required tools "
-            "recorded by the replay prompt entry."
-        ),
-        "answering_guidance": (
-            "Answer from gathered tool evidence, or return a typed tool-access "
-            "or evidence-availability blocker."
-        ),
-        "reasoning": (
-            "The live replay prompt bank declares this case as requiring "
-            "operational tool use; the sampler passes that represented obligation "
-            "into the turn instead of scoring it only out of band."
-        ),
-    }
-    contract: dict[str, Any] = {
-        "schema_version": "turn_expected_outcome_contract.v1",
-        "fields": fields,
-        "required_tools": required_tools,
-        "sources": ["live_kb_tool_prompt_sampler"],
-    }
-    if prompt_id:
-        contract["prompt_bank_entry_id"] = prompt_id
-        contract["sources"].append(f"prompt_bank:{prompt_id}")
-    if category:
-        contract["prompt_bank_category"] = category
-    if knowledge_surfaces:
-        contract["knowledge_surfaces"] = knowledge_surfaces
-    return contract
-
-
 def _late_terminal_grace_seconds(
     *,
     poll_interval_seconds: float,
@@ -2197,7 +790,9 @@ def _fetch_late_terminal_background_result(
 
     if last_status_payload is not None and "final_status_payload" not in reconciliation:
         reconciliation["final_status_payload"] = last_status_payload
-        reconciliation["final_status"] = _safe_text(last_status_payload.get("status")) or None
+        reconciliation["final_status"] = (
+            _safe_text(last_status_payload.get("status")) or None
+        )
     return reconciliation
 
 
@@ -2209,8 +804,6 @@ def _run_generate_background(
     model: str | None,
     gmail_profile: str | None,
     presenter_mode: bool,
-    agent_test_selector_replay_mode: str | None = None,
-    turn_expected_outcome_contract: Mapping[str, Any] | None,
     timeout_seconds: float,
     poll_interval_seconds: float,
     include_status_payload: bool = False,
@@ -2230,15 +823,6 @@ def _run_generate_background(
         request_payload["gmail_profile"] = cleaned_gmail_profile
     if presenter_mode:
         request_payload["presenter_mode"] = True
-    cleaned_selector_replay_mode = _safe_text(agent_test_selector_replay_mode)
-    if cleaned_selector_replay_mode:
-        request_payload[AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY] = (
-            cleaned_selector_replay_mode
-        )
-    if isinstance(turn_expected_outcome_contract, Mapping):
-        request_payload["turn_expected_outcome_contract"] = dict(
-            turn_expected_outcome_contract
-        )
     model_provider = _infer_provider_from_model_identifier(cleaned_model)
     if model_provider:
         request_payload["model_provider"] = model_provider
@@ -2669,1402 +1253,28 @@ def _collect_tool_names(
     llm_debug_data: Mapping[str, Any],
 ) -> list[str]:
     tool_names: list[str] = []
-    for entry in _as_list(diagnostics.get("tool_history")):
-        if not isinstance(entry, Mapping):
-            continue
-        tool_name = _safe_text(entry.get("tool") or entry.get("method"))
-        if tool_name and tool_name not in tool_names:
-            tool_names.append(tool_name)
-    for entry in _as_list(llm_debug_data.get("tool_invocations")):
-        if not isinstance(entry, Mapping):
-            continue
-        tool_name = _safe_text(entry.get("tool") or entry.get("method"))
-        if tool_name and tool_name not in tool_names:
-            tool_names.append(tool_name)
+    turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
+    for entries in (
+        _as_list(diagnostics.get("tool_history")),
+        _as_list(llm_debug_data.get("tool_invocations")),
+        _as_list(turn_record.get("tool_invocations")),
+    ):
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            tool_name = _safe_text(entry.get("tool") or entry.get("method"))
+            if tool_name and tool_name not in tool_names:
+                tool_names.append(tool_name)
     return tool_names
 
 
-def _append_unique_text(target: list[str], value: Any) -> None:
-    cleaned = _safe_text(value)
-    if cleaned and cleaned not in target:
-        target.append(cleaned)
-
-
-def _safe_lower_contains_any(text: str, markers: Sequence[str]) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in markers)
-
-
-def _iter_signal_strings(value: Any, *, depth: int = 0) -> list[str]:
-    if depth > 8:
-        return []
-    if isinstance(value, str):
-        cleaned = value.strip()
-        return [cleaned] if cleaned else []
-    if isinstance(value, Mapping):
-        strings: list[str] = []
-        for key, item in value.items():
-            if _safe_text(key).lower() in ACTION_OUTCOME_SKIP_SCAN_KEYS:
-                continue
-            strings.extend(_iter_signal_strings(item, depth=depth + 1))
-        return strings
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        strings = []
-        for item in value:
-            strings.extend(_iter_signal_strings(item, depth=depth + 1))
-        return strings
-    return []
-
-
-def _first_signal_match(
-    sections: Sequence[Any],
-    markers: Sequence[str],
-) -> str | None:
-    for section in sections:
-        for text in _iter_signal_strings(section):
-            if _safe_lower_contains_any(text, markers):
-                return text[:500]
-    return None
-
-
-def _extract_failure_background_task(summary: Mapping[str, Any]) -> dict[str, Any]:
-    response = _as_mapping(summary.get("response"))
-    failure = _as_mapping(response.get("failure"))
-    return _as_mapping(failure.get("background_task"))
-
-
-def _collect_action_status_payloads(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
-    payloads: list[dict[str, Any]] = []
-    background_task = _extract_failure_background_task(summary)
-    for key in ("status_payload", "timeout_reconciliation"):
-        payload = _as_mapping(background_task.get(key))
-        if payload:
-            payloads.append(payload)
-    cancellation_payload = _as_mapping(background_task.get("cancellation_payload"))
-    for key in ("post_cancellation_status_payload", "final_status_payload"):
-        payload = _as_mapping(cancellation_payload.get(key))
-        if payload:
-            payloads.append(payload)
-    response = _as_mapping(summary.get("response"))
-    for key in (
-        "background_task_status",
-        "background_task_timeout_reconciliation",
-    ):
-        payload = _as_mapping(response.get(key))
-        if payload:
-            payloads.append(payload)
-    return payloads
-
-
-def _collect_progress_entries_from_payload(payload: Mapping[str, Any]) -> list[Any]:
-    entries: list[Any] = []
-    progress = _as_mapping(payload.get("progress"))
-    if progress:
-        entries.append(progress)
-    entries.extend(_as_list(payload.get("progress_history")))
-    timeout_status = _as_mapping(payload.get("timeout_status_payload"))
-    if timeout_status:
-        entries.extend(_collect_progress_entries_from_payload(timeout_status))
-    final_status = _as_mapping(payload.get("final_status_payload"))
-    if final_status:
-        entries.extend(_collect_progress_entries_from_payload(final_status))
-    return entries
-
-
-def _collect_action_tool_observation_ledgers(
-    *,
-    summary: Mapping[str, Any],
-    llm_debug_data: Mapping[str, Any] | None = None,
-) -> list[tuple[str, Mapping[str, Any]]]:
-    ledgers: list[tuple[str, Mapping[str, Any]]] = []
-    seen: set[int] = set()
-
-    def append_ledger(source: str, ledger: Mapping[str, Any]) -> None:
-        if ledger.get("schema_version") != TOOL_OBSERVATION_LEDGER_SCHEMA_VERSION:
-            return
-        observations = ledger.get("observations")
-        if not isinstance(observations, list) or not observations:
-            return
-        identity = id(ledger)
-        if identity in seen:
-            return
-        seen.add(identity)
-        ledgers.append((source, ledger))
-
-    telemetry = _as_mapping(summary.get("telemetry"))
-    append_ledger(
-        "telemetry.tool_observation_ledger",
-        _as_mapping(telemetry.get("tool_observation_ledger")),
-    )
-    append_ledger(
-        "summary.tool_observation_ledger",
-        _as_mapping(summary.get("tool_observation_ledger")),
-    )
-
-    debug = _as_mapping(llm_debug_data)
-    append_ledger(
-        "llm_debug_data.tool_observation_ledger",
-        _as_mapping(debug.get("tool_observation_ledger")),
-    )
-    diagnostics = _as_mapping(debug.get("turn_execution_diagnostics"))
-    append_ledger(
-        "turn_execution_diagnostics.tool_observation_ledger",
-        _as_mapping(diagnostics.get("tool_observation_ledger")),
-    )
-    turn_record = _as_mapping(debug.get("turn_execution_record"))
-    execution = _as_mapping(turn_record.get("execution"))
-    append_ledger(
-        "turn_execution_record.execution.tool_observation_ledger",
-        _as_mapping(execution.get("tool_observation_ledger")),
-    )
-    return ledgers
-
-
-def _collect_action_tool_observations(
-    *,
-    summary: Mapping[str, Any],
-    llm_debug_data: Mapping[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    observations: list[dict[str, Any]] = []
-
-    def append_observation(source: str, entry: Mapping[str, Any]) -> None:
-        tool_name = _safe_text(entry.get("tool") or entry.get("method"))
-        if not tool_name:
-            return
-        compact = {
-            "source": source,
-            "tool": tool_name,
-            "status": _safe_text(
-                entry.get("status")
-                or entry.get("action_status")
-                or entry.get("outcome")
-                or entry.get("success")
-            )
-            or None,
-            "result_summary": _safe_text(entry.get("result_summary")) or None,
-            "phase": _safe_text(entry.get("phase")) or None,
-            "stage": _safe_text(entry.get("stage")) or None,
-        }
-        for optional_key in (
-            "error",
-            "error_code",
-            "result_empty",
-            "attempted",
-            "call_id",
-        ):
-            if optional_key in entry:
-                compact[optional_key] = entry.get(optional_key)
-        if compact not in observations:
-            observations.append(compact)
-
-    ledgers = _collect_action_tool_observation_ledgers(
-        summary=summary,
-        llm_debug_data=llm_debug_data,
-    )
-    if ledgers:
-        for source, ledger in ledgers:
-            for entry in _as_list(ledger.get("observations")):
-                if isinstance(entry, Mapping):
-                    append_observation(source, entry)
-        return observations
-
-    telemetry = _as_mapping(summary.get("telemetry"))
-    for tool_name in _as_list(telemetry.get("observed_tools")):
-        cleaned = _safe_text(tool_name)
-        if cleaned:
-            append_observation("telemetry.observed_tools", {"tool": cleaned})
-    for entry in _as_list(telemetry.get("tool_history")):
-        if isinstance(entry, Mapping):
-            append_observation("telemetry.tool_history", entry)
-    existing_outcome = _as_mapping(summary.get("action_outcome"))
-    for entry in _as_list(existing_outcome.get("tool_observations")):
-        if isinstance(entry, Mapping):
-            append_observation("action_outcome.tool_observations", entry)
-
-    debug = _as_mapping(llm_debug_data)
-    diagnostics = _as_mapping(debug.get("turn_execution_diagnostics"))
-    for entry in _as_list(diagnostics.get("tool_history")):
-        if isinstance(entry, Mapping):
-            append_observation("turn_execution_diagnostics.tool_history", entry)
-    for entry in _as_list(debug.get("tool_invocations")):
-        if isinstance(entry, Mapping):
-            append_observation("llm_debug_data.tool_invocations", entry)
-
-    for payload in _collect_action_status_payloads(summary):
-        for entry in _collect_progress_entries_from_payload(payload):
-            if isinstance(entry, Mapping):
-                append_observation("background_task_progress", entry)
-
-    return observations
-
-
-def _collect_action_phases(
-    *,
-    summary: Mapping[str, Any],
-) -> tuple[list[str], list[str], list[str]]:
-    phases: list[str] = []
-    stages: list[str] = []
-    statuses: list[str] = []
-    telemetry = _as_mapping(summary.get("telemetry"))
-    for key, target in (
-        ("phase", phases),
-        ("stage", stages),
-        ("status", statuses),
-    ):
-        _append_unique_text(target, telemetry.get(key))
-    for payload in _collect_action_status_payloads(summary):
-        _append_unique_text(statuses, payload.get("status"))
-        for entry in _collect_progress_entries_from_payload(payload):
-            if not isinstance(entry, Mapping):
-                continue
-            _append_unique_text(phases, entry.get("phase"))
-            _append_unique_text(stages, entry.get("stage"))
-            _append_unique_text(statuses, entry.get("status"))
-    return phases, stages, statuses
-
-
-def _collect_action_workflow_projection(summary: Mapping[str, Any]) -> dict[str, Any]:
-    telemetry = _as_mapping(summary.get("telemetry"))
-    projection: dict[str, Any] = {}
-
-    def set_if_missing(key: str, value: Any, *, source: str) -> None:
-        cleaned = _safe_text(value)
-        if not cleaned or projection.get(key):
-            return
-        projection[key] = cleaned
-        projection.setdefault("source", source)
-
-    set_if_missing(
-        "selected_workflow_id",
-        telemetry.get("selected_workflow_id"),
-        source="telemetry",
-    )
-    set_if_missing(
-        "selected_execution_mode",
-        telemetry.get("selected_execution_mode"),
-        source="telemetry",
-    )
-    for payload in _collect_action_status_payloads(summary):
-        for entry in _collect_progress_entries_from_payload(payload):
-            if not isinstance(entry, Mapping):
-                continue
-            nested_event = _as_mapping(entry.get("selected_workflow_execution_event"))
-            for source, candidate in (
-                ("background_task_progress", entry),
-                (
-                    "background_task_progress.selected_workflow_execution_event",
-                    nested_event,
-                ),
-            ):
-                set_if_missing(
-                    "selected_workflow_id",
-                    candidate.get("dispatch_workflow_id")
-                    or candidate.get("selected_workflow_id")
-                    or (
-                        candidate.get("workflow_id")
-                        if source.endswith("selected_workflow_execution_event")
-                        else None
-                    ),
-                    source=source,
-                )
-                set_if_missing(
-                    "selected_execution_mode",
-                    candidate.get("selected_execution_mode")
-                    or candidate.get("execution_mode"),
-                    source=source,
-                )
-    return projection
-
-
-def _summary_response_text(summary: Mapping[str, Any]) -> str:
-    response = _as_mapping(summary.get("response"))
-    return (
-        _safe_text(response.get("text"))
-        or _safe_text(response.get("response"))
-        or _safe_text(response.get("response_text"))
-    )
-
-
-def _summary_requested_tool_use(summary: Mapping[str, Any]) -> bool:
-    prompt = _as_mapping(summary.get("prompt"))
-    if "requires_tool_use" in prompt:
-        return bool(prompt.get("requires_tool_use"))
-    return bool(_as_list(prompt.get("likely_tools")))
-
-
-def _summary_selected_workflow(summary: Mapping[str, Any]) -> str:
-    return _safe_text(
-        _collect_action_workflow_projection(summary).get("selected_workflow_id")
-    )
-
-
-def classify_replay_action_outcome(
-    summary: Mapping[str, Any],
-    *,
-    llm_debug_data: Mapping[str, Any] | None = None,
+def _extract_timing_metrics(
+    diagnostics: Mapping[str, Any],
+    turn_record: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Classify the generic action/observation state reached by a replay turn."""
-
-    debug = _as_mapping(llm_debug_data)
-    response = _as_mapping(summary.get("response"))
-    failure = _as_mapping(response.get("failure"))
-    telemetry = _as_mapping(summary.get("telemetry"))
-    evaluation = _as_mapping(summary.get("evaluation"))
-    response_scan = {
-        key: value for key, value in response.items() if key != "failure"
-    }
-    phases, stages, statuses = _collect_action_phases(summary=summary)
-    tool_observations = _collect_action_tool_observations(
-        summary=summary,
-        llm_debug_data=debug,
-    )
-    observed_tools: list[str] = []
-    for observation in tool_observations:
-        _append_unique_text(observed_tools, observation.get("tool"))
-    ledger_observations_present = any(
-        "tool_observation_ledger" in (_safe_text(observation.get("source")) or "")
-        for observation in tool_observations
-    )
-    observation_statuses = {
-        (_safe_text(observation.get("status")) or "").lower()
-        for observation in tool_observations
-        if _safe_text(observation.get("status"))
-    }
-
-    text_reason = " ".join(
-        [
-            _safe_text(failure.get("message")),
-            _safe_text(response.get("text")),
-            _safe_text(evaluation.get("response_preview")),
-            " ".join(
-                _safe_text(reason) for reason in _as_list(evaluation.get("reasons"))
-            ),
-        ]
-    ).strip()
-    timeout_reconciliation = _as_mapping(
-        _extract_failure_background_task(summary).get("timeout_reconciliation")
-    )
-    timeout_detected = (
-        "timeout" in text_reason.lower()
-        or "did not complete before timeout" in text_reason.lower()
-        or bool(timeout_reconciliation)
-    )
-    cancelled_detected = any(status.lower() == "cancelled" for status in statuses)
-    action_started = bool(observed_tools) or any(
-        token in {phase.lower(), stage.lower(), status.lower()}
-        for phase in phases or [""]
-        for stage in stages or [""]
-        for status in statuses or [""]
-        for token in {"tool_execute", "tool_call_start", "tool_call"}
-    )
-
-    tool_signal_sections: list[Any] = [
-        response_scan,
-        {
-            "response_preview": evaluation.get("response_preview"),
-            "missing_answer_evidence": evaluation.get("missing_answer_evidence"),
-        },
-        tool_observations,
-    ]
-    if debug and not ledger_observations_present:
-        tool_signal_sections.extend(
-            [
-                debug.get("tool_invocations"),
-                _as_mapping(debug.get("turn_execution_diagnostics")).get(
-                    "tool_history"
-                ),
-            ]
-        )
-
-    invalid_tool_match = _first_signal_match(
-        tool_signal_sections,
-        ACTION_OUTCOME_INVALID_TOOL_ARGUMENT_MARKERS,
-    )
-    unavailable_match = _first_signal_match(
-        tool_signal_sections,
-        ACTION_OUTCOME_TOOL_UNAVAILABLE_MARKERS,
-    )
-    empty_observation_match = _first_signal_match(
-        tool_signal_sections,
-        ACTION_OUTCOME_EMPTY_OBSERVATION_MARKERS,
-    )
-
-    reasons = [reason for reason in _as_list(evaluation.get("reasons")) if reason]
-    missing_answer_evidence = _as_list(evaluation.get("missing_answer_evidence"))
-    response_text = _summary_response_text(summary)
-    requires_tool_use = _summary_requested_tool_use(summary)
-    selected_workflow_id = _summary_selected_workflow(summary)
-    status = _safe_text(summary.get("status"))
-
-    limitations: list[str] = []
-    if bool(telemetry.get("debug_readback_partial")):
-        limitations.append("debug_readback_partial")
-    if _safe_text(telemetry.get("history_lookup_error")):
-        limitations.append("history_lookup_error")
-    if not debug and status == "ok" and not bool(telemetry):
-        limitations.append("summary_lacks_debug_payload")
-
-    evidence: list[str] = []
-    if selected_workflow_id:
-        evidence.append(f"selected_workflow_id={selected_workflow_id}")
-    if phases:
-        evidence.append(f"phases={','.join(phases[:4])}")
-    if stages:
-        evidence.append(f"stages={','.join(stages[:4])}")
-    if statuses:
-        evidence.append(f"statuses={','.join(statuses[:4])}")
-    if observed_tools:
-        evidence.append(f"observed_tools={','.join(observed_tools)}")
-
-    ledger_invalid_args = bool(observation_statuses & {"invalid_args"})
-    ledger_unavailable = bool(observation_statuses & {"auth_failed", "unavailable"})
-    ledger_timeout_or_cancelled = bool(
-        observation_statuses & {"timeout", "cancelled", "canceled"}
-    )
-    ledger_empty_observation = bool(observation_statuses & {"empty_result"})
-
-    if ledger_invalid_args or invalid_tool_match:
-        outcome = "tool_args_invalid"
-        if ledger_invalid_args:
-            evidence.append("tool_observation_ledger_status=invalid_args")
-        if invalid_tool_match:
-            evidence.append(f"invalid_tool_argument_signal={invalid_tool_match[:160]}")
-    elif ledger_unavailable or unavailable_match:
-        outcome = "tool_unavailable_or_auth_failed"
-        if ledger_unavailable:
-            evidence.append("tool_observation_ledger_status=auth_failed_or_unavailable")
-        if unavailable_match:
-            evidence.append(f"tool_unavailable_signal={unavailable_match[:160]}")
-    elif ledger_timeout_or_cancelled or timeout_detected or cancelled_detected or status == "error":
-        outcome = "timeout_after_action" if action_started else "timeout_before_action"
-        evidence.append(
-            "timeout_or_cancellation_observed=true"
-            if ledger_timeout_or_cancelled or timeout_detected or cancelled_detected
-            else "error_without_terminal_action_result=true"
-        )
-    elif requires_tool_use and not selected_workflow_id and not observed_tools:
-        outcome = "no_workflow_selected"
-        evidence.append("requires_tool_use_without_workflow_or_tool=true")
-    elif (ledger_empty_observation or empty_observation_match) and observed_tools:
-        outcome = "tool_executed_empty_observation"
-        if ledger_empty_observation:
-            evidence.append("tool_observation_ledger_status=empty_result")
-        if empty_observation_match:
-            evidence.append(f"empty_observation_signal={empty_observation_match[:160]}")
-    elif observed_tools and not response_text:
-        outcome = "tool_executed_with_observation"
-        evidence.append("tool_seen_but_no_response_text=true")
-    elif observed_tools and (missing_answer_evidence or reasons):
-        outcome = "answer_ungrounded_in_observation"
-        if missing_answer_evidence:
-            evidence.append("missing_answer_evidence_present=true")
-        elif reasons:
-            evidence.append(f"evaluation_reason={_safe_text(reasons[0])[:160]}")
-    elif observed_tools and limitations:
-        outcome = "tool_executed_with_observation"
-        evidence.append("tool_seen_but_grounding_readback_limited=true")
-    elif observed_tools:
-        outcome = "answer_grounded"
-        evidence.append("tool_seen_and_no_generic_grounding_failure_detected=true")
-    elif requires_tool_use:
-        outcome = "answer_ungrounded_in_observation"
-        evidence.append("requires_tool_use_without_tool_observation=true")
-    elif response_text:
-        outcome = "answer_grounded"
-        evidence.append("response_text_present_for_non_tool_required_prompt=true")
-    else:
-        outcome = "harness_readback_inconclusive"
-        evidence.append("insufficient_response_or_action_evidence=true")
-
-    return {
-        "schema_version": REPLAY_ACTION_OUTCOME_SCHEMA_VERSION,
-        "outcome": outcome,
-        "request_id": (
-            _safe_text(_as_mapping(summary.get("conversation")).get("request_id"))
-            or _safe_text(
-                _as_mapping(summary.get("conversation")).get("background_task_id")
-            )
-            or None
-        ),
-        "background_task_id": (
-            _safe_text(
-                _as_mapping(summary.get("conversation")).get("background_task_id")
-            )
-            or _safe_text(_extract_failure_background_task(summary).get("task_id"))
-            or None
-        ),
-        "status": status or None,
-        "selected_workflow_id": selected_workflow_id or None,
-        "observed_tools": observed_tools,
-        "tool_observations": tool_observations[:12],
-        "phases": phases,
-        "stages": stages,
-        "statuses": statuses,
-        "timeout_detected": bool(timeout_detected or cancelled_detected),
-        "action_started": action_started,
-        "requires_tool_use": requires_tool_use,
-        "evidence": evidence,
-        "limitations": limitations,
-    }
-
-
-def _required_workflow_tool_groups(
-    llm_debug_data: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
-    execution = _as_mapping(turn_record.get("execution"))
-    workflow_contract = _as_mapping(execution.get("workflow_required_effects_contract"))
-    required_effects = _as_list(workflow_contract.get("required_effects"))
-    groups: list[dict[str, Any]] = []
-    for effect in required_effects:
-        if not isinstance(effect, Mapping):
-            continue
-        required_tools = [
-            _safe_text(tool_name)
-            for tool_name in _as_list(effect.get("required_tools"))
-            if _safe_text(tool_name)
-        ]
-        if not required_tools:
-            continue
-        explicit_answer_required: bool | None = None
-        for key in (
-            "user_answer_required",
-            "answer_required",
-            "required_for_user_answer",
-        ):
-            if key in effect:
-                explicit_answer_required = _optional_bool(effect.get(key))
-                break
-        groups.append(
-            {
-                "effect_id": _safe_text(effect.get("effect_id")),
-                "effect_type": _safe_text(effect.get("effect_type")),
-                "required_tools": required_tools,
-                "match": (_safe_text(effect.get("required_tools_match")) or "any")
-                .strip()
-                .lower(),
-                "requirement_source": "workflow_required_effects_contract",
-                "explicit_user_answer_required": explicit_answer_required,
-            }
-        )
-    return groups
-
-
-def _dispatch_missing_required_tool_group(
-    dispatch: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    missing_tools = [
-        _safe_text(tool_name)
-        for tool_name in _as_list(
-            dispatch.get("required_effects_missing_required_tools")
-        )
-        if _safe_text(tool_name)
-    ]
-    if not missing_tools:
-        return None
-    required_tools = [
-        _safe_text(tool_name)
-        for tool_name in _as_list(dispatch.get("required_effects_required_tools"))
-        if _safe_text(tool_name)
-    ]
-    unresolved_effect_ids = [
-        _safe_text(effect_id)
-        for effect_id in _as_list(
-            dispatch.get("required_effects_unresolved_effect_ids")
-        )
-        if _safe_text(effect_id)
-    ]
-    unresolved_effect_types = [
-        _safe_text(effect_type)
-        for effect_type in _as_list(
-            dispatch.get("required_effects_unresolved_effect_types")
-        )
-        if _safe_text(effect_type)
-    ]
-    return {
-        "effect_id": (
-            ", ".join(unresolved_effect_ids) or "workflow_dispatch_required_effects"
-        ),
-        "effect_type": (", ".join(unresolved_effect_types) or "required_evidence"),
-        "required_tools": required_tools or missing_tools,
-        "known_missing_tools": missing_tools,
-        "match": "all",
-        "requirement_source": "workflow_dispatch_required_effects",
-        "explicit_user_answer_required": True,
-    }
-
-
-def _prompt_requires_diagnostic_evidence(prompt_entry: Mapping[str, Any]) -> bool:
-    explicit_requirement = _optional_bool(
-        prompt_entry.get("requires_diagnostic_evidence")
-    )
-    if explicit_requirement is not None:
-        return explicit_requirement
-    knowledge_surfaces = {
-        _safe_text(surface).lower()
-        for surface in _as_list(prompt_entry.get("knowledge_surfaces"))
-        if _safe_text(surface)
-    }
-    if knowledge_surfaces & DIAGNOSTIC_EVIDENCE_KNOWLEDGE_SURFACES:
-        return True
-    likely_tools = {
-        _safe_text(tool_name).lower()
-        for tool_name in _as_list(prompt_entry.get("likely_tools"))
-        if _safe_text(tool_name)
-    }
-    return bool(likely_tools & DIAGNOSTIC_EVIDENCE_TOOLS)
-
-
-def _workflow_tool_group_is_user_answer_required(
-    group: Mapping[str, Any],
-    *,
-    prompt_requires_diagnostic_evidence: bool,
-) -> bool:
-    explicit_requirement = group.get("explicit_user_answer_required")
-    if isinstance(explicit_requirement, bool):
-        return explicit_requirement
-    effect_type = _safe_text(group.get("effect_type")).lower()
-    if effect_type == DIAGNOSTIC_EVIDENCE_EFFECT_TYPE:
-        return prompt_requires_diagnostic_evidence
-    return True
-
-
-def _terminal_container_has_evidence(container: Mapping[str, Any]) -> bool:
-    return any(
-        _debug_value_is_present(container.get(key))
-        for key in (
-            "completion_gate",
-            "completion_gate_verdict",
-            "critic_verdict",
-            "terminal_outcome_receipt",
-            "terminal_outcome_receipt_validation",
-        )
-    )
-
-
-def _terminal_container_state(container: Mapping[str, Any]) -> dict[str, Any]:
-    """Read one internally consistent terminal-evidence container."""
-
-    completion_gate = _as_mapping(container.get("completion_gate"))
-    if not completion_gate:
-        completion_gate = _as_mapping(container.get("completion_gate_verdict"))
-    completion_evidence = _as_mapping(completion_gate.get("evidence_payload"))
-    critic_verdict = _as_mapping(container.get("critic_verdict"))
-
-    receipt = _as_mapping(container.get("terminal_outcome_receipt"))
-    if not receipt:
-        receipt = _as_mapping(completion_evidence.get("terminal_outcome_receipt"))
-    if not receipt:
-        receipt = _as_mapping(critic_verdict.get("terminal_outcome_receipt"))
-
-    validation = _as_mapping(container.get("terminal_outcome_receipt_validation"))
-    if not validation:
-        validation = _as_mapping(
-            completion_evidence.get("terminal_outcome_receipt_validation")
-        )
-    return {
-        "completion_gate": completion_gate,
-        "receipt": receipt,
-        "validation": validation,
-    }
-
-
-def _terminal_outcome_receipt_state(
-    llm_debug_data: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Project one canonical represented terminal receipt for the sampler.
-
-    A populated persisted Turn Execution Record is the canonical same-request
-    terminal container.  Falling back to the terminal task-result projection is
-    allowed only when that record has no terminal evidence at all; fields from
-    the two priority surfaces are never mixed into a synthetic success.
-    """
-
-    turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
-    if turn_record and _terminal_container_has_evidence(turn_record):
-        terminal_source = "turn_execution_record"
-        terminal_state = _terminal_container_state(turn_record)
-    else:
-        terminal_source = "terminal_task_result"
-        terminal_state = _terminal_container_state(llm_debug_data)
-
-    completion_gate = _as_mapping(terminal_state.get("completion_gate"))
-    receipt = _as_mapping(terminal_state.get("receipt"))
-    validation = _as_mapping(terminal_state.get("validation"))
-
-    outcome = _safe_text(receipt.get("outcome")).lower()
-    validation_outcome = _safe_text(validation.get("outcome")).lower()
-    valid_typed_terminal_outcome = bool(
-        outcome
-        and receipt.get("schema_version") == "terminal_outcome_receipt.v1"
-        and receipt.get("profile_concept_id") == "#V#terminal_outcome_receipt"
-        and validation.get("present") is True
-        and validation.get("valid") is True
-        and validation_outcome == outcome
-        and validation.get("decision_authority") == "represented_llm"
-    )
-    valid_typed_input_required = bool(
-        outcome == "input_required"
-        and valid_typed_terminal_outcome
-        and _safe_text(receipt.get("cause_code"))
-    )
-    return {
-        "source": terminal_source,
-        "completion_gate": completion_gate,
-        "outcome": outcome or None,
-        "receipt": receipt,
-        "validation": validation,
-        "valid_typed_terminal_outcome": valid_typed_terminal_outcome,
-        "valid_typed_input_required": valid_typed_input_required,
-    }
-
-
-def _successful_observed_tool_names(
-    tool_observations: Sequence[Mapping[str, Any]],
-) -> set[str]:
-    return {
-        _safe_text(observation.get("tool")).lower()
-        for observation in tool_observations
-        if _safe_text(observation.get("tool"))
-        and _safe_text(observation.get("status")).lower()
-        in {"ok", "success", "succeeded", "completed", "true"}
-    }
-
-
-def _receipt_evidence_refers_to_tool(
-    receipt: Mapping[str, Any],
-    tool_name: str,
-) -> bool:
-    expected = tool_name.lower()
-    for evidence_ref in _as_list(receipt.get("evidence_refs")):
-        if not isinstance(evidence_ref, Mapping):
-            continue
-        for key in ("locator", "source", "summary", "tool"):
-            if expected in _safe_text(evidence_ref.get(key)).lower():
-                return True
-    return False
-
-
-def _input_required_evidence_exhaustion(
-    *,
-    terminal_outcome: Mapping[str, Any],
-    successful_observed_tools: set[str],
-) -> dict[str, Any]:
-    """Check that a represented ambiguity receipt did not stop at inventory evidence."""
-
-    if terminal_outcome.get("valid_typed_input_required") is not True:
-        return {
-            "status": "not_applicable",
-            "missing_content_tools": [],
-            "summary_tools_relied_on": [],
-        }
-    receipt = _as_mapping(terminal_outcome.get("receipt"))
-    cause_code = _safe_text(receipt.get("cause_code")).lower()
-    causal_stage = _safe_text(receipt.get("causal_stage")).lower()
-    if not cause_code.endswith("_ambiguous") or causal_stage not in {
-        "retrieval",
-        "verification",
-    }:
-        return {
-            "status": "not_applicable",
-            "missing_content_tools": [],
-            "summary_tools_relied_on": [],
-        }
-
-    missing_content_tools: list[str] = []
-    summary_tools_relied_on: list[str] = []
-    for summary_tool, content_tool in DISCOVERY_SUMMARY_TO_CONTENT_TOOL.items():
-        if summary_tool not in successful_observed_tools:
-            continue
-        if not _receipt_evidence_refers_to_tool(receipt, summary_tool):
-            continue
-        summary_tools_relied_on.append(summary_tool)
-        if content_tool not in successful_observed_tools:
-            missing_content_tools.append(content_tool)
-    if not summary_tools_relied_on:
-        status = "not_applicable"
-    else:
-        status = "incomplete" if missing_content_tools else "complete"
-    return {
-        "status": status,
-        "missing_content_tools": missing_content_tools,
-        "summary_tools_relied_on": summary_tools_relied_on,
-    }
-
-
-def _evaluate_user_happiness(
-    *,
-    prompt_entry: Mapping[str, Any],
-    generate_payload: Mapping[str, Any],
-    llm_debug_data: Mapping[str, Any],
-    run_environment: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    reasons: list[str] = []
-    diagnostic_evidence_reasons: list[str] = []
-    missing_evidence: list[dict[str, Any]] = []
-    complexity_class = _safe_text(prompt_entry.get("complexity_class"))
-    response_text = (
-        _safe_text(generate_payload.get("response"))
-        or _safe_text(generate_payload.get("response_text"))
-        or _safe_text(llm_debug_data.get("response"))
-    )
-    if not response_text:
-        reasons.append("No assistant response text was returned.")
-    timeout_reconciliation = _as_mapping(
-        generate_payload.get("background_task_timeout_reconciliation")
-    )
-    if timeout_reconciliation.get("timed_out_before_budget") is True:
-        if timeout_reconciliation.get("late_terminal_result_observed") is True:
-            reasons.append(
-                "Background task exceeded the configured timeout budget; a late terminal result was observed."
-            )
-        else:
-            reasons.append(
-                "Background task exceeded the configured timeout budget before a terminal result was observed."
-            )
-
-    diagnostics = _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
-    routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
-    dispatch = _as_mapping(routing.get("dispatch"))
-    selected_execution_mode = _safe_text(dispatch.get("selected_execution_mode"))
-    selected_workflow_id = _safe_text(
-        dispatch.get("dispatch_workflow_id") or routing.get("selected_workflow_id")
-    )
-    dispatch_failure_reason = _safe_text(
-        dispatch.get("dispatch_terminal_failure_reason")
-    )
-    if dispatch_failure_reason:
-        reasons.append(f"Dispatch failed: {dispatch_failure_reason}.")
-    dispatch_failure_detail = _safe_text(
-        dispatch.get("dispatch_terminal_failure_detail")
-    )
-    if dispatch_failure_detail:
-        reasons.append(f"Dispatch failure detail: {dispatch_failure_detail}.")
-
-    terminal_outcome = _terminal_outcome_receipt_state(llm_debug_data)
-    completion_gate = _as_mapping(terminal_outcome.get("completion_gate"))
-    completion_gate_status = _safe_text(
-        completion_gate.get("status")
-        or completion_gate.get("verdict")
-        or completion_gate.get("decision")
-    ).lower()
-    if completion_gate_status in {
-        "fail",
-        "failed",
-        "blocked",
-        "deny",
-        "denied",
-        "escalation_required",
-        "follow_up_required",
-        "incomplete",
-        "needs_replay",
-        "partial",
-        "retrying",
-    }:
-        reasons.append(f"Completion gate reported {completion_gate_status}.")
-    valid_input_required_gate = bool(
-        terminal_outcome.get("valid_typed_input_required")
-        and completion_gate_status == "input_required"
-    )
-    valid_verified_success_gate = bool(
-        terminal_outcome.get("valid_typed_terminal_outcome")
-        and terminal_outcome.get("outcome") == "verified_success"
-        and completion_gate_status
-        in {
-            "allow",
-            "approved",
-            "completed",
-            "pass",
-            "passed",
-            "success",
-            "succeeded",
-        }
-        and completion_gate.get("safe_to_claim_completion") is not False
-        and completion_gate.get("requires_follow_up") is not True
-    )
-    terminal_outcome_gate_consistent = bool(
-        valid_input_required_gate or valid_verified_success_gate
-    )
-    background_task_status = _safe_text(
-        _as_mapping(generate_payload.get("background_task_status")).get("status")
-        or generate_payload.get("background_task_status")
-    ).lower()
-    terminalised = bool(
-        background_task_status in {"completed", "failed", "cancelled"}
-        or _terminal_container_has_evidence(
-            _as_mapping(llm_debug_data.get("turn_execution_record"))
-        )
-        or _terminal_container_has_evidence(llm_debug_data)
-    )
-    if terminalised and not terminal_outcome_gate_consistent:
-        reasons.append(
-            "Terminal outcome receipt was missing, invalid, or inconsistent with "
-            "the canonical completion gate."
-        )
-    if (
-        terminal_outcome.get("valid_typed_input_required")
-        and not valid_input_required_gate
-    ):
-        reasons.append(
-            "Typed input-required receipt was not confirmed by the completion gate."
-        )
-    if (
-        completion_gate.get("safe_to_claim_completion") is False
-        and not valid_input_required_gate
-    ):
-        reasons.append("Completion gate reported safe_to_claim_completion=false.")
-    if (
-        completion_gate.get("requires_follow_up") is True
-        and not valid_input_required_gate
-    ):
-        reasons.append("Completion gate reported requires_follow_up=true.")
-
-    critic_verdict = _as_mapping(llm_debug_data.get("critic_verdict"))
-    critic_status = _safe_text(
-        critic_verdict.get("status")
-        or critic_verdict.get("verdict")
-        or critic_verdict.get("decision")
-    ).lower()
-    if critic_status in {"fail", "failed", "blocked", "deny", "denied"}:
-        reasons.append(f"Critic verdict reported {critic_status}.")
-
-    lowered_response = response_text.lower()
-    tool_names = _collect_tool_names(diagnostics, llm_debug_data)
-    tool_observations = _collect_action_tool_observations(
-        summary={
-            "response": {
-                "background_task_status": generate_payload.get(
-                    "background_task_status"
-                ),
-                "background_task_timeout_reconciliation": generate_payload.get(
-                    "background_task_timeout_reconciliation"
-                ),
-            }
-        },
-        llm_debug_data=llm_debug_data,
-    )
-    successful_observed_tools = _successful_observed_tool_names(tool_observations)
-    for observation in tool_observations:
-        tool_name = _safe_text(observation.get("tool"))
-        if not tool_name:
-            continue
-        status = _safe_text(observation.get("status")).lower()
-        error_code = _safe_text(observation.get("error_code"))
-        error_text = _safe_text(observation.get("error"))
-        failed = bool(error_code or error_text) or status in {
-            "error",
-            "failed",
-            "failure",
-            "false",
-        }
-        if not failed or tool_name.lower() in successful_observed_tools:
-            continue
-        detail = error_code or error_text or status
-        reasons.append(
-            f"Tool {tool_name} failed without a later successful observation: {detail}."
-        )
-    requires_tool_use = bool(prompt_entry.get("requires_tool_use"))
-    allows_grounded_empty_result = bool(
-        prompt_entry.get("allows_grounded_empty_result")
-    )
-    if any(marker in lowered_response for marker in HARD_FAILURE_RESPONSE_MARKERS):
-        reasons.append("Response contains a concrete failure or access marker.")
-    elif any(marker in lowered_response for marker in SOFT_FAILURE_RESPONSE_MARKERS):
-        grounded_empty_result = (
-            allows_grounded_empty_result
-            and bool(tool_names)
-            and any(
-                marker in lowered_response for marker in GROUNDED_EMPTY_RESULT_MARKERS
-            )
-        )
-        if not grounded_empty_result:
-            reasons.append("Response contains a generic limitation or failure marker.")
-
-    expected_tools = [
-        _safe_text(name)
-        for name in _as_list(prompt_entry.get("likely_tools"))
-        if _safe_text(name)
-    ]
-    external_surfaces = {
-        surface
-        for surface in _as_list(prompt_entry.get("knowledge_surfaces"))
-        if isinstance(surface, str) and surface in {"jira", "web", "arxiv"}
-    }
-    if external_surfaces and not tool_names:
-        reasons.append(
-            "Prompt expected external knowledge surfaces but no tool usage was recorded."
-        )
-    if requires_tool_use and not tool_names:
-        reasons.append(
-            "Prompt required operational tool use but no tool usage was recorded."
-        )
-    observed_tool_lookup = {tool_name.lower() for tool_name in tool_names}
-    prompt_requires_diagnostic_evidence = _prompt_requires_diagnostic_evidence(
-        prompt_entry
-    )
-    required_tool_groups = _required_workflow_tool_groups(llm_debug_data)
-    dispatch_required_tool_group = _dispatch_missing_required_tool_group(dispatch)
-    if dispatch_required_tool_group is not None:
-        required_tool_groups.append(dispatch_required_tool_group)
-    for group in required_tool_groups:
-        required_tools = [
-            tool_name
-            for tool_name in _as_list(group.get("required_tools"))
-            if isinstance(tool_name, str) and tool_name.strip()
-        ]
-        known_missing_tools = [
-            tool_name
-            for tool_name in _as_list(group.get("known_missing_tools"))
-            if isinstance(tool_name, str) and tool_name.strip()
-        ]
-        missing_tools = known_missing_tools or [
-            tool_name
-            for tool_name in required_tools
-            if tool_name.lower() not in observed_tool_lookup
-        ]
-        match_mode = _safe_text(group.get("match")).lower() or "any"
-        requirement_satisfied = (
-            not missing_tools
-            if match_mode == "all"
-            else len(missing_tools) < len(required_tools)
-        )
-        if requirement_satisfied:
-            continue
-        effect_id = _safe_text(group.get("effect_id")) or "workflow required effect"
-        effect_type = _safe_text(group.get("effect_type")) or None
-        reason = (
-            "Workflow-authored required evidence was not retrieved for "
-            f"{effect_id}; missing tools: {', '.join(missing_tools)}."
-        )
-        user_answer_required = _workflow_tool_group_is_user_answer_required(
-            group,
-            prompt_requires_diagnostic_evidence=prompt_requires_diagnostic_evidence,
-        )
-        evidence_entry = {
-            "effect_id": effect_id,
-            "effect_type": effect_type,
-            "required_tools": required_tools,
-            "missing_tools": missing_tools,
-            "match": match_mode,
-            "requirement_source": (
-                _safe_text(group.get("requirement_source"))
-                or "workflow_required_effects_contract"
-            ),
-            "user_answer_required": user_answer_required,
-            "reason": reason,
-        }
-        missing_evidence.append(evidence_entry)
-        if (effect_type or "").lower() == DIAGNOSTIC_EVIDENCE_EFFECT_TYPE:
-            diagnostic_evidence_reasons.append(reason)
-        if user_answer_required:
-            reasons.append(reason)
-
-    minimum_response_length = (
-        4
-        if complexity_class == "direct_context_or_background"
-        else 20 if requires_tool_use or allows_grounded_empty_result else 40
-    )
-    if len(response_text) < minimum_response_length:
-        reasons.append("Response was too short to plausibly satisfy the prompt.")
-
-    if not reasons and not tool_names and not selected_execution_mode:
-        reasons.append(
-            "No positive evidence of grounded execution was recorded for this turn."
-        )
-
-    inventory_only_tools = [name for name in tool_names if name in INVENTORY_ONLY_TOOLS]
-    if (
-        inventory_only_tools
-        and len(inventory_only_tools) == len(tool_names)
-        and any(marker in lowered_response for marker in RELATIONSHIP_CLAIM_MARKERS)
-    ):
-        reasons.append(
-            "Response made a relationship or ownership claim using inventory-only tool evidence."
-        )
-
-    input_required_evidence = _input_required_evidence_exhaustion(
-        terminal_outcome=terminal_outcome,
-        successful_observed_tools=successful_observed_tools,
-    )
-    if input_required_evidence.get("status") == "incomplete":
-        reasons.append(
-            "Typed input-required outcome stopped at discovery-summary evidence; "
-            "content-bearing evidence was not successfully retrieved with: "
-            + ", ".join(
-                _safe_text(tool_name)
-                for tool_name in _as_list(
-                    input_required_evidence.get("missing_content_tools")
-                )
-                if _safe_text(tool_name)
-            )
-            + "."
-        )
-
-    canonical_concept_id_fidelity = _evaluate_canonical_concept_id_fidelity(
-        prompt_entry=prompt_entry,
-        response_text=response_text,
-        run_environment=run_environment,
-        llm_debug_data=llm_debug_data,
-    )
-    for finding in _as_list(canonical_concept_id_fidelity.get("findings")):
-        if not isinstance(finding, Mapping):
-            continue
-        expected_id = _safe_text(finding.get("expected_concept_id"))
-        observed_id = _safe_text(finding.get("observed_concept_id"))
-        if expected_id and observed_id:
-            reasons.append(
-                "Canonical concept ID mismatch: expected "
-                f"{expected_id} but response displayed near-miss {observed_id}."
-            )
-
-    should_user_be_happy = not reasons
-    if not should_user_be_happy:
-        verdict = "unhappy"
-    elif terminal_outcome.get("valid_typed_input_required"):
-        verdict = "input_required"
-    else:
-        verdict = "happy"
-    missing_answer_evidence = [
-        entry for entry in missing_evidence if entry.get("user_answer_required") is True
-    ]
-    missing_diagnostic_evidence = [
-        entry
-        for entry in missing_evidence
-        if _safe_text(entry.get("effect_type")).lower()
-        == DIAGNOSTIC_EVIDENCE_EFFECT_TYPE
-    ]
-    diagnostic_evidence_complete = not missing_diagnostic_evidence
-    positive_evidence: list[str] = []
-    if selected_workflow_id:
-        positive_evidence.append(f"selected_workflow_id={selected_workflow_id}")
-    if selected_execution_mode:
-        positive_evidence.append(f"selected_execution_mode={selected_execution_mode}")
-    if tool_names:
-        positive_evidence.append(f"tools={','.join(tool_names)}")
-    if expected_tools:
-        positive_evidence.append(f"expected_tools={','.join(expected_tools)}")
-    if terminal_outcome.get("valid_typed_input_required"):
-        positive_evidence.append("terminal_outcome=input_required")
-    elif terminal_outcome.get("valid_typed_terminal_outcome"):
-        positive_evidence.append(
-            f"terminal_outcome={terminal_outcome.get('outcome')}"
-        )
-
-    return {
-        "verdict": verdict,
-        "should_user_be_happy": should_user_be_happy,
-        "evaluation_authority": {
-            "authoritative": False,
-            "source": "live_prompt_sampler_local_smoke_check",
-            "reason": (
-                "This script-level check is diagnostic replay evidence only; "
-                "durable experiment verdicts require represented replay "
-                "evaluation authority."
-            ),
-        },
-        "reasons": reasons,
-        "diagnostic_evidence_complete": diagnostic_evidence_complete,
-        "diagnostic_evidence_reasons": diagnostic_evidence_reasons,
-        "missing_evidence": missing_evidence,
-        "missing_answer_evidence": missing_answer_evidence,
-        "missing_diagnostic_evidence": missing_diagnostic_evidence,
-        "canonical_concept_id_fidelity": canonical_concept_id_fidelity,
-        "terminal_outcome": {
-            "outcome": terminal_outcome.get("outcome"),
-            "valid_typed_input_required": terminal_outcome.get(
-                "valid_typed_input_required"
-            ),
-            "completion_gate_consistent": terminal_outcome_gate_consistent,
-            "evidence_exhaustion": input_required_evidence,
-            "accepted": bool(
-                should_user_be_happy
-                and terminal_outcome_gate_consistent
-            ),
-        },
-        "positive_evidence": positive_evidence,
-        "response_length": len(response_text),
-        "response_preview": response_text[:400],
-        "selected_workflow_id": selected_workflow_id or None,
-        "selected_execution_mode": selected_execution_mode or None,
-        "observed_tools": tool_names,
-    }
-
-
-def _safe_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    return None
-
-
-def _selector_structured_output_valid(selector: Mapping[str, Any]) -> bool | None:
-    selection_metadata = _as_mapping(selector.get("selection_metadata"))
-    structured_detected = _optional_bool(
-        selection_metadata.get("structured_selection_detected")
-    )
-    if structured_detected is not None:
-        return structured_detected
-    raw_response_format = _safe_text(selector.get("raw_response_format")).lower()
-    if raw_response_format:
-        return raw_response_format in {"json", "structured_json"}
-    return None
-
-
-def _extract_selector_model_policy(routing: Mapping[str, Any]) -> dict[str, Any]:
-    selector = _as_mapping(routing.get("selector"))
-    selected_model_candidate = _as_mapping(selector.get("selected_model_candidate"))
-    return {
-        "selected_model_candidate": selected_model_candidate or None,
-        "fallback_used": bool(selector.get("fallback_used")),
-        "fallback_attempt_count": selector.get("fallback_attempt_count"),
-        "model_failure_count": selector.get("model_failure_count"),
-        "primary_fallback_failure_kind": (
-            _safe_text(selector.get("primary_fallback_failure_kind")) or None
-        ),
-        "model_errors": _as_list(selector.get("model_errors")),
-    }
-
-
-def _text_capture_preview(capture: Mapping[str, Any]) -> dict[str, Any]:
-    char_count = _safe_int(capture.get("char_count"))
-    text = _safe_text(capture.get("text"))
-    return {
-        "char_count": char_count if char_count is not None else len(text),
-        "preview": text[:400] if text else None,
-        "truncated": capture.get("truncated") if "truncated" in capture else None,
-    }
-
-
-def _extract_selector_evidence(
-    routing: Mapping[str, Any],
-) -> dict[str, Any]:
-    selector = _as_mapping(routing.get("selector"))
-    response_capture = _as_mapping(selector.get("response"))
-    selected_candidate = _as_mapping(selector.get("selected_candidate"))
-    return {
-        "prompt_id": _safe_text(selector.get("prompt_id")) or None,
-        "model_name": _safe_text(selector.get("model_name")) or None,
-        "confidence_score": selector.get("confidence_score"),
-        "reasoning": _safe_text(selector.get("reasoning")) or None,
-        "selected_workflow_id": (
-            _safe_text(routing.get("selected_workflow_id"))
-            or _safe_text(selected_candidate.get("concept_id"))
-            or None
-        ),
-        "selection_resolution": (
-            _safe_text(selector.get("selection_resolution")) or None
-        ),
-        "raw_candidate_label": _safe_text(selector.get("raw_candidate_label")) or None,
-        "raw_response_format": _safe_text(selector.get("raw_response_format")) or None,
-        "structured_output_valid": _selector_structured_output_valid(selector),
-        "raw_response": (
-            _text_capture_preview(response_capture) if response_capture else None
-        ),
-        "model_policy": _extract_selector_model_policy(routing),
-    }
-
-
-def _selector_telemetry_completeness(routing: Mapping[str, Any]) -> dict[str, Any]:
-    evidence = _extract_selector_evidence(routing)
-    missing_fields = [
-        field
-        for field in ("selected_workflow_id", "model_name", "raw_response")
-        if not evidence.get(field)
-    ]
-    return {
-        "complete": not missing_fields,
-        "missing_fields": missing_fields,
-        "selector_prompt_id": evidence.get("prompt_id"),
-        "selector_model_name": evidence.get("model_name"),
-        "structured_output_valid": evidence.get("structured_output_valid"),
-    }
-
-
-def _iter_llm_exchange_summaries(
-    llm_debug_data: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    summaries: list[dict[str, Any]] = []
-    for stage in _as_list(llm_debug_data.get("stage_diagnostics")):
-        if not isinstance(stage, Mapping):
-            continue
-        stage_id = _safe_text(stage.get("stage_id"))
-        latest_exchange = _as_mapping(stage.get("latest_llm_exchange"))
-        if latest_exchange:
-            summaries.append(
-                {
-                    "stage_id": stage_id or None,
-                    "stage_label": _safe_text(stage.get("stage_label")) or None,
-                    "latest_status": _safe_text(stage.get("latest_status")) or None,
-                    "exchange": latest_exchange,
-                }
-            )
-        for exchange in _as_list(stage.get("llm_exchange_summaries")):
-            if not isinstance(exchange, Mapping):
-                continue
-            summaries.append(
-                {
-                    "stage_id": stage_id or None,
-                    "stage_label": _safe_text(stage.get("stage_label")) or None,
-                    "latest_status": _safe_text(stage.get("latest_status")) or None,
-                    "exchange": dict(exchange),
-                }
-            )
-    return summaries
-
-
-def _collect_empty_success_llm_suspects(
-    llm_debug_data: Mapping[str, Any],
-    *,
-    final_response_text: str,
-) -> list[dict[str, Any]]:
-    suspects: list[dict[str, Any]] = []
-    for index, entry in enumerate(_iter_llm_exchange_summaries(llm_debug_data)):
-        exchange = _as_mapping(entry.get("exchange"))
-        response_preview = _as_mapping(exchange.get("response_preview"))
-        char_count = _safe_int(response_preview.get("char_count"))
-        if char_count is None:
-            response_text = _safe_text(response_preview.get("text"))
-            char_count = len(response_text) if response_text else None
-        request_state = _safe_text(exchange.get("llm_request_state")).lower()
-        if char_count == 0 and request_state in {"completed", "success"}:
-            suspects.append(
-                {
-                    "source": "stage_diagnostics",
-                    "exchange_index": index,
-                    "stage_id": entry.get("stage_id"),
-                    "stage_label": entry.get("stage_label"),
-                    "latest_status": entry.get("latest_status"),
-                    "llm_request_state": request_state,
-                    "model": _safe_text(exchange.get("selected_model")) or None,
-                    "response_char_count": 0,
-                }
-            )
-    if not _safe_text(final_response_text):
-        suspects.append(
-            {
-                "source": "final_response",
-                "stage_id": "turn_answer",
-                "response_char_count": 0,
-            }
-        )
-    deduped: list[dict[str, Any]] = []
-    seen: set[tuple[Any, ...]] = set()
-    for suspect in suspects:
-        key = (
-            suspect.get("source"),
-            suspect.get("stage_id"),
-            suspect.get("exchange_index"),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(suspect)
-    return deduped
-
-
-def _extract_timing_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
     timing = _as_mapping(diagnostics.get("timing_breakdown"))
+    if not timing:
+        timing = _as_mapping(turn_record.get("timing_breakdown"))
     totals = _as_mapping(timing.get("totals"))
     return {
         "elapsed_ms": totals.get("elapsed_ms"),
@@ -4072,270 +1282,6 @@ def _extract_timing_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
         "llm_call_count": totals.get("llm_call_count"),
         "llm_calls_by_stage_model": _as_list(timing.get("llm_calls_by_stage_model")),
     }
-
-
-def _build_model_portfolio_arm_evaluation(
-    *,
-    summary: Mapping[str, Any],
-    llm_debug_data: Mapping[str, Any],
-    prompt_entry: Mapping[str, Any],
-    requested_model: str | None,
-) -> dict[str, Any]:
-    telemetry = _as_mapping(summary.get("telemetry"))
-    evaluation = _as_mapping(summary.get("evaluation"))
-    response = _as_mapping(summary.get("response"))
-    conversation = _as_mapping(summary.get("conversation"))
-    diagnostics = _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
-    routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
-    selector_evidence = _extract_selector_evidence(routing)
-    completion_gate = _as_mapping(llm_debug_data.get("completion_gate_verdict"))
-    critic_verdict = _as_mapping(llm_debug_data.get("critic_verdict"))
-    response_text = _safe_text(response.get("text"))
-    empty_success_suspects = _collect_empty_success_llm_suspects(
-        llm_debug_data,
-        final_response_text=response_text,
-    )
-    canonical_concept_id_fidelity = _as_mapping(
-        evaluation.get("canonical_concept_id_fidelity")
-    )
-    canonical_concept_id_findings = _as_list(
-        canonical_concept_id_fidelity.get("findings")
-    )
-    missing_answer_evidence = _as_list(evaluation.get("missing_answer_evidence"))
-    missing_evidence = _as_list(evaluation.get("missing_evidence"))
-    tool_history = _as_list(telemetry.get("tool_history"))
-    observed_tools = _as_list(telemetry.get("observed_tools"))
-    tool_count = len(observed_tools) if observed_tools else len(tool_history)
-    prompt_variant_evaluation = _as_mapping(summary.get("prompt_variant_evaluation"))
-    replay_scoring_consistency = _as_mapping(summary.get("replay_scoring_consistency"))
-    structured_output_valid = selector_evidence.get("structured_output_valid")
-    should_user_be_happy = bool(evaluation.get("should_user_be_happy"))
-    selector_metrics = {
-        "selected_workflow_id": selector_evidence.get("selected_workflow_id"),
-        "selector_confidence_score": selector_evidence.get("confidence_score"),
-        "structured_output_valid": structured_output_valid,
-        "raw_response_format": selector_evidence.get("raw_response_format"),
-        "selection_resolution": selector_evidence.get("selection_resolution"),
-        "selected_model_candidate": selector_evidence["model_policy"].get(
-            "selected_model_candidate"
-        ),
-    }
-    answer_metrics = {
-        "final_response_length": len(response_text),
-        "final_answer_useful": should_user_be_happy,
-        "tool_count": tool_count,
-        "missing_evidence_count": len(missing_evidence),
-        "missing_answer_evidence_count": len(missing_answer_evidence),
-        "empty_success_suspect_count": len(empty_success_suspects),
-        "canonical_concept_id_fidelity_status": (
-            _safe_text(canonical_concept_id_fidelity.get("status")) or "not_applicable"
-        ),
-        "canonical_concept_id_mismatch_count": len(canonical_concept_id_findings),
-        "canonical_expected_concept_id_count": len(
-            _as_list(canonical_concept_id_fidelity.get("expected_concept_ids"))
-        ),
-        "canonical_observed_concept_id_count": len(
-            _as_list(canonical_concept_id_fidelity.get("observed_concept_ids"))
-        ),
-        "completion_gate_status": (
-            _safe_text(
-                completion_gate.get("status")
-                or completion_gate.get("verdict")
-                or completion_gate.get("decision")
-            )
-            or None
-        ),
-        "critic_verdict_status": (
-            _safe_text(
-                critic_verdict.get("status")
-                or critic_verdict.get("verdict")
-                or critic_verdict.get("decision")
-            )
-            or None
-        ),
-        **_extract_timing_metrics(diagnostics),
-    }
-    promotion_blockers = _dedupe_texts(
-        [
-            "single_prompt_replay_evidence_only",
-            *_as_list(prompt_variant_evaluation.get("promotion_blockers")),
-            *_as_list(replay_scoring_consistency.get("promotion_blockers")),
-        ]
-    )
-    selector_verdict = (
-        "passed"
-        if selector_metrics.get("selected_workflow_id")
-        and structured_output_valid is not False
-        else "suspect"
-    )
-    if not should_user_be_happy or empty_success_suspects:
-        answer_verdict = "failed"
-    else:
-        answer_verdict = "passed"
-    observed_model = _safe_text(telemetry.get("model")) or _safe_text(requested_model)
-    replay_case_id = _safe_text(prompt_entry.get("id"))
-    replay_set_id = DEFAULT_REPLAY_SET_ID
-    answer_prompt_id = (
-        _safe_text(prompt_variant_evaluation.get("base_prompt_id"))
-        or _safe_text(prompt_entry.get("id"))
-        or None
-    )
-    answer_prompt_variant_id = (
-        _safe_text(prompt_variant_evaluation.get("selected_prompt_id"))
-        or _safe_text(prompt_variant_evaluation.get("candidate_prompt_variant_id"))
-        or None
-    )
-    if answer_prompt_variant_id and answer_prompt_variant_id == answer_prompt_id:
-        answer_prompt_variant_id = None
-    selector_evidence_payload = build_model_stage_suitability_evidence(
-        model=observed_model,
-        stage="workflow_selector",
-        workflow_id=_safe_text(telemetry.get("selected_workflow_id")) or None,
-        prompt_id=selector_evidence.get("prompt_id"),
-        replay_set_id=replay_set_id,
-        replay_case_id=replay_case_id,
-        request_id=_safe_text(conversation.get("request_id")) or None,
-        verdict=selector_verdict,
-        metrics=selector_metrics,
-        rationale=selector_evidence.get("reasoning"),
-        evidence_artifact={
-            "conversation": conversation,
-            "selector": selector_evidence,
-        },
-        promotion_blockers=promotion_blockers,
-    )
-    answer_evidence_payload = build_model_stage_suitability_evidence(
-        model=observed_model,
-        stage="turn_answer",
-        workflow_id=_safe_text(telemetry.get("selected_workflow_id")) or None,
-        prompt_id=answer_prompt_id,
-        prompt_variant_id=answer_prompt_variant_id,
-        replay_set_id=replay_set_id,
-        replay_case_id=replay_case_id,
-        request_id=_safe_text(conversation.get("request_id")) or None,
-        verdict=answer_verdict,
-        metrics=answer_metrics,
-        rationale="; ".join(_as_list(evaluation.get("reasons"))) or None,
-        evidence_artifact={
-            "conversation": conversation,
-            "response_preview": response_text[:400],
-            "empty_success_suspects": empty_success_suspects,
-            "canonical_concept_id_fidelity": canonical_concept_id_fidelity,
-            "prompt_variant_evaluation": prompt_variant_evaluation,
-            "replay_scoring_consistency": replay_scoring_consistency,
-        },
-        promotion_blockers=promotion_blockers,
-    )
-    stage_evidence = [selector_evidence_payload, answer_evidence_payload]
-    return {
-        "schema_version": MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION,
-        "replay_set_id": replay_set_id,
-        "replay_case_id": replay_case_id,
-        "requested_model": _safe_text(requested_model) or None,
-        "observed_model": observed_model or None,
-        "selector": selector_evidence,
-        "empty_success_suspects": empty_success_suspects,
-        "stage_evidence": stage_evidence,
-        "stage_evidence_schema_version": MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION,
-        "certification_decision": assess_model_stage_certification(
-            stage_evidence,
-            minimum_replay_cases=DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION,
-        ),
-        "policy_update": {
-            "authorised": False,
-            "reason": (
-                "Replay evidence is emitted for represented policy review; "
-                "this runner does not mutate workflow/model policy."
-            ),
-        },
-    }
-
-
-def _build_model_portfolio_comparison_report(
-    *,
-    arm_summaries: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    stage_evidence: list[Mapping[str, Any]] = []
-    arm_reports: list[dict[str, Any]] = []
-    for arm_summary in arm_summaries:
-        if not isinstance(arm_summary, Mapping):
-            continue
-        arm = _as_mapping(arm_summary.get("arm"))
-        arm_label = _safe_text(arm.get("label")) or _safe_text(arm.get("arm_id"))
-        report = _as_mapping(arm_summary.get("model_portfolio_evaluation"))
-        if not report:
-            continue
-        prompt_variant_evaluation = _as_mapping(
-            arm_summary.get("prompt_variant_evaluation")
-        )
-        scoring_consistency = _as_mapping(arm_summary.get("replay_scoring_consistency"))
-        arm_reports.append(
-            {
-                "arm_id": _safe_text(arm.get("arm_id")) or None,
-                "label": arm_label or None,
-                "requested_model": _safe_text(arm.get("requested_model")) or None,
-                "observed_model": _safe_text(report.get("observed_model")) or None,
-                "replay_case_id": _safe_text(report.get("replay_case_id")) or None,
-                "base_prompt_id": _safe_text(
-                    prompt_variant_evaluation.get("base_prompt_id")
-                )
-                or None,
-                "candidate_prompt_variant_id": _safe_text(
-                    prompt_variant_evaluation.get("candidate_prompt_variant_id")
-                )
-                or None,
-                "selected_prompt_id": _safe_text(
-                    prompt_variant_evaluation.get("selected_prompt_id")
-                )
-                or None,
-                "candidate_prompt_variant_selected": prompt_variant_evaluation.get(
-                    "candidate_prompt_variant_selected"
-                ),
-                "telemetry_consistency_non_promotable": bool(
-                    scoring_consistency.get("non_promotable")
-                ),
-                "empty_success_suspect_count": len(
-                    _as_list(report.get("empty_success_suspects"))
-                ),
-                "certification_decision": _as_mapping(
-                    report.get("certification_decision")
-                ),
-            }
-        )
-        for entry in _as_list(report.get("stage_evidence")):
-            if isinstance(entry, Mapping):
-                stage_evidence.append(entry)
-
-    aggregate_decision = assess_model_stage_certification(
-        stage_evidence,
-        minimum_replay_cases=DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION,
-    )
-    return {
-        "schema_version": MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION,
-        "replay_set_id": DEFAULT_REPLAY_SET_ID,
-        "arm_count": len(arm_reports),
-        "stage_evidence_count": len(stage_evidence),
-        "arm_reports": arm_reports,
-        "aggregate_certification_decision": aggregate_decision,
-        "policy_update": {
-            "authorised": False,
-            "reason": (
-                "Comparison evidence is a replay artifact for represented "
-                "policy review. Model-stage certification requires the "
-                "promotion gate to pass and a separate Vontology/model-policy "
-                "mutation path."
-            ),
-        },
-    }
-
-
-def _build_experiment_observation_from_arm_summary(
-    summary: Mapping[str, Any],
-) -> dict[str, Any]:
-    return replay_experiment_observation_service.build_experiment_observation_from_arm_summary(
-        summary,
-        default_replay_set_id=DEFAULT_REPLAY_SET_ID,
-    )
 
 
 def _record_experiment_observations(
@@ -4422,7 +1368,6 @@ def _build_summary(
     history_location: Mapping[str, Any],
     generate_payload: Mapping[str, Any],
     llm_debug_data: Mapping[str, Any],
-    evaluation: Mapping[str, Any],
     prompt_bank_schema_version: str,
     requested_complexity_classes: Sequence[str],
     seed: int | None,
@@ -4433,16 +1378,18 @@ def _build_summary(
     diagnostics = _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
     routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
     dispatch = _as_mapping(routing.get("dispatch"))
+    turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
     tool_history = _as_list(diagnostics.get("tool_history"))
-    tool_observation_ledger = _as_mapping(
-        llm_debug_data.get("tool_observation_ledger")
-    )
+    tool_observation_ledger = _as_mapping(llm_debug_data.get("tool_observation_ledger"))
     if not tool_observation_ledger:
         tool_observation_ledger = _as_mapping(
             diagnostics.get("tool_observation_ledger")
         )
     if not tool_observation_ledger:
-        turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
+        tool_observation_ledger = _as_mapping(
+            turn_record.get("tool_observation_ledger")
+        )
+    if not tool_observation_ledger:
         tool_observation_ledger = _as_mapping(
             _as_mapping(turn_record.get("execution")).get("tool_observation_ledger")
         )
@@ -4450,7 +1397,10 @@ def _build_summary(
         derived_tool_observation_ledger = build_tool_observation_ledger(
             tool_invocations=[
                 entry
-                for entry in _as_list(llm_debug_data.get("tool_invocations"))
+                for entry in _as_list(
+                    turn_record.get("tool_invocations")
+                    or llm_debug_data.get("tool_invocations")
+                )
                 if isinstance(entry, Mapping)
             ],
             turn_execution_diagnostics=diagnostics,
@@ -4463,32 +1413,51 @@ def _build_summary(
         if int(derived_tool_observation_ledger.get("observation_count") or 0) > 0:
             tool_observation_ledger = derived_tool_observation_ledger
     observed_tools = _collect_tool_names(diagnostics, llm_debug_data)
+    if not observed_tools:
+        observed_tools = _dedupe_texts(
+            _as_list(tool_observation_ledger.get("observed_tools"))
+        )
+    tool_invocations = [
+        dict(entry)
+        for entry in _as_list(
+            turn_record.get("tool_invocations")
+            or llm_debug_data.get("tool_invocations")
+        )[:40]
+        if isinstance(entry, Mapping)
+    ]
+    llm_calls = [
+        dict(entry)
+        for entry in _as_list(
+            turn_record.get("llm_calls") or llm_debug_data.get("llm_calls")
+        )[:40]
+        if isinstance(entry, Mapping)
+    ]
     response_text = (
         _safe_text(generate_payload.get("response"))
         or _safe_text(generate_payload.get("response_text"))
         or _safe_text(llm_debug_data.get("response"))
     )
-    prompt_variant_evaluation = (
-        replay_experiment_observation_service.build_prompt_variant_evaluation(
-            llm_debug_data=llm_debug_data,
-            arm_metadata=arm_metadata,
-            requested_model=requested_model,
-        )
+    background_status = _safe_text(
+        _as_mapping(generate_payload.get("background_task_status")).get("status")
+        or generate_payload.get("background_task_status")
     )
-    replay_scoring_consistency = (
-        replay_experiment_observation_service.build_replay_scoring_consistency(
-            llm_debug_data=llm_debug_data,
-            evaluation=evaluation,
-            response_text=response_text,
-        )
-    )
-    context_adjudication = build_turn_context_adjudication_projection(
-        (
-            ("turn_execution_diagnostics", diagnostics),
-            ("llm_debug_data", llm_debug_data),
-            ("workflow_routing_diagnostics", routing),
-        )
-    )
+    terminal_observations: dict[str, dict[str, Any]] = {}
+    for source, container in (
+        ("turn_execution_record", turn_record),
+        ("task_result_debug", llm_debug_data),
+    ):
+        observed = {
+            key: container[key]
+            for key in (
+                "completion_gate",
+                "completion_gate_verdict",
+                "terminal_outcome_receipt",
+                "terminal_outcome_receipt_validation",
+            )
+            if _debug_value_is_present(container.get(key))
+        }
+        if observed:
+            terminal_observations[source] = observed
     summary = {
         "status": "ok",
         "guidance": {
@@ -4511,9 +1480,31 @@ def _build_summary(
         },
         "response": {
             "text": response_text,
+            "background_task_status": (
+                dict(_as_mapping(generate_payload.get("background_task_status")))
+                or generate_payload.get("background_task_status")
+            ),
+            "background_task_timeout_reconciliation": (
+                dict(
+                    _as_mapping(
+                        generate_payload.get("background_task_timeout_reconciliation")
+                    )
+                )
+                or None
+            ),
         },
         "telemetry": {
-            "model": _safe_text(llm_debug_data.get("model")),
+            "requested_model": _safe_text(requested_model) or None,
+            "model": (
+                _safe_text(turn_record.get("model"))
+                or _safe_text(llm_debug_data.get("model"))
+                or None
+            ),
+            "ordinary_turn_terminal_status": (
+                _safe_text(turn_record.get("terminal_status"))
+                or background_status
+                or None
+            ),
             "debug_readback_source": (
                 _safe_text(history_location.get("source")) or "history_debug"
             ),
@@ -4543,6 +1534,7 @@ def _build_summary(
             )
             or None,
             "tool_history": tool_history,
+            "tool_invocations": tool_invocations,
             "tool_observation_ledger": (
                 dict(tool_observation_ledger)
                 if tool_observation_ledger.get("schema_version")
@@ -4550,20 +1542,17 @@ def _build_summary(
                 else None
             ),
             "observed_tools": observed_tools,
-            "tool_count": len(observed_tools) if observed_tools else len(tool_history),
+            "tool_count": (
+                len(observed_tools)
+                if observed_tools
+                else len(tool_invocations) or len(tool_history)
+            ),
             "workflow_routing_diagnostics": routing,
-            "selector_telemetry_completeness": _selector_telemetry_completeness(
-                routing
-            ),
-            "context_adjudication": (
-                dict(context_adjudication)
-                if isinstance(context_adjudication, Mapping)
-                else None
-            ),
+            "timing": _extract_timing_metrics(diagnostics, turn_record),
+            "llm_calls": llm_calls,
+            "terminal_observations": terminal_observations or None,
+            "turn_execution_record": turn_record or None,
         },
-        "evaluation": dict(evaluation),
-        "prompt_variant_evaluation": prompt_variant_evaluation,
-        "replay_scoring_consistency": replay_scoring_consistency,
     }
     if arm_metadata:
         summary["arm"] = {
@@ -4586,24 +1575,21 @@ def _build_summary(
             optional_value = _safe_text(arm_metadata.get(optional_key))
             if optional_value:
                 summary["arm"][optional_key] = optional_value
-    summary["model_portfolio_evaluation"] = _build_model_portfolio_arm_evaluation(
-        summary=summary,
-        llm_debug_data=llm_debug_data,
-        prompt_entry=prompt_entry,
-        requested_model=requested_model,
-    )
-    attribution_diagnostics = dict(
-        _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
-    )
-    attribution_diagnostics["llm_debug"] = dict(llm_debug_data)
-    summary["decision_attribution"] = build_turn_decision_attribution(
-        diagnostics=attribution_diagnostics,
-        aux_entries=_as_list(llm_debug_data.get("aux_llm_calls")),
-    )
-    summary["action_outcome"] = classify_replay_action_outcome(
-        summary,
-        llm_debug_data=llm_debug_data,
-    )
+        if _safe_text(arm_metadata.get("base_prompt_id")) or _safe_text(
+            arm_metadata.get("candidate_prompt_variant_id")
+        ):
+            summary["prompt_variant_evaluation"] = (
+                replay_experiment_observation_service.build_prompt_variant_evaluation(
+                    llm_debug_data=llm_debug_data,
+                    arm_metadata=arm_metadata,
+                    requested_model=requested_model,
+                )
+            )
+            summary["replay_scoring_consistency"] = (
+                replay_experiment_observation_service.build_replay_scoring_consistency(
+                    llm_debug_data=llm_debug_data,
+                )
+            )
     return summary
 
 
@@ -4717,7 +1703,6 @@ def _run_prompt_replay_arm(
     arm_metadata: Mapping[str, Any] | None,
     presenter_mode: bool,
     gmail_profile: str | None,
-    agent_test_selector_replay_mode: str | None,
 ) -> dict[str, Any]:
     session = requests.Session()
     session_name = _build_arm_session_name(
@@ -4744,10 +1729,6 @@ def _run_prompt_replay_arm(
         model=requested_model,
         gmail_profile=gmail_profile,
         presenter_mode=presenter_mode,
-        agent_test_selector_replay_mode=agent_test_selector_replay_mode,
-        turn_expected_outcome_contract=(
-            _build_turn_expected_outcome_contract_for_prompt_entry(prompt_entry)
-        ),
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
         include_status_payload=True,
@@ -4770,12 +1751,6 @@ def _run_prompt_replay_arm(
         response_text=response_text,
         generate_payload=generate_payload,
     )
-    evaluation = _evaluate_user_happiness(
-        prompt_entry=prompt_entry,
-        generate_payload=generate_payload,
-        llm_debug_data=llm_debug_data,
-        run_environment=run_environment,
-    )
     return _build_summary(
         prompt_entry=prompt_entry,
         task_id=task_id,
@@ -4784,7 +1759,6 @@ def _run_prompt_replay_arm(
         history_location=history_location,
         generate_payload=generate_payload,
         llm_debug_data=llm_debug_data,
-        evaluation=evaluation,
         prompt_bank_schema_version=prompt_bank_schema_version,
         requested_complexity_classes=requested_complexity_classes,
         seed=seed,
@@ -4805,50 +1779,38 @@ def _build_multi_arm_summary(
     run_environment: Mapping[str, Any],
     arm_summaries: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    happy_arm_labels: list[str] = []
-    unhappy_arm_labels: list[str] = []
-    telemetry_models: list[str] = []
-    selected_workflow_ids: list[str] = []
-    selected_execution_modes: list[str] = []
-    action_outcomes: list[dict[str, Any]] = []
+    arm_observations: list[dict[str, Any]] = []
+    collected_arm_count = 0
     for arm_summary in arm_summaries:
         if not isinstance(arm_summary, Mapping):
             continue
         arm = _as_mapping(arm_summary.get("arm"))
         label = _safe_text(arm.get("label")) or _safe_text(arm.get("arm_id"))
-        if bool(_as_mapping(arm_summary.get("evaluation")).get("should_user_be_happy")):
-            if label:
-                happy_arm_labels.append(label)
-        elif label:
-            unhappy_arm_labels.append(label)
-        telemetry_model = _safe_text(
-            _as_mapping(arm_summary.get("telemetry")).get("model")
+        telemetry = _as_mapping(arm_summary.get("telemetry"))
+        response = _as_mapping(arm_summary.get("response"))
+        collected = _safe_text(arm_summary.get("status")) == "ok"
+        collected_arm_count += 1 if collected else 0
+        arm_observations.append(
+            {
+                "arm_id": _safe_text(arm.get("arm_id")) or None,
+                "arm_label": label or None,
+                "status": _safe_text(arm_summary.get("status")) or None,
+                "requested_model": _safe_text(arm.get("requested_model")) or None,
+                "observed_model": _safe_text(telemetry.get("model")) or None,
+                "ordinary_turn_terminal_status": _safe_text(
+                    telemetry.get("ordinary_turn_terminal_status")
+                )
+                or None,
+                "observed_tools": _as_list(telemetry.get("observed_tools")),
+                "tool_count": telemetry.get("tool_count"),
+                "timing": _as_mapping(telemetry.get("timing")),
+                "response_length": len(_safe_text(response.get("text"))),
+            }
         )
-        if telemetry_model and telemetry_model not in telemetry_models:
-            telemetry_models.append(telemetry_model)
-        workflow_id = _safe_text(
-            _as_mapping(arm_summary.get("telemetry")).get("selected_workflow_id")
-        )
-        if workflow_id and workflow_id not in selected_workflow_ids:
-            selected_workflow_ids.append(workflow_id)
-        execution_mode = _safe_text(
-            _as_mapping(arm_summary.get("telemetry")).get("selected_execution_mode")
-        )
-        if execution_mode and execution_mode not in selected_execution_modes:
-            selected_execution_modes.append(execution_mode)
-        action_outcome = _as_mapping(arm_summary.get("action_outcome"))
-        if action_outcome:
-            action_outcomes.append(
-                {
-                    "arm_label": label or None,
-                    "outcome": _safe_text(action_outcome.get("outcome")) or None,
-                    "observed_tools": _as_list(action_outcome.get("observed_tools")),
-                    "timeout_detected": action_outcome.get("timeout_detected"),
-                    "action_started": action_outcome.get("action_started"),
-                }
-            )
+    arm_count = len(arm_summaries)
+    all_arms_collected = bool(arm_count) and collected_arm_count == arm_count
     summary = {
-        "status": "ok",
+        "status": "ok" if all_arms_collected else "partial",
         "mode": "multi_arm_comparison",
         "guidance": {
             "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
@@ -4864,30 +1826,14 @@ def _build_multi_arm_summary(
         ),
         "prompt": _build_prompt_summary(prompt_entry),
         "comparison": {
-            "arm_count": len(arm_summaries),
-            "happy_arm_count": len(happy_arm_labels),
-            "unhappy_arm_count": len(unhappy_arm_labels),
-            "all_should_user_be_happy": len(unhappy_arm_labels) == 0,
-            "happy_arm_labels": happy_arm_labels,
-            "unhappy_arm_labels": unhappy_arm_labels,
-            "telemetry_models": telemetry_models,
-            "selected_workflow_ids": selected_workflow_ids,
-            "selected_execution_modes": selected_execution_modes,
-            "action_outcomes": action_outcomes,
+            "arm_count": arm_count,
+            "collected_arm_count": collected_arm_count,
+            "error_arm_count": arm_count - collected_arm_count,
+            "all_arms_collected": all_arms_collected,
+            "arm_observations": arm_observations,
         },
         "arms": [dict(entry) for entry in arm_summaries if isinstance(entry, Mapping)],
     }
-    summary["model_portfolio_report"] = _build_model_portfolio_comparison_report(
-        arm_summaries=arm_summaries
-    )
-    summary["decision_attribution_aggregate"] = aggregate_turn_decision_attributions(
-        [
-            _as_mapping(arm_summary.get("decision_attribution"))
-            for arm_summary in arm_summaries
-            if isinstance(arm_summary, Mapping)
-            and isinstance(arm_summary.get("decision_attribution"), Mapping)
-        ]
-    )
     return summary
 
 
@@ -4910,7 +1856,6 @@ def _run_replay_plan(
     prompt_variant_ids: Sequence[Any],
     presenter_mode: bool,
     gmail_profile: str | None,
-    agent_test_selector_replay_mode: str | None,
 ) -> tuple[dict[str, Any], bool]:
     if len(replay_arms) == 1:
         summary = _run_prompt_replay_arm(
@@ -4931,34 +1876,40 @@ def _run_replay_plan(
             ),
             presenter_mode=presenter_mode,
             gmail_profile=gmail_profile,
-            agent_test_selector_replay_mode=agent_test_selector_replay_mode,
         )
-        should_user_be_happy = bool(
-            _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
-        )
-        return summary, should_user_be_happy
+        return summary, _safe_text(summary.get("status")) == "ok"
 
-    arm_summaries = [
-        _run_prompt_replay_arm(
-            prompt_entry=prompt_entry,
-            base_url=base_url,
-            requested_model=_safe_text(arm.get("requested_model")) or None,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-            user_concept_id=user_concept_id,
-            organisation_concept_id=organisation_concept_id,
-            base_session_name=session_name,
-            shared_run_environment=run_environment,
-            prompt_bank_schema_version=prompt_bank_schema_version,
-            requested_complexity_classes=requested_complexity_classes,
-            seed=seed,
-            arm_metadata=arm,
-            presenter_mode=presenter_mode,
-            gmail_profile=gmail_profile,
-            agent_test_selector_replay_mode=agent_test_selector_replay_mode,
-        )
-        for arm in replay_arms
-    ]
+    arm_summaries: list[dict[str, Any]] = []
+    for arm_index, arm in enumerate(replay_arms, start=1):
+        try:
+            arm_summary = _run_prompt_replay_arm(
+                prompt_entry=prompt_entry,
+                base_url=base_url,
+                requested_model=_safe_text(arm.get("requested_model")) or None,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                user_concept_id=user_concept_id,
+                organisation_concept_id=organisation_concept_id,
+                base_session_name=session_name,
+                shared_run_environment=run_environment,
+                prompt_bank_schema_version=prompt_bank_schema_version,
+                requested_complexity_classes=requested_complexity_classes,
+                seed=seed,
+                arm_metadata=arm,
+                presenter_mode=presenter_mode,
+                gmail_profile=gmail_profile,
+            )
+        except Exception as exc:
+            arm_summary = _build_failed_replay_attempt_summary(
+                exc=exc,
+                attempt_index=arm_index,
+                prompt_entry=prompt_entry,
+                run_environment=run_environment,
+                requested_model=_safe_text(arm.get("requested_model")) or None,
+                requested_model_arms=[arm],
+            )
+            arm_summary["arm"] = dict(arm)
+        arm_summaries.append(arm_summary)
     summary = _build_multi_arm_summary(
         prompt_entry=prompt_entry,
         prompt_bank_schema_version=prompt_bank_schema_version,
@@ -4969,10 +1920,10 @@ def _run_replay_plan(
         run_environment=run_environment,
         arm_summaries=arm_summaries,
     )
-    should_user_be_happy = bool(
-        _as_mapping(summary.get("comparison")).get("all_should_user_be_happy")
+    collection_complete = bool(
+        _as_mapping(summary.get("comparison")).get("all_arms_collected")
     )
-    return summary, should_user_be_happy
+    return summary, collection_complete
 
 
 def _build_failed_replay_attempt_summary(
@@ -5019,39 +1970,22 @@ def _build_failed_replay_attempt_summary(
         },
         "response": {"text": "", "failure": failure},
         "telemetry": {
-            "selected_workflow_id": None,
-            "selected_execution_mode": None,
-            "selector_telemetry_completeness": {
-                "complete": False,
-                "missing_fields": ["turn_execution_diagnostics"],
-            },
-        },
-        "evaluation": {
-            "verdict": "error",
-            "should_user_be_happy": False,
-            "reasons": [str(exc)],
+            "requested_model": _safe_text(requested_model) or None,
+            "ordinary_turn_terminal_status": _safe_text(
+                _as_mapping(failure.get("background_task"))
+                .get("status_payload", {})
+                .get("status")
+            )
+            or None,
+            "background_task_observations": (
+                dict(_as_mapping(failure.get("background_task"))) or None
+            ),
         },
     }
-    workflow_projection = _collect_action_workflow_projection(summary)
-    if workflow_projection:
-        telemetry = _as_mapping(summary.get("telemetry"))
-        selected_workflow_id = _safe_text(
-            workflow_projection.get("selected_workflow_id")
-        )
-        selected_execution_mode = _safe_text(
-            workflow_projection.get("selected_execution_mode")
-        )
-        if selected_workflow_id:
-            telemetry["selected_workflow_id"] = selected_workflow_id
-        if selected_execution_mode:
-            telemetry["selected_execution_mode"] = selected_execution_mode
-        if _safe_text(workflow_projection.get("source")):
-            telemetry["workflow_projection_source"] = workflow_projection["source"]
-        summary["telemetry"] = telemetry
     if len(planned_arms) > 1:
         summary["comparison"] = {
             "planned_arm_count": len(planned_arms),
-            "completed_arm_count": 0,
+            "collected_arm_count": 0,
             "aborted_before_comparison_complete": True,
             "planned_arm_labels": [
                 _safe_text(arm.get("label") or arm.get("arm_id"))
@@ -5059,26 +1993,6 @@ def _build_failed_replay_attempt_summary(
                 if _safe_text(arm.get("label") or arm.get("arm_id"))
             ],
         }
-    action_outcome = classify_replay_action_outcome(summary)
-    tool_observation_ledger = build_tool_observation_ledger(
-        tool_observations=[
-            entry
-            for entry in _as_list(action_outcome.get("tool_observations"))
-            if isinstance(entry, Mapping)
-        ],
-    )
-    if int(tool_observation_ledger.get("observation_count") or 0) > 0:
-        telemetry = _as_mapping(summary.get("telemetry"))
-        telemetry["tool_observation_ledger"] = dict(tool_observation_ledger)
-        telemetry["observed_tools"] = list(
-            tool_observation_ledger.get("observed_tools") or []
-        )
-        telemetry["tool_count"] = len(
-            tool_observation_ledger.get("observed_tools") or []
-        )
-        summary["telemetry"] = telemetry
-        action_outcome = classify_replay_action_outcome(summary)
-    summary["action_outcome"] = action_outcome
     return summary
 
 
@@ -5092,15 +2006,15 @@ def _build_repeated_replay_summary(
     requested_model_arms: Sequence[Mapping[str, Any]],
     run_environment: Mapping[str, Any],
     attempt_summaries: Sequence[Mapping[str, Any]],
-    success_count: int,
-    minimum_success_rate: float,
+    collection_count: int,
+    minimum_collection_rate: float,
 ) -> dict[str, Any]:
     attempt_count = len(attempt_summaries)
-    success_rate = (
-        (float(success_count) / float(attempt_count)) if attempt_count else 0.0
+    collection_rate = (
+        (float(collection_count) / float(attempt_count)) if attempt_count else 0.0
     )
     return {
-        "status": "ok" if success_rate >= minimum_success_rate else "failed",
+        "status": ("ok" if collection_rate >= minimum_collection_rate else "partial"),
         "mode": "repeated_replay_suite",
         "guidance": {
             "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
@@ -5117,11 +2031,14 @@ def _build_repeated_replay_summary(
         "prompt": _build_prompt_summary(prompt_entry),
         "repeat": {
             "attempt_count": attempt_count,
-            "successful_attempt_count": success_count,
-            "failed_attempt_count": attempt_count - success_count,
-            "success_rate": success_rate,
-            "minimum_success_rate": minimum_success_rate,
-            "meets_minimum_success_rate": success_rate >= minimum_success_rate,
+            "collected_attempt_count": collection_count,
+            "error_attempt_count": attempt_count - collection_count,
+            "collection_rate": collection_rate,
+            "minimum_collection_rate": minimum_collection_rate,
+            "meets_minimum_collection_rate": (
+                collection_rate >= minimum_collection_rate
+            ),
+            "metric": "harness_collection_only_not_semantic_success",
         },
         "attempts": [
             dict(attempt)
@@ -5131,417 +2048,12 @@ def _build_repeated_replay_summary(
     }
 
 
-def _extract_trailing_json_mapping(text: str) -> dict[str, Any] | None:
-    if not isinstance(text, str) or "{" not in text:
-        return None
-    for index in range(len(text) - 1, -1, -1):
-        if text[index] != "{":
-            continue
-        try:
-            parsed = json.loads(text[index:])
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
-
-
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    if platform.system().lower().startswith("win"):
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            return
-        except (OSError, subprocess.SubprocessError):
-            pass
-    process.kill()
-
-
-def _summary_meets_success_threshold(summary: Mapping[str, Any]) -> bool:
-    repeat = _as_mapping(summary.get("repeat"))
-    if repeat:
-        attempts = [
-            attempt
-            for attempt in _as_list(summary.get("attempts"))
-            if isinstance(attempt, Mapping)
-        ]
-        expected_attempt_count = _safe_int(repeat.get("attempt_count"))
-        minimum_success_rate = repeat.get("minimum_success_rate")
-        if (
-            not attempts
-            or expected_attempt_count != len(attempts)
-            or isinstance(minimum_success_rate, bool)
-            or not isinstance(minimum_success_rate, (int, float))
-        ):
-            return False
-        accepted_attempt_count = sum(
-            1
-            for attempt in attempts
-            if _safe_text(attempt.get("status")) == "ok"
-            and _as_mapping(attempt.get("evaluation")).get(
-                "should_user_be_happy"
-            )
-            is True
-            and _as_mapping(
-                _as_mapping(attempt.get("evaluation")).get("terminal_outcome")
-            ).get("accepted")
-            is True
-        )
-        accepted_success_rate = accepted_attempt_count / len(attempts)
-        return bool(
-            repeat.get("meets_minimum_success_rate") is True
-            and accepted_success_rate >= float(minimum_success_rate)
-        )
-    if _safe_text(summary.get("status")) != "ok":
-        return False
-    evaluation = _as_mapping(summary.get("evaluation"))
-    return bool(
-        evaluation.get("should_user_be_happy") is True
-        and _as_mapping(evaluation.get("terminal_outcome")).get("accepted") is True
-    )
-
-
-def _run_sampler_subprocess_replay_suite(
-    *,
-    prompt_entry: Mapping[str, Any],
-    base_url: str,
-    requested_model: str,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    user_concept_id: str,
-    organisation_concept_id: str,
-    session_name: str,
-    presenter_mode: bool,
-    allow_non_agent_test_server: bool,
-    allow_agent_test_selector_fast_path: bool,
-    repeat_count: int,
-    minimum_success_rate: float,
-    process_timeout_seconds: float,
-) -> dict[str, Any]:
-    started_at = datetime.now(timezone.utc).isoformat()
-    prompt_text = _safe_text(prompt_entry.get("prompt"))
-    replay_case_id = _safe_text(prompt_entry.get("id"))
-    with tempfile.TemporaryDirectory(prefix="von_replay_probe_") as temp_dir:
-        output_path = Path(temp_dir) / "attempt.json"
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--base-url",
-            base_url,
-            "--prompt-text",
-            prompt_text,
-            "--timeout-seconds",
-            str(timeout_seconds),
-            "--poll-interval-seconds",
-            str(poll_interval_seconds),
-            "--user-concept-id",
-            user_concept_id,
-            "--organisation-concept-id",
-            organisation_concept_id,
-            "--session-name",
-            session_name,
-            "--model",
-            requested_model,
-            "--repeat-count",
-            str(max(int(repeat_count), 1)),
-            "--minimum-success-rate",
-            str(min(max(float(minimum_success_rate), 0.0), 1.0)),
-            "--output-json",
-            str(output_path),
-        ]
-        if replay_case_id:
-            command.extend(["--replay-case-id", replay_case_id])
-        if presenter_mode:
-            command.append("--presenter-mode")
-        if allow_non_agent_test_server:
-            command.append("--allow-non-agent-test-server")
-        if allow_agent_test_selector_fast_path:
-            command.append("--allow-agent-test-selector-fast-path")
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-        )
-        try:
-            stdout, stderr = process.communicate(
-                timeout=max(float(process_timeout_seconds), 1.0)
-            )
-        except subprocess.TimeoutExpired:
-            _terminate_process_tree(process)
-            stdout, stderr = process.communicate()
-            return {
-                "status": "error",
-                "started_at_utc": started_at,
-                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
-                "error": "replay_attempt_process_timeout",
-                "timeout_seconds": process_timeout_seconds,
-                "stdout_tail": stdout[-2000:],
-                "stderr_tail": stderr[-2000:],
-            }
-        summary: dict[str, Any]
-        if output_path.exists():
-            try:
-                parsed_output = json.loads(output_path.read_text(encoding="utf-8"))
-                summary = (
-                    dict(parsed_output) if isinstance(parsed_output, Mapping) else {}
-                )
-            except Exception as exc:
-                summary = {
-                    "status": "error",
-                    "error": f"invalid_attempt_output_json: {exc}",
-                }
-        else:
-            recovered_summary = (
-                _extract_trailing_json_mapping(stderr)
-                or _extract_trailing_json_mapping(stdout)
-                or {"status": "error", "error": "attempt_output_json_missing"}
-            )
-            summary = dict(recovered_summary)
-        if not summary:
-            summary = {"status": "error", "error": "attempt_output_json_not_object"}
-        summary["subprocess"] = {
-            "exit_code": process.returncode,
-            "stdout_tail": stdout[-2000:],
-            "stderr_tail": stderr[-2000:],
-            "process_timeout_seconds": process_timeout_seconds,
-        }
-        return summary
-
-
-def _build_local_model_probe_summary(
-    *,
-    prompt_entry: Mapping[str, Any],
-    prompt_bank_schema_version: str,
-    requested_complexity_classes: Sequence[str],
-    seed: int | None,
-    run_environment: Mapping[str, Any],
-    candidate_results: Sequence[Mapping[str, Any]],
-    selected_candidate: Mapping[str, Any] | None,
-    minimum_success_rate: float,
-) -> dict[str, Any]:
-    selected_model = (
-        _safe_text(selected_candidate.get("model"))
-        if isinstance(selected_candidate, Mapping)
-        else None
-    )
-    return {
-        "status": "ok" if selected_model else "failed",
-        "mode": "local_ollama_replay_model_probe",
-        "schema_version": LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION,
-        "guidance": {
-            "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
-            "replay_guide_note": REAL_PATH_REPLAY_GUIDE_NOTE,
-        },
-        "environment": dict(run_environment),
-        "selection": _build_selection_summary(
-            prompt_bank_schema_version=prompt_bank_schema_version,
-            requested_complexity_classes=requested_complexity_classes,
-            seed=seed,
-            requested_model=selected_model,
-        ),
-        "prompt": _build_prompt_summary(prompt_entry),
-        "local_model_probe": {
-            "minimum_success_rate": minimum_success_rate,
-            "selected_model": selected_model,
-            "candidate_count": len(candidate_results),
-            "candidates": [dict(entry) for entry in candidate_results],
-            "no_local_model_succeeded": selected_model is None,
-        },
-    }
-
-
-def _write_local_model_probe_cache(
-    *, cache_path: Path, probe_summary: Mapping[str, Any]
-) -> None:
-    payload: dict[str, Any] = {}
-    if cache_path.exists():
-        try:
-            parsed = json.loads(cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            parsed = {}
-        if isinstance(parsed, Mapping):
-            payload = dict(parsed)
-    payload["schema_version"] = LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION
-    payload["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
-    payload.setdefault("runs", [])
-    runs = payload.get("runs")
-    if not isinstance(runs, list):
-        runs = []
-        payload["runs"] = runs
-    run_record = {
-        "prompt_id": _safe_text(_as_mapping(probe_summary.get("prompt")).get("id"))
-        or None,
-        "selected_model": _safe_text(
-            _as_mapping(probe_summary.get("local_model_probe")).get("selected_model")
-        )
-        or None,
-        "status": _safe_text(probe_summary.get("status")) or None,
-        "recorded_at_utc": payload["updated_at_utc"],
-    }
-    runs.append(run_record)
-    payload["last_run"] = run_record
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _run_local_ollama_model_probe(
-    *,
-    prompt_entry: Mapping[str, Any],
-    base_url: str,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    user_concept_id: str,
-    organisation_concept_id: str,
-    session_name: str,
-    run_environment: Mapping[str, Any],
-    prompt_bank_schema_version: str,
-    requested_complexity_classes: Sequence[str],
-    seed: int | None,
-    presenter_mode: bool,
-    allow_non_agent_test_server: bool,
-    allow_agent_test_selector_fast_path: bool = False,
-    repeat_count: int,
-    screen_repeat_count: int,
-    attempt_process_timeout_seconds: float,
-    minimum_success_rate: float,
-    requested_candidates: Sequence[str],
-    pull_missing_models: bool,
-    cache_path: Path | None,
-) -> dict[str, Any]:
-    installed_models = _list_installed_ollama_models()
-    candidates = _build_local_ollama_replay_model_candidates(
-        requested_candidates=requested_candidates,
-        installed_models=installed_models,
-        pull_missing_models=pull_missing_models,
-    )
-    candidate_results: list[dict[str, Any]] = []
-    selected_candidate: Mapping[str, Any] | None = None
-    probe_environment = {
-        **run_environment,
-        "local_model_probe_enabled": True,
-        "local_model_probe_schema_version": LOCAL_OLLAMA_REPLAY_PROBE_SCHEMA_VERSION,
-        "local_model_probe_installed_models": sorted(installed_models),
-        "local_model_probe_candidate_order": [
-            _safe_text(candidate.get("model")) for candidate in candidates
-        ],
-    }
-    for candidate in candidates:
-        model_name = _safe_text(candidate.get("model"))
-        if not model_name:
-            continue
-        requested_model = _build_local_ollama_generate_model_override(model_name)
-        candidate_environment = {
-            **probe_environment,
-            "requested_model": model_name,
-            "requested_generate_model_override": requested_model,
-            "scoped_active_llm_temporarily_overridden": True,
-            "scoped_active_llm_temporary_provider": LOCAL_MODEL_PROVIDER_NAME,
-            "scoped_active_llm_temporary_model": model_name,
-            "local_model_probe_candidate": dict(candidate),
-        }
-        try:
-            with _temporary_scoped_active_llm(
-                user_concept_id=user_concept_id,
-                organisation_concept_id=organisation_concept_id,
-                provider=LOCAL_MODEL_PROVIDER_NAME,
-                model=model_name,
-            ) as previous_active_llm:
-                candidate_environment["scoped_active_llm_previous"] = dict(
-                    previous_active_llm
-                )
-                summary = _run_sampler_subprocess_replay_suite(
-                    prompt_entry=prompt_entry,
-                    base_url=base_url,
-                    requested_model=requested_model,
-                    timeout_seconds=timeout_seconds,
-                    poll_interval_seconds=poll_interval_seconds,
-                    user_concept_id=user_concept_id,
-                    organisation_concept_id=organisation_concept_id,
-                    session_name=f"{session_name} [{model_name}] screening",
-                    presenter_mode=presenter_mode,
-                    allow_non_agent_test_server=allow_non_agent_test_server,
-                    allow_agent_test_selector_fast_path=(
-                        allow_agent_test_selector_fast_path
-                    ),
-                    repeat_count=max(int(screen_repeat_count), 1),
-                    minimum_success_rate=minimum_success_rate,
-                    process_timeout_seconds=attempt_process_timeout_seconds,
-                )
-                if _summary_meets_success_threshold(summary) and max(
-                    int(repeat_count), 1
-                ) > max(int(screen_repeat_count), 1):
-                    screen_summary = summary
-                    summary = _run_sampler_subprocess_replay_suite(
-                        prompt_entry=prompt_entry,
-                        base_url=base_url,
-                        requested_model=requested_model,
-                        timeout_seconds=timeout_seconds,
-                        poll_interval_seconds=poll_interval_seconds,
-                        user_concept_id=user_concept_id,
-                        organisation_concept_id=organisation_concept_id,
-                        session_name=f"{session_name} [{model_name}] confirmation",
-                        presenter_mode=presenter_mode,
-                        allow_non_agent_test_server=allow_non_agent_test_server,
-                        allow_agent_test_selector_fast_path=(
-                            allow_agent_test_selector_fast_path
-                        ),
-                        repeat_count=max(int(repeat_count), 1),
-                        minimum_success_rate=minimum_success_rate,
-                        process_timeout_seconds=attempt_process_timeout_seconds,
-                    )
-                    summary["screening"] = screen_summary
-        except Exception as exc:
-            summary = {
-                "status": "error",
-                "requested_model": model_name,
-                "error": str(exc),
-            }
-        threshold_met = _summary_meets_success_threshold(summary)
-        candidate_result = {
-            "candidate": dict(candidate),
-            "model": model_name,
-            "status": _safe_text(summary.get("status")) or "unknown",
-            "threshold_met": threshold_met,
-            "suite": summary,
-        }
-        candidate_results.append(candidate_result)
-        if threshold_met:
-            selected_candidate = candidate
-            break
-    probe_summary = _build_local_model_probe_summary(
-        prompt_entry=prompt_entry,
-        prompt_bank_schema_version=prompt_bank_schema_version,
-        requested_complexity_classes=requested_complexity_classes,
-        seed=seed,
-        run_environment=probe_environment,
-        candidate_results=candidate_results,
-        selected_candidate=selected_candidate,
-        minimum_success_rate=minimum_success_rate,
-    )
-    if cache_path is not None:
-        _write_local_model_probe_cache(
-            cache_path=cache_path, probe_summary=probe_summary
-        )
-    return probe_summary
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Run one sampled KB+tool-sensitive prompt against a live Von server "
-            "and judge whether the user should be happy with the response. "
+            "and collect the response, tool, model, timing, and persisted turn "
+            "observations without applying a Python semantic verdict. "
             f"Use in conjunction with {REAL_PATH_REPLAY_GUIDE}. "
             "Use --complexity-class to work up from easier direct prompts to "
             "KB-grounded and then tool-augmented prompts."
@@ -5564,16 +2076,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Allow the replay to target a server whose /health response does "
             "not report agent_test_instance=true. Use only when deliberately "
             "testing the interactive/user-facing server."
-        ),
-    )
-    parser.add_argument(
-        "--allow-agent-test-selector-fast-path",
-        action="store_true",
-        help=(
-            "Permit AgentTest selector_decision to use the deterministic local "
-            "selector shortcut. By default, acceptance replays exercise the "
-            "represented selector LLM path so candidate ranking is not hidden "
-            "by replay support code."
         ),
     )
     parser.add_argument(
@@ -5607,67 +2109,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--allow-premium-model",
-        action="store_true",
-        help=(
-            "Permit premium or unverified active-model arms. By default this "
-            "sampler is local-only and rejects OpenAI/Gemini/Anthropic-looking "
-            "models or active-model arms whose provider cannot be verified local."
-        ),
-    )
-    parser.add_argument(
         "--repeat-count",
         type=int,
         default=1,
-        help="Run the same selected prompt/arm plan repeatedly and report a success rate.",
-    )
-    parser.add_argument(
-        "--minimum-success-rate",
-        "--success-threshold",
-        dest="minimum_success_rate",
-        type=float,
-        default=DEFAULT_MINIMUM_REPLAY_SUCCESS_RATE,
-        help="Required repeated-suite or probe success rate; default 0.95.",
-    )
-    parser.add_argument(
-        "--probe-local-models",
-        action="store_true",
         help=(
-            "Search installed local Ollama models from weakest/cheapest to "
-            "strongest and report the first model that meets the success rate."
+            "Run the same selected prompt/arm plan repeatedly and report the "
+            "mechanical collection rate."
         ),
     )
     parser.add_argument(
-        "--local-model-candidate",
-        dest="local_model_candidates",
-        action="append",
-        default=[],
-        help=(
-            "Restrict --probe-local-models to one local Ollama model candidate. "
-            "Repeat to provide an ordered candidate set."
-        ),
-    )
-    parser.add_argument(
-        "--model-probe-screen-repeat-count",
-        type=int,
-        default=1,
-        help="Number of cheap screening repeats per candidate before confirmation.",
-    )
-    parser.add_argument(
-        "--model-probe-attempt-timeout-seconds",
+        "--minimum-collection-rate",
+        dest="minimum_collection_rate",
         type=float,
-        default=900.0,
-        help="Wall-clock timeout for each subprocess-isolated candidate replay suite.",
-    )
-    parser.add_argument(
-        "--pull-missing-local-models",
-        action="store_true",
-        help="Allow the probe to run `ollama pull` for missing local candidates.",
-    )
-    parser.add_argument(
-        "--local-model-probe-cache-json",
-        default=str(DEFAULT_LOCAL_MODEL_PROBE_CACHE_PATH),
-        help="Path for appending local model probe cache metadata. Pass an empty string to disable.",
+        default=DEFAULT_MINIMUM_COLLECTION_RATE,
+        help=(
+            "Required repeated-suite collection rate; this is not a semantic "
+            "answer-quality threshold. Default 0.95."
+        ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
@@ -5864,11 +2322,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     base_url = resolve_live_test_base_url(args.base_url)
     requested_model = _safe_text(args.model) or None
     requested_gmail_profile = _safe_text(args.gmail_profile) or None
-    agent_test_selector_replay_mode = (
-        AGENT_TEST_SELECTOR_REPLAY_MODE_FAST_PATH
-        if bool(args.allow_agent_test_selector_fast_path)
-        else AGENT_TEST_SELECTOR_REPLAY_MODE_REPRESENTED_LLM
-    )
     compare_models = [
         cleaned
         for entry in _as_list(args.compare_models)
@@ -5999,65 +2452,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "explicit_model_override_arms_only"
             ),
         }
-    model_policy_report = _build_model_policy_report(
-        requested_model_arms=replay_arms,
-        run_environment=run_environment,
-        allow_premium_model=bool(args.allow_premium_model),
-    )
-    _enforce_model_policy(model_policy_report)
-    run_environment = {
-        **run_environment,
-        "model_policy": model_policy_report,
-        AGENT_TEST_SELECTOR_REPLAY_MODE_CONTEXT_KEY: agent_test_selector_replay_mode,
-        "agent_test_selector_fast_path_allowed": bool(
-            args.allow_agent_test_selector_fast_path
-        ),
-    }
     repeat_count = max(int(args.repeat_count or 1), 1)
-    minimum_success_rate = min(max(float(args.minimum_success_rate), 0.0), 1.0)
-    if bool(args.probe_local_models):
-        probe_cache_raw = _safe_text(args.local_model_probe_cache_json)
-        summary = _run_local_ollama_model_probe(
-            prompt_entry=prompt_entry,
-            base_url=base_url,
-            timeout_seconds=float(args.timeout_seconds),
-            poll_interval_seconds=float(args.poll_interval_seconds),
-            user_concept_id=authenticated_user_concept_id,
-            organisation_concept_id=authenticated_organisation_concept_id,
-            session_name=session_name,
-            run_environment=run_environment,
-            prompt_bank_schema_version=prompt_bank_schema_version,
-            requested_complexity_classes=requested_complexity_classes,
-            seed=args.seed,
-            presenter_mode=bool(args.presenter_mode),
-            allow_non_agent_test_server=bool(args.allow_non_agent_test_server),
-            allow_agent_test_selector_fast_path=bool(
-                args.allow_agent_test_selector_fast_path
-            ),
-            repeat_count=repeat_count,
-            screen_repeat_count=max(int(args.model_probe_screen_repeat_count or 1), 1),
-            attempt_process_timeout_seconds=float(
-                args.model_probe_attempt_timeout_seconds
-            ),
-            minimum_success_rate=minimum_success_rate,
-            requested_candidates=[
-                entry
-                for entry in _as_list(args.local_model_candidates)
-                if isinstance(entry, str)
-            ],
-            pull_missing_models=bool(args.pull_missing_local_models),
-            cache_path=Path(probe_cache_raw) if probe_cache_raw else None,
-        )
-        if failure_case_intake is not None:
-            summary["failure_case_intake"] = failure_case_intake
-        output_json = _safe_text(args.output_json)
-        if output_json:
-            _write_json_output(output_json, summary)
-        print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
-        return 0 if _safe_text(summary.get("status")) == "ok" else 1
+    minimum_collection_rate = min(max(float(args.minimum_collection_rate), 0.0), 1.0)
     if repeat_count == 1:
         try:
-            summary, should_user_be_happy = _run_replay_plan(
+            summary, collection_complete = _run_replay_plan(
                 prompt_entry=prompt_entry,
                 base_url=base_url,
                 requested_model=requested_model,
@@ -6075,7 +2474,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt_variant_ids=prompt_variant_ids,
                 presenter_mode=bool(args.presenter_mode),
                 gmail_profile=requested_gmail_profile,
-                agent_test_selector_replay_mode=agent_test_selector_replay_mode,
             )
         except Exception as exc:
             summary = _build_failed_replay_attempt_summary(
@@ -6086,10 +2484,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 requested_model=requested_model,
                 requested_model_arms=replay_arms,
             )
-            should_user_be_happy = False
+            collection_complete = False
     else:
         attempt_summaries: list[dict[str, Any]] = []
-        successful_attempt_count = 0
+        collected_attempt_count = 0
         for attempt_index in range(1, repeat_count + 1):
             try:
                 attempt_summary, attempt_success = _run_replay_plan(
@@ -6110,13 +2508,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     prompt_variant_ids=prompt_variant_ids,
                     presenter_mode=bool(args.presenter_mode),
                     gmail_profile=requested_gmail_profile,
-                    agent_test_selector_replay_mode=agent_test_selector_replay_mode,
                 )
                 attempt_summary = {
                     **attempt_summary,
                     "attempt": {"attempt_index": attempt_index},
                 }
-                successful_attempt_count += 1 if attempt_success else 0
+                collected_attempt_count += 1 if attempt_success else 0
                 attempt_summaries.append(attempt_summary)
             except Exception as exc:
                 attempt_summaries.append(
@@ -6138,11 +2535,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_model_arms=replay_arms,
             run_environment=run_environment,
             attempt_summaries=attempt_summaries,
-            success_count=successful_attempt_count,
-            minimum_success_rate=minimum_success_rate,
+            collection_count=collected_attempt_count,
+            minimum_collection_rate=minimum_collection_rate,
         )
-        should_user_be_happy = bool(
-            _as_mapping(summary.get("repeat")).get("meets_minimum_success_rate")
+        collection_complete = bool(
+            _as_mapping(summary.get("repeat")).get("meets_minimum_collection_rate")
         )
     if failure_case_intake is not None:
         summary["failure_case_intake"] = failure_case_intake
@@ -6181,7 +2578,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if output_json:
         _write_json_output(output_json, summary)
     print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
-    return 0 if should_user_be_happy else 1
+    return 0 if collection_complete else 1
 
 
 if __name__ == "__main__":

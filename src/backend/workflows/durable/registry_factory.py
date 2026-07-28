@@ -178,8 +178,6 @@ _EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#rumination_workflow",
     "#V#parent_specificity_concept_dossier_workflow",
     "#V#parent_specificity_rumination_workflow",
-    "#V#workflow_discovery_gap_recovery_workflow",
-    "#V#workflow_gap_test_workflow",
 )
 _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#rag_text_relation_sync_workflow",
@@ -893,10 +891,6 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
             input_schema=getattr(method_definition, "input_schema", None),
             user_namespace=getattr(environment, "user_namespace", None),
             default_gmail_profile=getattr(environment, "default_gmail_profile", None),
-            strip_unknown_fields=(
-                str(getattr(request, "workflow_state_id", "") or "").strip()
-                == "apply_recovery_tool_batch"
-            ),
         )
         input_schema = getattr(method_definition, "input_schema", None)
         authoritative_actor_fields = {
@@ -1816,9 +1810,6 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .tool_result_hint_actions import register_tool_result_hint_actions
     from .turn_execution_actions import register_turn_execution_actions
     from .workflow_creation_workflow import register_workflow_creation_actions
-    from .workflow_gap_recovery_workflow import (
-        register_workflow_gap_recovery_actions,
-    )
     from .workflow_introspection_maintenance_workflow import (
         register_workflow_introspection_maintenance_actions,
     )
@@ -1849,7 +1840,6 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_paper_representation_actions(registry)
     register_talk_representation_actions(registry)
     register_representation_workflow_routing_coverage_audit_actions(registry)
-    register_workflow_gap_recovery_actions(registry)
     register_control_flow_actions(
         registry, definition_loader=_resolve_subworkflow_definition
     )

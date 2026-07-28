@@ -119,7 +119,7 @@ def test_prompt_variant_evaluation_requires_observed_runtime_selection() -> None
     assert evaluation["policy_update"]["authorised"] is False
 
 
-def test_observation_builder_marks_local_smoke_verdict_non_authoritative() -> None:
+def test_observation_builder_retains_unscored_collection_non_authoritatively() -> None:
     observation = observations.build_experiment_observation_from_arm_summary(
         {
             "arm": {
@@ -137,10 +137,20 @@ def test_observation_builder_marks_local_smoke_verdict_non_authoritative() -> No
                 "model": "local-small",
                 "selected_workflow_id": "#V#grounded_answer_workflow",
                 "selected_execution_mode": "custom_workflow",
+                "ordinary_turn_terminal_status": "completed",
                 "tool_count": 1,
-                "tool_history": [{"tool": "search_records", "success": True}],
+                "timing": {"elapsed_ms": 1234, "llm_elapsed_ms": 900},
+                "tool_invocations": [
+                    {
+                        "tool": "search_records",
+                        "status": "success",
+                        "effective_payload": {
+                            "effect_id": "effect-1",
+                            "readback": {"status": "observed"},
+                        },
+                    }
+                ],
             },
-            "evaluation": {"should_user_be_happy": True, "reasons": ["grounded"]},
             "response": {"text": "Grounded answer."},
             "prompt_variant_evaluation": {
                 "base_prompt_id": "#V#base_answer_prompt",
@@ -159,16 +169,28 @@ def test_observation_builder_marks_local_smoke_verdict_non_authoritative() -> No
         default_replay_set_id="#V#replay_set",
     )
 
-    assert observation["verdict"] == "partial"
+    assert observation["verdict"] == "inconclusive"
     assert observation["recordable"] is True
     assert observation["observed_outcome"]["replay_set_id"] == "#V#replay_set"
-    assert observation["observed_outcome"]["telemetry_non_promotable"] is True
+    assert observation["observed_outcome"]["response_surface_non_promotable"] is True
+    assert observation["observed_outcome"]["ordinary_turn_terminal_status"] == (
+        "completed"
+    )
+    assert observation["observed_outcome"]["timing"]["elapsed_ms"] == 1234
     authority = observation["evidence"]["evaluation_authority"]
     assert authority["authoritative"] is False
-    assert authority["status"] == "local_smoke_only"
+    assert authority["status"] == "unscored_observation"
     assert observation["policy_decisions"] == []
+    assert observation["candidate_validation"]["candidate_kind"] == "prompt_variant"
     assert observation["tool_invocations"] == [
-        {"tool_name": "search_records", "status": None, "success": True}
+        {
+            "tool": "search_records",
+            "status": "success",
+            "effective_payload": {
+                "effect_id": "effect-1",
+                "readback": {"status": "observed"},
+            },
+        }
     ]
 
 
@@ -179,7 +201,6 @@ def test_observation_builder_uses_represented_evaluation_result_for_verdict() ->
             "prompt": {"id": "case-1"},
             "conversation": {"request_id": "request-1"},
             "telemetry": {"model": "local-small"},
-            "evaluation": {"should_user_be_happy": True},
             "response": {"text": "Looks useful."},
             "prompt_variant_evaluation": {"promotion_blockers": []},
             "replay_scoring_consistency": {"non_promotable": False},
@@ -192,7 +213,7 @@ def test_observation_builder_uses_represented_evaluation_result_for_verdict() ->
 
     assert observation["verdict"] == "fail"
     assert observation["recordable"] is True
-    assert observation["evidence"]["local_smoke_verdict"] == "pass"
+    assert observation["evidence"]["unscored_verdict"] == "inconclusive"
     authority = observation["evidence"]["evaluation_authority"]
     assert authority["authoritative"] is True
     assert authority["status"] == "represented_evaluation_result_accepted"
@@ -230,7 +251,6 @@ def test_record_experiment_observations_uses_injected_gateway() -> None:
                 "prompt": {"id": "case-1"},
                 "conversation": {"request_id": "request-1"},
                 "telemetry": {"model": "local-small"},
-                "evaluation": {"should_user_be_happy": False},
                 "response": {"text": ""},
                 "prompt_variant_evaluation": {"promotion_blockers": []},
                 "replay_scoring_consistency": {"non_promotable": False},
@@ -250,10 +270,13 @@ def test_record_experiment_observations_uses_injected_gateway() -> None:
     assert gateway.calls[0][1]["run_id"] == "#V#experiment_run"
     recorded_observation = gateway.calls[0][1]["observations"][0]
     assert recorded_observation["verdict"] == "fail"
-    assert recorded_observation["evidence"]["evaluation_authority"]["authoritative"] is True
+    assert (
+        recorded_observation["evidence"]["evaluation_authority"]["authoritative"]
+        is True
+    )
 
 
-def test_record_experiment_observations_fails_closed_without_represented_result() -> None:
+def test_record_experiment_observations_can_require_represented_result() -> None:
     gateway = _FakeGateway()
     result = observations.record_experiment_observations(
         run_id="#V#experiment_run",
@@ -263,7 +286,6 @@ def test_record_experiment_observations_fails_closed_without_represented_result(
                 "prompt": {"id": "case-1"},
                 "conversation": {"request_id": "request-1"},
                 "telemetry": {"model": "local-small"},
-                "evaluation": {"should_user_be_happy": True},
                 "response": {"text": "Looks useful."},
                 "prompt_variant_evaluation": {"promotion_blockers": []},
                 "replay_scoring_consistency": {"non_promotable": False},
@@ -272,6 +294,7 @@ def test_record_experiment_observations_fails_closed_without_represented_result(
         default_replay_set_id="#V#replay_set",
         gateway=gateway,
         replay_evaluation_rubric=_test_rubric(),
+        require_represented_evaluation=True,
     )
 
     assert result["success"] is False
@@ -281,3 +304,62 @@ def test_record_experiment_observations_fails_closed_without_represented_result(
     assert result["blockers"] == ["represented_replay_evaluation_result_missing"]
     assert result["turn_execution_request_ids"] == ["request-1"]
     assert gateway.calls == []
+
+
+def test_record_experiment_observations_defaults_to_unscored_evidence() -> None:
+    gateway = _FakeGateway()
+    result = observations.record_experiment_observations(
+        run_id="#V#experiment_run",
+        arm_summaries=[
+            {
+                "status": "ok",
+                "arm": {"arm_id": "arm_1", "requested_model": "frontier-medium"},
+                "prompt": {"id": "case-1"},
+                "conversation": {"request_id": "request-1"},
+                "telemetry": {
+                    "model": "frontier-medium",
+                    "ordinary_turn_terminal_status": "completed",
+                    "tool_invocations": [
+                        {
+                            "tool": "relation_upsert",
+                            "effective_payload": {
+                                "effect_id": "effect-1",
+                                "readback": {"status": "observed"},
+                            },
+                        }
+                    ],
+                },
+                "response": {"text": "Collected answer."},
+            }
+        ],
+        default_replay_set_id="#V#replay_set",
+        gateway=gateway,
+    )
+
+    assert result["success"] is True
+    recorded = gateway.calls[0][1]["observations"][0]
+    assert recorded["verdict"] == "inconclusive"
+    assert recorded["candidate_validation"]["candidate_kind"] == "replay_arm"
+    assert recorded["assertion_classes"][0] == "model_replay_arm_observation"
+    assert recorded["evidence"]["evaluation_authority"]["status"] == (
+        "unscored_observation"
+    )
+    assert recorded["tool_invocations"][0]["effective_payload"]["readback"] == {
+        "status": "observed"
+    }
+
+
+def test_completion_gate_is_observed_but_not_a_scoring_blocker() -> None:
+    consistency = observations.build_replay_scoring_consistency(
+        llm_debug_data={
+            "completion_gate_verdict": {
+                "status": "partial",
+                "safe_to_claim_completion": False,
+            }
+        }
+    )
+
+    assert consistency["completion_gate_status"] == "partial"
+    assert consistency["promotion_blockers"] == []
+    assert consistency["structural_blockers"] == []
+    assert consistency["non_promotable"] is False

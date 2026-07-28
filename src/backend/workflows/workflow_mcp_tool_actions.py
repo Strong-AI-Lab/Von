@@ -8,15 +8,11 @@ namespace propagation, and write-guardrail surface.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
 from ..integrations.internal_mcp.schemas import SchemaValidationError
-from ..services.tool_target_contract_validation import (
-    target_contract_state_from_context,
-    validate_tool_target_contract,
-)
 from .action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -486,42 +482,6 @@ def _handle_workflow_mcp_invoke_tool(
         if blocked_result is not None:
             return _with_event_launch_suppression_telemetry(
                 blocked_result,
-                requested=event_launch_suppression_requested,
-            )
-
-        target_validation = validate_tool_target_contract(
-            tool_name=resolved_tool_name,
-            payload=payload,
-            target_contract_state=target_contract_state_from_context(request.data),
-            prior_tool_invocations=(
-                request.data.get("invocations")
-                if isinstance(request.data.get("invocations"), Sequence)
-                and not isinstance(
-                    request.data.get("invocations"), (str, bytes, bytearray)
-                )
-                else ()
-            ),
-        )
-        if not target_validation.ok:
-            error_code = target_validation.first_error_code()
-            return _with_event_launch_suppression_telemetry(
-                WorkflowActionResult(
-                    status="failed",
-                    error=(
-                        f"workflow_mcp_target_contract_validation_failed:"
-                        f"{resolved_tool_name}:{error_code or 'invalid_target'}"
-                    ),
-                    outputs={
-                        "mcp_tool": resolved_tool_name,
-                        "mcp_requested_tool": requested_tool_name,
-                        "mcp_resolved_tool": resolved_tool_name,
-                        "target_contract_validation_failed": True,
-                        "target_contract_validation_error_code": error_code,
-                        "tool_call_validation_diagnostics": list(
-                            target_validation.diagnostics
-                        ),
-                    },
-                ),
                 requested=event_launch_suppression_requested,
             )
 

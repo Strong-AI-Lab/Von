@@ -8,12 +8,13 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from bson import ObjectId
 
 from .concept_search_service import _search_text_relations
-from .text_value_service import get_texts_for_concept
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
 )
+from ..security.access_control import filter_accessible_concept_ids
 from ..vontology.code_concepts_registry import is_code_concept_id
 from ..vontology.utils_vontology import get_vontology_node_and_descendant_ids
 
@@ -44,6 +45,14 @@ def _person_signature(tokens: Sequence[str]) -> Optional[Tuple[str, str, str]]:
     last = tokens[-1]
     middle_initials = "".join(t[0] for t in tokens[1:-1] if t)
     return (first, last, middle_initials)
+
+
+def _accessible_candidate_ids(candidate_ids: Sequence[str] | set[str]) -> set[str]:
+    """Discard name-index hits whose subject concepts are not actor-visible."""
+
+    if not candidate_ids:
+        return set()
+    return filter_accessible_concept_ids(candidate_ids)
 
 
 def _slug_to_concept_id(value: str) -> Optional[str]:
@@ -136,7 +145,14 @@ def resolve_concept_by_name(
 
     # Stage 1: exact name match via text relations.
     for query_text, variant in query_variants:
-        hits = _search_text_relations(query_text, exact=True)
+        hits = _accessible_candidate_ids(
+            _search_text_relations(
+                query_text,
+                exact=True,
+                result_limit=max_results,
+                allow_fallback_scan=False,
+            )
+        )
         if hits:
             audit.append(
                 {
@@ -151,7 +167,13 @@ def resolve_concept_by_name(
 
     # Stage 2+: broaden if nothing found.
     if not candidate_ids:
-        hits = _search_text_relations(raw, prefix=True)
+        hits = _accessible_candidate_ids(
+            _search_text_relations(
+                raw,
+                prefix=True,
+                result_limit=max_results,
+            )
+        )
         audit.append(
             {
                 "stage": "candidate_generation",
@@ -163,7 +185,9 @@ def resolve_concept_by_name(
         candidate_ids.update(hits)
 
     if not candidate_ids:
-        hits = _search_text_relations(raw)
+        hits = _accessible_candidate_ids(
+            _search_text_relations(raw, result_limit=max_results)
+        )
         audit.append(
             {
                 "stage": "candidate_generation",
@@ -222,16 +246,17 @@ def resolve_concept_by_name(
                 if _strip_diacritics(text.casefold()) == query_cf_stripped:
                     diacritic_hits.update(tv_to_subjects.get(tv_id, set()))
 
+            accessible_diacritic_hits = _accessible_candidate_ids(diacritic_hits)
             audit.append(
                 {
                     "stage": "candidate_generation",
                     "method": "text_relations_diacritic_scan",
                     "query": raw,
-                    "hits": len(diacritic_hits),
+                    "hits": len(accessible_diacritic_hits),
                     "relation_scan_cap": 10000,
                 }
             )
-            candidate_ids.update(diacritic_hits)
+            candidate_ids.update(accessible_diacritic_hits)
 
     # Deterministic cap to avoid pathological scans.
     candidate_pool_cap = max(50, min(500, max_results * 50))
@@ -373,13 +398,26 @@ def resolve_concept_by_name(
     }
 
     matches: list[_CandidateMatch] = []
+    ordered_candidate_ids = sorted(candidate_ids)
+    name_query_metadata: dict[str, Any] = {}
+    names_by_concept_id = get_texts_for_concepts(
+        ordered_candidate_ids,
+        predicate="hasName",
+        limit_per_concept=200,
+        query_metadata=name_query_metadata,
+    )
+    if name_query_metadata.get("relation_query_truncated") is True:
+        names_by_concept_id = {
+            concept_id: get_texts_for_concept(
+                concept_id,
+                predicate="hasName",
+                limit=200,
+            )
+            for concept_id in ordered_candidate_ids
+        }
 
-    for concept_id in sorted(candidate_ids):
-        names = get_texts_for_concept(
-            concept_id,
-            predicate="hasName",
-            limit=200,
-        )
+    for concept_id in ordered_candidate_ids:
+        names = names_by_concept_id.get(concept_id, [])
 
         best: Optional[_CandidateMatch] = None
         for name_doc in names:

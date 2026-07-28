@@ -43,6 +43,12 @@ def _safe_str(value: Any) -> str | None:
     return cleaned or None
 
 
+def _is_observational_record(value: Any) -> bool:
+    return isinstance(value, Mapping) and (
+        _safe_str(value.get("record_kind")) == "observational"
+    )
+
+
 def _safe_mapping(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -1035,13 +1041,25 @@ def _build_fallback_turn_execution_diagnostics(
         if isinstance(turn_record, Mapping)
         else None
     )
+    embedded_turn_record = (
+        llm_debug_mapping.get("turn_execution_record")
+        if isinstance(llm_debug_mapping, Mapping)
+        else None
+    )
+    observational_record = _is_observational_record(
+        turn_record
+    ) or _is_observational_record(embedded_turn_record)
     workflow_stage_model_snapshot = (
         execution.get("workflow_stage_model") if execution else None
     )
     workflow_stage_model = (
         deepcopy(workflow_stage_model_snapshot)
         if isinstance(workflow_stage_model_snapshot, Mapping)
-        else build_conversation_turn_stage_model_snapshot()
+        else (
+            None
+            if observational_record
+            else build_conversation_turn_stage_model_snapshot()
+        )
     )
     selected_workflow_id = None
     workflow_selection = (
@@ -1058,10 +1076,14 @@ def _build_fallback_turn_execution_diagnostics(
     workflow_stage_path = (
         deepcopy(workflow_stage_path_snapshot)
         if isinstance(workflow_stage_path_snapshot, Mapping)
-        else build_conversation_turn_stage_path(
-            runtime_stages=(),
-            workflow_id=selected_workflow_id,
-            selected_workflow_id=selected_workflow_id,
+        else (
+            None
+            if observational_record
+            else build_conversation_turn_stage_path(
+                runtime_stages=(),
+                workflow_id=selected_workflow_id,
+                selected_workflow_id=selected_workflow_id,
+            )
         )
     )
 
@@ -1146,8 +1168,6 @@ def _build_fallback_turn_execution_diagnostics(
             else None
         ),
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
-        "workflow_stage_model": workflow_stage_model,
-        "workflow_stage_path": workflow_stage_path,
         "stage_diagnostics": [],
         "timing_breakdown": _build_minimal_timing_breakdown(
             llm_debug=llm_debug_mapping
@@ -1163,6 +1183,10 @@ def _build_fallback_turn_execution_diagnostics(
         },
         **tool_counts,
     }
+    if isinstance(workflow_stage_model, Mapping):
+        payload["workflow_stage_model"] = workflow_stage_model
+    if isinstance(workflow_stage_path, Mapping):
+        payload["workflow_stage_path"] = workflow_stage_path
     _repair_workflow_routing_diagnostics(
         payload,
         llm_debug=llm_debug_mapping,
@@ -1184,6 +1208,7 @@ def _normalise_embedded_diagnostics_payload(
     turn_record: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     payload = deepcopy(dict(embedded))
+    observational_record = _is_observational_record(payload)
     history_context_mapping = _safe_mapping(history_context)
     llm_debug_mapping = (
         _safe_mapping(history_context_mapping.get("target_llm_debug"))
@@ -1271,7 +1296,10 @@ def _normalise_embedded_diagnostics_payload(
         if isinstance(routing, Mapping):
             payload["workflow_routing_diagnostics"] = deepcopy(routing)
 
-    if not isinstance(payload.get("workflow_stage_model"), Mapping):
+    if (
+        not observational_record
+        and not isinstance(payload.get("workflow_stage_model"), Mapping)
+    ):
         workflow_stage_model_snapshot = (
             execution.get("workflow_stage_model") if execution else None
         )
@@ -1282,7 +1310,10 @@ def _normalise_embedded_diagnostics_payload(
                 build_conversation_turn_stage_model_snapshot()
             )
 
-    if not isinstance(payload.get("workflow_stage_path"), Mapping):
+    if (
+        not observational_record
+        and not isinstance(payload.get("workflow_stage_path"), Mapping)
+    ):
         workflow_stage_path_snapshot = (
             execution.get("workflow_stage_path") if execution else None
         )

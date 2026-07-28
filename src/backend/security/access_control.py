@@ -253,7 +253,11 @@ class AccessEvaluator:
             **{f"relationships.{p}": 1 for p in SPECIFIC_TO_ORG_PREDICATES_READ},
         }
         seen: set[str] = set()
-        for doc in coll.find({"concept_id": {"$in": sorted(uncached)}}, projection):
+        cursor = coll.find({"concept_id": {"$in": sorted(uncached)}}, projection)
+        set_batch_size = getattr(cursor, "batch_size", None)
+        if callable(set_batch_size):
+            cursor = set_batch_size(min(len(uncached), 20_000))
+        for doc in cursor:
             if not isinstance(doc, dict):
                 continue
             concept_id = _normalise_concept_id(doc.get("concept_id"))

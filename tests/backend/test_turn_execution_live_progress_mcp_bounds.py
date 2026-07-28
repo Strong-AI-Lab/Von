@@ -178,6 +178,30 @@ def test_live_progress_default_projection_is_bounded(monkeypatch) -> None:
     assert len(json.dumps(result, indent=2, default=str)) < 20_000
 
 
+def test_observational_live_progress_does_not_require_a_workflow_stage_path(
+    monkeypatch,
+) -> None:
+    from src.backend.services.turn_execution_live_progress_service import (
+        get_turn_execution_live_progress_payload,
+    )
+
+    payload = _large_serialised_progress_payload()
+    payload["record_kind"] = "observational"
+    payload.pop("workflow_stage_path")
+    _install_live_progress_stubs(monkeypatch, payload)
+
+    result = get_turn_execution_live_progress_payload(
+        request_id="req-large-live-progress",
+        namespace="#V#tester@org",
+    )
+
+    assert result is not None
+    assert result["success"] is True
+    assert result["workflow_stage_path_summary"] is None
+    assert result["section_counts"]["workflow_stage_path"] is None
+    assert "#V#conversation_turn_execution_workflow" not in json.dumps(result)
+
+
 def test_live_progress_surfaces_terminal_receipt_from_critic_stage(monkeypatch) -> None:
     from src.backend.services.turn_execution_live_progress_service import (
         get_turn_execution_live_progress_payload,

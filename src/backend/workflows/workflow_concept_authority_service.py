@@ -30,24 +30,15 @@ from .definitions import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
-    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
-    TURN_COMPLETION_GATE_WORKFLOW_ID,
-    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
-    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
 from .parent_specificity_workflow_contracts import (
     PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
     ParentSpecificityToolOutputMappingSpec,
-)
-from .workflow_gap_workflow_contracts import (
-    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-    WORKFLOW_GAP_TEST_WORKFLOW_ID,
-    WorkflowGapOutputMappingSpec,
 )
 from .static_input_binding_utils import (
     coerce_static_input_binding,
@@ -305,10 +296,6 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
-    TURN_COMPLETION_GATE_WORKFLOW_ID,
-    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
-    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
-    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )
 
 # Additional built-in workflows that should be published when registered.
@@ -327,8 +314,6 @@ CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
     PLANNING_WORKFLOW_ID,
     PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
     PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
-    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-    WORKFLOW_GAP_TEST_WORKFLOW_ID,
     RUMINATION_WORKFLOW_ID,
 )
 
@@ -420,7 +405,6 @@ class _CanonicalStepPublicationSpec:
     tool_output_context_mappings: tuple[str, ...] = ()
     tool_output_mapping_specs: tuple[
         ParentSpecificityToolOutputMappingSpec
-        | WorkflowGapOutputMappingSpec
         | _CanonicalToolOutputMappingSpec,
         ...,
     ] = ()
@@ -592,7 +576,6 @@ def _parse_tool_output_mapping_specs_payload(
     raw_payload: Any,
 ) -> tuple[
     ParentSpecificityToolOutputMappingSpec
-    | WorkflowGapOutputMappingSpec
     | _CanonicalToolOutputMappingSpec,
     ...,
 ]:
@@ -600,7 +583,6 @@ def _parse_tool_output_mapping_specs_payload(
         return ()
     specs: list[
         ParentSpecificityToolOutputMappingSpec
-        | WorkflowGapOutputMappingSpec
         | _CanonicalToolOutputMappingSpec
     ] = []
     for item in raw_payload:
@@ -2285,7 +2267,6 @@ def _build_publication_subworkflow_contract(
     tool_output_mapping_specs: (
         Sequence[
             ParentSpecificityToolOutputMappingSpec
-            | WorkflowGapOutputMappingSpec
             | _CanonicalToolOutputMappingSpec
         ]
         | None
@@ -2419,7 +2400,6 @@ def _runtime_tool_output_mapping_concept_id(
 def _normalise_tool_output_mapping_spec_fields(
     mapping_spec: (
         ParentSpecificityToolOutputMappingSpec
-        | WorkflowGapOutputMappingSpec
         | _CanonicalToolOutputMappingSpec
     ),
 ) -> tuple[str, str, str]:
@@ -2674,7 +2654,6 @@ def _ensure_tool_output_mapping_concept(
     mapping_target_id: str,
     mapping_spec: (
         ParentSpecificityToolOutputMappingSpec
-        | WorkflowGapOutputMappingSpec
         | _CanonicalToolOutputMappingSpec
     ),
 ) -> tuple[bool, str | None]:
@@ -3235,7 +3214,7 @@ def publish_canonical_chat_workflow_graphs(
         ]
     target_workflow_ids = list(dict.fromkeys(target_workflow_ids))
 
-    if CONVERSATION_TURN_EXECUTION_WORKFLOW_ID in target_workflow_ids:
+    if set(target_workflow_ids).intersection(CANONICAL_CHAT_WORKFLOW_IDS):
         from ..services.conversation_turn_workflow_vontology_service import (
             _ensure_conversation_turn_prompt_support,
         )

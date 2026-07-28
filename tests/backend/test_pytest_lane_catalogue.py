@@ -80,7 +80,7 @@ def test_recommend_for_changed_paths_adds_high_risk_route_overlays() -> None:
 def test_get_git_changed_paths_includes_worktree_deltas(monkeypatch) -> None:
     outputs = iter(
         (
-            "src/backend/workflows/workflow_gap_recovery_workflow.py\n",
+            "src/backend/workflows/durable/planning_workflow.py\n",
             "tests/backend/test_pytest_lane_catalogue.py\n",
             "docs/engineering/pytest_lane_strategy.md\n",
             "scripts/pytest_lanes.py\n",
@@ -96,7 +96,7 @@ def test_get_git_changed_paths_includes_worktree_deltas(monkeypatch) -> None:
     changed_paths = get_git_changed_paths(REPO_ROOT)
 
     assert changed_paths == [
-        "src/backend/workflows/workflow_gap_recovery_workflow.py",
+        "src/backend/workflows/durable/planning_workflow.py",
         "tests/backend/test_pytest_lane_catalogue.py",
         "docs/engineering/pytest_lane_strategy.md",
         "scripts/pytest_lanes.py",

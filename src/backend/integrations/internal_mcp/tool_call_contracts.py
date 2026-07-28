@@ -52,28 +52,104 @@ def closed_object_schema(schema: Mapping[str, Any] | None) -> dict[str, Any] | N
 def is_strict_tool_schema_compatible(schema: Mapping[str, Any] | None) -> bool:
     """Return whether a schema is safe for OpenAI-style strict tool definitions.
 
-    The strict provider subset is most predictable when the schema is a closed
-    object and every declared property is required.  Optional arguments still get
-    closed-schema validation, but they are not marked strict here.
+    This deliberately recognises a small provider-supported subset rather than
+    trying to validate all of JSON Schema.  Schemas outside it remain usable,
+    but must be sent as non-strict.
     """
 
     if not isinstance(schema, Mapping):
         return False
     if schema.get("type") != "object":
         return False
-    if schema.get("additionalProperties") is not False:
-        return False
-    properties = schema.get("properties")
-    if not isinstance(properties, Mapping):
-        return False
-    required = schema.get("required")
-    if not isinstance(required, Sequence) or isinstance(
-        required, (str, bytes, bytearray)
-    ):
-        return False
-    property_names = {str(name) for name in properties.keys()}
-    required_names = {str(name) for name in required}
-    return property_names == required_names
+
+    def _schema_node_is_compatible(node: Any) -> bool:
+        safe_keys = {
+            "type",
+            "description",
+            "properties",
+            "required",
+            "additionalProperties",
+            "items",
+            "anyOf",
+        }
+        if not isinstance(node, Mapping) or not set(node).issubset(safe_keys):
+            return False
+
+        supported_types = {
+            "array",
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "object",
+            "string",
+        }
+        declared_type = node.get("type")
+        if isinstance(declared_type, str):
+            if declared_type not in supported_types:
+                return False
+            declared_types = {declared_type}
+        elif isinstance(declared_type, Sequence) and not isinstance(
+            declared_type, (str, bytes, bytearray)
+        ):
+            if not declared_type or not all(
+                isinstance(item, str) and item in supported_types
+                for item in declared_type
+            ):
+                return False
+            declared_types = set(declared_type)
+            if len(declared_types - {"null"}) > 1:
+                return False
+        elif declared_type is None and "anyOf" in node:
+            declared_types = set()
+        else:
+            return False
+
+        if "object" in declared_types:
+            properties = node.get("properties")
+            required = node.get("required")
+            if (
+                node.get("additionalProperties") is not False
+                or not isinstance(properties, Mapping)
+                or not isinstance(required, Sequence)
+                or isinstance(required, (str, bytes, bytearray))
+                or set(properties) != set(required)
+                or not all(
+                    _schema_node_is_compatible(child)
+                    for child in properties.values()
+                )
+            ):
+                return False
+        elif any(
+            keyword in node
+            for keyword in ("properties", "required", "additionalProperties")
+        ):
+            return False
+
+        items = node.get("items")
+        if "array" in declared_types:
+            if not isinstance(items, Mapping) or not _schema_node_is_compatible(
+                items
+            ):
+                return False
+        elif items is not None:
+            return False
+
+        alternatives = node.get("anyOf")
+        if alternatives is not None:
+            if not isinstance(alternatives, Sequence) or isinstance(
+                alternatives, (str, bytes, bytearray)
+            ):
+                return False
+            if not alternatives or not all(
+                _schema_node_is_compatible(alternative)
+                for alternative in alternatives
+            ):
+                return False
+
+        return True
+
+    return _schema_node_is_compatible(schema)
 
 
 def strip_internal_schema_extensions(schema: Mapping[str, Any] | None) -> dict[str, Any]:

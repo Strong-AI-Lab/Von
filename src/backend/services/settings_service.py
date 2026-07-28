@@ -532,7 +532,7 @@ def get_all_settings_batch() -> Dict[str, Any]:
             raw.get(SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME), default=True
         ),
         "buttonify_model_enabled": _coerce_bool(
-            raw.get(BUTTONIFY_MODEL_ENABLED_SETTING_NAME), default=True
+            raw.get(BUTTONIFY_MODEL_ENABLED_SETTING_NAME), default=False
         ),
         "auto_proceed_minimal_imposition_enabled": _coerce_bool(
             raw.get(AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME),
@@ -2037,12 +2037,14 @@ def set_show_tool_use_during_thinking(enabled: bool) -> bool:
 def get_buttonify_model_enabled() -> bool:
     """Return whether model-driven buttonify is enabled.
 
-    Defaults to True when unset or invalid. Falls back to VON_BUTTONIFY_MODEL_ENABLE.
+    Buttonify is an optional post-answer model call, so it is opt-in when no
+    represented setting exists. ``VON_BUTTONIFY_MODEL_ENABLE`` remains an
+    explicit deployment override.
     """
 
     val = get_setting(BUTTONIFY_MODEL_ENABLED_SETTING_NAME)
     if val is None:
-        env_value = os.getenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
+        env_value = os.getenv("VON_BUTTONIFY_MODEL_ENABLE", "0")
         return str(env_value).strip().lower() in {"1", "true", "yes", "y", "on"}
     if isinstance(val, bool):
         return val
@@ -2054,7 +2056,7 @@ def get_buttonify_model_enabled() -> bool:
             return False
     if isinstance(val, (int, float)):
         return val != 0
-    return True
+    return False
 
 
 def set_buttonify_model_enabled(enabled: bool) -> bool:

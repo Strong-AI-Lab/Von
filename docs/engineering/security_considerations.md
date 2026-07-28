@@ -3,7 +3,7 @@
 - **Kind:** Security guidance with dated deployment-posture observations
 - **Lifecycle:** Active
 - **Authority:** Canonical security guidance routed by [`AGENTS.md`](../../AGENTS.md)
-- **Last reviewed:** 25 July 2026
+- **Last reviewed:** 27 July 2026
 - **Evidence boundary:** Statements about current users, deployments, and
   implemented controls are dated observations and must be revalidated; the
   security requirements do not expire merely because implementation evidence
@@ -233,14 +233,32 @@ Current implementation details:
 
 ### 4. MCP Tool Access Control and Agentic-AI Threats
 
-**Current**: Internal MCP tools injectable with user namespace via orchestrator.
+**Current as of 27 July 2026**: When internal MCP is enabled, authenticated
+ordinary turns receive a bounded additive representation aperture. Trusted
+actor and namespace values are server-bound; creation scope is fixed; effects
+on existing subjects require actor- or organisation-scoped authority; and
+ordinary turns cannot change visibility scope. Gmail reads are projected only
+when a represented actor-to-profile relation authorises a configured profile,
+which the entry point injects without letting the model choose it. Revalidate
+the catalogue and adaptive-turn service before relying on this dated
+implementation claim.
 
 **Protection**:
-- Orchestrator injects `user_namespace` into tool payloads if authenticated
-- RAG tools validate namespace presence before query execution
+- The ordinary-turn projection excludes undelegated effects; an operation's
+  catalogue category alone does not establish authority
+- Gateway handlers distinguish trusted ambient actor context from raw
+  tool-payload identity claims
+- Actor-private RAG, chat, turn, experiment, and critique-memory reads validate
+  or derive namespace from the trusted actor context
+- Deployment-global diagnostics, host-local paths, connector accounts, and
+  operator control-plane reads are excluded or source-constrained
 - No namespace → error response (fail closed)
 
 **Limitations**:
+- Standalone trusted-local/developer MCP entry points are separate authority
+  surfaces and may use operator-supplied scope. They are not part of the
+  ordinary actor-scoped projection and must not be described as though every
+  MCP route shared its identity model.
 - External MCP servers (arXiv, future integrations) may not respect namespace
 - No rate limiting on tool invocations
 - No audit trail of tool access by user
@@ -263,6 +281,8 @@ Current implementation details:
   relevant deployment limits of tools when those facts help the model and
   runtime choose proportionate assurance. Avoid a universal verb-based risk
   taxonomy.
+- Apply the semantic read-only boundary in [`AGENTS.md`](../../AGENTS.md) to
+  derived maintenance.
 - Log enough tool input/output metadata to investigate suspicious tool use while
   redacting secrets and private content where required.
 
@@ -571,6 +591,9 @@ be added before broader external contribution or partner deployment.
 
 ## Change Log
 
+- **2026-07-27**: Distinguished logical read semantics from physical write
+  purity and documented the bounded ordinary-turn representation-effect
+  aperture
 - **2026-07-25**: Replaced categorical write/destructive guardrails with
   delegated-capability and residual-risk guidance
   - Distinguished the actor's maximum capability from semantic action choice
@@ -578,6 +601,12 @@ be added before broader external contribution or partner deployment.
     radius part of control selection
   - Clarified that operation names and model-derived risk labels do not
     determine a universal approval policy
+- **2026-07-26**: Updated ordinary MCP access guidance for the direct adaptive
+  read path
+  - Replaced the retired universal orchestrator description with the standing
+    gateway capability projection
+  - Documented trusted actor binding and represented Gmail profile injection
+  - Distinguished actor-scoped reads from host/deployment/operator surfaces
 - **2026-04-24**: Recalibrated security guidance for SAIL-only current use,
   open-repo contributor risk, and future partner/production profiles
   - Added operating profiles and data/capability classes

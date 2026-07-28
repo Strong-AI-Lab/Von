@@ -1,11 +1,17 @@
 """Gemini client with structured tool calling support."""
 
-import logging
-from typing import Any, Dict, List, Optional, Sequence
 import asyncio
+import logging
+import math
+from time import monotonic
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
-from ..client import LLMClient, LLMClientConfig
+from ..client import (
+    LLMClient,
+    LLMClientConfig,
+    split_request_timeout_from_llm_params,
+)
 from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 
 logger = logging.getLogger(__name__)
@@ -29,10 +35,11 @@ class GeminiClient(LLMClient):
         self._genai = genai
 
         # Create client with API key if provided
-        client_kwargs = {}
+        client_kwargs: dict[str, Any] = {}
         if config.api_key:
             client_kwargs["api_key"] = config.api_key
 
+        self._client_kwargs = client_kwargs
         self._client = genai.Client(**client_kwargs)  # type: ignore[attr-defined]
         self._model_name = config.model
         self._temperature = config.temperature
@@ -46,24 +53,77 @@ class GeminiClient(LLMClient):
         system_message: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Generate response using Gemini function calling API.
+        """Generate response using Gemini's native asynchronous client."""
 
-        Note: This runs synchronously using asyncio to avoid blocking.
-        """
-        # Validate tools
         for tool in available_tools:
             self._validate_input_schema(tool)
 
-        # Run sync implementation in thread pool
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self.generate_with_tools_sync,
-            prompt,
-            available_tools,
-            context,
-            system_message,
+        request_kwargs = dict(kwargs)
+        _, request_timeout_seconds = split_request_timeout_from_llm_params(
+            request_kwargs.pop("llm_params", None)
         )
+        request_deadline_monotonic = (
+            monotonic() + request_timeout_seconds
+            if request_timeout_seconds is not None
+            else None
+        )
+        request_client = self._client
+        owns_request_client = False
+
+        try:
+            tools = self._convert_tools_to_gemini_format(available_tools)
+            messages = self._build_messages(prompt, context, system_message)
+            config = self._genai.types.GenerateContentConfig(
+                temperature=self._temperature,
+                max_output_tokens=self._max_tokens,
+                tools=tools,
+            )
+
+            if request_deadline_monotonic is not None:
+                remaining_seconds = request_deadline_monotonic - monotonic()
+                if remaining_seconds <= 0.0:
+                    raise TimeoutError(
+                        "Gemini structured-tool request deadline exhausted."
+                    )
+                request_client = self._genai.Client(
+                    **self._client_kwargs,
+                    http_options=self._genai.types.HttpOptions(
+                        timeout=max(1, math.ceil(remaining_seconds * 1000.0))
+                    ),
+                )
+                owns_request_client = True
+
+            async def _request() -> Any:
+                return await request_client.aio.models.generate_content(
+                    model=self._model_name,
+                    contents=messages,  # type: ignore[arg-type]
+                    config=config,
+                )
+
+            if request_deadline_monotonic is None:
+                response = await _request()
+            else:
+                remaining_seconds = request_deadline_monotonic - monotonic()
+                if remaining_seconds <= 0.0:
+                    raise TimeoutError(
+                        "Gemini structured-tool request deadline exhausted."
+                    )
+                async with asyncio.timeout(remaining_seconds):
+                    response = await _request()
+            return self._parse_response(response, available_tools)
+        except TimeoutError as exc:
+            self.logger.error("Gemini structured-tool request deadline exhausted.")
+            raise ToolCallError(
+                "Gemini structured-tool request deadline exhausted."
+            ) from exc
+        except Exception as exc:
+            self.logger.error("Gemini API error: %s", exc)
+            if self.config.fallback_to_json_text:
+                self.logger.info("Falling back to JSON-in-text parsing")
+            raise ToolCallError(f"Gemini call failed: {exc}") from exc
+        finally:
+            if owns_request_client:
+                await request_client.aio.aclose()
 
     def generate_with_tools_sync(
         self,
@@ -73,34 +133,22 @@ class GeminiClient(LLMClient):
         system_message: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Synchronous implementation using Gemini SDK."""
+        """Synchronous wrapper around the same bounded transport."""
 
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            # Convert tools to Gemini format
-            tools = self._convert_tools_to_gemini_format(available_tools)
-
-            # Build chat history
-            messages = self._build_messages(prompt, context, system_message)
-
-            # Call Gemini API with function calling
-            response = self._client.models.generate_content(
-                model=self._model_name,
-                contents=messages,  # type: ignore[arg-type]
-                tools=tools,  # type: ignore[call-arg]
-                config=self._genai.types.GenerateContentConfig(
-                    temperature=self._temperature,
-                    max_output_tokens=self._max_tokens,
-                ),
-                **kwargs,
+            return loop.run_until_complete(
+                self.generate_with_tools(
+                    prompt,
+                    available_tools,
+                    context,
+                    system_message,
+                    **kwargs,
+                )
             )
-
-            return self._parse_response(response, available_tools)
-
-        except Exception as exc:
-            self.logger.error(f"Gemini API error: {exc}")
-            if self.config.fallback_to_json_text:
-                self.logger.info("Falling back to JSON-in-text parsing")
-            raise ToolCallError(f"Gemini call failed: {exc}") from exc
+        finally:
+            loop.close()
 
     def _convert_tools_to_gemini_format(
         self,

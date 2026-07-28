@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 from .gateway import MethodDefinition
-from .schemas import Schema, validate_payload
+from .schemas import Schema, normalise_payload_aliases, validate_payload
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,9 @@ def _build_dynamic_input_schema(
     tool_name: str,
     target_tool_name: str,
 ) -> Schema:
+    remaining_fields = (
+        set(target_schema.required) | set(target_schema.optional)
+    ) - fixed_payload_keys
     required = {
         key: expected
         for key, expected in target_schema.required.items()
@@ -190,6 +193,32 @@ def _build_dynamic_input_schema(
         optional=optional,
         allow_unknown=target_schema.allow_unknown,
         description=description,
+        aliases={
+            alias_name: canonical_name
+            for alias_name, canonical_name in target_schema.aliases.items()
+            if alias_name not in fixed_payload_keys
+            and canonical_name in remaining_fields
+        },
+        batch_propagated_fields=tuple(
+            field_name
+            for field_name in target_schema.batch_propagated_fields
+            if field_name in remaining_fields
+        ),
+        enum_values={
+            field_name: tuple(values)
+            for field_name, values in target_schema.enum_values.items()
+            if field_name in remaining_fields
+        },
+        scalar_source_fields={
+            field_name: tuple(source_fields)
+            for field_name, source_fields in target_schema.scalar_source_fields.items()
+            if field_name in remaining_fields
+        },
+        comma_separated_list_fields=tuple(
+            field_name
+            for field_name in target_schema.comma_separated_list_fields
+            if field_name in remaining_fields
+        ),
     )
 
 
@@ -405,6 +434,11 @@ def load_dynamic_method_definitions(
                 }
             )
             continue
+        fixed_payload, _alias_warnings = normalise_payload_aliases(
+            target_definition.input_schema,
+            fixed_payload,
+        )
+        fixed_payload = dict(fixed_payload)
 
         fixed_payload_errors = _validate_fixed_payload(
             fixed_payload=fixed_payload,
@@ -419,6 +453,42 @@ def load_dynamic_method_definitions(
                     "target_tool_name": target_tool_name,
                     "reason": "invalid_fixed_payload",
                     "message": "; ".join(fixed_payload_errors),
+                }
+            )
+            continue
+
+        trusted_bindings = (
+            target_definition.ordinary_turn_trusted_argument_bindings
+        )
+        trusted_argument_names = (
+            {
+                str(argument_name)
+                for argument_name in trusted_bindings
+                if isinstance(argument_name, str) and argument_name
+            }
+            if isinstance(trusted_bindings, Mapping)
+            else set()
+        )
+        fixed_trusted_argument_names = sorted(
+            trusted_argument_names.intersection(
+                str(key) for key in fixed_payload
+            )
+        )
+        if fixed_trusted_argument_names:
+            status["failed"].append(
+                {
+                    "concept_id": concept_id,
+                    "tool_name": tool_name,
+                    "target_tool_name": target_tool_name,
+                    "reason": "fixed_payload_overrides_trusted_argument",
+                    "message": (
+                        "dynamic_fixed_payload cannot bind arguments supplied "
+                        "from trusted ordinary-turn authority: "
+                        f"{fixed_trusted_argument_names}"
+                    ),
+                    "conflicting_argument_names": (
+                        fixed_trusted_argument_names
+                    ),
                 }
             )
             continue
@@ -460,6 +530,26 @@ def load_dynamic_method_definitions(
         description = dynamic_description or (
             f"Dynamic Vontology proxy for '{target_tool_name}'."
         )
+        target_fixed_arguments = (
+            dict(target_definition.ordinary_turn_fixed_arguments)
+            if isinstance(
+                target_definition.ordinary_turn_fixed_arguments,
+                Mapping,
+            )
+            else {}
+        )
+        fixed_argument_conflict = any(
+            argument_name in fixed_payload
+            and fixed_payload.get(argument_name) != fixed_value
+            for argument_name, fixed_value in target_fixed_arguments.items()
+        )
+        ordinary_turn_excluded_reason = (
+            target_definition.ordinary_turn_excluded_reason
+        )
+        if fixed_argument_conflict and not ordinary_turn_excluded_reason:
+            ordinary_turn_excluded_reason = (
+                "dynamic_proxy_overrides_ordinary_turn_fixed_argument"
+            )
 
         dynamic_definition = MethodDefinition(
             name=tool_name,
@@ -472,6 +562,17 @@ def load_dynamic_method_definitions(
             category=target_definition.category,
             timeout_sec=timeout_sec,
             description=description,
+            ordinary_turn_public=target_definition.ordinary_turn_public,
+            ordinary_turn_excluded_reason=ordinary_turn_excluded_reason,
+            ordinary_turn_trusted_argument_bindings=(
+                dict(target_definition.ordinary_turn_trusted_argument_bindings)
+                if isinstance(
+                    target_definition.ordinary_turn_trusted_argument_bindings,
+                    Mapping,
+                )
+                else None
+            ),
+            ordinary_turn_fixed_arguments=target_fixed_arguments or None,
         )
         resolved.append(dynamic_definition)
         dynamic_name_guard.add(tool_name)

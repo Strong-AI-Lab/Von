@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..db.repositories.text_value_repository import (
+    TextRelationsRepository,
+    TextValuesRepository,
+)
 from ..security.access_control import (
     bypass_access_control,
     can_access_concept,
     filter_accessible_concept_ids,
     should_enforce_access_control,
-)
-from .concept_predicate_metadata_service import get_relationship_kinds_set
-from ..db.repositories.text_value_repository import (
-    TextRelationsRepository,
-    TextValuesRepository,
 )
 from ..vontology.utils_vontology import (
     build_pure_instance_query,
@@ -27,6 +25,9 @@ from ..vontology.utils_vontology import (
     is_predicate,
     is_type,
 )
+from .concept_predicate_metadata_service import get_relationship_kinds_set
+from .relationship_extent_index_service import query_relationship_extent_index
+from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 RelationValue = Dict[str, Any]
 
@@ -344,6 +345,19 @@ def find_relations_with_argument(
     include_arg2_or_later = (
         argument_filter is None or argument_filter >= _ARG_INDEX_FIRST_OBJECT
     )
+    incoming_asserted_binary_diagnostics = {
+        "requested": bool(
+            include_asserted_rows
+            and include_structural
+            and include_arg2_or_later
+        ),
+        "path": "not_requested",
+        "used_relationship_extent_index": False,
+        "fallback_reason": None,
+        "index_rows_examined": 0,
+        "canonical_rows_returned": 0,
+        "rows_filtered_by_access": 0,
+    }
 
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     hits: List[Dict[str, Any]] = []
@@ -413,81 +427,156 @@ def find_relations_with_argument(
                 )
 
     if include_asserted_rows and include_structural and include_arg2_or_later:
-        incoming_pipeline = [
-            {"$match": {"relationships": {"$type": "object"}}},
-            {
-                "$project": {
-                    "concept_id": 1,
-                    "updated_at": 1,
-                    "relationship_items": {"$objectToArray": "$relationships"},
-                }
+        incoming_candidates: List[Tuple[str, Any, int, Any]] = []
+        index_rows, index_total = query_relationship_extent_index(
+            target_value=resolved_concept_id,
+            count_total=False,
+            projection={
+                "_id": 0,
+                "source_concept_id": 1,
+                "predicate_id": 1,
+                "target_value": 1,
+                "target_index": 1,
+                "source_updated_at": 1,
             },
-            {"$unwind": "$relationship_items"},
-            {
-                "$project": {
-                    "concept_id": 1,
-                    "updated_at": 1,
-                    "predicate": "$relationship_items.k",
-                    "targets": "$relationship_items.v",
+            batch_size=20_000,
+        )
+        if index_total >= 0:
+            incoming_asserted_binary_diagnostics.update(
+                {
+                    "path": "relationship_extent_index",
+                    "used_relationship_extent_index": True,
+                    "index_rows_examined": len(index_rows),
                 }
-            },
-            {"$match": {"targets": resolved_concept_id}},
-        ]
-        for row in ConceptsRepository.aggregate(incoming_pipeline):
-            source_id = row.get("concept_id")
-            if not isinstance(source_id, str) or not source_id.strip():
-                continue
-            source_id = source_id.strip()
-            predicate_id = row.get("predicate")
+            )
+            candidate_rows: List[Tuple[str, Any, int, Any]] = []
+            for row in index_rows:
+                source_id = row.get("source_concept_id")
+                if not isinstance(source_id, str) or not source_id.strip():
+                    continue
+                target_value = row.get("target_value")
+                if target_value != resolved_concept_id:
+                    continue
+                target_index = row.get("target_index")
+                if (
+                    not isinstance(target_index, int)
+                    or isinstance(target_index, bool)
+                    or target_index < 0
+                ):
+                    continue
+                candidate_rows.append(
+                    (
+                        source_id.strip(),
+                        row.get("predicate_id"),
+                        target_index,
+                        row.get("source_updated_at"),
+                    )
+                )
+            accessible_source_ids = filter_accessible_concept_ids(
+                source_id for source_id, _, _, _ in candidate_rows
+            )
+            for candidate in candidate_rows:
+                if candidate[0] not in accessible_source_ids:
+                    incoming_asserted_binary_diagnostics[
+                        "rows_filtered_by_access"
+                    ] += 1
+                    continue
+                incoming_candidates.append(candidate)
+        else:
+            incoming_asserted_binary_diagnostics.update(
+                {
+                    "path": "canonical_aggregation",
+                    "fallback_reason": "relationship_extent_index_unavailable",
+                }
+            )
+            incoming_pipeline = [
+                {"$match": {"relationships": {"$type": "object"}}},
+                {
+                    "$project": {
+                        "concept_id": 1,
+                        "updated_at": 1,
+                        "relationship_items": {"$objectToArray": "$relationships"},
+                    }
+                },
+                {"$unwind": "$relationship_items"},
+                {
+                    "$project": {
+                        "concept_id": 1,
+                        "updated_at": 1,
+                        "predicate": "$relationship_items.k",
+                        "targets": "$relationship_items.v",
+                    }
+                },
+                {"$match": {"targets": resolved_concept_id}},
+            ]
+            for row in ConceptsRepository.aggregate(incoming_pipeline):
+                incoming_asserted_binary_diagnostics[
+                    "canonical_rows_returned"
+                ] += 1
+                source_id = row.get("concept_id")
+                if not isinstance(source_id, str) or not source_id.strip():
+                    continue
+                source_id = source_id.strip()
+                targets = _normalise_relationship_targets(row.get("targets"))
+                if not targets:
+                    continue
+                for target_index, target_value in enumerate(targets):
+                    if target_value != resolved_concept_id:
+                        continue
+                    incoming_candidates.append(
+                        (
+                            source_id,
+                            row.get("predicate"),
+                            target_index,
+                            row.get("updated_at"),
+                        )
+                    )
+
+        for source_id, predicate_id, target_index, source_updated_at in (
+            incoming_candidates
+        ):
             if not _predicate_matches_terms(predicate_id, predicate_terms):
                 continue
-            targets = _normalise_relationship_targets(row.get("targets"))
-            if not targets:
+            matched_indexes = [_ARG_INDEX_FIRST_OBJECT + target_index]
+            if not _argument_indexes_match(matched_indexes, argument_filter):
                 continue
             source_preview = _resolve_concept_preview(
                 source_id,
                 include_concept_preview,
                 preview_cache,
             )
-            updated_at = _isoformat(row.get("updated_at"))
-            for target_index, target_value in enumerate(targets):
-                if target_value != resolved_concept_id:
-                    continue
-                matched_indexes = [_ARG_INDEX_FIRST_OBJECT + target_index]
-                if not _argument_indexes_match(matched_indexes, argument_filter):
-                    continue
-                hits.append(
-                    {
-                        "source_concept_id": source_id,
-                        "predicate_concept_id": predicate_id,
-                        "relation_kind": "binary",
-                        "argument_indexes": matched_indexes,
-                        "target_value": target_value,
-                        "target_concept_preview": (
-                            _resolve_concept_preview(
-                                resolved_concept_id,
-                                True,
-                                preview_cache,
-                            )
-                            if include_concept_preview
-                            else None
-                        ),
-                        "relation_metadata": {
-                            "relation_id": f"struct::{source_id}::{predicate_id}::incoming::{target_index}",
-                            "updated_at": updated_at,
-                            "match_type": "exact",
-                        },
-                        "access_granted": source_preview is not None
-                        or not include_concept_preview,
-                        "follow_up_actions": _build_follow_up_actions(
-                            [source_id],
-                            exclude={resolved_concept_id},
-                        ),
-                        "score": 1.0,
-                        "is_asserted": True,
-                        "relation_state": "asserted",
-                    }
-                )
+            hits.append(
+                {
+                    "source_concept_id": source_id,
+                    "predicate_concept_id": predicate_id,
+                    "relation_kind": "binary",
+                    "argument_indexes": matched_indexes,
+                    "target_value": resolved_concept_id,
+                    "target_concept_preview": (
+                        _resolve_concept_preview(
+                            resolved_concept_id,
+                            True,
+                            preview_cache,
+                        )
+                        if include_concept_preview
+                        else None
+                    ),
+                    "relation_metadata": {
+                        "relation_id": f"struct::{source_id}::{predicate_id}::incoming::{target_index}",
+                        "updated_at": _isoformat(source_updated_at),
+                        "match_type": "exact",
+                    },
+                    "access_granted": source_preview is not None
+                    or not include_concept_preview,
+                    "follow_up_actions": _build_follow_up_actions(
+                        [source_id],
+                        exclude={resolved_concept_id},
+                    ),
+                    "score": 1.0,
+                    "is_asserted": True,
+                    "relation_state": "asserted",
+                }
+            )
 
     if include_asserted_rows and include_text and include_arg1:
         source_preview = _resolve_concept_preview(
@@ -664,6 +753,7 @@ def find_relations_with_argument(
             "uncertainty_statuses": status_filter or None,
             "total_hits": len(sorted_hits),
             "returned": len(paged_hits),
+            "incoming_asserted_binary": incoming_asserted_binary_diagnostics,
         },
     }
 
@@ -2791,30 +2881,54 @@ def _load_accessible_relation_subject_document(
 def _filter_accessible_relationships(
     relationships: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    filtered: Dict[str, Any] = {}
-    for predicate_id, raw_targets in relationships.items():
-        filtered[predicate_id] = _filter_accessible_relationship_value(raw_targets)
-    return filtered
-
-
-def _filter_accessible_relationship_value(raw_targets: Any) -> Any:
     if not should_enforce_access_control():
-        return raw_targets
-    if isinstance(raw_targets, str):
-        if raw_targets.startswith("#") and not can_access_concept(raw_targets):
-            return []
-        return raw_targets
-    if not isinstance(raw_targets, Iterable) or isinstance(raw_targets, Mapping):
-        return raw_targets
-    filtered: List[Any] = []
-    for entry in raw_targets:
-        if (
-            isinstance(entry, str)
-            and entry.startswith("#")
-            and not can_access_concept(entry)
-        ):
+        return dict(relationships)
+
+    prepared: Dict[str, Any] = {}
+    candidate_ids: List[str] = []
+    for predicate_id, raw_targets in relationships.items():
+        if isinstance(raw_targets, str):
+            prepared[predicate_id] = raw_targets
+            if raw_targets.startswith("#"):
+                candidate_ids.append(raw_targets)
             continue
-        filtered.append(entry)
+        if isinstance(raw_targets, Iterable) and not isinstance(
+            raw_targets,
+            Mapping,
+        ):
+            entries = list(raw_targets)
+            prepared[predicate_id] = entries
+            candidate_ids.extend(
+                entry
+                for entry in entries
+                if isinstance(entry, str) and entry.startswith("#")
+            )
+            continue
+        prepared[predicate_id] = raw_targets
+
+    accessible_ids = filter_accessible_concept_ids(candidate_ids)
+    filtered: Dict[str, Any] = {}
+    for predicate_id, raw_targets in prepared.items():
+        if isinstance(raw_targets, str):
+            filtered[predicate_id] = (
+                []
+                if raw_targets.startswith("#")
+                and raw_targets not in accessible_ids
+                else raw_targets
+            )
+            continue
+        if isinstance(raw_targets, list):
+            filtered[predicate_id] = [
+                entry
+                for entry in raw_targets
+                if not (
+                    isinstance(entry, str)
+                    and entry.startswith("#")
+                    and entry not in accessible_ids
+                )
+            ]
+            continue
+        filtered[predicate_id] = raw_targets
     return filtered
 
 

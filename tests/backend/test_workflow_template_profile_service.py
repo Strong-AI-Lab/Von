@@ -18,7 +18,6 @@ from src.backend.workflows.workflow_template_profile_service import (
     WORKFLOW_CREATION_PERSON_TEMPLATE_ID,
     WORKFLOW_CREATION_PLACE_TEMPLATE_ID,
     WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID,
-    WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
     WORKFLOW_TEMPLATE_PROFILE_PREDICATE,
     WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD,
     WORKFLOW_TEMPLATE_SPEC_PREDICATE,
@@ -237,36 +236,6 @@ def test_select_workflow_template_uses_fallback_for_generic_request(
     assert selection["selection_source"] == "fallback"
 
 
-def test_resolve_workflow_spec_template_renders_gap_candidate_template(
-    _reset_mock_db: Any,
-) -> None:
-    rendered_spec, diagnostics = resolve_workflow_spec_template(
-        request_text="Recover the missing workflow for this request.",
-        explicit_template_id=WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
-        variables={
-            "workflow_id": "#V#candidate_gap_workflow",
-            "workflow_name": "Candidate Gap Workflow",
-            "workflow_description": "Candidate workflow for gap recovery.",
-            "prompt_concept_id": "#V#candidate_gap_prompt",
-            "request_text": "Recover the missing workflow for this request.",
-            "recent_turns_json": "[]",
-            "base_response_text": "Fallback reply.",
-            "workflow_guidance_json": '["Prefer reusable surfaces."]',
-            "acceptance_requirements_json": '["Produce a better response."]',
-            "intent_summary": "workflow gap recovery",
-            "gap_summary": "No suitable workflow matched.",
-        },
-    )
-
-    assert diagnostics["template_id"] == WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID
-    assert diagnostics["selection_source"] == "explicit"
-    assert rendered_spec["workflow_id"] == "#V#candidate_gap_workflow"
-    assert rendered_spec["steps"][0]["action_id"] == "workflow_gap.execute_candidate"
-    assert rendered_spec["steps"][0]["inputs"]["prompt_concept_id"] == (
-        "#V#candidate_gap_prompt"
-    )
-
-
 def test_resolve_workflow_spec_template_renders_person_representation_template(
     _reset_mock_db: Any,
 ) -> None:
@@ -435,7 +404,7 @@ def test_entity_templates_migrate_only_exact_known_unversioned_authority(
             limit=5,
         )
         profile = json.loads(str(profile_rows[0]["text"]))
-        assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "3"
+        assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "4"
 
 
 def test_template_migration_accepts_an_exact_registered_numeric_legacy_payload(
@@ -471,7 +440,7 @@ def test_template_migration_accepts_an_exact_registered_numeric_legacy_payload(
         limit=5,
     )[0]
     profile = json.loads(str(profile_row["text"]))
-    assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "3"
+    assert profile[WORKFLOW_TEMPLATE_REPO_SEED_VERSION_FIELD] == "4"
     receipt = dict(profile_row.get("context") or {}).get(
         service._SEED_MIGRATION_RECEIPT_CONTEXT_KEY
     )

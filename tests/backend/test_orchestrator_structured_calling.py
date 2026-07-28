@@ -1,13 +1,4 @@
-"""
-Tests for Phase 3 (JVNAUTOSCI-799): Orchestrator Structured Tool Calling Integration.
-
-This test suite validates:
-1. Structured calling path works when feature flag enabled
-2. Legacy fallback works when feature flag disabled
-3. Safety constraints preserved (namespace injection, gmail profile, whitelist)
-4. call_id execution tracing works correctly
-5. Tool definition conversion from MCP catalog to ToolDefinition format
-"""
+"""Tests for structured tool mechanics retained by explicit workflows."""
 
 import json
 from types import SimpleNamespace
@@ -19,7 +10,6 @@ import pytest
 import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
-    _MissingToolCallDetectorSpec,
     _PromptRequirementEvaluation,
     _WorkflowModelPolicyState,
 )
@@ -29,12 +19,13 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     ToolDefinition,
 )
 from src.backend.services.tool_metadata_service import ToolDispatchSurfaceMetadata
+from src.backend.services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+    SynthesiserContextFramingTemplate,
+)
 from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows.definitions import TOOL_CALLING_WORKFLOW_ID
-from src.backend.workflows.workflow_selector import (
-    WorkflowSelection,
-    WorkflowSelectionPrompt,
-)
+from src.backend.workflows.durable import synthesiser_context_prep_actions as synth_mod
 
 
 class MockLLMClientWithTools:
@@ -148,84 +139,29 @@ def mock_gateway():
 
 @pytest.fixture
 def orchestrator(mock_gateway):
-    """Create an orchestrator instance with mocked gateway."""
-    orch = InternalMCPChatOrchestrator(gateway=mock_gateway)
-    cast(Any, orch)._load_base_system_prompt_from_vontology = (
-        lambda preferred_language=None: (
-            "Test base system prompt",
-            "#V#test_base_prompt",
-        )
-    )
-    original_run_llm_with_fallbacks = orch._run_llm_with_fallbacks
-    selector = cast(Any, orch._workflow_selector)
+    """Create explicit-workflow tool runtime support with a mocked gateway."""
+    return InternalMCPChatOrchestrator(gateway=mock_gateway)
 
-    def _run_llm_with_fallbacks_force_tool_workflow(*args, **kwargs):
-        if kwargs.get("stage") == "workflow_dispatch":
-            return TOOL_CALLING_WORKFLOW_ID, kwargs.get("default_model"), None
-        return original_run_llm_with_fallbacks(*args, **kwargs)
 
-    cast(Any, orch)._run_llm_with_fallbacks = _run_llm_with_fallbacks_force_tool_workflow
-    selector.prepare_selection_prompt = lambda *args, **kwargs: WorkflowSelectionPrompt(
-        prompt_id="#V#chat_turn_classifier_prompt",
-        prompt_text="Select workflow",
-        discovered_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
-        candidate_entries=(
-            {
-                "concept_id": TOOL_CALLING_WORKFLOW_ID,
-                "name": "Tool Calling Workflow",
-                "is_executable": True,
-                "executability_reason": "executable_now",
-            },
+@pytest.fixture(autouse=True)
+def _stub_synthesiser_context_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    template = SynthesiserContextFramingTemplate(
+        prompt_concept_id="#V#test_synthesiser_context_framing_prompt",
+        loaded_prompt_concept_id="#V#test_synthesiser_context_framing_prompt",
+        schema_version=SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+        active_request_template="Active request: {active_user_message}",
+        tool_hints_template="Tool {tool_concept_id}:\n{hint_sections}",
+        collection_presentation_hint_template=(
+            "Collection: {collection_presentation_hint}"
         ),
-        candidate_list_text=(
-            "- #V#tool_calling_workflow: Tool Calling Workflow — General-purpose "
-            "tool-calling pipeline."
-        ),
-        requested_prompt_ids=("#V#chat_turn_classifier_prompt",),
-        prompt_provenance={},
-        policy_recommendation={},
+        item_summary_hint_template="Item: {item_summary_hint}",
+        diagnostics={"source": "represented_test_template"},
     )
-    selector.resolve_selection = lambda **kwargs: WorkflowSelection(
-        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        verdict="test_forced_tool_pipeline",
-        prompt_id=kwargs.get("prompt_id"),
-        prompt_used=kwargs.get("prompt_used"),
-        raw_response=str(kwargs.get("response_text") or TOOL_CALLING_WORKFLOW_ID),
-        discovered_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
-        confidence_score=1.0,
-        reasoning="Structured-calling tests force the tool-calling workflow.",
-        selection_source="selector",
-        selection_metadata={"selected_workflow_id": TOOL_CALLING_WORKFLOW_ID},
+    monkeypatch.setattr(
+        synth_mod,
+        "resolve_synthesiser_context_framing_template",
+        lambda **_kwargs: (template, dict(template.diagnostics)),
     )
-    selector.resolve_policy_selection = (
-        lambda **kwargs: WorkflowSelection(
-            workflow_id=TOOL_CALLING_WORKFLOW_ID,
-            verdict="test_forced_tool_pipeline",
-            prompt_id=kwargs.get("prompt_id"),
-            prompt_used=kwargs.get("prompt_used"),
-            raw_response=TOOL_CALLING_WORKFLOW_ID,
-            discovered_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
-            confidence_score=1.0,
-            reasoning="Structured-calling tests force the tool-calling workflow.",
-            selection_source="selector",
-            selection_metadata={"selected_workflow_id": TOOL_CALLING_WORKFLOW_ID},
-        )
-    )
-    selector.resolve_prompt_unavailable_selection = (
-        lambda **kwargs: WorkflowSelection(
-            workflow_id=TOOL_CALLING_WORKFLOW_ID,
-            verdict="test_forced_tool_pipeline",
-            prompt_id="#V#chat_turn_classifier_prompt",
-            prompt_used=None,
-            raw_response=TOOL_CALLING_WORKFLOW_ID,
-            discovered_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
-            confidence_score=1.0,
-            reasoning="Structured-calling tests force the tool-calling workflow.",
-            selection_source="selector",
-            selection_metadata={"selected_workflow_id": TOOL_CALLING_WORKFLOW_ID},
-        )
-    )
-    return orch
 
 
 def _build_large_method_catalogue(
@@ -416,146 +352,9 @@ def _build_workflow_testing_method_catalogue() -> dict[str, dict[str, Any]]:
     return catalogue
 
 
-def test_structured_calling_path_used_when_available(orchestrator):
-    """Test that structured calling is used when available and feature flag enabled."""
-    llm_client = MockLLMClientWithTools(should_use_structured=True)
-
-    result = orchestrator.run(
-        prompt="Find test concept",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    # Verify structured calling was used (for initial prompt)
-    assert llm_client.generate_with_tools_called
-    # Note: generate() may be called for follow-up after tool execution
-    # This is expected behavior - we just want to verify structured calling was used first
-
-    # Verify tool was invoked
-    assert len(result.tool_invocations) == 1
-    assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
-    assert len(result.tool_invocations) == 1
-    assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
 
 
-def test_structured_tool_pipeline_preserves_answer_first_represented_context_response(
-    orchestrator, mock_gateway
-):
-    class _RepresentedContextLLM:
-        def __init__(self) -> None:
-            self.generate_called = 0
-            self.generate_with_tools_called = 0
 
-        def _should_use_structured_calling(self) -> bool:
-            return True
-
-        def generate(self, prompt, context=None, model=None):
-            self.generate_called += 1
-            return "Michael Witbrock is affiliated with Test Org."
-
-        def generate_with_tools(
-            self,
-            prompt: str,
-            available_tools: List[ToolDefinition],
-            context: Optional[Sequence[Mapping[str, Any]]] = None,
-            model: Optional[str] = None,
-            system_message: Optional[str] = None,
-        ) -> LLMResponse:
-            self.generate_with_tools_called += 1
-            return LLMResponse(
-                text_response="I will check the represented knowledge.",
-                tool_calls=[
-                    ToolCall(
-                        tool_name="search_knowledge_base",
-                        payload={"query": "Michael Witbrock affiliation"},
-                        call_id="call_ctx_1",
-                    )
-                ],
-            )
-
-    mock_result = MagicMock()
-    mock_result.payload = {
-        "results": [
-            {
-                "concept_id": "#V#michael_witbrock",
-                "text": "Michael Witbrock is affiliated with Test Org.",
-            }
-        ]
-    }
-    mock_result.duration_ms = 50
-    mock_gateway.invoke.return_value = mock_result
-
-    llm_client = _RepresentedContextLLM()
-    result = orchestrator.run(
-        prompt="Which organisation is Michael Witbrock affiliated with in the represented knowledge?",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    assert llm_client.generate_with_tools_called == 1
-    assert len(result.tool_invocations) == 1
-    assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
-    assert result.response_text == "Michael Witbrock is affiliated with Test Org."
-    assert "Execution status:" not in result.response_text
-
-
-def test_legacy_fallback_when_structured_disabled(orchestrator):
-    """Test that legacy path is used when feature flag disabled."""
-    llm_client = MockLLMClientWithTools(should_use_structured=False)
-
-    orchestrator.run(
-        prompt="Find test concept",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    # Verify legacy generate was used
-    assert llm_client.generate_called
-    assert not llm_client.generate_with_tools_called
-
-
-def test_legacy_fallback_when_structured_unavailable(orchestrator):
-    """Test that legacy path works when client doesn't support structured calling."""
-    llm_client = MockLLMClientLegacyOnly()
-
-    result = orchestrator.run(
-        prompt="Find test concept",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    # Verify legacy generate was used
-    assert llm_client.generate_called
-
-    # Verify tool was still invoked (via JSON parsing)
-    assert len(result.tool_invocations) == 1
-    assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
-
-
-def test_call_id_tracing_in_structured_path(orchestrator):
-    """Test that call_id is preserved in tool invocations (JVNAUTOSCI-803)."""
-    llm_client = MockLLMClientWithTools(should_use_structured=True)
-
-    result = orchestrator.run(
-        prompt="Find test concept",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    # Verify call_id is in invocation record
-    assert len(result.tool_invocations) == 1
-    assert "call_id" in result.tool_invocations[0]
-    assert result.tool_invocations[0]["call_id"] == "call_abc123"
 
 
 def test_tool_calling_respond_surfaces_tool_evidence_in_outputs(
@@ -658,28 +457,6 @@ def test_tool_definition_conversion_accepts_list_schema():
     assert schema.get("additionalProperties") is True
 
 
-def test_namespace_injection_preserved(orchestrator):
-    """Test that namespace injection still works in structured path."""
-    llm_client = MockLLMClientWithTools(should_use_structured=True)
-
-    orchestrator.run(
-        prompt="Find test concept",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    # Verify namespace was injected into payload
-    invoke_calls = orchestrator._gateway.invoke.call_args_list
-    assert invoke_calls
-    search_calls = [call for call in invoke_calls if call[0][0] == "search_knowledge_base"]
-    assert search_calls
-    # The invoke is called with (tool_name, payload) positional args
-    payload = search_calls[0][0][1]
-    assert isinstance(payload, dict)
-    assert payload.get("namespace") == "#V#test_user"
-
 
 def test_mcp_schema_to_json_schema_conversion(orchestrator):
     """Test Schema to JSON Schema conversion."""
@@ -763,150 +540,7 @@ def test_tool_definitions_conversion_appends_planner_hints():
     assert "represented-knowledge lookup" in by_name["search_knowledge_base"]
 
 
-def test_structured_calling_with_no_tool_response(orchestrator, mock_gateway):
-    """Test that structured calling handles responses without tool calls."""
 
-    class MockLLMClientNoTools:
-        def _should_use_structured_calling(self):
-            return True
-
-        def generate(self, prompt, context=None, model=None):
-            return "Just a text response"
-
-        def generate_with_tools(
-            self, prompt, available_tools, context=None, model=None, system_message=None
-        ):
-            # Return response without tool calls
-            return LLMResponse(text_response="Just a text response", tool_calls=[])
-
-    llm_client = MockLLMClientNoTools()
-
-    result = orchestrator.run(
-        prompt="What is the weather?",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-    )
-
-    # Should return text response without invoking tools
-    assert result.response_text == "Just a text response"
-    assert len(result.tool_invocations) == 0
-
-
-def test_structured_calling_exception_fallback(orchestrator, mock_gateway):
-    """Test that exceptions in structured calling fall back to legacy path."""
-
-    class MockLLMClientWithException:
-        def _should_use_structured_calling(self):
-            return True
-
-        def generate(self, prompt, context=None, model=None):
-            return '{"tool": "search_knowledge_base", "payload": {"query": "fallback"}}'
-
-        def generate_with_tools(
-            self, prompt, available_tools, context=None, model=None, system_message=None
-        ):
-            raise RuntimeError("Structured calling failed")
-
-    llm_client = MockLLMClientWithException()
-
-    # Should not raise, should fall back to legacy
-    result = orchestrator.run(
-        prompt="Find concept",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    # Should have invoked tool via legacy path
-    assert len(result.tool_invocations) == 1
-    assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
-
-
-def test_structured_path_missing_tool_call_recovery_smoke(
-    orchestrator,
-):
-    """Structured no-tool recovery should surface a stable top-level result.
-
-    When structured calling is enabled but the model returns no tool calls while
-    promising to use tools, the orchestrator should:
-    - invoke the structured planner once
-    - avoid crashing the top-level turn
-    - preserve structured path tags if recovery telemetry is surfaced
-
-    Detailed missing-tool-call telemetry contracts are asserted in the
-    extraction/helper tests. This integration test stays at the surfaced
-    orchestrator-result layer.
-    """
-
-    class MockLLMClientStructuredMissingToolCall:
-        def __init__(self):
-            self.generate_called = 0
-            self.generate_with_tools_called = 0
-
-        def _should_use_structured_calling(self) -> bool:
-            return True
-
-        def generate(self, prompt: str, context=None, model=None):
-            # 1) classifier verdict
-            # 2) retry response (legacy JSON tool-call format)
-            # 3) final response after tool execution
-            self.generate_called += 1
-            if self.generate_called == 1:
-                return "YES"
-            if self.generate_called == 2:
-                return '{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"test query"}}'
-            return "Final response"
-
-        def generate_with_tools(
-            self,
-            prompt: str,
-            available_tools: List[ToolDefinition],
-            context=None,
-            model=None,
-            system_message=None,
-        ) -> LLMResponse:
-            self.generate_with_tools_called += 1
-            # Structured path: model promises a tool call but doesn't include one.
-            return LLMResponse(
-                text_response="I will search the knowledge base now.",
-                tool_calls=[],
-            )
-
-    llm_client = MockLLMClientStructuredMissingToolCall()
-
-    orchestrator._missing_tool_call_detector_loaded = True
-    orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
-        action_id="#V#detect_missing_tool_call_action",
-        prompt_id="#V#missing_tool_call_detection_prompt",
-        prompt_text="Answer YES or NO for: {response}",
-        model="detector-model",
-    )
-
-    result = orchestrator.run(
-        prompt="Find test concept",
-        context=[],
-        llm_client=llm_client,
-        model="gpt-4",
-        user_namespace="#V#test_user",
-    )
-
-    assert llm_client.generate_with_tools_called == 1
-    assert isinstance(result.response_text, str)
-    assert result.response_text.strip()
-
-    aux_by_type: dict[str, list[Mapping[str, Any]]] = {}
-    for entry in result.aux_llm_calls:
-        if isinstance(entry, dict) and isinstance(entry.get("type"), str):
-            aux_by_type.setdefault(entry["type"], []).append(entry)
-
-    for detection_entry in aux_by_type.get("missing_tool_call_detection", []):
-        assert detection_entry["path"] == "structured"
-    for classifier_entry in aux_by_type.get("missing_tool_call_classifier", []):
-        assert classifier_entry["path"] == "structured"
-    for retry_entry in aux_by_type.get("missing_tool_call_retry", []):
-        assert retry_entry["path"] == "structured"
 
 
 def test_structured_candidate_resolver_enforces_provider_cap():
@@ -1302,37 +936,6 @@ def test_structured_candidate_resolver_readds_required_tool_deterministically():
     )
     assert second.candidate_tool_names == first.candidate_tool_names
 
-
-def test_tool_listing_uses_authority_backed_family_resolution():
-    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
-
-    gateway = MagicMock(spec=InternalMCPGateway)
-    gateway.enabled = True
-    gateway.describe_methods.return_value = {
-        "search_concepts": {
-            "name": "search_concepts",
-            "description": "Search concepts",
-            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
-            "output_schema": None,
-            "category": "read",
-        },
-        "custom_workflow_probe": {
-            "name": "custom_workflow_probe",
-            "description": "Probe workflow state",
-            "family": "workflow",
-            "input_schema": {"required": {"workflow_id": str}, "optional": {}, "allow_unknown": True},
-            "output_schema": None,
-            "category": "read",
-        },
-    }
-
-    orch = InternalMCPChatOrchestrator(gateway=gateway)
-    listing = orch._tool_listing()
-
-    assert "- workflow:" in listing
-    assert "custom_workflow_probe" in listing
-    assert "- vontology:" in listing
-    assert "search_concepts" in listing
 
 
 def test_structured_candidate_resolver_uses_required_tools_for_workflow_testing_planner():
@@ -1793,37 +1396,6 @@ def test_turn_contract_required_relation_summary_tools_count_as_metadata_driven_
 
     assert families == ("knowledge_base",)
 
-
-def test_turn_contract_required_surface_families_accept_new_metadata_driven_external_surface(
-    monkeypatch,
-):
-    dispatch_metadata = {
-        "search_knowledge_base": _dispatch_surface("knowledge_base"),
-        "search_patents": _dispatch_surface("patents", external_surface=True),
-    }
-    monkeypatch.setattr(
-        orchestrator_module,
-        "get_tool_dispatch_surface_metadata",
-        lambda tool_name: dispatch_metadata.get(str(tool_name).strip().lower()),
-    )
-
-    families = InternalMCPChatOrchestrator._infer_required_tool_surface_families(
-        required_tools=(
-            "search_knowledge_base",
-            "search_patents",
-        )
-    )
-    external_families = (
-        InternalMCPChatOrchestrator._infer_required_external_surface_families(
-            required_tools=(
-                "search_knowledge_base",
-                "search_patents",
-            )
-        )
-    )
-
-    assert families == ("knowledge_base", "patents")
-    assert external_families == ("patents",)
 
 
 def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_task_prompt():

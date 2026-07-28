@@ -49,12 +49,6 @@ if TYPE_CHECKING:
         run_mongo_startup_probe,
         validate_mongo_startup_or_raise,
     )
-    from ..services.settings_service import (
-        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
-        INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
-        get_internal_mcp_max_tool_invocations,
-        get_internal_mcp_tool_batch_cap,
-    )
 
 # Adjust path to ensure project root and src are included for imports BEFORE any backend.* imports
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -155,16 +149,6 @@ _bind_imports(
         "validate_mongo_startup_or_raise",
     ],
 )
-_bind_imports(
-    "src.backend.services.settings_service",
-    [
-        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT",
-        "INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT",
-        "get_internal_mcp_max_tool_invocations",
-        "get_internal_mcp_tool_batch_cap",
-    ],
-)
-
 # Legacy fallback version string retained for backwards compatibility.
 APP_VERSION = DEFAULT_APP_VERSION
 
@@ -651,7 +635,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             bootstrap_fn=bootstrap_canonical_multilingual_concept_enrichment_workflow,
         )
         conversation_turn_workflow_bootstrap_report = _run_workflow_family_bootstrap(
-            label="conversation-turn workflow",
+            label="explicit chat-support workflows",
             bootstrap_fn=bootstrap_canonical_conversation_turn_workflows,
         )
         email_source_convergence_workflow_bootstrap_report = _run_workflow_family_bootstrap(
@@ -865,7 +849,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             )
         if not bool(conversation_turn_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
-                "[durable_workflows] conversation-turn workflow bootstrap failed: %s",
+                "[durable_workflows] explicit chat-support bootstrap failed: %s",
                 conversation_turn_workflow_bootstrap_report,
             )
         if not bool(
@@ -1037,24 +1021,6 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         except Exception as prompt_exc:
             app_logger.warning(
                 "[durable_workflows] parent-specificity prompt bootstrap error: %s",
-                prompt_exc,
-            )
-
-        try:
-            from ..services.workflow_gap_vontology_service import (
-                ensure_workflow_gap_prompt_support,
-            )
-
-            workflow_gap_prompt_report = ensure_workflow_gap_prompt_support()
-            result["workflow_gap_prompt_bootstrap"] = workflow_gap_prompt_report
-            if not bool(workflow_gap_prompt_report.get("success", False)):
-                app_logger.warning(
-                    "[durable_workflows] workflow-gap prompt bootstrap failed: %s",
-                    workflow_gap_prompt_report,
-                )
-        except Exception as prompt_exc:
-            app_logger.warning(
-                "[durable_workflows] workflow-gap prompt bootstrap error: %s",
                 prompt_exc,
             )
 
@@ -2394,13 +2360,11 @@ def _initialise_internal_mcp_gateway(app: Flask):
     gateway_instance = None
     try:
         from ..integrations.internal_mcp import (
-            InternalMCPChatOrchestrator,
             InternalMCPGateway,
             InternalMCPTransport,
             build_default_catalogue,
         )
 
-        del InternalMCPChatOrchestrator
         internal_mcp_enabled = os.getenv("VON_INTERNAL_MCP_ENABLE", "0").lower() in {
             "1",
             "true",
@@ -2433,111 +2397,18 @@ def _initialise_internal_mcp_gateway(app: Flask):
     return gateway_instance
 
 
-def _configure_internal_mcp_orchestrator_startup(app: Flask, gateway_instance) -> None:
-    """Initialise or defer the internal MCP orchestrator."""
+def _configure_internal_mcp_orchestrator_startup(
+    app: Flask, gateway_instance
+) -> None:
+    """Expose a compatibility status for the retired automatic controller."""
+    del gateway_instance
     app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
     app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-        "state": "disabled" if gateway_instance is None else "pending",
+        "state": "retired",
         "ready": False,
+        "replacement": "direct_adaptive_turn",
         "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }
-
-    if gateway_instance is None:
-        return
-
-    from ..integrations.internal_mcp import InternalMCPChatOrchestrator
-
-    orchestrator_logger = (
-        app.logger.getChild("mcp_orchestrator") if app.logger else None
-    )
-    blocking_orchestrator_start = os.getenv(
-        "VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0"
-    ).strip().lower() in {"1", "true", "yes", "on"}
-
-    def _build_orchestrator() -> None:
-        start_perf = time.perf_counter()
-        app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-            "state": "initialising",
-            "ready": False,
-            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        }
-        try:
-            try:
-                bootstrap_max_tool_invocations = get_internal_mcp_max_tool_invocations()
-            except Exception:
-                bootstrap_max_tool_invocations = (
-                    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
-                )
-            try:
-                bootstrap_tool_batch_cap = get_internal_mcp_tool_batch_cap()
-            except Exception:
-                bootstrap_tool_batch_cap = INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT
-            orchestrator_instance = InternalMCPChatOrchestrator(
-                gateway=gateway_instance,
-                logger=orchestrator_logger,
-                max_tool_invocations=bootstrap_max_tool_invocations,
-                tool_batch_cap=bootstrap_tool_batch_cap,
-                default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None,
-            )
-            duration_ms = int((time.perf_counter() - start_perf) * 1000)
-            app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator_instance
-            app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-                "state": "ready",
-                "ready": True,
-                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                "duration_ms": duration_ms,
-            }
-            try:
-                app.logger.info(
-                    "[mcp_orchestrator] Initialised in %dms (blocking_startup=%s).",
-                    duration_ms,
-                    blocking_orchestrator_start,
-                )
-            except Exception:
-                pass
-        except Exception as exc:  # pragma: no cover - defensive bootstrap
-            app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-                "state": "failed",
-                "ready": False,
-                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                "error": str(exc),
-            }
-            try:
-                app.logger.warning("[mcp_orchestrator] Failed to initialise: %s", exc)
-            except Exception:
-                pass
-
-    if blocking_orchestrator_start:
-        _build_orchestrator()
-        return
-
-    try:
-        app.logger.info(
-            "[mcp_orchestrator] Deferring initialisation to background thread "
-            "(set VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP=1 to restore blocking startup)."
-        )
-    except Exception:
-        pass
-
-    try:
-        threading.Thread(
-            target=_build_orchestrator,
-            name="mcp_orchestrator_init",
-            daemon=True,
-        ).start()
-    except Exception as exc:  # pragma: no cover - defensive bootstrap
-        app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-            "state": "failed",
-            "ready": False,
-            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            "error": f"thread_start_failed:{exc}",
-        }
-        try:
-            app.logger.warning(
-                "[mcp_orchestrator] Failed to start async init thread: %s", exc
-            )
-        except Exception:
-            pass
 
 
 def _ensure_db_monitor_started(app: Flask) -> None:
@@ -2916,10 +2787,28 @@ def _build_health_runtime_authority_projection(app: Flask) -> dict[str, object]:
                 "scheduler_running": None,
             }
 
+    try:
+        from ..services.model_registry_service import (
+            get_model_registry_snapshot_status,
+        )
+
+        model_registry = dict(get_model_registry_snapshot_status())
+    except Exception:
+        model_registry = {
+            "schema_version": "model_registry_snapshot_status.v1",
+            "ready": False,
+            "source": None,
+            "cache_state": "unavailable",
+            "age_seconds": None,
+            "refresh_in_progress": False,
+            "last_refresh_succeeded": None,
+        }
+
     return {
         "schema_version": "health_runtime_authority_projection.v1",
         "mongo": mongo,
         "durable_workflows": durable,
+        "model_registry": model_registry,
     }
 
 
@@ -3978,81 +3867,6 @@ def _handle_admin_policy_comparison_request():
         return jsonify(error=str(exc), status="error"), 500
 
 
-# --- Chat-critical workflow warm (JVNAUTOSCI-2383) -------------------------
-#
-# The live chat turn lazily resolves a small set of workflow definitions from
-# Vontology on first use (tool calling, narration, buttonify, chat assistant).
-# Each cold lazy-load is a multi-second Atlas round trip that, under a busy
-# Waitress pool, blocks a request thread and contributes to turn stalls. Warming
-# these definitions in the background prewarm thread promotes them to eager
-# registrations so the first real user turn does not pay that cost on the
-# request thread.
-_CHAT_CRITICAL_WORKFLOW_IDS = (
-    "#V#tool_calling_workflow",
-    "#V#chat_narration_workflow",
-    "#V#chat_buttonify_workflow",
-    "#V#chat_assistant_workflow",
-)
-
-
-def _prewarm_chat_critical_workflows(app: Flask) -> None:
-    """Eagerly resolve chat-critical workflow definitions in the background.
-
-    Controlled by ``VON_EAGER_WARM_CHAT_WORKFLOWS`` (default on). Skipped under
-    pytest/agent-test instances where startup should stay minimal.
-    """
-
-    if os.getenv("VON_EAGER_WARM_CHAT_WORKFLOWS", "1").strip().lower() in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        app.logger.info("[prewarm] Chat-workflow warm disabled by env flag.")
-        return
-    if "PYTEST_CURRENT_TEST" in os.environ or _is_agent_test_instance():
-        return
-
-    try:
-        from ..workflows.durable.registry_factory import (
-            get_shared_workflow_registry_read_only,
-        )
-
-        registry = get_shared_workflow_registry_read_only(
-            defer_parity_work=True,
-            start_deferred_registry_work=False,
-        )
-    except Exception as exc:
-        app.logger.warning(
-            "[prewarm] Could not obtain workflow registry for warm: %s", exc
-        )
-        return
-
-    warmed = 0
-    for workflow_id in _CHAT_CRITICAL_WORKFLOW_IDS:
-        try:
-            if not registry.has(workflow_id):
-                continue
-            t0 = time.monotonic()
-            definition = registry.get(workflow_id)
-            if definition is not None:
-                warmed += 1
-                app.logger.info(
-                    "[prewarm] Warmed chat workflow %s (%.0fms)",
-                    workflow_id,
-                    (time.monotonic() - t0) * 1000,
-                )
-        except Exception as exc:
-            app.logger.warning(
-                "[prewarm] Failed to warm chat workflow %s: %s", workflow_id, exc
-            )
-    app.logger.info(
-        "[prewarm] Chat-workflow warm complete (%d/%d warmed).",
-        warmed,
-        len(_CHAT_CRITICAL_WORKFLOW_IDS),
-    )
-
-
 def _start_prewarm(app: Flask) -> None:
     try:
         if os.getenv("VON_PREWARM_DISABLE") in {
@@ -4092,10 +3906,6 @@ def _start_prewarm(app: Flask) -> None:
                             )
                 except Exception as exc:
                     app.logger.warning("[prewarm] Tree build failed: %s", exc)
-                try:
-                    _prewarm_chat_critical_workflows(app)
-                except Exception as exc:
-                    app.logger.warning("[prewarm] Chat-workflow warm failed: %s", exc)
             finally:
                 app.logger.info("[prewarm] Completed in %.2fs", time.time() - t0)
 

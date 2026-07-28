@@ -595,8 +595,10 @@ class TestBackgroundTaskRegistry:
 
         registry.shutdown(wait=True)
 
-    def test_mark_terminal_external_completed_overrides_failed_status(self) -> None:
-        """A durable completion should restore a task already marked failed."""
+    def test_mark_terminal_external_completed_cannot_override_failed_status(
+        self,
+    ) -> None:
+        """The first failed terminal result remains final."""
         registry = BackgroundTaskRegistry(max_workers=1)
         registry.mark_terminal_external(
             "restore-failed",
@@ -605,25 +607,25 @@ class TestBackgroundTaskRegistry:
             progress={"source": "worker"},
         )
 
-        restored = registry.mark_terminal_external(
+        unchanged = registry.mark_terminal_external(
             "restore-failed",
             status="completed",
             result={"source": "durable"},
             progress={"source": "durable_conversation_turn_instance"},
         )
 
-        assert restored.status == "completed"
-        assert restored.error is None
-        assert restored.result == {"source": "durable"}
-        assert restored.progress["status"] == "completed"
-        assert restored.progress["source"] == "durable_conversation_turn_instance"
+        assert unchanged.status == "failed"
+        assert unchanged.error == "post-processing failed"
+        assert unchanged.result is None
+        assert unchanged.progress["status"] == "failed"
+        assert unchanged.progress["source"] == "worker"
 
         registry.shutdown(wait=True)
 
-    def test_mark_terminal_external_completed_enriches_existing_completed_result(
+    def test_mark_terminal_external_completed_cannot_replace_completed_result(
         self,
     ) -> None:
-        """A ready response can be replaced by a richer completed payload later."""
+        """A duplicate completion cannot replace the published result."""
         registry = BackgroundTaskRegistry(max_workers=1)
         registry.mark_terminal_external(
             "enrich-completed",
@@ -634,7 +636,7 @@ class TestBackgroundTaskRegistry:
             user_id="user-early",
         )
 
-        enriched = registry.mark_terminal_external(
+        unchanged = registry.mark_terminal_external(
             "enrich-completed",
             status="completed",
             result={"source": "final_payload", "llm_debug": {"request_id": "req-1"}},
@@ -643,16 +645,40 @@ class TestBackgroundTaskRegistry:
             user_id="user-final",
         )
 
-        assert enriched.status == "completed"
-        assert enriched.error is None
-        assert enriched.result == {
-            "source": "final_payload",
-            "llm_debug": {"request_id": "req-1"},
-        }
-        assert enriched.progress["source"] == "final_generate_payload"
-        assert enriched.session_id == "session-early"
-        assert enriched.user_id == "user-early"
-        assert registry.get_task_result("enrich-completed") == enriched.result
+        assert unchanged.status == "completed"
+        assert unchanged.error is None
+        assert unchanged.result == {"source": "response_ready"}
+        assert unchanged.progress["source"] == "background_generate_success_body"
+        assert unchanged.session_id == "session-early"
+        assert unchanged.user_id == "user-early"
+        assert registry.get_task_result("enrich-completed") == unchanged.result
+
+        registry.shutdown(wait=True)
+
+    def test_mark_terminal_external_completed_cannot_override_cancelled_status(
+        self,
+    ) -> None:
+        """Late work cannot publish success after cancellation became terminal."""
+        registry = BackgroundTaskRegistry(max_workers=1)
+        registry.mark_terminal_external(
+            "cancelled-first",
+            status="cancelled",
+            error="cancelled by user",
+            progress={"source": "cancellation"},
+        )
+
+        unchanged = registry.mark_terminal_external(
+            "cancelled-first",
+            status="completed",
+            result={"source": "late-worker"},
+            progress={"source": "late-worker"},
+        )
+
+        assert unchanged.status == "cancelled"
+        assert unchanged.error == "cancelled by user"
+        assert unchanged.result is None
+        assert unchanged.progress["status"] == "cancelled"
+        assert unchanged.progress["source"] == "cancellation"
 
         registry.shutdown(wait=True)
 

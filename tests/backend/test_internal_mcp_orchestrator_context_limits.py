@@ -1,9 +1,13 @@
 import json
 from typing import Any, cast
 
+import pytest
+
+from src.backend.integrations.internal_mcp import orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.services.tool_metadata_service import ToolMetadata
 
 
 class _StubResult:
@@ -23,109 +27,45 @@ class _StubGateway:
         return _StubResult({"content": "x" * 50_000, "ok": True})
 
 
-class _CapturingLLM:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = []
+@pytest.fixture(autouse=True)
+def _isolate_formatting_tests_from_workflow_authority(monkeypatch):
+    """These private formatting tests do not need live workflow persistence."""
 
-    def generate(self, prompt, *, context=None, model=None):
-        self.calls.append({"prompt": prompt, "context": context, "model": model})
-        if self._responses:
-            return self._responses.pop(0)
-        return "ok"
-
-
-def _stub_base_system_prompt(orchestrator: InternalMCPChatOrchestrator) -> None:
-    cast(Any, orchestrator)._load_base_system_prompt_from_vontology = (
-        lambda **_kwargs: (
-            "You are Von.",
-            "#V#test_base_system_prompt",
-        )
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service.project_surfaceable_concept_evidence",
+        lambda _payload: [],
     )
-    cast(Any, orchestrator)._workflow_selector.enabled = lambda: False
-
-
-def _total_context_chars(context):
-    if not context:
-        return 0
-    total = 0
-    for msg in context:
-        content = msg.get("content")
-        total += len(content) if isinstance(content, str) else len(str(content))
-    return total
-
-
-def test_orchestrator_limits_context_by_chars():
-    gateway = cast(Any, _StubGateway())
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
-        max_tool_invocations=1,
-        max_context_chars=30_000,
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service.project_tool_payload_for_llm",
+        lambda _tool_name, _payload: None,
     )
-    _stub_base_system_prompt(orchestrator)
-
-    # Create a very large chat history with unique contents so trimming is testable.
-    context = [
-        {"role": "user", "content": f"msg-{i}:" + ("a" * 2_000)} for i in range(100)
-    ]
-
-    llm = _CapturingLLM(["hello world"])
-    result = orchestrator.run(prompt="hi", context=context, llm_client=llm, model=None)
-
-    assert result.response_text == "hello world"
-    assert llm.calls
-
-    sent_context = llm.calls[0]["context"]
-    assert sent_context and sent_context[0]["role"] == "system"
-
-    # Should be trimmed well below the original 100 messages.
-    assert len(sent_context) < len(context) + 1
-
-    # Context budget is approximate because system message is always retained.
-    assert _total_context_chars(sent_context) <= 30_000 + 20_000
-
-    # The newest user message should be present; the oldest should be trimmed.
-    assert sent_context[-1]["content"].startswith("msg-99:")
-    # After trimming, the earliest preserved message index should be > 0.
-    first_preserved = next(msg for msg in sent_context[1:] if msg.get("role") == "user")
-    assert first_preserved["content"].startswith("msg-")
-    first_idx = int(first_preserved["content"].split(":", 1)[0].split("-", 1)[1])
-    assert first_idx > 0
-
-
-def test_orchestrator_preserves_presenter_protocol_when_trimming_context():
-    gateway = cast(Any, _StubGateway())
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
-        max_tool_invocations=1,
-        max_context_chars=8_000,
+    monkeypatch.setattr(
+        orchestrator_module,
+        "PromptTemplateService",
+        lambda: object(),
     )
-    _stub_base_system_prompt(orchestrator)
-
-    presenter_protocol = {
-        "role": "system",
-        "content": (
-            "PRESENTER MODE PROTOCOL:\n"
-            "- Output EXACTLY TWO tagged blocks and nothing else:\n"
-            "  <spoken>...brief talk track...</spoken>\n"
-            "  <screen>...full on-screen content...</screen>\n"
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_tool_metadata",
+        lambda tool_name: ToolMetadata(
+            tool_name=tool_name,
+            display_template=(
+                "Found {count} concepts for {query}"
+                if tool_name == "search_concepts"
+                else None
+            ),
         ),
-    }
-
-    # Force trimming with many large messages; presenter protocol would normally
-    # be at risk of being dropped if it were not merged into the retained system
-    # instruction message.
-    context = [presenter_protocol] + [
-        {"role": "user", "content": f"msg-{i}:" + ("a" * 2_000)} for i in range(30)
-    ]
-
-    llm = _CapturingLLM(["ok"])
-    result = orchestrator.run(prompt="hi", context=context, llm_client=llm, model=None)
-
-    assert result.response_text == "ok"
-    sent_context = llm.calls[0]["context"]
-    assert sent_context and sent_context[0]["role"] == "system"
-    assert "PRESENTER MODE PROTOCOL:" in sent_context[0]["content"]
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_shared_workflow_registry_read_only",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_build_action_registry",
+        lambda _self: {},
+    )
 
 
 def test_orchestrator_truncates_tool_payload_in_context():

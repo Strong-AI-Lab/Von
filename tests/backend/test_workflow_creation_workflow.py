@@ -313,7 +313,7 @@ def test_v2_entity_templates_pass_creation_runtime_verification(
     bootstrap_report = bootstrap_canonical_entity_representation_workflows()
     assert (bootstrap_report.get("template_publication") or {}).get(
         "repo_seed_version"
-    ) == "3"
+    ) == "4"
     _seed_workflow_creation_synthesis_policy()
 
     payload = {

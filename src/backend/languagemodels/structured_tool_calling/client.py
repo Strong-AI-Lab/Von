@@ -5,7 +5,7 @@ All LLM provider implementations (OpenAI, Gemini, Ollama) inherit from LLMClient
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 import logging
 
 from ...services.model_registry_service import (
@@ -20,6 +20,24 @@ from .types import ToolDefinition, LLMResponse
 
 
 logger = logging.getLogger(__name__)
+
+
+def split_request_timeout_from_llm_params(
+    raw_params: Any,
+) -> tuple[dict[str, Any], float | None]:
+    """Separate the caller-owned request deadline from model parameters."""
+
+    params = dict(raw_params) if isinstance(raw_params, Mapping) else {}
+    raw_timeout = params.pop("request_timeout_seconds", None)
+    if raw_timeout is None:
+        raw_timeout = params.pop("timeout_seconds", None)
+    try:
+        timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+    except (TypeError, ValueError):
+        timeout_seconds = None
+    if timeout_seconds is not None:
+        timeout_seconds = max(0.0, min(600.0, timeout_seconds))
+    return params, timeout_seconds
 
 
 def model_supports_custom_temperature(model: str) -> bool:
@@ -46,6 +64,7 @@ def resolve_safe_temperature_for_model(
     temperature: Optional[float],
     *,
     api_surface: str = "chat_completions",
+    profile_concept_id: str | None = None,
 ) -> Optional[float]:
     """Return a temperature that is safe to send for the given model.
 
@@ -62,6 +81,7 @@ def resolve_safe_temperature_for_model(
         parameter="temperature",
         value=temperature,
         api_surface=api_surface,
+        profile_concept_id=profile_concept_id,
     )
     return sanitised if isinstance(sanitised, (int, float)) else None
 
@@ -100,7 +120,8 @@ class LLMClient(ABC):
     provider's API (OpenAI functions, Gemini function calling, etc.).
 
     This interface is designed to be consumed by:
-    - InternalMCPChatOrchestrator (tool invocation loop)
+    - the ordinary adaptive turn engine
+    - explicit workflow MCP/tool runtimes
     - Workflow engine step executors (JVNAUTOSCI-803)
     - Annotation extraction service
     - Any other LLM operation requiring tool calling

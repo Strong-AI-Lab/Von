@@ -449,6 +449,37 @@ def test_rag_namespace_resolver_derives_components_from_explicit_namespace():
     assert report["organisation_concept_id"] == "#V#org"
 
 
+def test_rag_namespace_resolver_rejects_payload_scope_outside_bound_actor():
+    from src.backend.integrations.internal_mcp import catalogue as cat
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
+    )
+
+    with bind_internal_mcp_actor_context_source(
+        "preexisting_authenticated_or_workflow_context",
+        preexisting_actor_context=("#V#user", "#V#org"),
+    ):
+        report = cat._resolve_rag_namespace_from_kwargs(
+            {
+                "namespace": "#V#other_user@other_org",
+                "user_concept_id": "#V#other_user",
+                "organisation_concept_id": "#V#other_org",
+            }
+        )
+
+    assert report["namespace"] is None
+    assert report["namespace_mismatch"] is True
+    assert report["namespace_source"] == "conflict"
+    assert set(report["mismatch_fields"]) == {
+        "namespace",
+        "user_concept_id",
+        "organisation_concept_id",
+    }
+    assert report["derived_namespace"] == "#V#user@org"
+    assert report["user_concept_id"] == "#V#user"
+    assert report["organisation_concept_id"] == "#V#org"
+
+
 def test_rag_list_indexed_fails_closed_on_namespace_mismatch(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

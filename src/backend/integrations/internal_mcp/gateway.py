@@ -15,7 +15,11 @@ from .schemas import (
     normalise_payload_aliases,
     validate_payload,
 )
-from .transport import InternalMCPTransport, TransportResult
+from .transport import (
+    InternalMCPTransport,
+    LateCompletionObserver,
+    TransportResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,28 @@ class MethodDefinition:
     timeout_sec: float | None = None
     description: str | None = None
     write_guardrail: Mapping[str, Any] | None = None
+    ordinary_turn_public: bool = False
+    # Evidence-backed authority/effect exception only. This must not encode
+    # request relevance, preferred routing, or a prescribed solution path.
+    ordinary_turn_excluded_reason: str | None = None
+    # Map capability arguments to values resolved by the trusted entry point.
+    ordinary_turn_trusted_argument_bindings: Mapping[str, str] | None = None
+    # Evidence-backed option-level boundary. The model cannot see or override
+    # these values on an ordinary turn; keep the rest of the capability usable.
+    ordinary_turn_fixed_arguments: Mapping[str, Any] | None = None
+    # Explicitly delegate this write as a bounded ordinary-turn semantic effect.
+    # This is an access/effect ceiling, not a request classifier or preferred
+    # solution route.
+    ordinary_turn_effect: bool = False
+    # Minimum caller window required before an ordinary effect may start.  The
+    # hard timeout remains an upper bound; this separate mechanical threshold
+    # prevents a generic maximum from starving normally fast later effects.
+    # Omission retains the conservative full-hard-window requirement.
+    effect_admission_window_sec: float | None = None
+    # Existing concepts may be changed only when this authoritative forward
+    # subject is scoped to the trusted actor or organisation. Creation effects
+    # leave this unset because their scope is fixed server-side.
+    ordinary_turn_mutation_subject_argument: str | None = None
 
     def resolved_timeout(self, transport: InternalMCPTransport) -> float | None:
         if self.timeout_sec is not None:
@@ -95,6 +121,29 @@ class MethodDefinition:
         if self.category == "read":
             return transport.read_timeout_sec
         return transport.read_timeout_sec
+
+    def resolved_effect_admission_window(
+        self,
+        transport: InternalMCPTransport,
+    ) -> float:
+        hard_timeout = float(
+            self.resolved_timeout(transport) or transport.write_timeout_sec
+        )
+        raw_window = self.effect_admission_window_sec
+        if raw_window is None:
+            return hard_timeout
+        if self.category != "write":
+            raise ValueError(
+                "effect_admission_window_sec is valid only for write methods"
+            )
+        window = float(raw_window)
+        if window <= 0.0:
+            raise ValueError("effect_admission_window_sec must be positive")
+        if window > hard_timeout:
+            raise ValueError(
+                "effect_admission_window_sec cannot exceed the hard timeout"
+            )
+        return window
 
 
 @dataclass
@@ -185,6 +234,33 @@ class MethodCatalogue:
                     dict(definition.write_guardrail)
                     if isinstance(definition.write_guardrail, Mapping)
                     else None
+                ),
+                "ordinary_turn_public": definition.ordinary_turn_public,
+                "ordinary_turn_excluded_reason": (
+                    definition.ordinary_turn_excluded_reason
+                ),
+                "ordinary_turn_trusted_argument_bindings": (
+                    dict(definition.ordinary_turn_trusted_argument_bindings)
+                    if isinstance(
+                        definition.ordinary_turn_trusted_argument_bindings,
+                        Mapping,
+                    )
+                    else None
+                ),
+                "ordinary_turn_fixed_arguments": (
+                    dict(definition.ordinary_turn_fixed_arguments)
+                    if isinstance(
+                        definition.ordinary_turn_fixed_arguments,
+                        Mapping,
+                    )
+                    else None
+                ),
+                "ordinary_turn_effect": definition.ordinary_turn_effect,
+                "effect_admission_window_sec": (
+                    definition.effect_admission_window_sec
+                ),
+                "ordinary_turn_mutation_subject_argument": (
+                    definition.ordinary_turn_mutation_subject_argument
                 ),
                 "input_schema": self._summarise_schema(definition.input_schema),
                 "output_schema": self._summarise_schema(definition.output_schema),
@@ -293,7 +369,13 @@ class InternalMCPGateway:
             yield
 
     def invoke(
-        self, method_name: str, payload: Optional[MutableMapping[str, Any]] = None
+        self,
+        method_name: str,
+        payload: Optional[MutableMapping[str, Any]] = None,
+        *,
+        deadline_monotonic: float | None = None,
+        require_effect_admission_window: bool = False,
+        late_completion_observer: LateCompletionObserver | None = None,
     ) -> TransportResult:
         if not self._enabled:
             raise GatewayDisabledError("Internal MCP gateway is disabled.")
@@ -333,10 +415,71 @@ class InternalMCPGateway:
             raise SchemaValidationError(error_message, stage="input_schema")
 
         timeout = definition.resolved_timeout(self._transport)
+        minimum_execution_window = (
+            definition.resolved_effect_admission_window(self._transport)
+            if require_effect_admission_window
+            else None
+        )
         advisory_timeout = self._transport.advisory_timeout_sec(
             definition.category,
             hard_timeout_sec=float(timeout or self._transport.read_timeout_sec),
         )
+        observed_late_completion = late_completion_observer
+        if late_completion_observer is not None:
+
+            def _observe_validated_late_completion(
+                observation: Dict[str, Any],
+            ) -> None:
+                enriched = dict(observation)
+                result_payload = enriched.get("payload")
+                if enriched.get("outcome") != "late_success":
+                    validation = "handler_error"
+                    valid: bool | None = None
+                    validation_error = None
+                elif enriched.get("payload_truncated") is True:
+                    validation = "indeterminate_truncated"
+                    valid = None
+                    validation_error = "Late handler payload was truncated."
+                elif definition.output_schema is None:
+                    validation = "not_configured"
+                    valid = None
+                    validation_error = None
+                elif not isinstance(result_payload, MutableMapping):
+                    validation = "invalid"
+                    valid = False
+                    validation_error = (
+                        "Output schema provided but late handler returned "
+                        "a non-mapping payload."
+                    )
+                elif result_payload.get("success") is False:
+                    validation = "standard_error_response"
+                    valid = True
+                    validation_error = None
+                else:
+                    try:
+                        valid, validation_errors = validate_payload(
+                            definition.output_schema,
+                            result_payload,
+                        )
+                    except Exception as exc:
+                        valid = False
+                        validation_errors = [type(exc).__name__]
+                    validation = "valid" if valid else "invalid"
+                    validation_error = (
+                        None
+                        if valid
+                        else "; ".join(validation_errors)[:2_000]
+                    )
+                enriched.update(
+                    {
+                        "output_schema_validation": validation,
+                        "output_schema_valid": valid,
+                        "output_schema_error": validation_error,
+                    }
+                )
+                late_completion_observer(enriched)
+
+            observed_late_completion = _observe_validated_late_completion
         try:
             from src.backend.security.access_control import (
                 get_effective_organisation_concept_id,
@@ -413,7 +556,10 @@ class InternalMCPGateway:
                         timeout_sec=timeout,
                         category=definition.category,
                         advisory_timeout_sec=advisory_timeout,
+                        deadline_monotonic=deadline_monotonic,
+                        minimum_execution_window_sec=minimum_execution_window,
                         log_tag=self._log_tag,
+                        late_completion_observer=observed_late_completion,
                     )
             finally:
                 _PREEXISTING_ACTOR_CONTEXT.reset(preexisting_actor_token)
@@ -534,6 +680,27 @@ class InternalMCPGateway:
             return self._catalogue.get(method_name)
         except Exception:
             return None
+
+    def get_method_timeout_sec(self, method_name: str) -> float | None:
+        """Return the configured hard window for one registered method."""
+
+        definition = self.get_method_definition(method_name)
+        return (
+            definition.resolved_timeout(self._transport)
+            if definition is not None
+            else None
+        )
+
+    def get_method_effect_admission_window_sec(
+        self,
+        method_name: str,
+    ) -> float | None:
+        """Return the resolved minimum window for one delegated effect."""
+
+        definition = self.get_method_definition(method_name)
+        if definition is None or not definition.ordinary_turn_effect:
+            return None
+        return definition.resolved_effect_admission_window(self._transport)
 
     def extend_catalogue(self, definitions: Iterable[MethodDefinition]) -> None:
         for definition in definitions:

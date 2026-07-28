@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
 import uuid
 from collections.abc import Mapping
+from time import monotonic
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 import openai
 
-from ..client import LLMClient, LLMClientConfig, resolve_safe_temperature_for_model
+from ..client import (
+    LLMClient,
+    LLMClientConfig,
+    resolve_safe_temperature_for_model,
+    split_request_timeout_from_llm_params,
+)
 from ..transport import (
     API_SURFACE_CHAT_COMPLETIONS,
     API_SURFACE_RESPONSES,
@@ -27,6 +34,7 @@ from ..types import (
     LLMContinuation,
     LLMResponse,
     StructuredToolCapabilityRejectedError,
+    StructuredToolContextLimitError,
     StructuredToolProtocolError,
     StructuredToolTransportError,
     ToolCall,
@@ -45,30 +53,6 @@ from ....services.model_parameter_service import (
 logger = logging.getLogger(__name__)
 
 
-def _split_request_timeout_from_llm_params(
-    raw_params: Any,
-) -> tuple[dict[str, Any], float | None]:
-    """Separate the caller-owned request deadline from model parameters.
-
-    ``request_timeout_seconds`` is a transport boundary, not a model
-    capability.  Keeping it out of the represented parameter projection
-    prevents it from being silently discarded by model-parameter filtering
-    while still allowing the OpenAI SDK to cancel the underlying request.
-    """
-
-    params = dict(raw_params) if isinstance(raw_params, Mapping) else {}
-    raw_timeout = params.pop("request_timeout_seconds", None)
-    if raw_timeout is None:
-        raw_timeout = params.pop("timeout_seconds", None)
-    try:
-        timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
-    except (TypeError, ValueError):
-        timeout_seconds = None
-    if timeout_seconds is not None:
-        timeout_seconds = max(1.0, min(600.0, timeout_seconds))
-    return params, timeout_seconds
-
-
 def _value(item: Any, key: str, default: Any = None) -> Any:
     if isinstance(item, Mapping):
         return item.get(key, default)
@@ -84,6 +68,35 @@ def _provider_item_mapping(item: Any) -> dict[str, Any]:
     return {}
 
 
+def _raw_reasoning_effort(raw: Any) -> Any:
+    if not isinstance(raw, Mapping):
+        return None
+    payload = raw.get("model_parameters")
+    if not isinstance(payload, Mapping):
+        payload = raw
+    effort = payload.get("reasoning_effort")
+    if effort is None:
+        effort = payload.get("reasoningEffort")
+    nested = payload.get("reasoning")
+    if effort is None and isinstance(nested, Mapping):
+        effort = nested.get("effort")
+    return effort
+
+
+def _merge_provider_parameter_kwargs(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+) -> None:
+    """Merge provider projections without discarding adjacent nested options."""
+
+    for key, value in source.items():
+        current = target.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            target[key] = {**dict(current), **dict(value)}
+        else:
+            target[key] = value
+
+
 class OpenAIClient(LLMClient):
     """OpenAI client whose wire surface is selected from represented profiles."""
 
@@ -94,8 +107,28 @@ class OpenAIClient(LLMClient):
             kwargs["api_key"] = config.api_key
         if config.base_url:
             kwargs["base_url"] = config.base_url
-        self._client = openai.AsyncOpenAI(**kwargs)
-        self._sync_client = openai.OpenAI(**kwargs)
+        self._client_kwargs = kwargs
+        self._client: Any | None = None
+
+    async def aclose(self) -> None:
+        """Close a lazily-created native-async client on its owning loop."""
+
+        client = self._client
+        self._client = None
+        await self._close_request_client(client)
+
+    @staticmethod
+    async def _close_request_client(client: Any) -> None:
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if not callable(close):
+            close = getattr(client, "aclose", None)
+        if not callable(close):
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
     async def generate_with_tools(
         self,
@@ -109,22 +142,21 @@ class OpenAIClient(LLMClient):
             self._validate_input_schema(tool)
 
         request_kwargs = dict(kwargs)
+        request_client_base = request_kwargs.pop("_request_client", None)
+        if request_client_base is None:
+            if self._client is None:
+                self._client = openai.AsyncOpenAI(**self._client_kwargs)
+            request_client_base = self._client
         request_model = request_kwargs.pop("model", None) or self.config.model
         raw_llm_params = request_kwargs.pop("llm_params", None)
-        llm_params, request_timeout_seconds = _split_request_timeout_from_llm_params(
+        llm_params, request_timeout_seconds = split_request_timeout_from_llm_params(
             raw_llm_params
         )
-        request_client = self._client
-        if request_timeout_seconds is not None:
-            # The SDK's default retry policy would turn a represented
-            # per-record deadline into as many as three attempts.  A caller-
-            # owned workflow budget is a total transport boundary, so bind it
-            # to a no-retry request client rather than merely passing a
-            # per-attempt ``timeout`` keyword.
-            request_client = self._client.with_options(
-                timeout=request_timeout_seconds,
-                max_retries=0,
-            )
+        request_deadline_monotonic = (
+            monotonic() + request_timeout_seconds
+            if request_timeout_seconds is not None
+            else None
+        )
         raw_continuation = request_kwargs.pop("continuation", None)
         continuation = LLMContinuation.from_value(raw_continuation)
         if raw_continuation is not None and continuation is None:
@@ -170,6 +202,19 @@ class OpenAIClient(LLMClient):
             selected_decision: StructuredToolTransportDecision,
         ) -> LLMResponse:
             selected_request_kwargs = dict(request_kwargs)
+            request_client = request_client_base
+            if request_deadline_monotonic is not None:
+                remaining_seconds = request_deadline_monotonic - monotonic()
+                if remaining_seconds <= 0.0:
+                    raise TimeoutError(
+                        "OpenAI structured-tool request deadline exhausted."
+                    )
+                # Disable SDK retries and give each represented surface attempt
+                # only the time left in the one caller-owned request budget.
+                request_client = request_client_base.with_options(
+                    timeout=remaining_seconds,
+                    max_retries=0,
+                )
             if selected_decision.effective_api_surface == API_SURFACE_RESPONSES:
                 return await self._generate_responses(
                     prompt=prompt,
@@ -205,6 +250,16 @@ class OpenAIClient(LLMClient):
         except Exception as exc:
             safe_error = self._sanitise_provider_error(exc)
             self.logger.error("OpenAI structured-tool API error: %s", safe_error)
+            if self._has_exact_context_length_exceeded_code(exc):
+                raise StructuredToolContextLimitError(
+                    "OpenAI rejected the structured-tool request because its "
+                    f"context exceeded the model limit: {safe_error}",
+                    decision={
+                        **decision.to_telemetry(),
+                        **self._provider_error_metadata(exc),
+                        "failure_kind": "provider_context_length_exceeded",
+                    },
+                ) from exc
             if self._looks_like_tool_call_lineage_rejection(exc):
                 raise StructuredToolProtocolError(
                     "OpenAI rejected a function-call output whose provider call "
@@ -275,6 +330,25 @@ class OpenAIClient(LLMClient):
                         alternate_safe_error = self._sanitise_provider_error(
                             alternate_exc
                         )
+                        if self._has_exact_context_length_exceeded_code(
+                            alternate_exc
+                        ):
+                            raise StructuredToolContextLimitError(
+                                "OpenAI rejected the advertised alternate "
+                                "structured-tool surface because its context "
+                                f"exceeded the model limit: {alternate_safe_error}",
+                                decision={
+                                    **alternate_decision.to_telemetry(),
+                                    **self._provider_error_metadata(alternate_exc),
+                                    "surface_fallback_used": True,
+                                    "initial_effective_api_surface": (
+                                        decision.effective_api_surface
+                                    ),
+                                    "failure_kind": (
+                                        "provider_context_length_exceeded"
+                                    ),
+                                },
+                            ) from alternate_exc
                         if self._looks_like_tool_call_lineage_rejection(alternate_exc):
                             raise StructuredToolProtocolError(
                                 "OpenAI rejected a function-call output whose "
@@ -411,14 +485,33 @@ class OpenAIClient(LLMClient):
             dict(llm_params) if isinstance(llm_params, Mapping) else {}
         )
         effective_parameters: dict[str, Any] = {}
+        direct_reasoning_effort = request_kwargs.pop("reasoning_effort", None)
+        if (
+            _raw_reasoning_effort(llm_params) is None
+            and direct_reasoning_effort is not None
+        ):
+            requested_parameters["reasoning_effort"] = direct_reasoning_effort
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_chat_completions_kwargs_from_model_parameters(
+                    {"reasoning_effort": direct_reasoning_effort},
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
+            )
 
         if self.config.max_tokens is not None:
             request_kwargs["max_tokens"] = self.config.max_tokens
         if isinstance(llm_params, Mapping) and llm_params:
-            effective_parameters = openai_chat_completions_kwargs_from_model_parameters(
-                llm_params, model=request_model
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_chat_completions_kwargs_from_model_parameters(
+                    llm_params,
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
             )
-            request_kwargs.update(effective_parameters)
+        _merge_provider_parameter_kwargs(request_kwargs, effective_parameters)
         if (
             tools
             and "reasoning_effort" in request_kwargs
@@ -430,13 +523,26 @@ class OpenAIClient(LLMClient):
                 "Omitting non-zero reasoning_effort for a represented Chat "
                 "Completions structured-tool profile."
             )
+        if (
+            "temperature" not in requested_parameters
+            and "temperature" in request_kwargs
+        ):
+            requested_parameters["temperature"] = request_kwargs["temperature"]
+        requested_temperature = requested_parameters.get(
+            "temperature",
+            request_kwargs.get("temperature", self.config.temperature),
+        )
+        request_kwargs.pop("temperature", None)
+        effective_parameters.pop("temperature", None)
         safe_temperature = resolve_safe_temperature_for_model(
             request_model,
-            self.config.temperature,
+            requested_temperature,
             api_surface=API_SURFACE_CHAT_COMPLETIONS,
+            profile_concept_id=decision.profile_concept_id,
         )
         if safe_temperature is not None:
             request_kwargs["temperature"] = safe_temperature
+            effective_parameters["temperature"] = safe_temperature
 
         response = await request_client.chat.completions.create(
             model=request_model,
@@ -497,6 +603,31 @@ class OpenAIClient(LLMClient):
             dict(llm_params) if isinstance(llm_params, Mapping) else {}
         )
         effective_parameters: dict[str, Any] = {}
+        direct_reasoning_effort = request_kwargs.pop("reasoning_effort", None)
+        raw_direct_reasoning = request_kwargs.pop("reasoning", None)
+        if isinstance(raw_direct_reasoning, Mapping):
+            direct_reasoning = dict(raw_direct_reasoning)
+            nested_effort = direct_reasoning.pop("effort", None)
+            if direct_reasoning_effort is None:
+                direct_reasoning_effort = nested_effort
+            if direct_reasoning:
+                request_kwargs["reasoning"] = direct_reasoning
+        elif raw_direct_reasoning is not None:
+            # An invalid raw shape must not bypass represented reasoning policy.
+            requested_parameters["reasoning"] = raw_direct_reasoning
+        if (
+            _raw_reasoning_effort(llm_params) is None
+            and direct_reasoning_effort is not None
+        ):
+            requested_parameters["reasoning_effort"] = direct_reasoning_effort
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_responses_kwargs_from_model_parameters(
+                    {"reasoning_effort": direct_reasoning_effort},
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
+            )
         input_items = self._build_responses_input(
             prompt=prompt,
             context=context,
@@ -506,18 +637,35 @@ class OpenAIClient(LLMClient):
         if self.config.max_tokens is not None:
             request_kwargs["max_output_tokens"] = self.config.max_tokens
         if isinstance(llm_params, Mapping) and llm_params:
-            effective_parameters = openai_responses_kwargs_from_model_parameters(
-                llm_params,
-                model=request_model,
+            _merge_provider_parameter_kwargs(
+                effective_parameters,
+                openai_responses_kwargs_from_model_parameters(
+                    llm_params,
+                    model=request_model,
+                    profile_concept_id=decision.profile_concept_id,
+                ),
             )
-            request_kwargs.update(effective_parameters)
+        _merge_provider_parameter_kwargs(request_kwargs, effective_parameters)
+        if (
+            "temperature" not in requested_parameters
+            and "temperature" in request_kwargs
+        ):
+            requested_parameters["temperature"] = request_kwargs["temperature"]
+        requested_temperature = requested_parameters.get(
+            "temperature",
+            request_kwargs.get("temperature", self.config.temperature),
+        )
+        request_kwargs.pop("temperature", None)
+        effective_parameters.pop("temperature", None)
         safe_temperature = resolve_safe_temperature_for_model(
             request_model,
-            self.config.temperature,
+            requested_temperature,
             api_surface=API_SURFACE_RESPONSES,
+            profile_concept_id=decision.profile_concept_id,
         )
         if safe_temperature is not None:
             request_kwargs["temperature"] = safe_temperature
+            effective_parameters["temperature"] = safe_temperature
         request_kwargs["store"] = decision.store
         if decision.continuation_mode == "stateless" and not decision.store:
             requested_include = request_kwargs.get("include")
@@ -586,20 +734,31 @@ class OpenAIClient(LLMClient):
         system_message: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(
-                self.generate_with_tools(
+        # This adapter is routinely constructed once per synchronous model
+        # request. Keep its async HTTP client inside the same one-shot loop and
+        # close it before that loop goes away; otherwise httpx may later try to
+        # finalise a connection on an already-closed loop.
+        async def _run_request() -> LLMResponse:
+            request_client = openai.AsyncOpenAI(**self._client_kwargs)
+            try:
+                return await self.generate_with_tools(
                     prompt,
                     available_tools,
                     context,
                     system_message,
+                    _request_client=request_client,
                     **kwargs,
                 )
-            )
-        finally:
-            loop.close()
+            finally:
+                try:
+                    await self._close_request_client(request_client)
+                except Exception as exc:  # pragma: no cover - defensive cleanup
+                    self.logger.warning(
+                        "OpenAI structured-tool client cleanup failed: %s",
+                        type(exc).__name__,
+                    )
+
+        return asyncio.run(_run_request())
 
     def _build_chat_messages(
         self,
@@ -895,6 +1054,7 @@ class OpenAIClient(LLMClient):
     ) -> Dict[str, Any]:
         chat_tool = self._tool_definition_to_dict(tool)
         function = dict(chat_tool["function"])
+        function.setdefault("strict", False)
         return {"type": "function", **function}
 
     @staticmethod
@@ -1625,6 +1785,17 @@ class OpenAIClient(LLMClient):
         )
 
     @staticmethod
+    def _has_exact_context_length_exceeded_code(exc: Exception) -> bool:
+        """Use only the provider's structured code to identify context overflow."""
+
+        metadata = OpenAIClient._provider_error_metadata(exc)
+        code = metadata.get("provider_error_code")
+        return (
+            isinstance(code, str)
+            and code.strip().lower() == "context_length_exceeded"
+        )
+
+    @staticmethod
     def _looks_like_capability_rejection(exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None)
         text = str(exc).lower()
@@ -1656,7 +1827,14 @@ class OpenAIClient(LLMClient):
         if isinstance(status_code, int):
             metadata["provider_status_code"] = status_code
         body = getattr(exc, "body", None)
-        error_body = body.get("error") if isinstance(body, Mapping) else None
+        nested_error_body = body.get("error") if isinstance(body, Mapping) else None
+        error_body = (
+            nested_error_body
+            if isinstance(nested_error_body, Mapping)
+            else body
+            if isinstance(body, Mapping)
+            else None
+        )
         for key in ("code", "param", "type"):
             value = getattr(exc, key, None)
             if value is None and isinstance(error_body, Mapping):

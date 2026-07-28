@@ -10,11 +10,13 @@ import asyncio
 import logging
 import os
 import shlex
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
-from ...utils.runtime_env import apply_repo_dotenv_overrides, clean_env_value
+from ...utils.runtime_env import clean_env_value, read_repo_dotenv_values
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = "[github_proxy]"
@@ -28,6 +30,19 @@ GITHUB_PROXY_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     *GITHUB_TOKEN_ENV_KEYS,
     "VON_GITHUB_MCP_COMMAND",
     "VON_GITHUB_MCP_ARGS",
+)
+_GITHUB_SUBPROCESS_PASSTHROUGH_KEYS: tuple[str, ...] = (
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
 )
 
 
@@ -77,19 +92,29 @@ class GitHubMCPProxy:
         }
 
 
-def _build_github_env() -> Dict[str, str]:
-    applied_overrides = apply_repo_dotenv_overrides(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
-    if applied_overrides:
+def _github_source_env() -> Dict[str, str]:
+    dotenv_values = read_repo_dotenv_values(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
+    if dotenv_values:
         logger.info(
-            "%s Applied repo-root .env overrides for %s GitHub key(s).",
+            "%s Loaded repo-root .env values for %s GitHub subprocess key(s).",
             _LOG_TAG,
-            len(applied_overrides),
+            len(dotenv_values),
         )
 
     env = os.environ.copy()
+    env.update(dotenv_values)
+    return env
+
+
+def _build_github_env(
+    source_env: Mapping[str, str] | None = None,
+) -> Dict[str, str]:
+    resolved_source = (
+        dict(source_env) if source_env is not None else _github_source_env()
+    )
 
     # Resolve token from env vars in priority order and log which key was used.
-    resolved_key, token = resolve_github_token(env)
+    resolved_key, token = resolve_github_token(resolved_source)
 
     if not token:
         raise GitHubProxyError(
@@ -98,11 +123,10 @@ def _build_github_env() -> Dict[str, str]:
         )
 
     logger.info(
-        "%s Token resolved from %s (length=%d, prefix=%s...)",
+        "%s Token resolved from %s (length=%d)",
         _LOG_TAG,
         resolved_key,
         len(token),
-        token[:12] if len(token) > 12 else "***",
     )
 
     # GITHUB_TOKEN / GH_TOKEN are low-priority fallbacks that VS Code may
@@ -116,6 +140,31 @@ def _build_github_env() -> Dict[str, str]:
             _LOG_TAG,
             resolved_key,
         )
+
+    runtime_root = Path(tempfile.gettempdir()) / "von-github-mcp"
+    runtime_home = runtime_root / "home"
+    runtime_cache = runtime_root / "cache"
+    runtime_tmp = runtime_root / "tmp"
+    npm_cache = runtime_root / "npm-cache"
+    for path in (runtime_home, runtime_cache, runtime_tmp, npm_cache):
+        path.mkdir(parents=True, exist_ok=True)
+
+    env = {
+        key: value
+        for key in _GITHUB_SUBPROCESS_PASSTHROUGH_KEYS
+        if (value := resolved_source.get(key))
+    }
+    env.update(
+        {
+            "HOME": str(runtime_home),
+            "USERPROFILE": str(runtime_home),
+            "XDG_CACHE_HOME": str(runtime_cache),
+            "TMPDIR": str(runtime_tmp),
+            "TEMP": str(runtime_tmp),
+            "TMP": str(runtime_tmp),
+            "NPM_CONFIG_CACHE": str(npm_cache),
+        }
+    )
 
     # Populate common token keys used by GitHub MCP server variants.
     env["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
@@ -138,8 +187,12 @@ def resolve_github_token(
 
 
 def _build_github_config() -> GitHubProxyConfig:
-    command = str(os.getenv("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
-    raw_args = os.getenv("VON_GITHUB_MCP_ARGS")
+    source_env = _github_source_env()
+    env = _build_github_env(source_env)
+    command = (
+        str(source_env.get("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
+    )
+    raw_args = source_env.get("VON_GITHUB_MCP_ARGS")
     if isinstance(raw_args, str) and raw_args.strip():
         args = shlex.split(raw_args.strip())
     else:
@@ -149,7 +202,7 @@ def _build_github_config() -> GitHubProxyConfig:
     return GitHubProxyConfig(
         command=command,
         args=args,
-        env=_build_github_env(),
+        env=env,
     )
 
 
@@ -166,9 +219,9 @@ async def get_github_proxy() -> GitHubMCPProxy:
             config = _build_github_config()
             _proxy_instance = GitHubMCPProxy(config)
             logger.info(
-                "%s Initialised GitHub MCP proxy via command=%s args=%s",
+                "%s Initialised GitHub MCP proxy via command=%s arg_count=%d",
                 _LOG_TAG,
                 config.command,
-                config.args,
+                len(config.args),
             )
         return _proxy_instance

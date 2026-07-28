@@ -358,8 +358,8 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
             if concept:
                 concept["notes"] = get_concept_notes(concept)
 
-                # Use shared enrichment logic for names and descriptions
-                # (includes migrate-on-read for legacy fields)
+                # Use shared, non-mutating enrichment logic for names and
+                # descriptions.
                 from ...services.concept_service import (
                     enrich_concept_with_text_relations,
                 )
@@ -379,9 +379,8 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
                     concept["description"] = descriptions_from_relations[0].get(
                         "text", ""
                     )
-                else:
-                    # Remove legacy field from response if no description in text relations
-                    concept.pop("description", None)
+                # When no relation exists, retain any readable legacy description
+                # in the response. Migration is an explicit maintenance action.
 
             return jsonify(concept), 200
         except ConceptNotFoundError as e:

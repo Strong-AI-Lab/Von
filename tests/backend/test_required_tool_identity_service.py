@@ -16,9 +16,6 @@ from src.backend.services.selected_workflow_handoff_service import (
     evaluate_workflow_required_effects_tool_policy,
 )
 from src.backend.services.turn_execution_record_service import _tool_requirement_key
-from src.backend.workflows.durable.turn_execution_runtime_support import (
-    _missing_required_tools_from_invocations,
-)
 from src.backend.workflows.tool_invocation_evidence import (
     derive_tool_invocation_records_from_step_envelopes,
 )
@@ -213,16 +210,7 @@ def test_selected_workflow_policy_rejects_other_or_dynamic_workflow_mcp_tool(
     assert policy["reason_code"] == "workflow_required_effect_tool_not_allowed"
 
 
-def test_runtime_and_step_evidence_use_the_shared_identity() -> None:
-    invocations = [{"tool": "fetch_concept", "status": "ok", "payload": {}}]
-    assert (
-        _missing_required_tools_from_invocations(
-            required_tools=["vontology:fetch_concept"],
-            invocations=invocations,
-        )
-        == []
-    )
-
+def test_step_evidence_uses_the_shared_identity() -> None:
     records = derive_tool_invocation_records_from_step_envelopes(
         [
             {

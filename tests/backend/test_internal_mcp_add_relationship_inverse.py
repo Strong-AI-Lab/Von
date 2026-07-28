@@ -114,3 +114,39 @@ def test_add_relationship_when_forward_exists_still_ensures_inverse(monkeypatch)
     assert result["success"] is True
     # Forward relationship already existed, but inverse may have been added
     assert result.get("inverse", {}).get("added") is True
+
+
+def test_add_relationship_surfaces_inverse_failure_as_partial(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda *_args, **_kwargs: {"concept_id": "#V#source"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {
+            "success": True,
+            "predicate": "is_a_type_of",
+            "target_id": "#V#target",
+            "forward_modified": True,
+            "inverse_predicate": "has_subtype",
+            "inverse_error": "inverse update unavailable",
+        },
+    )
+
+    result = catalogue._add_relationship(
+        source_id="#V#source",
+        predicate="typeOf",
+        target="#V#target",
+    )
+
+    assert result["success"] is True
+    assert result["effect_status"] == "partial"
+    assert result["changed"] is True
+    assert result["partial_failures"] == [
+        {
+            "stage": "inverse_relationship",
+            "error": "inverse update unavailable",
+        }
+    ]

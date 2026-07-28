@@ -92,3 +92,30 @@ def test_model_parameter_registry_override_drives_provider_mapping(monkeypatch) 
         {"reasoning_effort": "future"},
         model="gpt-5.5",
     ) == {"reasoning_effort": "future"}
+
+
+def test_provider_mapping_scopes_registry_policy_to_selected_profile(
+    monkeypatch,
+) -> None:
+    import src.backend.services.model_parameter_service as mod
+
+    profile_ids: list[str | None] = []
+
+    def registry_lookup(**kwargs):
+        profile_ids.append(kwargs.get("profile_concept_id"))
+        return {
+            "action": "allow",
+            "allowed_values": ["low"],
+            "fixed_value": None,
+            "source": "vontology_graph",
+        }
+
+    monkeypatch.setattr(mod, "_registry_parameter_policy", registry_lookup)
+
+    assert mod.openai_responses_kwargs_from_model_parameters(
+        {"reasoning_effort": "low"},
+        model="gpt-5.6-terra",
+        profile_concept_id="#V#selected_responses_profile",
+    ) == {"reasoning": {"effort": "low"}}
+    assert profile_ids
+    assert set(profile_ids) == {"#V#selected_responses_profile"}

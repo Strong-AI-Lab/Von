@@ -8,6 +8,7 @@ while reusing the existing Flask endpoint logic.
 import sys
 import os
 import asyncio
+import concurrent.futures
 import importlib
 import json
 import logging
@@ -63,10 +64,6 @@ if TYPE_CHECKING:
     from src.backend.services.annotation_extraction_service import extract_annotations
     from src.backend.services.concept_merge_service import merge_concepts
     from src.backend.services.settings_service import (
-        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
-        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
-        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
-        INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
         get_preferred_language,
         get_setting,
         resolve_llm_setting,
@@ -340,10 +337,6 @@ _bind_imports(
         "resolve_llm_setting",
         "get_preferred_language",
         "get_setting",
-        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT",
-        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX",
-        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN",
-        "INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT",
     ],
 )
 _bind_imports(
@@ -417,6 +410,7 @@ _bind_imports(
         "_chat_history_get_debug_entry",
         "_chat_history_get_segments",
         "_conversation_telemetry_get_locator",
+        "_mongo_query_diagnostics_report",
         "_turn_execution_get",
         "_turn_execution_get_diagnostics",
         "_turn_execution_get_live_progress",
@@ -505,6 +499,10 @@ _LOG = logging.getLogger(__name__)
 
 _STDIO_MAX_RESPONSE_CHARS_DEFAULT = 100_000
 _STDIO_MAX_RESPONSE_CHARS_MIN = 10_000
+_VON_CHAT_RUN_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="von_chat_run",
+)
 
 _TOOL_LIST_CACHE: list[Tool] | None = None
 _TOOL_LIST_CACHE_PATH = (
@@ -890,7 +888,6 @@ async def _run_blocking_with_timeout(func, *, timeout_seconds: float):
     """
 
     import asyncio
-    import concurrent.futures
     import os
     import threading
 
@@ -901,29 +898,26 @@ async def _run_blocking_with_timeout(func, *, timeout_seconds: float):
         thread_id_holder["thread_id"] = threading.get_ident()
         return func()
 
-    # Use a dedicated executor so we can reliably capture the worker thread ID.
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="von_chat_run"
-    ) as executor:
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(executor, _wrapped)
-        try:
-            if timeout_seconds <= 0:
-                return await future
-            return await asyncio.wait_for(future, timeout=timeout_seconds)
-        except asyncio.TimeoutError as exc:
-            raise VonChatRunTimeout(
-                timeout_seconds=timeout_seconds,
-                pid=pid,
-                thread_id=thread_id_holder["thread_id"],
-            ) from exc
+    # A shared bounded pool prevents repeated timed-out calls from creating an
+    # unbounded family of live threads. A running Python thread cannot be
+    # killed safely, so the ordinary chat worker is read-only and its result is
+    # isolated by the cancelled asyncio future.
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_VON_CHAT_RUN_EXECUTOR, _wrapped)
+    try:
+        if timeout_seconds <= 0:
+            return await future
+        return await asyncio.wait_for(future, timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        raise VonChatRunTimeout(
+            timeout_seconds=timeout_seconds,
+            pid=pid,
+            thread_id=thread_id_holder["thread_id"],
+        ) from exc
 
 
 class _RestrictedGateway:
-    """Gateway wrapper used by `von_chat_run`.
-
-    When writes are not allowed, blocks non-read-category tools.
-    """
+    """Read-capability view of the gateway used by ``von_chat_run``."""
 
     def __init__(self, *, gateway: Any, allow_writes: bool) -> None:
         self._gateway: Any = gateway
@@ -934,18 +928,52 @@ class _RestrictedGateway:
         return self._gateway.enabled
 
     def describe_methods(self) -> dict[str, dict[str, Any]]:
-        return self._gateway.describe_methods()
+        methods = self._gateway.describe_methods()
+        if self._allow_writes:
+            return methods
+        return {
+            name: metadata
+            for name, metadata in methods.items()
+            if metadata.get("category") == "read"
+        }
 
-    def invoke(self, method_name: str, payload: dict[str, Any] | None = None):
+    def get_method_definition(self, method_name: str) -> Any:
+        definition = self._gateway.get_method_definition(method_name)
+        if (
+            self._allow_writes
+            or definition is None
+            or getattr(definition, "category", None) == "read"
+        ):
+            return definition
+        return None
+
+    def get_method_timeout_sec(self, method_name: str) -> float | None:
+        return self._gateway.get_method_timeout_sec(method_name)
+
+    def invoke(
+        self,
+        method_name: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        deadline_monotonic: float | None = None,
+        late_completion_observer: Any | None = None,
+        require_effect_admission_window: bool = False,
+    ):
         if not self._allow_writes:
             meta = self._gateway.describe_methods().get(method_name) or {}
             category = meta.get("category")
             if category != "read":
                 raise PermissionError(
-                    "Write tools are disabled for von_chat_run. "
-                    "Re-run with allow_writes=true and set VON_MCP_ALLOW_WRITES=1."
+                    "von_chat_run delegates read capabilities only. Use an "
+                    "explicit authorised effect tool or workflow for writes."
                 )
-        return self._gateway.invoke(method_name, payload)
+        return self._gateway.invoke(
+            method_name,
+            payload,
+            deadline_monotonic=deadline_monotonic,
+            late_completion_observer=late_completion_observer,
+            require_effect_admission_window=require_effect_admission_window,
+        )
 
 
 @app.list_tools()
@@ -1218,9 +1246,10 @@ async def _handle_find_concepts_by_name(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
-    from src.backend.integrations.internal_mcp.orchestrator import (
-        InternalMCPChatOrchestrator,
-        ToolCallParsingError,
+    import secrets
+
+    from src.backend.services.adaptive_turn_service import (
+        execute_adaptive_turn,
     )
     from src.backend.languagemodels.llm_interface import (
         get_active_model_name,
@@ -1298,7 +1327,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         else "tool_payload_fallback"
     )
     try:
-        resolve_provenance_bound_workflow_actor_scope(
+        actor_scope = resolve_provenance_bound_workflow_actor_scope(
             claimed_user_id=user_concept_id,
             claimed_org_id=org_concept_id,
             claimed_namespace=user_namespace,
@@ -1321,31 +1350,85 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
                 }
             )
         ]
-    gmail_profile = (
+    user_concept_id = actor_scope.user_concept_id
+    org_concept_id = actor_scope.organisation_concept_id
+    user_namespace = actor_scope.namespace
+    requested_gmail_profile = (
         arguments.get("gmail_profile")
         if isinstance(arguments.get("gmail_profile"), str)
         else None
     )
+    gmail_profile: str | None = None
+    if user_concept_id:
+        from src.backend.integrations.google.gmail_service import (
+            list_profile_ids_from_env,
+        )
+        from src.backend.services.mail_profile_resource_vontology_service import (
+            resolve_authorised_gmail_profile_for_user,
+        )
+        from src.backend.security.access_control import override_current_actor
+
+        with override_current_actor(user_concept_id, org_concept_id):
+            gmail_authority = resolve_authorised_gmail_profile_for_user(
+                user_concept_id=user_concept_id,
+                requested_profile_id=requested_gmail_profile,
+            )
+        resolved_profile = gmail_authority.get("profile_id")
+        if gmail_authority.get("success") and isinstance(
+            resolved_profile,
+            str,
+        ):
+            if resolved_profile in set(list_profile_ids_from_env()):
+                gmail_profile = resolved_profile
+            elif requested_gmail_profile:
+                return [
+                    _json_text(
+                        {
+                            "success": False,
+                            "error_code": (
+                                "authorised_gmail_profile_unavailable"
+                            ),
+                            "error": (
+                                "The requested Gmail profile is represented "
+                                "as authorised for this actor but is not "
+                                "configured in this runtime."
+                            ),
+                        }
+                    )
+                ]
+        elif requested_gmail_profile:
+            return [
+                _json_text(
+                    {
+                        "success": False,
+                        "error_code": "gmail_profile_not_authorised",
+                        "error": (
+                            "The requested Gmail profile is not represented "
+                            "as authorised for this actor."
+                        ),
+                    }
+                )
+            ]
+    elif requested_gmail_profile:
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error_code": "gmail_profile_authentication_required",
+                    "error": (
+                        "Selecting a Gmail profile requires an authenticated "
+                        "actor."
+                    ),
+                }
+            )
+        ]
     auxiliary_system_prompt = (
         arguments.get("auxiliary_system_prompt")
         if isinstance(arguments.get("auxiliary_system_prompt"), str)
         else None
     )
 
-    try:
-        max_tool_invocations = int(
-            arguments.get(
-                "max_tool_invocations", INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
-            )
-        )
-    except Exception:
-        max_tool_invocations = INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
-    max_tool_invocations = max(
-        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
-        min(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX, max_tool_invocations),
-    )
-
-    write_access_allowed, access_profile, _write_policy = _evaluate_stdio_write_access(
+    _write_access_allowed, access_profile, _write_policy = _evaluate_stdio_write_access(
         "von_chat_run",
         arguments,
     )
@@ -1353,31 +1436,28 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
 
     raw_allow_writes = arguments.get("allow_writes")
     allow_writes_requested = (
-        _coerce_bool_argument(raw_allow_writes, default=write_access_allowed)
+        _coerce_bool_argument(raw_allow_writes, default=False)
         if raw_allow_writes is not None
-        else write_access_allowed
+        else False
     )
-    raw_dry_run = arguments.get("dry_run")
-    dry_run = (
-        _coerce_bool_argument(raw_dry_run, default=not allow_writes_requested)
-        if raw_dry_run is not None
-        else not allow_writes_requested
-    )
-
-    if allow_writes_requested and not write_access_allowed and not dry_run:
+    if allow_writes_requested:
         return [
             _json_text(
                 {
                     "success": False,
+                    "error_code": "von_chat_run_read_only",
                     "error": (
-                        "Write-category tools are blocked by the current coding-agent "
-                        "MCP access profile."
+                        "von_chat_run is an adaptive read-only entry point. Use "
+                        "an explicit authorised effect tool or workflow for writes."
                     ),
+                    "dry_run": True,
+                    "allow_writes": False,
                     "access_profile": access_profile_summary,
                 }
             )
         ]
-    effective_allow_writes = allow_writes_requested and not dry_run
+    dry_run = True
+    effective_allow_writes = False
 
     try:
         max_string_chars = int(arguments.get("max_string_chars", 8000))
@@ -1386,33 +1466,40 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
     max_string_chars = max(256, min(20000, max_string_chars))
 
     try:
-        max_context_chars = int(arguments.get("max_context_chars", 120000))
-    except Exception:
-        max_context_chars = 120000
-    max_context_chars = max(4000, min(2_000_000, max_context_chars))
-
-    try:
-        max_tool_result_chars = int(arguments.get("max_tool_result_chars", 20000))
-    except Exception:
-        max_tool_result_chars = 20000
-    max_tool_result_chars = max(2000, min(1_000_000, max_tool_result_chars))
-
-    try:
-        max_tool_result_field_chars = int(
-            arguments.get("max_tool_result_field_chars", 8000)
-        )
-    except Exception:
-        max_tool_result_field_chars = 8000
-    max_tool_result_field_chars = max(1000, min(200_000, max_tool_result_field_chars))
-
-    try:
         timeout_seconds = float(arguments.get("timeout_seconds", 90))
     except Exception:
         timeout_seconds = 90.0
     timeout_seconds = max(1.0, min(600.0, timeout_seconds))
 
     raw_context = arguments.get("context")
-    context = raw_context if isinstance(raw_context, list) else None
+    context = (
+        [dict(item) for item in raw_context if isinstance(item, dict)]
+        if isinstance(raw_context, list)
+        else []
+    )
+    preferred_language = get_preferred_language()
+    if isinstance(preferred_language, str) and preferred_language.strip():
+        context.append(
+            {
+                "role": "system",
+                "content": (
+                    "Trusted response-language preference: "
+                    f"{preferred_language.strip()}."
+                ),
+            }
+        )
+    if auxiliary_system_prompt and auxiliary_system_prompt.strip():
+        # This field is caller payload, not server authority. Preserve it as
+        # ordinary context rather than escalating it to a system instruction.
+        context.append(
+            {
+                "role": "user",
+                "content": (
+                    "Caller-provided supplementary context:\n"
+                    f"{auxiliary_system_prompt.strip()}"
+                ),
+            }
+        )
 
     llm_client = get_llm_client()
     catalogue = build_default_catalogue()
@@ -1426,86 +1513,95 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         ),
     )
     gateway = _RestrictedGateway(
-        gateway=base_gateway, allow_writes=effective_allow_writes
-    )
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        logger=_LOG.getChild("von_chat_run"),
-        max_tool_invocations=max_tool_invocations,
-        tool_batch_cap=INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
-        default_gmail_profile=None,
-        max_context_chars=max_context_chars,
-        max_tool_result_chars=max_tool_result_chars,
-        max_tool_result_field_chars=max_tool_result_field_chars,
+        gateway=base_gateway,
+        allow_writes=False,
     )
 
     try:
 
-        def _run_orchestrator_sync():
+        def _run_adaptive_turn_sync():
             # ContextVars are not propagated by run_in_executor.  Bind actor
-            # provenance inside the worker thread so every nested direct or MCP
-            # workflow launch observes the same authority boundary.
+            # provenance inside the worker thread so each delegated read sees
+            # the same trusted authority boundary.
             with bind_internal_mcp_actor_context_source(actor_context_source):
-                return orchestrator.run(
-                    prompt=prompt,
+                return execute_adaptive_turn(
+                    gateway=gateway,  # type: ignore[arg-type]
+                    prompt=prompt.strip(),
                     context=context,
                     llm_client=llm_client,
                     model=model_name,
+                    model_parameters=None,
                     user_namespace=user_namespace,
-                    gmail_profile=gmail_profile,
-                    auxiliary_system_prompt=auxiliary_system_prompt,
-                    preferred_language=get_preferred_language(),
                     user_concept_id=user_concept_id,
                     org_concept_id=org_concept_id,
+                    trusted_argument_values=(
+                        {"gmail_profile": gmail_profile}
+                        if gmail_profile
+                        else None
+                    ),
+                    turn_id=(
+                        arguments.get("turn_id").strip()
+                        if isinstance(arguments.get("turn_id"), str)
+                        and arguments.get("turn_id").strip()
+                        else f"von-chat-run-{secrets.token_urlsafe(12)}"
+                    ),
+                    turn_budget_seconds=timeout_seconds,
+                    final_synthesis_reserve_seconds=min(
+                        30.0,
+                        max(0.2, timeout_seconds * 0.2),
+                    ),
                 )
 
-        orchestrator_result = await _run_blocking_with_timeout(
-            _run_orchestrator_sync,
-            timeout_seconds=timeout_seconds,
+        adaptive_result = await _run_blocking_with_timeout(
+            _run_adaptive_turn_sync,
+            timeout_seconds=timeout_seconds + 1.0,
         )
+        completed = adaptive_result.terminal_status == "completed"
         payload = {
-            "success": True,
+            "success": completed,
             "model": model_name,
             "dry_run": dry_run,
             "allow_writes": effective_allow_writes,
+            "delegation": "read_only",
             "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
+            "terminal_status": adaptive_result.terminal_status,
             "response_text": _truncate_string(
-                orchestrator_result.response_text, max_chars=max_string_chars
+                adaptive_result.response_text, max_chars=max_string_chars
             ),
             "tool_invocations": _redact_debug_value(
-                list(orchestrator_result.tool_invocations),
+                list(adaptive_result.tool_invocations),
                 max_string_chars=max_string_chars,
             ),
             "tool_messages": _redact_debug_value(
-                list(orchestrator_result.extra_messages),
+                list(adaptive_result.extra_messages),
                 max_string_chars=max_string_chars,
             ),
+            "evidence_index": _redact_debug_value(
+                list(adaptive_result.evidence_index),
+                max_string_chars=max_string_chars,
+            ),
+            "llm_usage": dict(adaptive_result.llm_usage or {}),
         }
+        if not completed:
+            payload["error_code"] = adaptive_result.terminal_status
+            payload["error"] = adaptive_result.response_text
     except VonChatRunTimeout as exc:
         payload = {
             "success": False,
             "model": model_name,
             "dry_run": dry_run,
             "allow_writes": effective_allow_writes,
+            "delegation": "read_only",
             "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
+            "error_code": "von_chat_run_timeout",
             "error": str(exc),
             "timeout_debug": {
                 "pid": exc.pid,
                 "thread_id": exc.thread_id,
-                "note": "If this remains stuck, terminate the MCP server process by PID. Python threads cannot be safely killed directly.",
+                "late_result_policy": "discard_from_terminal_reply",
             },
-        }
-    except ToolCallParsingError as exc:
-        payload = {
-            "success": False,
-            "model": model_name,
-            "dry_run": dry_run,
-            "allow_writes": effective_allow_writes,
-            "access_profile": access_profile_summary,
-            "timeout_seconds": timeout_seconds,
-            "error": f"Tool call parsing error: {exc}",
         }
     except Exception as exc:
         payload = {
@@ -1513,8 +1609,10 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "model": model_name,
             "dry_run": dry_run,
             "allow_writes": effective_allow_writes,
+            "delegation": "read_only",
             "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
+            "error_code": type(exc).__name__,
             "error": str(exc),
         }
 
