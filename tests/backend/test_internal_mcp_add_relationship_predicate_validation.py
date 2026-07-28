@@ -1,7 +1,9 @@
 import pytest
 
 
-def test_add_relationship_rejects_non_vontology_predicate_keys(monkeypatch):
+def test_add_relationship_returns_typed_recovery_for_unknown_predicate_name(
+    monkeypatch,
+):
     from src.backend.integrations.internal_mcp import catalogue
 
     calls = {"find_one": [], "update_one": []}
@@ -35,10 +37,216 @@ def test_add_relationship_rejects_non_vontology_predicate_keys(monkeypatch):
     )
 
     assert result["success"] is False
-    assert result.get("error_code") == "invalid_predicate_format"
-    assert "invalid_predicate_format" in (result.get("error") or "")
-    assert "mutation_outcome" not in result
-    assert result.get("effect_status") != "indeterminate"
+    assert result.get("error_code") == "predicate_reference_not_found"
+    assert result["mutation_outcome"] == "not_started"
+    assert result["changed"] is False
+    assert result["predicate_resolution"]["status"] == "not_found"
+    assert result["recovery_affordances"][0]["action_type"] == (
+        "retry_with_predicate_concept_id"
+    )
+    assert calls["update_one"] == []
+
+
+def test_add_relationship_resolves_accessible_predicate_name_before_write(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda filter_doc, projection=None: {
+            "concept_id": filter_doc.get("concept_id"),
+            "relationships": (
+                {"is_an_instance_of": ["#V#predicate"]}
+                if filter_doc.get("concept_id") == "#V#depends_on"
+                else {}
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **kwargs: {
+            "success": True,
+            "status": "resolved",
+            "resolved_concept_id": "#V#depends_on",
+            "match": {"stage": "exact_name"},
+            "candidates": [],
+            "audit": [],
+        },
+    )
+
+    def _add_edge(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "predicate": kwargs["predicate"],
+            "target_id": kwargs["target"],
+            "modified": True,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        _add_edge,
+    )
+
+    result = catalogue._add_relationship(
+        source_id="#V#source",
+        predicate="Depends on",
+        target="#V#target",
+    )
+
+    assert result["success"] is True
+    assert captured["predicate"] == "#V#depends_on"
+    assert result["predicate_resolution"]["status"] == "resolved"
+    assert result["predicate_resolution"]["resolved_concept_id"] == (
+        "#V#depends_on"
+    )
+
+
+def test_add_relationship_returns_candidates_for_ambiguous_predicate_name(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda filter_doc, projection=None: (
+            {"concept_id": "#V#source", "relationships": {}}
+            if filter_doc.get("concept_id") == "#V#source"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **kwargs: {
+            "success": True,
+            "status": "ambiguous",
+            "resolved_concept_id": None,
+            "candidates": [
+                {"concept_id": "#V#about"},
+                {"concept_id": "#V#is_about"},
+            ],
+            "audit": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an ambiguous predicate must not be written")
+        ),
+    )
+
+    result = catalogue._add_relationship(
+        source_id="#V#source",
+        predicate="about",
+        target="#V#target",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "predicate_reference_ambiguous"
+    assert result["mutation_outcome"] == "not_started"
+    assert [
+        item["predicate_ref"]["concept_id"]
+        for item in result["recovery_affordances"]
+    ] == ["#V#about", "#V#is_about"]
+
+
+def test_add_relationship_typed_reference_can_create_text_predicate(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    events: list[str] = []
+    validation_results = iter(
+        [
+            (
+                False,
+                "predicate_concept_not_found",
+                {"predicate": "#V#has_summary"},
+            ),
+            (True, None, None),
+        ]
+    )
+
+    def _find_one(filter_doc, projection=None):
+        concept_id = filter_doc.get("concept_id")
+        if concept_id == "#V#source":
+            return {"concept_id": concept_id, "relationships": {}}
+        if concept_id == "#V#has_summary":
+            return {
+                "concept_id": concept_id,
+                "relationships": {
+                    "is_an_instance_of": ["#V#binary_text_predicate"]
+                },
+            }
+        return None
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        _find_one,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **kwargs: {
+            "success": True,
+            "status": "not_found",
+            "resolved_concept_id": None,
+            "candidates": [],
+            "audit": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.validate_predicate_concept",
+        lambda predicate, repo=None: next(validation_results),
+    )
+
+    def _create_predicate(**kwargs):
+        events.append("create")
+        assert kwargs["parent_id"] == "#V#binary_text_predicate"
+        assert kwargs["concepts"][0]["name"] == "Has summary"
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_concept_ids": ["#V#has_summary"],
+        }
+
+    monkeypatch.setattr(catalogue, "_create_concepts", _create_predicate)
+
+    def _upsert_text(**kwargs):
+        events.append("text")
+        assert kwargs["predicate"] == "#V#has_summary"
+        assert kwargs["text"] == "A concise summary"
+        return {
+            "text_value_id": "text-1",
+            "relation_id": "relation-1",
+            "relation_created": True,
+            "context_updated": False,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_text_for_concept",
+        _upsert_text,
+    )
+
+    result = catalogue._add_relationship(
+        source_id="#V#source",
+        target="A concise summary",
+        predicate_ref={
+            "name": "Has summary",
+            "on_missing": "create_typed_predicate",
+            "value_kind": "text",
+        },
+    )
+
+    assert events == ["create", "text"]
+    assert result["success"] is True
+    assert result["relationship_type"] == "text_relation"
+    assert result["changed"] is True
+    assert result["predicate"] == "#V#has_summary"
+    assert result["predicate_dependency"]["status"] == "created"
 
 
 def test_add_relationship_rejects_missing_dynamic_predicate_concepts(monkeypatch):

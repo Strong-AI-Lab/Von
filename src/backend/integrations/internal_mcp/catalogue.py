@@ -2610,8 +2610,11 @@ def _add_relationship(**kwargs):
 
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
+    predicate_ref = kwargs.get("predicate_ref")
     target = kwargs.get("target")
     predicate_if_missing = kwargs.get("predicate_if_missing")
+    predicate_resolution: dict[str, Any] | None = None
+    predicate_value_kind = "concept"
     mutation_dispatched = False
     predicate_dependency: dict[str, Any] | None = None
     predicate_dependency_changed = False
@@ -2624,6 +2627,83 @@ def _add_relationship(**kwargs):
         if isinstance(raw_namespace, str) and raw_namespace.strip()
         else None
     )
+
+    if predicate_ref is not None:
+        if isinstance(predicate, str) and predicate.strip():
+            return make_error_response(
+                "conflicting_predicate_reference",
+                "Provide predicate or predicate_ref, not both.",
+                details={"conflicting_fields": ["predicate", "predicate_ref"]},
+            )
+        if not isinstance(predicate_ref, Mapping):
+            return make_error_response(
+                "invalid_predicate_reference",
+                "predicate_ref must be an object.",
+                details={"value_type": type(predicate_ref).__name__},
+            )
+        reference_concept_id = predicate_ref.get("concept_id")
+        reference_name = predicate_ref.get("name")
+        has_concept_id = bool(
+            isinstance(reference_concept_id, str)
+            and reference_concept_id.strip()
+        )
+        has_name = bool(
+            isinstance(reference_name, str) and reference_name.strip()
+        )
+        if has_concept_id == has_name:
+            return make_error_response(
+                "invalid_predicate_reference",
+                (
+                    "predicate_ref must provide exactly one of concept_id or "
+                    "name."
+                ),
+                details={
+                    "required_choice": ["concept_id", "name"],
+                },
+            )
+        on_missing = str(predicate_ref.get("on_missing") or "fail").strip().lower()
+        if on_missing not in {"fail", "create_typed_predicate"}:
+            return make_error_response(
+                "invalid_predicate_reference",
+                (
+                    "predicate_ref.on_missing must be 'fail' or "
+                    "'create_typed_predicate'."
+                ),
+                details={"on_missing": on_missing},
+            )
+        if has_concept_id and on_missing == "create_typed_predicate":
+            return make_error_response(
+                "invalid_predicate_reference",
+                (
+                    "Creating a missing predicate requires predicate_ref.name; "
+                    "an exact concept_id reference is resolve-only."
+                ),
+                details={"on_missing": on_missing},
+            )
+        predicate_value_kind = str(
+            predicate_ref.get("value_kind") or "concept"
+        ).strip().lower()
+        if predicate_value_kind not in {"concept", "text"}:
+            return make_error_response(
+                "invalid_predicate_reference",
+                "predicate_ref.value_kind must be 'concept' or 'text'.",
+                details={"value_kind": predicate_value_kind},
+            )
+        if has_concept_id:
+            predicate = str(reference_concept_id).strip()
+            predicate_resolution = {
+                "status": "explicit_concept_id",
+                "requested": predicate,
+                "resolved_concept_id": predicate,
+            }
+        else:
+            predicate = str(reference_name).strip()
+            if on_missing == "create_typed_predicate":
+                predicate_if_missing = {
+                    "name": predicate,
+                    "description": predicate_ref.get("description"),
+                    "value_kind": predicate_value_kind,
+                }
 
     def _cancellation_after_predicate_dependency() -> dict[str, Any] | None:
         try:
@@ -2686,10 +2766,11 @@ def _add_relationship(**kwargs):
     if not predicate:
         return make_error_response(
             "missing_parameter",
-            "Missing 'predicate' parameter",
-            details={"missing": ["predicate"]},
+            "Missing predicate parameter or predicate_ref.",
+            details={"missing": ["predicate_or_predicate_ref"]},
             suggestions=[
-                "Provide a predicate like 'instance_of', 'typeOf', or a concept ID like '#V#hasAffiliation'"
+                "Provide predicate, or a predicate_ref with exactly one of "
+                "concept_id or name."
             ],
         )
     if not target:
@@ -2718,7 +2799,7 @@ def _add_relationship(**kwargs):
                 details={
                     "value_type": type(predicate_if_missing).__name__,
                     "required_fields": ["name"],
-                    "optional_fields": ["description"],
+                    "optional_fields": ["description", "value_kind"],
                 },
             )
         raw_dependency_name = predicate_if_missing.get("name")
@@ -2745,12 +2826,22 @@ def _add_relationship(**kwargs):
             predicate_dependency_description = (
                 raw_dependency_description.strip() or None
             )
+        predicate_value_kind = str(
+            predicate_if_missing.get("value_kind") or predicate_value_kind
+        ).strip().lower()
+        if predicate_value_kind not in {"concept", "text"}:
+            return make_error_response(
+                "invalid_predicate_if_missing",
+                "predicate_if_missing.value_kind must be 'concept' or 'text'.",
+                details={"value_kind": predicate_value_kind},
+            )
 
     try:
         repo = ConceptsRepository
 
         from ...services.relationship_write_service import (
             add_relationship,
+            is_structural_predicate,
             normalise_structural_predicate,
             validate_predicate_concept,
         )
@@ -2781,6 +2872,133 @@ def _add_relationship(**kwargs):
             predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
         )
         well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
+        if (
+            not predicate_str.startswith("#V#")
+            and predicate_normalised not in well_known_text_predicates
+            and not is_structural_predicate(predicate_str)
+        ):
+            from ...services.concept_resolution_service import (
+                resolve_concept_by_name,
+            )
+
+            resolution_payload = resolve_concept_by_name(
+                name=predicate_str,
+                instance_of="#V#predicate",
+                match_code_strings=False,
+                max_results=5,
+            )
+            resolution_status = str(
+                resolution_payload.get("status") or "not_found"
+            ).strip()
+            resolved_predicate_id = resolution_payload.get(
+                "resolved_concept_id"
+            )
+            predicate_resolution = {
+                "status": resolution_status,
+                "requested": predicate_str,
+                "resolved_concept_id": resolved_predicate_id,
+                "match": resolution_payload.get("match"),
+                "candidates": list(
+                    resolution_payload.get("candidates") or []
+                )[:5],
+            }
+            if (
+                resolution_status == "resolved"
+                and isinstance(resolved_predicate_id, str)
+                and resolved_predicate_id.startswith("#V#")
+            ):
+                predicate_str = resolved_predicate_id
+                predicate_normalised = predicate_str[3:]
+            elif resolution_status == "ambiguous":
+                candidates = list(
+                    resolution_payload.get("candidates") or []
+                )[:5]
+                response = make_error_response(
+                    "predicate_reference_ambiguous",
+                    (
+                        "The predicate name identifies more than one accessible "
+                        "predicate. Select one exact concept ID."
+                    ),
+                    details={
+                        "predicate": predicate_str,
+                        "candidates": candidates,
+                    },
+                )
+                response.update(
+                    {
+                        "effect_status": "not_started",
+                        "changed": False,
+                        "mutation_outcome": "not_started",
+                        "predicate_resolution": predicate_resolution,
+                        "recovery_affordances": [
+                            {
+                                "action_type": "retry_with_predicate_concept_id",
+                                "predicate_ref": {
+                                    "concept_id": candidate.get("concept_id")
+                                },
+                            }
+                            for candidate in candidates
+                            if isinstance(candidate, Mapping)
+                            and isinstance(candidate.get("concept_id"), str)
+                        ],
+                    }
+                )
+                return response
+            elif predicate_dependency_name is not None:
+                canonical_new_predicate_id = canonicalise_vontology_concept_id(
+                    predicate_dependency_name
+                )
+                if canonical_new_predicate_id is None:
+                    return make_error_response(
+                        "predicate_reference_not_canonicalisable",
+                        (
+                            "The requested predicate name cannot form a canonical "
+                            "Vontology concept ID."
+                        ),
+                        details={"predicate": predicate_dependency_name},
+                    )
+                predicate_str = canonical_new_predicate_id
+                predicate_normalised = predicate_str[3:]
+                predicate_resolution.update(
+                    {
+                        "status": "not_found_create_requested",
+                        "resolved_concept_id": predicate_str,
+                    }
+                )
+            else:
+                response = make_error_response(
+                    "predicate_reference_not_found",
+                    (
+                        "No accessible predicate matched that name. The "
+                        "relationship was not started."
+                    ),
+                    details={"predicate": predicate_str},
+                )
+                response.update(
+                    {
+                        "effect_status": "not_started",
+                        "changed": False,
+                        "mutation_outcome": "not_started",
+                        "predicate_resolution": predicate_resolution,
+                        "recovery_affordances": [
+                            {
+                                "action_type": "retry_with_predicate_concept_id",
+                                "predicate_ref": {
+                                    "concept_id": "#V#exact_predicate_id"
+                                },
+                            },
+                            {
+                                "action_type": "create_typed_predicate_then_retry",
+                                "predicate_ref": {
+                                    "name": predicate_str,
+                                    "on_missing": "create_typed_predicate",
+                                    "value_kind": "concept",
+                                },
+                            },
+                        ],
+                    }
+                )
+                return response
         if predicate_dependency_name is not None:
             canonical_dependency_id = canonicalise_vontology_concept_id(
                 predicate_dependency_name
@@ -2835,30 +3053,31 @@ def _add_relationship(**kwargs):
                         related_concept_ids=[predicate_str],
                     )
 
-                target_id = str(target).strip()
-                target_doc = repo.find_one(
-                    {"concept_id": target_id},
-                    {"concept_id": 1},
-                )
-                if not target_doc:
-                    return make_error_response(
-                        "target_concept_not_found",
-                        (
-                            f"Target concept '{target_id}' was not found. The "
-                            "predicate dependency and relationship were not "
-                            "created."
-                        ),
-                        details={
-                            "role": "target",
-                            "concept_id": target_id,
-                            "predicate": predicate_str,
-                        },
-                        suggestions=[
-                            "Create or resolve the target concept before retrying "
-                            "the relationship."
-                        ],
-                        related_concept_ids=[target_id],
+                if predicate_value_kind == "concept":
+                    target_id = str(target).strip()
+                    target_doc = repo.find_one(
+                        {"concept_id": target_id},
+                        {"concept_id": 1},
                     )
+                    if not target_doc:
+                        return make_error_response(
+                            "target_concept_not_found",
+                            (
+                                f"Target concept '{target_id}' was not found. The "
+                                "predicate dependency and relationship were not "
+                                "created."
+                            ),
+                            details={
+                                "role": "target",
+                                "concept_id": target_id,
+                                "predicate": predicate_str,
+                            },
+                            suggestions=[
+                                "Create or resolve the target concept before retrying "
+                                "the relationship."
+                            ],
+                            related_concept_ids=[target_id],
+                        )
 
                 predicate_concept: dict[str, Any] = {
                     "name": predicate_dependency_name,
@@ -2870,7 +3089,11 @@ def _add_relationship(**kwargs):
                 mutation_dispatched = True
                 try:
                     creation_result = _create_concepts(
-                        parent_id="#V#predicate",
+                        parent_id=(
+                            "#V#binary_text_predicate"
+                            if predicate_value_kind == "text"
+                            else "#V#predicate"
+                        ),
                         concepts=[predicate_concept],
                         duplicate_resolution_mode=(
                             _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
@@ -3047,6 +3270,11 @@ def _add_relationship(**kwargs):
                     if predicate_dependency is not None
                     else {}
                 ),
+                **(
+                    {"predicate_resolution": predicate_resolution}
+                    if predicate_resolution is not None
+                    else {}
+                ),
             }
 
         # Determine if this is a text predicate (binary_text_predicate instance)
@@ -3092,6 +3320,11 @@ def _add_relationship(**kwargs):
                     if predicate_dependency is not None
                     else {}
                 ),
+                **(
+                    {"predicate_resolution": predicate_resolution}
+                    if predicate_resolution is not None
+                    else {}
+                ),
             }
 
         # Concept-to-concept relationships use the single authoritative pathway.
@@ -3122,6 +3355,8 @@ def _add_relationship(**kwargs):
             )
             if predicate_dependency is not None:
                 response["predicate_dependency"] = predicate_dependency
+            if predicate_resolution is not None:
+                response["predicate_resolution"] = predicate_resolution
             if (
                 predicate_dependency_changed
                 or predicate_dependency_partial_failures
@@ -3176,6 +3411,8 @@ def _add_relationship(**kwargs):
         response["changed"] = bool(response["added"] or predicate_dependency_changed)
         if predicate_dependency is not None:
             response["predicate_dependency"] = predicate_dependency
+        if predicate_resolution is not None:
+            response["predicate_resolution"] = predicate_resolution
         if "inverse_predicate" in result or "inverse_modified" in result:
             response["inverse"] = {
                 "predicate": result.get("inverse_predicate"),
@@ -9038,21 +9275,24 @@ def _add_relationship_input_schema() -> Schema:
     return Schema(
         required={
             "source_id": str,
-            "predicate": str,
             "target": str,
         },
         optional={
+            "predicate": (str, type(None)),
+            "predicate_ref": (dict, type(None)),
             "predicate_if_missing": (dict, type(None)),
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
         description=(
-            "add_relationship input: source_id (str), predicate (str, structural "
-            "relationship name or exact #V# predicate concept ID), target (str). "
-            "For a missing dynamic predicate only, predicate_if_missing may be "
-            "{name: str, description?: str}; its name must canonically identify "
-            "the exact requested predicate. The capability creates or reuses and "
-            "verifies that predicate before attempting the edge."
+            "add_relationship input: source_id and target plus exactly one useful "
+            "predicate reference. predicate accepts a structural relationship, "
+            "natural-language predicate name, or exact #V# predicate ID. "
+            "predicate_ref is the typed form: {concept_id} or {name, "
+            "on_missing?: 'fail'|'create_typed_predicate', value_kind?: "
+            "'concept'|'text', description?}. Legacy predicate_if_missing remains "
+            "supported for exact dynamic predicates. Creation is attempted only "
+            "when explicitly requested, then verified before the edge."
         ),
     )
 
@@ -9074,6 +9314,8 @@ def _add_relationship_output_schema() -> Schema:
             "changed": (bool, type(None)),
             "partial_failures": (list, type(None)),
             "predicate_dependency": (dict, type(None)),
+            "predicate_resolution": (dict, type(None)),
+            "recovery_affordances": (list, type(None)),
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "error": (str, type(None)),
@@ -32280,11 +32522,12 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_mutation_subject_argument="source_id",
             description=(
                 "Add one concept-to-concept or concept-to-text relationship. "
-                "Structural predicates use their existing aliases; a custom "
-                "predicate uses its exact #V# concept ID. If that exact custom "
-                "predicate is missing, predicate_if_missing={name, description?} "
-                "can canonically create or reuse and verify it before this "
-                "relationship attempt."
+                "Structural predicates use their aliases. A custom predicate may "
+                "be supplied by exact #V# ID or resolved natural-language name. "
+                "Use predicate_ref for typed ambiguity/not-found recovery and "
+                "explicitly request creation with on_missing="
+                "'create_typed_predicate' plus value_kind='concept' or 'text'. "
+                "Creation/reuse is verified before the relationship attempt."
             ),
         ),
         MethodDefinition(
@@ -36291,8 +36534,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             input_schema=Schema(
                 required={"workflow_id": str},
                 optional={
-                    "user_id": str,
-                    "org_id": str,
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
                     "namespace": (str, type(None)),
                     "inputs": (dict, type(None)),
                     "max_retries": int,
@@ -36328,6 +36571,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Structured awaited workflow execution result and telemetry.",
             ),
             category="write",
+            timeout_sec=120.0,
+            effect_admission_window_sec=5.0,
             description=(
                 "Create a durable workflow instance via the verified submission pathway and optionally "
                 "wait for a bounded terminal result with structured telemetry and optional trace retrieval."

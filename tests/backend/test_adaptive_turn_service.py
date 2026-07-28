@@ -320,6 +320,53 @@ def _effect_gateway(
     )
 
 
+def _workflow_gateway(handler: Any) -> InternalMCPGateway:
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="general_read",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(allow_unknown=True),
+            category="read",
+            ordinary_turn_public=True,
+        )
+    )
+    catalogue.register(
+        MethodDefinition(
+            name="workflow_execute",
+            handler=handler,
+            input_schema=Schema(
+                required={"workflow_id": str},
+                optional={
+                    "user_id": str,
+                    "org_id": (str, type(None)),
+                    "namespace": str,
+                    "inputs": dict,
+                    "max_retries": int,
+                    "await_terminal": bool,
+                    "timeout_seconds": (int, float),
+                    "poll_interval_seconds": (int, float),
+                    "include_step_result_envelopes": bool,
+                    "include_trace": bool,
+                },
+                allow_unknown=False,
+            ),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="write",
+            timeout_sec=1.0,
+            effect_admission_window_sec=0.01,
+        )
+    )
+    return InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(
+            read_timeout_sec=1.0,
+            write_timeout_sec=1.0,
+        ),
+        enabled=True,
+    )
+
+
 class _ManualClock:
     def __init__(self, now: float = 0.0) -> None:
         self.now = now
@@ -4244,3 +4291,230 @@ def test_model_cannot_select_gmail_profile_without_a_trusted_binding() -> None:
         result.tool_invocations[0]["effective_payload"]["error_code"]
             == "capability_not_delegated"
     )
+
+
+def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
+    monkeypatch,
+) -> None:
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    seen_arguments: dict[str, Any] = {}
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_turn_test",
+        workflow_id="#V#represented_test_workflow",
+        display_name="Represented test workflow",
+        description="Produce the represented test work product.",
+        relevance_score=0.94,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "inputs": {
+                    "type": "object",
+                    "properties": {"record_id": {"type": "string"}},
+                }
+            },
+            "additionalProperties": False,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+
+    def _execute_workflow(**kwargs: Any) -> dict[str, Any]:
+        seen_arguments.update(kwargs)
+        return {
+            "success": True,
+            "instance_id": "workflow-instance-1",
+            "created_new": True,
+            "final_status": "completed",
+        }
+
+    gateway = _workflow_gateway(_execute_workflow)
+    assert "workflow_execute" not in ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#real_user",
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-workflow",
+                    payload={"query": "produce the represented work product"},
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="test",
+                api_surface="responses",
+                model="test-model",
+                response_id="workflow-discovery-response",
+            ),
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-workflow",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {
+                            "workflow_id": "#V#spoofed_workflow",
+                            "user_id": "#V#spoofed_user",
+                            "inputs": {
+                                "record_id": "#V#record",
+                                "user_concept_id": "#V#spoofed_user",
+                            },
+                        },
+                    },
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="test",
+                api_surface="responses",
+                model="test-model",
+                response_id="workflow-invocation-response",
+            ),
+        ),
+        LLMResponse(text_response="The represented work product was completed."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Produce the represented work product.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        workflow_launch_inputs={"authorised_record": "#V#request_record"},
+        turn_id="turn-represented-workflow",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    catalogue_result = client.calls[1]["tool_results"][0].output
+    assert catalogue_result["represented_workflow_total"] == 1
+    assert catalogue_result["capabilities"][0]["kind"] == (
+        "represented_workflow"
+    )
+    assert seen_arguments["workflow_id"] == "#V#represented_test_workflow"
+    assert seen_arguments["user_id"] == "#V#real_user"
+    assert seen_arguments["org_id"] == "#V#real_org"
+    assert seen_arguments["namespace"] == "#V#real_user@real_org"
+    assert seen_arguments["inputs"]["user_concept_id"] == "#V#real_user"
+    assert seen_arguments["inputs"]["record_id"] == "#V#record"
+    assert seen_arguments["inputs"]["authorised_record"] == "#V#request_record"
+    invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == workflow_capability.name
+    )
+    assert invocation["tool"] == workflow_capability.name
+    assert invocation["execution_method"] == "workflow_execute"
+    assert invocation["capability_kind"] == "represented_workflow"
+    assert invocation["represented_workflow_id"] == (
+        "#V#represented_test_workflow"
+    )
+    assert invocation["effect_status"] == "succeeded"
+    assert invocation["changed"] is True
+    assert result.response_text == "The represented work product was completed."
+
+
+def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
+    monkeypatch,
+) -> None:
+    handler_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.adaptive_turn_service."
+        "_effect_subject_authorised",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "add_relationship"
+        handler_calls.append(arguments)
+        return {
+            "success": False,
+            "effect_status": "failed",
+            "changed": False,
+            "error_code": "invalid_predicate_format",
+            "retryable": False,
+        }
+
+    effect_arguments = {
+        "source_id": "#V#source",
+        "predicate": "unresolved predicate",
+        "target": "#V#target",
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invalid-effect-1",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": effect_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invalid-effect-2",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": effect_arguments,
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "The relationship was not changed; a different typed predicate "
+                "reference is required."
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, effect_admission_window_sec=0.01),
+        prompt="Add this relationship.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_concept_id="#V#user",
+        turn_id="turn-repeat-terminal-failure",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert handler_calls == [effect_arguments]
+    assert len(result.tool_invocations) == 2
+    assert result.tool_invocations[0]["error_code"] == (
+        "invalid_predicate_format"
+    )
+    assert result.tool_invocations[1]["error_code"] == (
+        "effect_request_unchanged_after_terminal_failure"
+    )
+    assert result.tool_invocations[1]["effect_status"] == "not_started"
+    assert result.tool_invocations[1]["changed"] is False
