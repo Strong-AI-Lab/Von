@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import sys
 import time
 from threading import Event, Thread
 
+from pymongo.errors import ExecutionTimeout
+import pytest
+
+from src.backend.integrations.internal_mcp import transport as transport_mod
 from src.backend.integrations.internal_mcp.gateway import (
     InternalMCPGateway,
     MethodCatalogue,
@@ -128,6 +133,7 @@ def test_hard_deadline_returns_typed_timeout_and_requests_cooperative_cancel() -
     assert result.payload["outcome_finality"] == "terminal_for_turn"
     assert result.payload["late_result_policy"] == "discard_from_turn"
     assert result.payload["handler_isolation"] == "bounded_worker_pool"
+    assert result.payload["database_deadline_propagation"] == "pymongo_csot"
     assert result.payload["timeout_phase"] == "handler"
     assert result.handler_duration_ms is None
     assert result.handler_elapsed_ms is not None
@@ -146,6 +152,181 @@ def test_hard_deadline_returns_typed_timeout_and_requests_cooperative_cancel() -
     assert method_metrics["timeouts"] == 1
     assert method_metrics["last_outcome"] == "timed_out"
     assert method_metrics["last_error"] == "tool_timeout"
+
+
+def test_handler_database_operations_receive_the_remaining_transport_budget(
+    monkeypatch,
+) -> None:
+    observed_timeouts: list[float] = []
+
+    @contextmanager
+    def _capture_timeout(seconds: float):
+        observed_timeouts.append(seconds)
+        yield
+
+    monkeypatch.setattr(transport_mod, "pymongo_timeout", _capture_timeout)
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.2,
+        read_advisory_timeout_sec=0.01,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_database_read",
+        handler=lambda: {"success": True},
+        transport=transport,
+    )
+
+    result = gateway.invoke("synthetic_database_read", {})
+
+    assert result.outcome == "completed"
+    assert len(observed_timeouts) == 1
+    assert 0.0 < observed_timeouts[0] < 0.2
+
+
+def test_database_deadline_timeout_releases_worker_for_follow_up() -> None:
+    executor = _BoundedHandlerExecutor(worker_count=1, queue_capacity=1)
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.08,
+        read_advisory_timeout_sec=0.01,
+        handler_executor=executor,
+    )
+
+    def _database_read() -> None:
+        scope = get_internal_mcp_execution_scope()
+        assert scope is not None
+        while scope.remaining_seconds > 0.0:
+            time.sleep(0.001)
+        raise ExecutionTimeout("simulated MongoDB CSOT expiry")
+
+    gateway = _gateway_for(
+        method_name="synthetic_database_deadline",
+        handler=_database_read,
+        transport=transport,
+    )
+
+    result = gateway.invoke("synthetic_database_deadline", {})
+
+    assert result.outcome == "timed_out"
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.payload["timeout_phase"] == "handler"
+    assert result.payload["late_result_policy"] == "discard_from_turn"
+    assert result.payload["database_deadline_propagation"] == "pymongo_csot"
+    assert transport.get_diagnostics()["late_completion_count"] == 0
+
+    follow_up_gateway = _gateway_for(
+        method_name="synthetic_read_after_database_deadline",
+        handler=lambda: {"success": True},
+        transport=transport,
+    )
+    follow_up = follow_up_gateway.invoke(
+        "synthetic_read_after_database_deadline",
+        {},
+    )
+    assert follow_up.outcome == "completed"
+    assert follow_up.payload == {"success": True}
+    assert executor.diagnostics()["active_worker_count"] == 0
+    assert executor.diagnostics()["completed_count"] == 2
+
+
+def test_pymongo_csot_admission_refusal_is_typed_transport_timeout() -> None:
+    message = (
+        "operation would exceed time limit, remaining timeout:0.10516 "
+        "<= network round trip time:0.29659"
+    )
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.5,
+        read_advisory_timeout_sec=0.1,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_csot_admission_refusal",
+        handler=lambda: (_ for _ in ()).throw(
+            ExecutionTimeout(
+                message,
+                50,
+                {"ok": 0, "errmsg": message, "code": 50},
+            )
+        ),
+        transport=transport,
+    )
+
+    result = gateway.invoke("synthetic_csot_admission_refusal", {})
+
+    assert result.outcome == "timed_out"
+    assert result.duration_ms < 100.0
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.payload["database_deadline_propagation"] == "pymongo_csot"
+
+
+def test_swallowed_pymongo_csot_error_cannot_masquerade_as_success() -> None:
+    message = (
+        "operation would exceed time limit, remaining timeout:0.19221 "
+        "<= network round trip time:0.28518"
+    )
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.5,
+        read_advisory_timeout_sec=0.1,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_swallowed_csot_error",
+        handler=lambda: {"error": message, "tree": []},
+        transport=transport,
+    )
+
+    result = gateway.invoke("synthetic_swallowed_csot_error", {})
+
+    assert result.outcome == "timed_out"
+    assert result.payload["success"] is False
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.payload["database_deadline_propagation"] == "pymongo_csot"
+    assert result.payload.get("tree") is None
+    assert transport.get_diagnostics()["late_completion_count"] == 0
+
+
+def test_swallowed_pymongo_network_timeout_at_deadline_is_not_late_success() -> None:
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.08,
+        read_advisory_timeout_sec=0.01,
+    )
+
+    def _handler() -> dict[str, object]:
+        time.sleep(0.075)
+        return {
+            "error": (
+                "The read operation timed out "
+                "(configured timeouts: timeoutMS: 71.9ms, "
+                "connectTimeoutMS: 5000.0ms)"
+            ),
+            "tree": [],
+        }
+
+    gateway = _gateway_for(
+        method_name="synthetic_swallowed_network_timeout",
+        handler=_handler,
+        transport=transport,
+    )
+
+    result = gateway.invoke("synthetic_swallowed_network_timeout", {})
+
+    assert result.outcome == "timed_out"
+    assert result.payload["error_code"] == "tool_timeout"
+    assert result.duration_ms < 100.0
+    assert transport.get_diagnostics()["late_completion_count"] == 0
+
+
+def test_database_timeout_before_transport_deadline_keeps_handler_error() -> None:
+    transport = InternalMCPTransport(
+        read_timeout_sec=0.5,
+        read_advisory_timeout_sec=0.1,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_early_database_timeout",
+        handler=lambda: (_ for _ in ()).throw(
+            ExecutionTimeout("database operation failed before transport deadline")
+        ),
+        transport=transport,
+    )
+
+    with pytest.raises(ExecutionTimeout):
+        gateway.invoke("synthetic_early_database_timeout", {})
 
 
 def test_caller_deadline_shortens_the_registered_method_timeout() -> None:

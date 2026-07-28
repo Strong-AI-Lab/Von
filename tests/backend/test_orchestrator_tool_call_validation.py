@@ -149,13 +149,14 @@ def test_tool_calling_loop_records_terminal_timeout_not_late_success(
         },
     )
 
-    started_at = time.perf_counter()
     result = orchestrator._action_tool_calling_execute(request)
-    elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.2
     assert result.outputs["tool_execution_complete"] is True
     invocation = request.data["invocations"][0]
+    # Keep the deadline assertion on the transport span.  The first
+    # orchestration action in a fresh process may also initialise unrelated
+    # evidence/workflow support modules, which is not handler monopolisation.
+    assert invocation["transport"]["duration_ms"] < 200.0
     assert invocation["status"] == "timeout"
     assert invocation["error_code"] == "tool_timeout"
     assert invocation["effective_payload"]["success"] is False

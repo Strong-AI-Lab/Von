@@ -38,6 +38,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping
 
+from pymongo import timeout as pymongo_timeout
+from pymongo.errors import PyMongoError
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_READ_ADVISORY_TIMEOUT_SEC = 6.0
@@ -51,6 +54,17 @@ _DEFAULT_HANDLER_QUEUE_CAPACITY = 32
 # scheduling tolerance applied at handler start; materially queued work must
 # still retain its configured minimum.
 _EFFECT_ADMISSION_START_TOLERANCE_SEC = 0.005
+# Leave a small bounded interval for a database deadline to unwind through
+# legacy handlers that catch and return exceptions before the transport itself
+# reaches its terminal deadline.  This prevents a caught CSOT expiry from
+# becoming an apparently completed error payload or a misleading late result.
+_MONGO_DEADLINE_COMPLETION_RESERVE_SEC = 0.05
+_MONGO_DEADLINE_COMPLETION_RESERVE_FRACTION = 0.1
+_MONGO_DEADLINE_CLASSIFICATION_TOLERANCE_SEC = 0.1
+_MONGO_CSOT_ADMISSION_REFUSAL_MARKER = (
+    "operation would exceed time limit, remaining timeout:"
+)
+_MONGO_CSOT_CONFIGURED_TIMEOUT_MARKER = "configured timeouts: timeoutms:"
 _LATE_COMPLETION_HISTORY_LIMIT = 50
 _LATE_COMPLETION_MAX_PAYLOAD_CHARS = 32_000
 _LATE_COMPLETION_MAX_RECEIPT_FIELD_CHARS = 4_000
@@ -162,6 +176,60 @@ class InternalMCPHandlerCancelled(RuntimeError):
     """Raised by cooperative handlers after the transport requests cancellation."""
 
 
+class InternalMCPHandlerDeadlineExceeded(InternalMCPHandlerCancelled):
+    """Raised when a handler's database work consumes its transport deadline."""
+
+
+def _mongo_timeout_consumed_transport_deadline(
+    exc: PyMongoError,
+    *,
+    scope: InternalMCPExecutionScope,
+) -> bool:
+    if not bool(getattr(exc, "timeout", False)):
+        return False
+    details = getattr(exc, "details", None)
+    detail_message = (
+        str(details.get("errmsg") or "")
+        if isinstance(details, Mapping)
+        else ""
+    )
+    if _MONGO_CSOT_ADMISSION_REFUSAL_MARKER in (
+        f"{exc} {detail_message}".lower()
+    ):
+        return True
+    return (
+        scope.remaining_seconds
+        <= _MONGO_DEADLINE_CLASSIFICATION_TOLERANCE_SEC
+    )
+
+
+def _handler_payload_reports_mongo_deadline(
+    payload: Any,
+    *,
+    scope: InternalMCPExecutionScope,
+) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    messages = [
+        payload.get("error"),
+        payload.get("message"),
+        payload.get("detail"),
+    ]
+    details = payload.get("details")
+    if isinstance(details, Mapping):
+        messages.extend((details.get("error"), details.get("errmsg")))
+    combined_message = " ".join(
+        str(message or "") for message in messages
+    ).lower()
+    if _MONGO_CSOT_ADMISSION_REFUSAL_MARKER in combined_message:
+        return True
+    return bool(
+        _MONGO_CSOT_CONFIGURED_TIMEOUT_MARKER in combined_message
+        and scope.remaining_seconds
+        <= _MONGO_DEADLINE_CLASSIFICATION_TOLERANCE_SEC
+    )
+
+
 def get_internal_mcp_execution_scope() -> InternalMCPExecutionScope | None:
     """Return the active handler deadline/cancellation scope, if any."""
 
@@ -255,6 +323,7 @@ class _HandlerTask:
     completed_monotonic: float | None = None
     result: Any = None
     exception: BaseException | None = None
+    deadline_exceeded_during_handler: bool = False
     terminal_returned: bool = False
     cancelled_before_start: bool = False
     admission_denied_before_start: bool = False
@@ -270,7 +339,51 @@ class _HandlerTask:
         )
         token = _ACTIVE_EXECUTION_SCOPE.set(scope)
         try:
-            return self.handler(**self.payload)
+            remaining_seconds = scope.remaining_seconds
+            if remaining_seconds <= 0.0:
+                raise InternalMCPHandlerDeadlineExceeded(
+                    f"Internal MCP execution {scope.execution_id} reached its "
+                    "deadline before the handler started."
+                )
+            database_completion_reserve_sec = min(
+                _MONGO_DEADLINE_COMPLETION_RESERVE_SEC,
+                remaining_seconds
+                * _MONGO_DEADLINE_COMPLETION_RESERVE_FRACTION,
+            )
+            database_timeout_sec = (
+                remaining_seconds - database_completion_reserve_sec
+            )
+            try:
+                # PyMongo CSOT is context-local, applies the remaining budget
+                # across all nested database operations, and leaves only a
+                # small bounded interval for caught exceptions to unwind before
+                # the transport deadline. Non-Mongo handlers are unaffected
+                # and remain bounded by the transport worker pool.
+                with pymongo_timeout(database_timeout_sec):
+                    result = self.handler(**self.payload)
+                # Some legacy support handlers convert every exception to an
+                # error mapping.  Preserve their compatibility behaviour for
+                # ordinary errors, but do not let an explicit PyMongo CSOT
+                # admission refusal masquerade as a completed transport call.
+                if _handler_payload_reports_mongo_deadline(
+                    result,
+                    scope=scope,
+                ):
+                    raise InternalMCPHandlerDeadlineExceeded(
+                        f"Internal MCP execution {scope.execution_id} consumed "
+                        "its database operation deadline."
+                    )
+                return result
+            except PyMongoError as exc:
+                if _mongo_timeout_consumed_transport_deadline(
+                    exc,
+                    scope=scope,
+                ):
+                    raise InternalMCPHandlerDeadlineExceeded(
+                        f"Internal MCP execution {scope.execution_id} consumed "
+                        "its database operation deadline."
+                    ) from exc
+                raise
         finally:
             _ACTIVE_EXECUTION_SCOPE.reset(token)
 
@@ -316,11 +429,18 @@ class _HandlerTask:
         with self.lock:
             self.result = result
             self.exception = exception
+            self.deadline_exceeded_during_handler = isinstance(
+                exception,
+                InternalMCPHandlerDeadlineExceeded,
+            )
             self.completed_at = completed_at
             self.completed_monotonic = completed_monotonic
             was_late = bool(
-                self.terminal_returned
-                or completed_monotonic > self.deadline_monotonic
+                not self.deadline_exceeded_during_handler
+                and (
+                    self.terminal_returned
+                    or completed_monotonic > self.deadline_monotonic
+                )
             )
             # Wake the caller before any potentially blocking durable observer.
             self.done_event.set()
@@ -652,6 +772,7 @@ class InternalMCPTransport:
             "handler_elapsed_ms": handler_elapsed_ms,
             "cancellation_requested": True,
             "handler_isolation": "bounded_worker_pool",
+            "database_deadline_propagation": "pymongo_csot",
             "outcome_finality": "terminal_for_turn",
             "late_result_policy": late_result_policy,
         }
@@ -943,6 +1064,7 @@ class InternalMCPTransport:
                 (completed or task.done_event.is_set())
                 and task.completed_monotonic is not None
                 and task.completed_monotonic <= handler_deadline_monotonic
+                and not task.deadline_exceeded_during_handler
             )
             if completed_within_deadline:
                 task_completed = True
@@ -1114,6 +1236,7 @@ class InternalMCPTransport:
                 "late_completion_count": self._late_completion_count,
                 "late_completions": list(self._late_completions),
                 "late_result_policy": "discard_from_turn",
+                "database_deadline_propagation": "pymongo_csot",
             }
         local["handler_pool"] = self._executor.diagnostics()
         return local
