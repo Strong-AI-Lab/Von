@@ -84,6 +84,37 @@ class AdaptiveTurnResult:
     effect_finality_fallback: bool = False
 
 
+@dataclass(frozen=True)
+class _PreparedCapabilityCall:
+    """One model-requested capability after trusted argument binding."""
+
+    index: int
+    call: ToolCall
+    capability_name: str
+    execution_method_name: str
+    arguments: Mapping[str, Any]
+    is_effect: bool
+    minimum_effect_window_seconds: float
+    capability_kind: str = "registered_tool"
+    represented_workflow_id: str | None = None
+    binding_diagnostics: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _ContainedCapabilityResult:
+    """A capability result retained until request-thread evidence commit."""
+
+    raw_payload: Any
+    transport_result: Any
+    arguments: Mapping[str, Any]
+    capability_name: str
+    is_effect: bool
+    execution_method_name: str
+    capability_kind: str = "registered_tool"
+    represented_workflow_id: str | None = None
+    binding_diagnostics: Mapping[str, Any] | None = None
+
+
 def _positive_float_env(name: str, default: float) -> float:
     try:
         value = float(os.getenv(name, str(default)))
@@ -1022,8 +1053,10 @@ def _tool_definitions() -> list[ToolDefinition]:
             description=(
                 "Inspect the capabilities delegated to this turn. Search by "
                 "ordinary words, request exact names, or page through the complete "
-                "catalogue. Returns canonical argument schemas. This is discovery, "
-                "not a requirement to use any particular capability."
+                "catalogue. A natural-language query also searches actor-accessible "
+                "represented workflows and returns executable matches as bound "
+                "capabilities. Returns canonical argument schemas. This is "
+                "discovery, not a requirement to use any particular capability."
             ),
             input_schema={
                 "type": "object",
@@ -1044,7 +1077,9 @@ def _tool_definitions() -> list[ToolDefinition]:
                 f"{_CAPABILITY_TOOL_NAME}. You may also invoke a known capability "
                 "directly without first searching. Reads return provenance-bearing "
                 "evidence. Effects return a server-generated receipt and evidence "
-                "handle; inspect canonical state before claiming persistence."
+                "handle; represented-workflow capability identities and actor scope "
+                "are bound by the server. Inspect canonical state before claiming "
+                "persistence."
             ),
             input_schema={
                 "type": "object",
@@ -1135,7 +1170,9 @@ def _scope_message(
         "- Remaining effect-capable window before the protected final-answer "
         f"reserve: {max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
         f"- {_CAPABILITY_TOOL_NAME} exposes the complete delegated catalogue "
-        "without interpreting the user's intent.\n"
+        "without interpreting the user's intent; a natural-language query also "
+        "retrieves actor-accessible executable represented workflows as bound "
+        "capabilities.\n"
         f"- {_INVOKE_TOOL_NAME} invokes any named delegated capability.\n"
         f"- {_EVIDENCE_INDEX_TOOL_NAME} pages every evidence handle recorded "
         "for this turn.\n"
@@ -1256,6 +1293,9 @@ def _capability_catalogue(
     gateway: InternalMCPGateway,
     delegated_names: Sequence[str],
     payload: Mapping[str, Any],
+    *,
+    workflow_capabilities: Sequence[Any] = (),
+    workflow_discovery: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     query = str(payload.get("query") or "").strip().lower()
     requested_names = payload.get("names")
@@ -1356,6 +1396,7 @@ def _capability_catalogue(
         )
         capability = {
             "name": name,
+            "kind": "registered_tool",
             "description": description,
             "input_schema": _model_visible_input_schema(definition),
             "query_match": query_match,
@@ -1387,6 +1428,68 @@ def _capability_catalogue(
                 capability,
             )
         )
+    represented_workflow_total = 0
+    for workflow_capability in workflow_capabilities:
+        to_catalogue_entry = getattr(
+            workflow_capability,
+            "to_catalogue_entry",
+            None,
+        )
+        if not callable(to_catalogue_entry):
+            continue
+        capability = to_catalogue_entry()
+        if not isinstance(capability, Mapping):
+            continue
+        capability = dict(capability)
+        name = str(capability.get("name") or "").strip()
+        if not name:
+            continue
+        represented_workflow_total += 1
+        name_key = name.lower()
+        if exact_names and name_key not in exact_names:
+            continue
+        description = str(capability.get("description") or "").strip()
+        searchable = (
+            f"{name_key.replace('_', ' ')} "
+            f"{str(capability.get('display_name') or '').lower()} "
+            f"{str(capability.get('workflow_id') or '').lower()} "
+            f"{description.lower()}"
+        )
+        if query_tokens:
+            literal_matches = sum(
+                1 for token in query_tokens if token in searchable
+            )
+            query_match = bool(
+                literal_matches
+                or float(capability.get("relevance_score") or 0.0) > 0.0
+            )
+            semantic_score = int(
+                max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(capability.get("relevance_score") or 0.0),
+                    ),
+                )
+                * 1000
+            )
+            score = semantic_score + (literal_matches * 10)
+        else:
+            query_match = True
+            score = int(
+                max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(capability.get("relevance_score") or 0.0),
+                    ),
+                )
+                * 1000
+            )
+        capability["query_match"] = query_match
+        if query_match:
+            matched_total += 1
+        ranked.append((-score, name_key, capability))
     ranked.sort(key=lambda item: (item[0], item[1]))
     selected = [item[2] for item in ranked]
     page = selected[offset : offset + limit]
@@ -1396,9 +1499,15 @@ def _capability_catalogue(
         "success": True,
         "delegation": "bounded_capabilities",
         "total": len(selected),
-        "delegated_total": registered_delegated_total,
+        "delegated_total": (
+            registered_delegated_total + represented_workflow_total
+        ),
+        "registered_tool_total": registered_delegated_total,
+        "represented_workflow_total": represented_workflow_total,
         "matched_total": matched_total,
-        "ranking": "literal_query_match_then_name",
+        "ranking": (
+            "represented_semantic_relevance_then_literal_query_match_then_name"
+        ),
         "catalogue_scope": (
             "requested_exact_names"
             if exact_names
@@ -1407,6 +1516,32 @@ def _capability_catalogue(
         "offset": offset,
         "next_offset": next_offset if next_offset < len(selected) else None,
         "capabilities": page,
+        **(
+            {"workflow_discovery": dict(workflow_discovery)}
+            if isinstance(workflow_discovery, Mapping)
+            else {}
+        ),
+        **(
+            {
+                "recovery_affordances": [
+                    {
+                        "action_type": "query_represented_workflow_capabilities",
+                        "tool": _CAPABILITY_TOOL_NAME,
+                        "arguments": {
+                            "query": (
+                                "Describe the work product or reusable workflow "
+                                "capability needed."
+                            )
+                        },
+                    }
+                ]
+            }
+            if exact_names.intersection(
+                {"workflow_create_instance", "workflow_execute"}
+            )
+            and not page
+            else {}
+        ),
     }
 
 
@@ -1621,6 +1756,22 @@ def _effect_id(*, turn_id: str | None, call_id: str, capability_name: str) -> st
     return f"effect_{hashlib.sha256(material).hexdigest()[:24]}"
 
 
+def _effect_request_signature(
+    capability_name: str,
+    arguments: Mapping[str, Any],
+) -> str:
+    """Identify an unchanged effect request independently of model call IDs."""
+
+    return hashlib.sha256(
+        _json_bytes(
+            {
+                "capability_name": str(capability_name).strip().lower(),
+                "arguments": dict(arguments),
+            }
+        )
+    ).hexdigest()
+
+
 def _effect_result_target_ids(raw_payload: Any) -> list[str]:
     """Extract bounded concrete mutation targets from a handler receipt."""
 
@@ -1798,6 +1949,7 @@ def execute_adaptive_turn(
     user_concept_id: str | None = None,
     org_concept_id: str | None = None,
     trusted_argument_values: Mapping[str, Any] | None = None,
+    workflow_launch_inputs: Mapping[str, Any] | None = None,
     progress_tracker: Any = None,
     turn_id: str | None = None,
     turn_budget_seconds: float | None = None,
@@ -1869,6 +2021,8 @@ def execute_adaptive_turn(
         trusted_argument_values=trusted_values,
     )
     delegated_lookup = {name.lower(): name for name in delegated_names}
+    workflow_capabilities_by_name: dict[str, Any] = {}
+    latest_workflow_discovery: dict[str, Any] | None = None
     available_tools = _tool_definitions()
     final_synthesis_tools = [
         tool
@@ -1917,6 +2071,8 @@ def execute_adaptive_turn(
     effect_states: dict[str, dict[str, Any]] = {}
     effect_state_generation = 0
     last_partial_effect_generation = 0
+    successful_effect_mutation_generation = 0
+    terminal_failed_effect_requests: dict[str, tuple[int, str | None]] = {}
 
     def remember_effect_state(
         effect_id: str,
@@ -2417,7 +2573,10 @@ def execute_adaptive_turn(
                 model=model,
                 system_message=_scope_message(
                     scope,
-                    delegated_count=len(delegated_names),
+                    delegated_count=(
+                        len(delegated_names)
+                        + len(workflow_capabilities_by_name)
+                    ),
                     final_synthesis=final_synthesis,
                     answer_only=answer_only,
                     remaining_effect_capable_seconds=(
@@ -2707,13 +2866,8 @@ def execute_adaptive_turn(
 
         continuation = response.continuation
         batch_results: list[ToolResult | None] = [None] * len(calls)
-        raw_capability_results: dict[
-            int,
-            tuple[Any, Any, dict[str, Any], str, bool],
-        ] = {}
-        actual_capabilities: list[
-            tuple[int, ToolCall, str, dict[str, Any], bool, float]
-        ] = []
+        raw_capability_results: dict[int, _ContainedCapabilityResult] = {}
+        actual_capabilities: list[_PreparedCapabilityCall] = []
 
         for index, call in enumerate(calls):
             _check_cancellation(progress_tracker)
@@ -2779,14 +2933,71 @@ def execute_adaptive_turn(
                 )
                 continue
             if call.tool_name == _CAPABILITY_TOOL_NAME:
-                output = (
-                    _capability_catalogue(gateway, delegated_names, call.payload)
-                    if gateway is not None
-                    else _error_payload(
+                if gateway is not None:
+                    workflow_query = str(call.payload.get("query") or "").strip()
+                    if workflow_query:
+                        from src.backend.services.workflow_turn_capability_service import (
+                            discover_turn_workflow_capabilities,
+                        )
+
+                        remaining_discovery_seconds = max(
+                            0.1,
+                            min(5.0, research_deadline - clock()),
+                        )
+                        try:
+                            requested_workflow_limit = int(
+                                call.payload.get("limit") or 5
+                            )
+                        except (TypeError, ValueError):
+                            requested_workflow_limit = 5
+                        try:
+                            discovered_workflows, workflow_discovery = (
+                                discover_turn_workflow_capabilities(
+                                    workflow_query,
+                                    namespace=scope.namespace,
+                                    user_concept_id=scope.user_concept_id,
+                                    organisation_concept_id=(
+                                        scope.organisation_concept_id
+                                    ),
+                                    turn_id=turn_id or "ordinary-turn",
+                                    max_results=min(
+                                        10,
+                                        max(1, requested_workflow_limit),
+                                    ),
+                                    timeout_seconds=remaining_discovery_seconds,
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            discovered_workflows = []
+                            workflow_discovery = {
+                                "schema_version": (
+                                    "workflow_turn_capability_discovery.v1"
+                                ),
+                                "status": "failed",
+                                "query": workflow_query,
+                                "match_count": 0,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc)[:500],
+                            }
+                        for workflow_capability in discovered_workflows:
+                            workflow_capabilities_by_name[
+                                workflow_capability.name.lower()
+                            ] = workflow_capability
+                        latest_workflow_discovery = dict(workflow_discovery)
+                    output = _capability_catalogue(
+                        gateway,
+                        delegated_names,
+                        call.payload,
+                        workflow_capabilities=tuple(
+                            workflow_capabilities_by_name.values()
+                        ),
+                        workflow_discovery=latest_workflow_discovery,
+                    )
+                else:
+                    output = _error_payload(
                         "capability_gateway_unavailable",
                         "The capability gateway is unavailable.",
                     )
-                )
                 batch_results[index] = ToolResult(
                     call_id=call.call_id,
                     tool_name=call.tool_name,
@@ -2869,8 +3080,11 @@ def execute_adaptive_turn(
 
             requested_name = str(call.payload.get("name") or "").strip()
             canonical_name = delegated_lookup.get(requested_name.lower())
+            workflow_capability = workflow_capabilities_by_name.get(
+                requested_name.lower()
+            )
             arguments = call.payload.get("arguments")
-            if canonical_name is None:
+            if canonical_name is None and workflow_capability is None:
                 output = _error_payload(
                     "capability_not_delegated",
                     f"{requested_name!r} is not a delegated capability.",
@@ -2893,73 +3107,210 @@ def execute_adaptive_turn(
                 )
                 continue
             assert gateway is not None
-            definition = gateway.get_method_definition(canonical_name)
+            capability_name = (
+                canonical_name
+                if canonical_name is not None
+                else str(workflow_capability.name)
+            )
+            execution_method_name = (
+                canonical_name
+                if canonical_name is not None
+                else "workflow_execute"
+            )
+            definition = gateway.get_method_definition(execution_method_name)
+            is_workflow_capability = workflow_capability is not None
             is_effect = bool(
-                definition is not None
-                and definition.category == "write"
-                and definition.ordinary_turn_effect
+                is_workflow_capability
+                or (
+                    definition is not None
+                    and definition.category == "write"
+                    and definition.ordinary_turn_effect
+                )
             )
             if not isinstance(arguments, Mapping):
-                raw_capability_results[index] = (
-                    _error_payload(
+                raw_capability_results[index] = _ContainedCapabilityResult(
+                    raw_payload=_error_payload(
                         "invalid_capability_arguments",
                         "arguments must be an object.",
                     ),
-                    None,
-                    {},
-                    canonical_name,
-                    is_effect,
+                    transport_result=None,
+                    arguments={},
+                    capability_name=capability_name,
+                    is_effect=is_effect,
+                    execution_method_name=execution_method_name,
+                    capability_kind=(
+                        "represented_workflow"
+                        if is_workflow_capability
+                        else "registered_tool"
+                    ),
+                    represented_workflow_id=(
+                        str(workflow_capability.workflow_id)
+                        if is_workflow_capability
+                        else None
+                    ),
                 )
                 continue
-            trusted_arguments = _trusted_tool_payload(
-                gateway=gateway,
-                tool_name=canonical_name,
-                model_payload=arguments,
-                trusted_argument_values=trusted_values,
-            )
+            binding_diagnostics: Mapping[str, Any] | None = None
+            if is_workflow_capability:
+                if definition is None:
+                    raw_capability_results[index] = _ContainedCapabilityResult(
+                        raw_payload=_error_payload(
+                            "workflow_execution_capability_unavailable",
+                            (
+                                "The represented workflow was discovered, but "
+                                "the verified workflow execution method is not "
+                                "registered."
+                            ),
+                        ),
+                        transport_result=None,
+                        arguments={},
+                        capability_name=capability_name,
+                        is_effect=True,
+                        execution_method_name=execution_method_name,
+                        capability_kind="represented_workflow",
+                        represented_workflow_id=str(
+                            workflow_capability.workflow_id
+                        ),
+                    )
+                    continue
+                if not scope.user_concept_id or not scope.namespace:
+                    raw_capability_results[index] = _ContainedCapabilityResult(
+                        raw_payload=_error_payload(
+                            "workflow_actor_authority_required",
+                            (
+                                "Represented workflow invocation requires an "
+                                "authenticated actor and namespace."
+                            ),
+                        ),
+                        transport_result=None,
+                        arguments={},
+                        capability_name=capability_name,
+                        is_effect=True,
+                        execution_method_name=execution_method_name,
+                        capability_kind="represented_workflow",
+                        represented_workflow_id=str(
+                            workflow_capability.workflow_id
+                        ),
+                    )
+                    continue
+                from src.backend.services.workflow_turn_capability_service import (
+                    build_workflow_execution_arguments,
+                )
+
+                try:
+                    (
+                        trusted_arguments,
+                        binding_diagnostics,
+                    ) = build_workflow_execution_arguments(
+                        workflow_capability,
+                        arguments,
+                        prompt=prompt,
+                        context=current_context,
+                        request_workflow_launch_inputs=workflow_launch_inputs,
+                        user_concept_id=scope.user_concept_id,
+                        organisation_concept_id=scope.organisation_concept_id,
+                        namespace=scope.namespace,
+                        maximum_wait_seconds=max(
+                            0.1,
+                            final_answer_deadline - clock() - 1.0,
+                        ),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raw_capability_results[index] = _ContainedCapabilityResult(
+                        raw_payload=_error_payload(
+                            "invalid_workflow_capability_arguments",
+                            str(exc),
+                        ),
+                        transport_result=None,
+                        arguments={},
+                        capability_name=capability_name,
+                        is_effect=True,
+                        execution_method_name=execution_method_name,
+                        capability_kind="represented_workflow",
+                        represented_workflow_id=str(
+                            workflow_capability.workflow_id
+                        ),
+                    )
+                    continue
+            else:
+                trusted_arguments = _trusted_tool_payload(
+                    gateway=gateway,
+                    tool_name=execution_method_name,
+                    model_payload=arguments,
+                    trusted_argument_values=trusted_values,
+                )
             minimum_effect_window = 0.0
             if is_effect:
-                resolved_effect_window = gateway.get_method_effect_admission_window_sec(
-                    canonical_name
+                resolved_effect_window = (
+                    5.0
+                    if is_workflow_capability
+                    else gateway.get_method_effect_admission_window_sec(
+                        execution_method_name
+                    )
                 )
                 if resolved_effect_window is None:
                     resolved_effect_window = gateway.get_method_timeout_sec(
-                        canonical_name
+                        execution_method_name
                     )
                 minimum_effect_window = max(
                     0.0,
                     float(resolved_effect_window or 0.0),
                 )
             actual_capabilities.append(
-                (
-                    index,
-                    call,
-                    canonical_name,
-                    trusted_arguments,
-                    is_effect,
-                    minimum_effect_window,
+                _PreparedCapabilityCall(
+                    index=index,
+                    call=call,
+                    capability_name=capability_name,
+                    execution_method_name=execution_method_name,
+                    arguments=trusted_arguments,
+                    is_effect=is_effect,
+                    minimum_effect_window_seconds=minimum_effect_window,
+                    capability_kind=(
+                        "represented_workflow"
+                        if is_workflow_capability
+                        else "registered_tool"
+                    ),
+                    represented_workflow_id=(
+                        str(workflow_capability.workflow_id)
+                        if is_workflow_capability
+                        else None
+                    ),
+                    binding_diagnostics=binding_diagnostics,
                 )
             )
 
         def invoke_and_contain(
-            item: tuple[int, ToolCall, str, dict[str, Any], bool, float],
+            item: _PreparedCapabilityCall,
             *,
             deadline_monotonic: float,
             effect_window_denial: Mapping[str, Any] | None = None,
-        ) -> tuple[
-            int,
-            tuple[Any, Any, dict[str, Any], str, bool],
-        ]:
-            (
-                index,
-                call,
-                canonical_name,
-                arguments,
-                is_effect,
-                _minimum_effect_window,
-            ) = item
+        ) -> tuple[int, _ContainedCapabilityResult]:
+            nonlocal successful_effect_mutation_generation
+            index = item.index
+            call = item.call
+            canonical_name = item.capability_name
+            execution_method_name = item.execution_method_name
+            arguments = dict(item.arguments)
+            is_effect = item.is_effect
+
+            def contained(
+                raw_payload: Any,
+                transport_result: Any = None,
+            ) -> _ContainedCapabilityResult:
+                return _ContainedCapabilityResult(
+                    raw_payload=raw_payload,
+                    transport_result=transport_result,
+                    arguments=arguments,
+                    capability_name=canonical_name,
+                    is_effect=is_effect,
+                    execution_method_name=execution_method_name,
+                    capability_kind=item.capability_kind,
+                    represented_workflow_id=item.represented_workflow_id,
+                    binding_diagnostics=item.binding_diagnostics,
+                )
+
             assert gateway is not None
-            definition = gateway.get_method_definition(canonical_name)
+            definition = gateway.get_method_definition(execution_method_name)
             subject_argument = (
                 definition.ordinary_turn_mutation_subject_argument
                 if definition is not None and is_effect
@@ -2971,29 +3322,61 @@ def execute_adaptive_turn(
                 else None
             )
             if effect_denial is not None:
-                return index, (
-                    effect_denial,
-                    None,
-                    arguments,
-                    canonical_name,
-                    is_effect,
-                )
+                return index, contained(effect_denial)
             if subject_argument:
                 if not _effect_subject_authorised(
                     arguments.get(subject_argument),
                     scope,
                 ):
-                    return index, (
+                    return index, contained(
                         _error_payload(
                             "effect_subject_not_authorised",
                             "The effect subject is not scoped to the authenticated "
                             "actor or organisation.",
-                        ),
-                        None,
-                        arguments,
-                        canonical_name,
-                        is_effect,
+                        )
                     )
+
+            effect_request_signature = (
+                _effect_request_signature(canonical_name, arguments)
+                if is_effect
+                else None
+            )
+            prior_terminal_failure = (
+                terminal_failed_effect_requests.get(effect_request_signature)
+                if effect_request_signature is not None
+                else None
+            )
+            if (
+                prior_terminal_failure is not None
+                and prior_terminal_failure[0]
+                == successful_effect_mutation_generation
+            ):
+                return index, contained(
+                    {
+                        **_error_payload(
+                            "effect_request_unchanged_after_terminal_failure",
+                            (
+                                "This exact effect request was not repeated because "
+                                "it already failed terminally and no successful "
+                                "intervening effect changed the turn state."
+                            ),
+                        ),
+                        "status": "not_started",
+                        "mutation_outcome": "not_started",
+                        "outcome_finality": "terminal_for_turn",
+                        "prior_error_code": prior_terminal_failure[1],
+                        "changed": False,
+                        "recovery_affordances": [
+                            {
+                                "action_type": "change_arguments_or_use_typed_recovery"
+                            },
+                            {
+                                "action_type": "inspect_canonical_state_before_retry"
+                            },
+                        ],
+                    }
+                )
+
             effect_identifier = (
                 _effect_id(
                     turn_id=turn_id,
@@ -3014,7 +3397,7 @@ def execute_adaptive_turn(
                     },
                 )
                 if not _effect_phase_acknowledged(dispatch_outcome):
-                    return index, (
+                    return index, contained(
                         {
                             **_error_payload(
                                 "effect_observation_unavailable",
@@ -3039,11 +3422,7 @@ def execute_adaptive_turn(
                                     )
                                 }
                             ],
-                        },
-                        None,
-                        arguments,
-                        canonical_name,
-                        is_effect,
+                        }
                     )
                 if isinstance(effect_window_denial, Mapping):
                     denial_payload = dict(effect_window_denial)
@@ -3077,20 +3456,14 @@ def execute_adaptive_turn(
                                 ),
                             }
                         )
-                    return index, (
-                        denial_payload,
-                        None,
-                        arguments,
-                        canonical_name,
-                        is_effect,
-                    )
+                    return index, contained(denial_payload)
             try:
                 with override_current_actor(
                     scope.user_concept_id,
                     scope.organisation_concept_id,
                 ):
                     transport_result = gateway.invoke(
-                        canonical_name,
+                        execution_method_name,
                         arguments,
                         deadline_monotonic=deadline_monotonic,
                         late_completion_observer=(
@@ -3136,6 +3509,52 @@ def execute_adaptive_turn(
                 if is_effect:
                     raw_payload["mutation_outcome"] = "unknown"
                 transport_result = None
+
+            if item.capability_kind == "represented_workflow":
+                from src.backend.services.workflow_turn_capability_service import (
+                    normalise_workflow_effect_receipt,
+                )
+
+                workflow_capability = workflow_capabilities_by_name.get(
+                    canonical_name.lower()
+                )
+                if workflow_capability is not None:
+                    raw_payload = normalise_workflow_effect_receipt(
+                        raw_payload,
+                        capability=workflow_capability,
+                    )
+
+            terminal_effect_status = (
+                _effect_status(
+                    raw_payload,
+                    transport_result=transport_result,
+                )
+                if is_effect
+                else None
+            )
+            if (
+                is_effect
+                and effect_request_signature is not None
+                and terminal_effect_status in {"failed", "not_started"}
+                and isinstance(raw_payload, Mapping)
+                and raw_payload.get("retryable") is not True
+            ):
+                terminal_failed_effect_requests[effect_request_signature] = (
+                    successful_effect_mutation_generation,
+                    (
+                        str(raw_payload.get("error_code")).strip()
+                        if raw_payload.get("error_code")
+                        else None
+                    ),
+                )
+            elif (
+                is_effect
+                and terminal_effect_status in {"succeeded", "partial"}
+                and isinstance(raw_payload, Mapping)
+                and raw_payload.get("changed") is True
+            ):
+                successful_effect_mutation_generation += 1
+
             if effect_identifier is not None:
                 transport_metadata_fn = getattr(
                     transport_result,
@@ -3147,10 +3566,7 @@ def execute_adaptive_turn(
                     if callable(transport_metadata_fn)
                     else {}
                 )
-                terminal_effect_status = _effect_status(
-                    raw_payload,
-                    transport_result=transport_result,
-                )
+                assert terminal_effect_status is not None
                 changed = (
                     raw_payload.get("changed")
                     if isinstance(raw_payload, Mapping)
@@ -3192,15 +3608,11 @@ def execute_adaptive_turn(
                             ),
                         }
                     )
-            return index, (
-                raw_payload,
-                transport_result,
-                arguments,
-                canonical_name,
-                is_effect,
-            )
+            return index, contained(raw_payload, transport_result)
 
-        if actual_capabilities and any(item[4] for item in actual_capabilities):
+        if actual_capabilities and any(
+            item.is_effect for item in actual_capabilities
+        ):
             # Preserve model-call order whenever the batch contains an effect.
             # Each effect receives an independent admission decision in model
             # order. One invalid or oversized call therefore cannot deny an
@@ -3209,14 +3621,8 @@ def execute_adaptive_turn(
             # remain available for that inspection.
             prior_indeterminate_effect_id: str | None = None
             for item in actual_capabilities:
-                (
-                    _item_index,
-                    _call,
-                    canonical_name,
-                    _arguments,
-                    is_effect,
-                    _minimum_effect_window,
-                ) = item
+                canonical_name = item.capability_name
+                is_effect = item.is_effect
                 effect_window_denial = None
                 if is_effect and prior_indeterminate_effect_id is not None:
                     effect_window_denial = {
@@ -3249,19 +3655,18 @@ def execute_adaptive_turn(
                     effect_window_denial=effect_window_denial,
                 )
                 raw_capability_results[result_index] = contained
-                raw_payload, transport_result, *_rest = contained
                 if (
                     is_effect
                     and effect_window_denial is None
                     and _effect_status(
-                        raw_payload,
-                        transport_result=transport_result,
+                        contained.raw_payload,
+                        transport_result=contained.transport_result,
                     )
                     == "indeterminate"
                 ):
                     prior_indeterminate_effect_id = _effect_id(
                         turn_id=turn_id,
-                        call_id=_call.call_id,
+                        call_id=item.call.call_id,
                         capability_name=canonical_name,
                     )
         elif actual_capabilities:
@@ -3294,15 +3699,13 @@ def execute_adaptive_turn(
         # handler therefore cannot mutate the terminal transcript.
         for index, call in enumerate(calls):
             if index in raw_capability_results:
-                (
-                    raw_payload,
-                    transport_result,
-                    arguments,
-                    canonical_name,
-                    is_effect,
-                ) = (
-                    raw_capability_results[index]
-                )
+                contained_result = raw_capability_results[index]
+                raw_payload = contained_result.raw_payload
+                transport_result = contained_result.transport_result
+                arguments = contained_result.arguments
+                canonical_name = contained_result.capability_name
+                is_effect = contained_result.is_effect
+                execution_method_name = contained_result.execution_method_name
                 effect_identifier = (
                     _effect_id(
                         turn_id=turn_id,
@@ -3348,6 +3751,17 @@ def execute_adaptive_turn(
                         "namespace": scope.namespace,
                         "user_concept_id": scope.user_concept_id,
                         "organisation_concept_id": scope.organisation_concept_id,
+                        "capability_kind": contained_result.capability_kind,
+                        "execution_method": execution_method_name,
+                        **(
+                            {
+                                "represented_workflow_id": (
+                                    contained_result.represented_workflow_id
+                                )
+                            }
+                            if contained_result.represented_workflow_id
+                            else {}
+                        ),
                         "transport": transport_metadata,
                         **(
                             {
@@ -3417,6 +3831,8 @@ def execute_adaptive_turn(
                 invocation: dict[str, Any] = {
                     "tool": canonical_name,
                     "via": call.tool_name,
+                    "capability_kind": contained_result.capability_kind,
+                    "execution_method": execution_method_name,
                     "call_id": call.call_id,
                     "payload": dict(call.payload),
                     "effective_arguments": arguments,
@@ -3428,6 +3844,14 @@ def execute_adaptive_turn(
                         else {}
                     ),
                 }
+                if contained_result.represented_workflow_id:
+                    invocation["represented_workflow_id"] = (
+                        contained_result.represented_workflow_id
+                    )
+                if contained_result.binding_diagnostics:
+                    invocation["binding_diagnostics"] = dict(
+                        contained_result.binding_diagnostics
+                    )
                 if is_effect:
                     invocation.update(
                         {
@@ -3455,6 +3879,7 @@ def execute_adaptive_turn(
                         "stage": "adaptive_research",
                         "phase": "adaptive_research",
                         "tool": canonical_name,
+                        "execution_method": execution_method_name,
                         "call_id": call.call_id,
                         "success": status == "ok",
                         "result_summary": (

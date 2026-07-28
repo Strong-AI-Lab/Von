@@ -256,6 +256,28 @@ def test_generate_canonicalises_actor_scope_for_the_adaptive_turn(
     assert adaptive_call["user_namespace"] == "#V#michael_witbrock@sail_lab"
 
 
+def test_generate_passes_authorised_workflow_inputs_to_adaptive_capabilities(
+    app: Flask,
+) -> None:
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Use the represented capability with these inputs.",
+            "workflow_inputs": {
+                "record_id": "#V#record",
+                "maximum_results": 3,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    adaptive_call = app.config["_ADAPTIVE_TURN_CALLS"][-1]
+    assert adaptive_call["workflow_launch_inputs"] == {
+        "record_id": "#V#record",
+        "maximum_results": 3,
+    }
+
+
 def test_body_identity_cannot_override_actor_scope_passed_to_adaptive_turn(
     app: Flask,
 ) -> None:

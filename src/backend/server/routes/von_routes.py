@@ -10975,6 +10975,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 if request_gmail_profile
                 else None
             ),
+            workflow_launch_inputs=request_workflow_launch_inputs,
             progress_tracker=progress_tracker,
             turn_id=request_id,
         )

@@ -1,0 +1,667 @@
+"""Turn-scoped affordances for represented workflow discovery and execution.
+
+This service adapts the existing actor-filtered workflow capability index and
+verified durable submission surface to the thin ordinary-turn capability
+interface.  It does not select a workflow or interpret request semantics.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Sequence
+
+from src.backend.security.access_control import override_current_actor
+
+
+WORKFLOW_TURN_CAPABILITY_SCHEMA_VERSION = "workflow_turn_capability.v1"
+WORKFLOW_TURN_DISCOVERY_SCHEMA_VERSION = "workflow_turn_capability_discovery.v1"
+WORKFLOW_TURN_RECEIPT_SCHEMA_VERSION = "workflow_turn_effect_receipt.v1"
+
+_SERVER_PROVIDED_WORKFLOW_INPUT_KEYS = frozenset(
+    {
+        "actor_concept_id",
+        "actor_user_concept_id",
+        "augmented_context",
+        "namespace",
+        "org_concept_id",
+        "organisation_concept_id",
+        "prompt",
+        "workflow_id",
+        "user_id",
+        "org_id",
+        "user_concept_id",
+        "user_namespace",
+        "user_prompt",
+        "workflow_launch_inputs",
+    }
+)
+_MODEL_WORKFLOW_CONTROL_ARGUMENTS = frozenset(
+    {
+        "await_terminal",
+        "include_step_result_envelopes",
+        "include_trace",
+        "inputs",
+        "max_retries",
+        "poll_interval_seconds",
+        "timeout_seconds",
+    }
+)
+_TERMINAL_SUCCESS_STATUSES = frozenset({"completed", "succeeded", "success"})
+_TERMINAL_FAILURE_STATUSES = frozenset(
+    {"cancelled", "canceled", "failed", "rejected", "terminated"}
+)
+
+
+def _normalise_non_empty_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalised = value.strip().lower()
+        if normalised in {"1", "true", "yes", "on"}:
+            return True
+        if normalised in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
+def _bounded_mapping_sequence(
+    value: Any,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return []
+    return [
+        dict(item)
+        for item in list(value)[:limit]
+        if isinstance(item, Mapping)
+    ]
+
+
+def _turn_capability_name(*, turn_id: str, workflow_id: str) -> str:
+    digest = hashlib.sha256(
+        f"{turn_id}\0{workflow_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    return f"represented_workflow_{digest}"
+
+
+def _mapping_source_input_key(source_expression: Any) -> str | None:
+    expression = _normalise_non_empty_text(source_expression)
+    if expression is None or not expression.startswith("inputs."):
+        return None
+    input_path = expression.removeprefix("inputs.").strip()
+    if not input_path:
+        return None
+    return input_path.split(".", 1)[0].strip() or None
+
+
+def _workflow_model_input_schema(
+    contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    mappings = _bounded_mapping_sequence(
+        contract.get("input_mappings") if isinstance(contract, Mapping) else None,
+        limit=40,
+    )
+    represented_mappings: list[dict[str, Any]] = []
+    model_properties: dict[str, Any] = {}
+    required_model_inputs: list[str] = []
+    explicit_required_inputs = {
+        str(item).strip()
+        for item in (
+            contract.get("required_inputs", [])
+            if isinstance(contract, Mapping)
+            else []
+        )
+        if isinstance(item, str) and item.strip()
+    }
+
+    for mapping in mappings:
+        target_key = _normalise_non_empty_text(
+            mapping.get("target_context_key")
+            or mapping.get("workflow_context_key")
+            or mapping.get("context_key")
+            or mapping.get("target_key")
+        )
+        source_expression = _normalise_non_empty_text(
+            mapping.get("source_expression")
+            or mapping.get("source")
+            or mapping.get("source_context_key")
+            or mapping.get("source_path")
+        )
+        if target_key is None or source_expression is None:
+            continue
+        source_input_key = _mapping_source_input_key(source_expression)
+        required = bool(mapping.get("required")) or target_key in explicit_required_inputs
+        represented_mapping = {
+            "target_context_key": target_key,
+            "source_expression": source_expression,
+            "extractor": (
+                _normalise_non_empty_text(mapping.get("extractor")) or "identity"
+            ),
+            "required": required,
+        }
+        description = _normalise_non_empty_text(mapping.get("description"))
+        if description is not None:
+            represented_mapping["description"] = description[:500]
+        represented_mappings.append(represented_mapping)
+
+        if (
+            source_input_key is None
+            or source_input_key in _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS
+        ):
+            continue
+        property_schema: dict[str, Any] = {}
+        if description is not None:
+            property_schema["description"] = description[:500]
+        model_properties.setdefault(source_input_key, property_schema)
+        if required and source_input_key not in required_model_inputs:
+            required_model_inputs.append(source_input_key)
+
+    inputs_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": model_properties,
+        "additionalProperties": True,
+        "description": (
+            "Workflow launch inputs not already supplied by the server from the "
+            "turn prompt, authenticated actor, context, or explicit request inputs."
+        ),
+    }
+    if required_model_inputs:
+        inputs_schema["required"] = sorted(required_model_inputs)
+
+    return {
+        "type": "object",
+        "properties": {
+            "inputs": inputs_schema,
+            "await_terminal": {
+                "type": "boolean",
+                "description": (
+                    "Wait for a terminal workflow state before returning. "
+                    "Defaults to true."
+                ),
+            },
+            "timeout_seconds": {
+                "type": "number",
+                "minimum": 0.1,
+                "description": (
+                    "Maximum bounded terminal wait, further capped by the turn."
+                ),
+            },
+            "poll_interval_seconds": {
+                "type": "number",
+                "minimum": 0.0,
+            },
+            "include_trace": {"type": "boolean"},
+            "include_step_result_envelopes": {"type": "boolean"},
+            "max_retries": {"type": "integer", "minimum": 0, "maximum": 50},
+        },
+        "additionalProperties": False,
+        "x-von-represented-launch-input-mappings": represented_mappings,
+        "x-von-server-provided-inputs": sorted(
+            _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class WorkflowTurnCapability:
+    """One actor-visible workflow exposed as a turn-bound capability."""
+
+    name: str
+    workflow_id: str
+    display_name: str
+    description: str
+    relevance_score: float
+    input_schema: Mapping[str, Any]
+    launch_input_contract_source: str | None = None
+    discovery_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_catalogue_entry(self) -> dict[str, Any]:
+        return {
+            "schema_version": WORKFLOW_TURN_CAPABILITY_SCHEMA_VERSION,
+            "name": self.name,
+            "kind": "represented_workflow",
+            "workflow_id": self.workflow_id,
+            "display_name": self.display_name,
+            "description": self.description,
+            "input_schema": dict(self.input_schema),
+            "query_match": True,
+            "semantic_effect": True,
+            "minimum_effect_window_seconds": 5.0,
+            "server_bound_arguments": [
+                "workflow_id",
+                "user_id",
+                "org_id",
+                "namespace",
+            ],
+            "terminal_readback": True,
+            "relevance_score": round(float(self.relevance_score), 4),
+            "launch_input_contract_source": self.launch_input_contract_source,
+            "discovery_metadata": dict(self.discovery_metadata),
+        }
+
+
+def discover_turn_workflow_capabilities(
+    query: str,
+    *,
+    namespace: str | None,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    turn_id: str,
+    max_results: int = 5,
+    timeout_seconds: float = 5.0,
+) -> tuple[list[WorkflowTurnCapability], dict[str, Any]]:
+    """Return bounded actor-accessible workflow affordances for a model query."""
+
+    query_text = _normalise_non_empty_text(query)
+    if query_text is None:
+        return [], {
+            "schema_version": WORKFLOW_TURN_DISCOVERY_SCHEMA_VERSION,
+            "status": "not_requested",
+            "match_count": 0,
+        }
+    if not _normalise_non_empty_text(user_concept_id) or not _normalise_non_empty_text(
+        namespace
+    ):
+        return [], {
+            "schema_version": WORKFLOW_TURN_DISCOVERY_SCHEMA_VERSION,
+            "status": "authenticated_actor_required",
+            "match_count": 0,
+        }
+
+    from src.backend.services.workflow_discovery_service import (
+        discover_workflows_for_turn,
+    )
+    from src.backend.workflows.vontology_loader import (
+        resolve_workflow_launch_input_contract,
+    )
+
+    bounded_max_results = max(1, min(10, int(max_results)))
+    bounded_timeout_seconds = max(0.1, min(10.0, float(timeout_seconds)))
+    with override_current_actor(user_concept_id, organisation_concept_id):
+        payload = discover_workflows_for_turn(
+            query_text,
+            namespace=namespace,
+            max_results=bounded_max_results,
+            timeout_seconds=bounded_timeout_seconds,
+            allow_non_executable=False,
+        )
+
+        matches = (
+            payload.get("matches")
+            if isinstance(payload, Mapping)
+            and isinstance(payload.get("matches"), list)
+            else []
+        )
+        capabilities: list[WorkflowTurnCapability] = []
+        seen_workflow_ids: set[str] = set()
+        contract_errors: list[dict[str, Any]] = []
+        for raw_match in matches[:bounded_max_results]:
+            if not isinstance(raw_match, Mapping):
+                continue
+            workflow_id = _normalise_non_empty_text(raw_match.get("concept_id"))
+            if workflow_id is None or workflow_id in seen_workflow_ids:
+                continue
+            if raw_match.get("is_executable") is not True:
+                continue
+            if raw_match.get("routing_eligible") is not True:
+                continue
+            seen_workflow_ids.add(workflow_id)
+            try:
+                launch_contract, launch_contract_source = (
+                    resolve_workflow_launch_input_contract(workflow_id)
+                )
+            except Exception as exc:  # noqa: BLE001
+                launch_contract = None
+                launch_contract_source = None
+                contract_errors.append(
+                    {
+                        "workflow_id": workflow_id,
+                        "stage": "launch_input_contract_resolution",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:500],
+                    }
+                )
+            routing_profile = raw_match.get("routing_profile")
+            routing_index_metadata = raw_match.get("routing_index_metadata")
+            capabilities.append(
+                WorkflowTurnCapability(
+                    name=_turn_capability_name(
+                        turn_id=turn_id,
+                        workflow_id=workflow_id,
+                    ),
+                    workflow_id=workflow_id,
+                    display_name=(
+                        _normalise_non_empty_text(raw_match.get("name"))
+                        or workflow_id
+                    ),
+                    description=(
+                        _normalise_non_empty_text(raw_match.get("description"))
+                        or f"Execute represented workflow {workflow_id}."
+                    ),
+                    relevance_score=_coerce_relevance_score(
+                        raw_match.get("relevance_score")
+                    ),
+                    input_schema=_workflow_model_input_schema(launch_contract),
+                    launch_input_contract_source=(
+                        _normalise_non_empty_text(launch_contract_source)
+                    ),
+                    discovery_metadata={
+                        "match_source": raw_match.get("match_source"),
+                        "executability_reason": raw_match.get(
+                            "executability_reason"
+                        ),
+                        "routing_readiness_status": raw_match.get(
+                            "routing_readiness_status"
+                        ),
+                        "routing_profile": (
+                            dict(routing_profile)
+                            if isinstance(routing_profile, Mapping)
+                            else None
+                        ),
+                        "routing_index_metadata": (
+                            {
+                                key: routing_index_metadata.get(key)
+                                for key in (
+                                    "authority_source",
+                                    "description_source",
+                                    "publication_lifecycle",
+                                    "routing_profile_source",
+                                )
+                                if key in routing_index_metadata
+                            }
+                            if isinstance(routing_index_metadata, Mapping)
+                            else None
+                        ),
+                    },
+                )
+            )
+
+    diagnostic = {
+        "schema_version": WORKFLOW_TURN_DISCOVERY_SCHEMA_VERSION,
+        "status": "completed",
+        "query": query_text,
+        "match_count": len(capabilities),
+        "candidate_count": (
+            payload.get("candidate_count") if isinstance(payload, Mapping) else None
+        ),
+        "search_time_ms": (
+            payload.get("search_time_ms") if isinstance(payload, Mapping) else None
+        ),
+        "budget_exhausted": bool(
+            payload.get("budget_exhausted")
+            if isinstance(payload, Mapping)
+            else False
+        ),
+        "match_absence_reason": (
+            payload.get("match_absence_reason")
+            if isinstance(payload, Mapping)
+            else None
+        ),
+        "errors": (
+            [*list(payload.get("errors") or [])[:5], *contract_errors[:5]]
+            if isinstance(payload, Mapping)
+            else contract_errors[:5]
+        ),
+    }
+    return capabilities, diagnostic
+
+
+def _bounded_context_projection(
+    context: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    remaining_chars = 24_000
+    for item in list(context or ())[-20:]:
+        if not isinstance(item, Mapping) or remaining_chars <= 0:
+            continue
+        role = _normalise_non_empty_text(item.get("role")) or "context"
+        content = item.get("content")
+        if isinstance(content, str):
+            bounded_content = content[: min(4_000, remaining_chars)]
+            projected.append({"role": role, "content": bounded_content})
+            remaining_chars -= len(bounded_content)
+    return projected
+
+
+def _coerce_relevance_score(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_workflow_execution_arguments(
+    capability: WorkflowTurnCapability,
+    model_arguments: Mapping[str, Any],
+    *,
+    prompt: str,
+    context: Sequence[Mapping[str, Any]] | None,
+    request_workflow_launch_inputs: Mapping[str, Any] | None,
+    user_concept_id: str,
+    organisation_concept_id: str | None,
+    namespace: str,
+    maximum_wait_seconds: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind workflow identity/actor and build verified-submission arguments."""
+
+    unknown_arguments = sorted(
+        str(key)
+        for key in model_arguments
+        if str(key) not in _MODEL_WORKFLOW_CONTROL_ARGUMENTS
+    )
+    raw_model_inputs = model_arguments.get("inputs")
+    if raw_model_inputs is None:
+        model_inputs: dict[str, Any] = {}
+    elif isinstance(raw_model_inputs, Mapping):
+        model_inputs = {
+            str(key): value
+            for key, value in raw_model_inputs.items()
+            if isinstance(key, str)
+            and key.strip()
+            and key not in _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS
+            and not key.startswith("__")
+        }
+    else:
+        raise ValueError("workflow capability inputs must be an object")
+
+    trusted_request_inputs = (
+        {
+            str(key): value
+            for key, value in request_workflow_launch_inputs.items()
+            if isinstance(key, str)
+            and key.strip()
+            and key not in _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS
+            and not key.startswith("__")
+        }
+        if isinstance(request_workflow_launch_inputs, Mapping)
+        else {}
+    )
+    launch_inputs = dict(model_inputs)
+    for key, value in trusted_request_inputs.items():
+        if isinstance(key, str) and key.strip() and not key.startswith("__"):
+            launch_inputs[key] = value
+    if trusted_request_inputs:
+        launch_inputs["workflow_launch_inputs"] = dict(trusted_request_inputs)
+    launch_inputs.update(
+        {
+            "actor_concept_id": user_concept_id,
+            "actor_user_concept_id": user_concept_id,
+            "user_concept_id": user_concept_id,
+            "namespace": namespace,
+            "user_namespace": namespace,
+        }
+    )
+    if organisation_concept_id is not None:
+        launch_inputs.update(
+            {
+                "org_concept_id": organisation_concept_id,
+                "organisation_concept_id": organisation_concept_id,
+            }
+        )
+    clean_prompt = str(prompt or "").strip()
+    if clean_prompt:
+        launch_inputs["prompt"] = clean_prompt
+        launch_inputs["user_prompt"] = clean_prompt
+    context_projection = _bounded_context_projection(context)
+    if context_projection:
+        launch_inputs["augmented_context"] = context_projection
+
+    try:
+        requested_wait = float(model_arguments.get("timeout_seconds", 60.0))
+    except (TypeError, ValueError):
+        requested_wait = 60.0
+    effective_wait = max(
+        0.1,
+        min(
+            requested_wait if requested_wait > 0.0 else 0.1,
+            max(0.1, float(maximum_wait_seconds)),
+            90.0,
+        ),
+    )
+    try:
+        poll_interval = float(model_arguments.get("poll_interval_seconds", 0.5))
+    except (TypeError, ValueError):
+        poll_interval = 0.5
+    try:
+        max_retries = int(model_arguments.get("max_retries", 3))
+    except (TypeError, ValueError):
+        max_retries = 3
+
+    effective_arguments = {
+        "workflow_id": capability.workflow_id,
+        "user_id": user_concept_id,
+        "namespace": namespace,
+        "inputs": launch_inputs,
+        "max_retries": max(0, min(max_retries, 50)),
+        "await_terminal": _coerce_bool(
+            model_arguments.get("await_terminal"),
+            default=True,
+        ),
+        "timeout_seconds": effective_wait,
+        "poll_interval_seconds": max(0.0, poll_interval),
+        "include_step_result_envelopes": _coerce_bool(
+            model_arguments.get("include_step_result_envelopes"),
+            default=False,
+        ),
+        "include_trace": _coerce_bool(
+            model_arguments.get("include_trace"),
+            default=False,
+        ),
+    }
+    if organisation_concept_id is not None:
+        effective_arguments["org_id"] = organisation_concept_id
+    binding_diagnostics = {
+        "schema_version": "workflow_turn_capability_binding.v1",
+        "capability_name": capability.name,
+        "workflow_id": capability.workflow_id,
+        "server_bound_arguments": [
+            "workflow_id",
+            "user_id",
+            "org_id",
+            "namespace",
+        ],
+        "ignored_model_arguments": unknown_arguments,
+        "trusted_request_input_keys": sorted(trusted_request_inputs),
+        "model_input_keys": sorted(model_inputs),
+        "effective_wait_seconds": effective_wait,
+    }
+    return effective_arguments, binding_diagnostics
+
+
+def normalise_workflow_effect_receipt(
+    payload: Any,
+    *,
+    capability: WorkflowTurnCapability,
+) -> Any:
+    """Project durable workflow launch/terminal state into effect semantics."""
+
+    if not isinstance(payload, Mapping):
+        return payload
+    receipt = dict(payload)
+    instance_id = _normalise_non_empty_text(receipt.get("instance_id"))
+    final_status = _normalise_non_empty_text(receipt.get("final_status"))
+    workflow_instance = receipt.get("workflow_instance")
+    if final_status is None and isinstance(workflow_instance, Mapping):
+        final_status = _normalise_non_empty_text(workflow_instance.get("status"))
+    status_key = (final_status or "").lower()
+    timed_out = bool(receipt.get("timed_out"))
+    created_new = receipt.get("created_new")
+    changed = bool(instance_id and created_new is not False)
+
+    if receipt.get("success") is False and instance_id is None:
+        effect_status = "failed"
+        changed = False
+    elif status_key in _TERMINAL_SUCCESS_STATUSES and not timed_out:
+        effect_status = "succeeded"
+    elif status_key in _TERMINAL_FAILURE_STATUSES:
+        effect_status = "failed"
+    elif (
+        timed_out
+        or status_key in {"pending", "queued", "running", "paused"}
+        or not status_key
+    ):
+        effect_status = "partial" if instance_id is not None else "failed"
+    else:
+        effect_status = "partial" if instance_id is not None else "failed"
+
+    receipt.update(
+        {
+            "workflow_turn_receipt_schema_version": (
+                WORKFLOW_TURN_RECEIPT_SCHEMA_VERSION
+            ),
+            "capability_kind": "represented_workflow",
+            "capability_name": capability.name,
+            "workflow_id": capability.workflow_id,
+            "effect_status": effect_status,
+            "changed": changed,
+            "mutation_outcome": (
+                "completed"
+                if effect_status == "succeeded"
+                else ("partial" if changed else "not_started")
+            ),
+            "outcome_finality": "terminal_for_turn",
+        }
+    )
+    if effect_status != "succeeded":
+        recovery_affordances = list(receipt.get("recovery_affordances") or [])
+        if instance_id is not None:
+            recovery_affordances.append(
+                {
+                    "action_type": "inspect_workflow_instance",
+                    "capability": "workflow_get_instance",
+                    "arguments": {"instance_id": instance_id},
+                }
+            )
+        else:
+            recovery_affordances.append(
+                {
+                    "action_type": "inspect_launch_failure_before_retry",
+                    "workflow_id": capability.workflow_id,
+                }
+            )
+        receipt["recovery_affordances"] = recovery_affordances
+    return receipt
+
+
+__all__ = [
+    "WorkflowTurnCapability",
+    "build_workflow_execution_arguments",
+    "discover_turn_workflow_capabilities",
+    "normalise_workflow_effect_receipt",
+]
