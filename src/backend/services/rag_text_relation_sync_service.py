@@ -337,9 +337,6 @@ def collect_text_relation_docs_for_namespace(
             limit=safe_limit,
         )
     )
-    if not relations:
-        return []
-
     docs: List[TextRelationRagDoc] = []
 
     # Small cache to avoid repeated concept lookups.
@@ -418,6 +415,68 @@ def collect_text_relation_docs_for_namespace(
                 doc_id=f"text_relation:{relation_id_str}",
                 text=rag_text,
                 metadata=metadata,
+            )
+        )
+
+    from src.backend.services.scoped_assertion_service import (
+        list_visible_scoped_assertions,
+    )
+
+    scoped_assertions = list_visible_scoped_assertions(
+        subject_concept_ids=sorted(concept_allow) if concept_allow else None,
+        predicates=predicates,
+        object_kind="text",
+        limit=max(safe_limit, 1),
+        user_concept_id=user_id,
+        organisation_concept_id=org_id,
+    )
+    language_allow = set(languages or ())
+    for assertion in scoped_assertions:
+        object_text = assertion.get("object_text")
+        if not isinstance(object_text, dict):
+            continue
+        text = object_text.get("text")
+        lang = str(object_text.get("language") or "en-NZ")
+        subject_concept_id = str(assertion.get("subject_concept_id") or "")
+        predicate = str(assertion.get("predicate") or "")
+        assertion_id = str(assertion.get("assertion_id") or "")
+        if not text or not subject_concept_id or not predicate or not assertion_id:
+            continue
+        if language_allow and lang not in language_allow:
+            continue
+        if updated_since is not None:
+            updated_at = assertion.get("updated_at")
+            if isinstance(updated_at, str):
+                try:
+                    if datetime.fromisoformat(updated_at) < updated_since:
+                        continue
+                except ValueError:
+                    continue
+        docs.append(
+            TextRelationRagDoc(
+                doc_id=f"scoped_assertion:{assertion_id}",
+                text=_build_rag_text(
+                    concept_id=subject_concept_id,
+                    predicate=predicate,
+                    lang=lang,
+                    text=str(text),
+                ),
+                metadata={
+                    "type": "scoped_knowledge_assertion",
+                    "source": "scoped_knowledge_assertion",
+                    "concept_id": subject_concept_id,
+                    "subject_concept_id": subject_concept_id,
+                    "predicate": predicate,
+                    "assertion_id": assertion_id,
+                    "relation_id": assertion_id,
+                    "lang": lang,
+                    "language": lang,
+                    "user_id": user_id,
+                    "organisation_concept_id": org_id,
+                    "org_id": org_id,
+                    "assertion_scope": assertion.get("scope"),
+                    "canonical_publication": False,
+                },
             )
         )
 

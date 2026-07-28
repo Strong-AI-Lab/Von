@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 
-
 class _ConceptsCollection:
     def __init__(self, visible_concepts: set[str]):
         self.visible_concepts = set(visible_concepts)
@@ -109,3 +108,46 @@ def test_sync_text_relations_indexes_visible_concepts(monkeypatch):
     assert meta["user_id"] == "#V#user"
     assert meta["organisation_concept_id"] == "#V#org"
     assert meta["org_id"] == "#V#org"
+
+
+def test_collect_includes_scoped_assertion_for_namespace(monkeypatch):
+    from src.backend.services import rag_text_relation_sync_service as svc
+    from src.backend.services import scoped_assertion_service
+
+    monkeypatch.setattr(
+        svc.TextRelationsRepository,
+        "find",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        scoped_assertion_service,
+        "list_visible_scoped_assertions",
+        lambda **_kwargs: [
+            {
+                "assertion_id": "ska_123",
+                "subject_concept_id": "#V#gillian_dobbie",
+                "predicate": "hasDescription",
+                "object_kind": "text",
+                "object_text": {
+                    "text": "Organisation-scoped programme context.",
+                    "language": "en-NZ",
+                },
+                "scope": {
+                    "mode": "organisation",
+                    "audience_keys": ["org:#V#org"],
+                },
+                "canonical_publication": False,
+            }
+        ],
+    )
+
+    docs = svc.collect_text_relation_docs_for_namespace(
+        namespace="#V#user@org",
+    )
+
+    assert len(docs) == 1
+    assert docs[0].doc_id == "scoped_assertion:ska_123"
+    assert "Organisation-scoped programme context." in docs[0].text
+    assert docs[0].metadata["type"] == "scoped_knowledge_assertion"
+    assert docs[0].metadata["canonical_publication"] is False
+    assert docs[0].metadata["organisation_concept_id"] == "#V#org"

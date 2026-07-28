@@ -71,6 +71,33 @@ def test_text_value_indexes_are_ensured_once_per_database(monkeypatch):
     }
 
 
+def test_scoped_assertion_indexes_are_ensured_once_per_database(monkeypatch):
+    _reset_collection_index_state(monkeypatch)
+    db = _FakeDb("test_von_db", client=object())
+    monkeypatch.setattr(mc, "get_db", lambda: db)
+
+    coll_first = cast(
+        _FakeCollection,
+        mc.get_scoped_knowledge_assertions_collection(),
+    )
+    coll_second = cast(
+        _FakeCollection,
+        mc.get_scoped_knowledge_assertions_collection(),
+    )
+
+    assert coll_first is coll_second
+    assert coll_first is not None
+    assert len(coll_first.create_index_calls) == 4
+    assert {
+        str(call["kwargs"].get("name")) for call in coll_first.create_index_calls
+    } == {
+        "assertion_id_unique",
+        "subject_audience_updated_at_desc",
+        "object_audience_updated_at_desc",
+        "predicate_audience_updated_at_desc",
+    }
+
+
 def test_interaction_session_indexes_are_ensured_once_per_database(monkeypatch):
     _reset_collection_index_state(monkeypatch)
     db = _FakeDb("test_von_db", client=object())
@@ -106,9 +133,7 @@ def test_application_settings_index_is_ensured_once_per_database(monkeypatch):
     assert coll_first is coll_second
     assert coll_first is not None
     assert len(coll_first.create_index_calls) == 1
-    assert coll_first.create_index_calls[0]["keys"] == [
-        ("setting_name", mc.ASCENDING)
-    ]
+    assert coll_first.create_index_calls[0]["keys"] == [("setting_name", mc.ASCENDING)]
     assert coll_first.create_index_calls[0]["kwargs"] == {"unique": True}
 
 
@@ -180,8 +205,7 @@ def test_text_relation_indexes_cover_concept_search_and_atlas_name_lookup(monkey
 
     assert coll is not None
     calls_by_name = {
-        str(call["kwargs"].get("name") or ""): call
-        for call in coll.create_index_calls
+        str(call["kwargs"].get("name") or ""): call for call in coll.create_index_calls
     }
     assert calls_by_name.keys() >= {
         "context_name_type_predicate_text",
@@ -212,9 +236,7 @@ def test_relationship_extent_indexes_add_target_first_lookup_without_dropping_dr
     assert list(indexes["target_predicate_source_lookup"]["key"].items()) == (
         wrong_keys
     )
-    assert list(
-        indexes["target_value_predicate_source_lookup_v2"]["key"].items()
-    ) == [
+    assert list(indexes["target_value_predicate_source_lookup_v2"]["key"].items()) == [
         ("target_value", mc.ASCENDING),
         ("predicate_id", mc.ASCENDING),
         ("source_concept_id", mc.ASCENDING),
@@ -286,9 +308,7 @@ def test_relationship_extent_index_ensure_does_not_replace_named_unique_drift():
 
     mc._ensure_relationship_extent_index_indexes(coll)
 
-    index = {
-        item["name"]: item for item in coll.list_indexes()
-    }["relation_id_1_unique"]
+    index = {item["name"]: item for item in coll.list_indexes()}["relation_id_1_unique"]
     assert index.get("unique") is not True
 
 

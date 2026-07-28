@@ -126,6 +126,17 @@ def _get_concept_by_concept_id(**kwargs):
 
     concept = enrich_concept_with_text_relations(concept)
 
+    from ...services.scoped_assertion_service import (
+        list_visible_scoped_assertions,
+    )
+
+    scoped_assertions = list_visible_scoped_assertions(
+        subject_concept_ids=[concept_id],
+        limit=100,
+    )
+    concept["scoped_assertions"] = scoped_assertions
+    concept["scoped_assertion_count"] = len(scoped_assertions)
+
     # Detect vacuous typing (soft warning for agents to repair)
     vacuous_warning = detect_vacuous_typing(concept)
     if vacuous_warning:
@@ -1118,8 +1129,7 @@ def _create_concepts(**kwargs):
         for concept_data in concepts
         if not (
             isinstance(concept_data, dict)
-            and str(concept_data.get("kind") or "type").strip().lower()
-            == "predicate"
+            and str(concept_data.get("kind") or "type").strip().lower() == "predicate"
         )
     }
     if (
@@ -1182,8 +1192,7 @@ def _create_concepts(**kwargs):
             effect_status = "succeeded"
 
         if "changed" in receipt and (
-            isinstance(receipt.get("changed"), bool)
-            or receipt.get("changed") is None
+            isinstance(receipt.get("changed"), bool) or receipt.get("changed") is None
         ):
             changed = receipt.get("changed")
         else:
@@ -1192,10 +1201,7 @@ def _create_concepts(**kwargs):
                 isinstance(writes, list)
                 and any(
                     isinstance(write, Mapping)
-                    and (
-                        write.get("relation_created")
-                        or write.get("context_updated")
-                    )
+                    and (write.get("relation_created") or write.get("context_updated"))
                     for write in writes
                 )
             )
@@ -1383,12 +1389,8 @@ def _create_concepts(**kwargs):
                 continue
 
             if (
-                (
-                    identity_candidates_supplied
-                    or identity_rejected_candidates_supplied
-                )
-                and not external_identifiers
-            ):
+                identity_candidates_supplied or identity_rejected_candidates_supplied
+            ) and not external_identifiers:
                 results.append(
                     {
                         "success": False,
@@ -1501,9 +1503,7 @@ def _create_concepts(**kwargs):
                         guard_scope=duplicate_match.guard_scope,
                         match_source=duplicate_match.match_source,
                     )
-                    if duplicate_match.match_source.startswith(
-                        "external_identifier:"
-                    ):
+                    if duplicate_match.match_source.startswith("external_identifier:"):
                         # Duplicate resolution is read-only and may consume the
                         # remaining transport budget. Do not begin the marker
                         # repair after cancellation.
@@ -1518,9 +1518,7 @@ def _create_concepts(**kwargs):
                             identity_changed,
                             identity_failures,
                             identity_indeterminate_failures,
-                        ) = _identity_persistence_outcome(
-                            identity_persistence
-                        )
+                        ) = _identity_persistence_outcome(identity_persistence)
                         result["effect_status"] = identity_effect_status
                         result["changed"] = identity_changed
                         result["external_identity"] = {
@@ -1561,19 +1559,16 @@ def _create_concepts(**kwargs):
                                     ),
                                 }
                             )
-                        elif (
-                            identity_failures
-                            or identity_effect_status in {"failed", "partial"}
-                        ):
-                            persistence_failures = (
-                                identity_failures
-                                or [
-                                    {
-                                        "stage": "external_identity_persistence",
-                                        "outcome": identity_effect_status,
-                                    }
-                                ]
-                            )
+                        elif identity_failures or identity_effect_status in {
+                            "failed",
+                            "partial",
+                        }:
+                            persistence_failures = identity_failures or [
+                                {
+                                    "stage": "external_identity_persistence",
+                                    "outcome": identity_effect_status,
+                                }
+                            ]
                             result.update(
                                 {
                                     "success": False,
@@ -1740,19 +1735,16 @@ def _create_concepts(**kwargs):
                                 }
                             ]
                         )
-                    elif (
-                        identity_failures
-                        or identity_effect_status in {"failed", "partial"}
-                    ):
-                        persistence_failures = (
-                            identity_failures
-                            or [
-                                {
-                                    "stage": "external_identity_persistence",
-                                    "outcome": identity_effect_status,
-                                }
-                            ]
-                        )
+                    elif identity_failures or identity_effect_status in {
+                        "failed",
+                        "partial",
+                    }:
+                        persistence_failures = identity_failures or [
+                            {
+                                "stage": "external_identity_persistence",
+                                "outcome": identity_effect_status,
+                            }
+                        ]
                         result["partial_failures"] = persistence_failures
                         if isinstance(result.get("concept"), dict):
                             concept_partial_failures = result["concept"].setdefault(
@@ -1760,9 +1752,7 @@ def _create_concepts(**kwargs):
                                 [],
                             )
                             if isinstance(concept_partial_failures, list):
-                                concept_partial_failures.extend(
-                                    persistence_failures
-                                )
+                                concept_partial_failures.extend(persistence_failures)
                         result["effect_status"] = "partial"
                         result["changed"] = True
             results.append(result)
@@ -1912,9 +1902,7 @@ def _create_concepts(**kwargs):
             {
                 "success": False,
                 "effect_status": (
-                    "indeterminate"
-                    if effect_status == "indeterminate"
-                    else "partial"
+                    "indeterminate" if effect_status == "indeterminate" else "partial"
                 ),
                 "error_code": "handler_cancelled_after_partial_completion",
                 "error": (
@@ -2077,6 +2065,86 @@ def _upsert_text_relation(**kwargs):
                 "predicate": predicate,
             },
         )
+
+
+def _upsert_scoped_assertion(**kwargs):
+    from ...services.rag_text_relation_change_hook_service import (
+        maybe_sync_concept_text_relations_to_rag,
+    )
+    from ...services.scoped_assertion_service import upsert_scoped_assertion
+
+    subject_concept_id = kwargs.get("subject_concept_id")
+    predicate = kwargs.get("predicate")
+    if not subject_concept_id:
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'subject_concept_id' parameter",
+            details={"missing": ["subject_concept_id"]},
+        )
+    if not predicate:
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'predicate' parameter",
+            details={"missing": ["predicate"]},
+        )
+    try:
+        result = upsert_scoped_assertion(**kwargs)
+        assertion = result.get("assertion")
+        if isinstance(assertion, dict) and assertion.get("object_kind") == "text":
+            maybe_sync_concept_text_relations_to_rag(
+                namespace=kwargs.get("namespace"),
+                concept_id=str(subject_concept_id),
+                predicate=str(assertion.get("predicate") or predicate),
+            )
+        return result
+    except PermissionError as exc:
+        return make_error_response(
+            "access_denied",
+            str(exc),
+            details={"subject_concept_id": subject_concept_id},
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_scoped_assertion",
+            str(exc),
+            details={"subject_concept_id": subject_concept_id},
+        )
+    except Exception as exc:
+        return _indeterminate_effect_error(
+            "The scoped-assertion operation raised unexpectedly.",
+            details={
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "subject_concept_id": subject_concept_id,
+            },
+        )
+
+
+def _list_scoped_assertions(**kwargs):
+    from ...services.scoped_assertion_service import (
+        list_visible_scoped_assertions,
+    )
+
+    subject_concept_id = kwargs.get("subject_concept_id")
+    predicates = kwargs.get("predicates")
+    predicate = kwargs.get("predicate")
+    if predicate and not predicates:
+        predicates = [predicate]
+    assertions = list_visible_scoped_assertions(
+        subject_concept_ids=([str(subject_concept_id)] if subject_concept_id else None),
+        argument_concept_id=kwargs.get("argument_concept_id"),
+        predicates=predicates,
+        object_kind=kwargs.get("object_kind"),
+        limit=kwargs.get("limit") or 200,
+        user_concept_id=kwargs.get("acting_user_concept_id"),
+        organisation_concept_id=kwargs.get("organisation_concept_id"),
+    )
+    return {
+        "success": True,
+        "assertions": assertions,
+        "assertions_found": len(assertions),
+        "canonical_publication": False,
+    }
 
 
 def _get_text_relations(**kwargs):
@@ -2644,19 +2712,13 @@ def _add_relationship(**kwargs):
         reference_concept_id = predicate_ref.get("concept_id")
         reference_name = predicate_ref.get("name")
         has_concept_id = bool(
-            isinstance(reference_concept_id, str)
-            and reference_concept_id.strip()
+            isinstance(reference_concept_id, str) and reference_concept_id.strip()
         )
-        has_name = bool(
-            isinstance(reference_name, str) and reference_name.strip()
-        )
+        has_name = bool(isinstance(reference_name, str) and reference_name.strip())
         if has_concept_id == has_name:
             return make_error_response(
                 "invalid_predicate_reference",
-                (
-                    "predicate_ref must provide exactly one of concept_id or "
-                    "name."
-                ),
+                ("predicate_ref must provide exactly one of concept_id or " "name."),
                 details={
                     "required_choice": ["concept_id", "name"],
                 },
@@ -2680,9 +2742,9 @@ def _add_relationship(**kwargs):
                 ),
                 details={"on_missing": on_missing},
             )
-        predicate_value_kind = str(
-            predicate_ref.get("value_kind") or "concept"
-        ).strip().lower()
+        predicate_value_kind = (
+            str(predicate_ref.get("value_kind") or "concept").strip().lower()
+        )
         if predicate_value_kind not in {"concept", "text"}:
             return make_error_response(
                 "invalid_predicate_reference",
@@ -2826,9 +2888,11 @@ def _add_relationship(**kwargs):
             predicate_dependency_description = (
                 raw_dependency_description.strip() or None
             )
-        predicate_value_kind = str(
-            predicate_if_missing.get("value_kind") or predicate_value_kind
-        ).strip().lower()
+        predicate_value_kind = (
+            str(predicate_if_missing.get("value_kind") or predicate_value_kind)
+            .strip()
+            .lower()
+        )
         if predicate_value_kind not in {"concept", "text"}:
             return make_error_response(
                 "invalid_predicate_if_missing",
@@ -2890,17 +2954,13 @@ def _add_relationship(**kwargs):
             resolution_status = str(
                 resolution_payload.get("status") or "not_found"
             ).strip()
-            resolved_predicate_id = resolution_payload.get(
-                "resolved_concept_id"
-            )
+            resolved_predicate_id = resolution_payload.get("resolved_concept_id")
             predicate_resolution = {
                 "status": resolution_status,
                 "requested": predicate_str,
                 "resolved_concept_id": resolved_predicate_id,
                 "match": resolution_payload.get("match"),
-                "candidates": list(
-                    resolution_payload.get("candidates") or []
-                )[:5],
+                "candidates": list(resolution_payload.get("candidates") or [])[:5],
             }
             if (
                 resolution_status == "resolved"
@@ -2910,9 +2970,7 @@ def _add_relationship(**kwargs):
                 predicate_str = resolved_predicate_id
                 predicate_normalised = predicate_str[3:]
             elif resolution_status == "ambiguous":
-                candidates = list(
-                    resolution_payload.get("candidates") or []
-                )[:5]
+                candidates = list(resolution_payload.get("candidates") or [])[:5]
                 response = make_error_response(
                     "predicate_reference_ambiguous",
                     (
@@ -3357,10 +3415,7 @@ def _add_relationship(**kwargs):
                 response["predicate_dependency"] = predicate_dependency
             if predicate_resolution is not None:
                 response["predicate_resolution"] = predicate_resolution
-            if (
-                predicate_dependency_changed
-                or predicate_dependency_partial_failures
-            ):
+            if predicate_dependency_changed or predicate_dependency_partial_failures:
                 response.update(
                     {
                         "effect_status": "partial",
@@ -3479,9 +3534,7 @@ def _add_relationship(**kwargs):
                 }
             ]
         if predicate_dependency_partial_failures:
-            response["partial_failures"] = list(
-                predicate_dependency_partial_failures
-            )
+            response["partial_failures"] = list(predicate_dependency_partial_failures)
         return response
 
 
@@ -8703,6 +8756,84 @@ def _upsert_text_relation_output_schema() -> Schema:
     )
 
 
+def _upsert_scoped_assertion_input_schema() -> Schema:
+    return Schema(
+        required={
+            "subject_concept_id": str,
+            "predicate": str,
+        },
+        optional={
+            "target_text": (str, type(None)),
+            "target_concept_id": (str, type(None)),
+            "language": (str, type(None)),
+            "scope_mode": (str, type(None)),
+            "evidence": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "upsert_scoped_assertion input: subject_concept_id and predicate, "
+            "exactly one of target_text or target_concept_id, optional language, "
+            "scope_mode ('user' default or 'organisation'), and evidence. Actor, "
+            "organisation, namespace, turn, and non-publication are server-bound."
+        ),
+    )
+
+
+def _upsert_scoped_assertion_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+        },
+        optional={
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
+            "assertion_id": (str, type(None)),
+            "assertion": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "canonical_publication": (bool, type(None)),
+            "storage_surface": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Scoped assertion write receipt with durable read-back. "
+            "canonical_publication is always false."
+        ),
+    )
+
+
+def _list_scoped_assertions_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "subject_concept_id": (str, type(None)),
+            "argument_concept_id": (str, type(None)),
+            "predicate": (str, type(None)),
+            "predicates": (list, type(None)),
+            "object_kind": (str, type(None)),
+            "limit": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "List assertions visible in the trusted user/organisation scope, "
+            "optionally filtered by subject, argument, predicate, or object kind."
+        ),
+    )
+
+
+def _list_scoped_assertions_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "assertions": list,
+            "assertions_found": int,
+            "canonical_publication": bool,
+        },
+        optional={},
+        allow_unknown=True,
+    )
+
+
 def _get_text_relations_input_schema() -> Schema:
     return Schema(
         required={
@@ -11127,15 +11258,9 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
             and payload_user_candidate != trusted_user
         ):
             mismatch_fields.append("user_concept_id")
-        if (
-            payload_org_candidate is not None
-            and payload_org_candidate != trusted_org
-        ):
+        if payload_org_candidate is not None and payload_org_candidate != trusted_org:
             mismatch_fields.append("organisation_concept_id")
-        if (
-            explicit_namespace is not None
-            and explicit_namespace != trusted_namespace
-        ):
+        if explicit_namespace is not None and explicit_namespace != trusted_namespace:
             mismatch_fields.append("namespace")
 
         user_candidate = trusted_user
@@ -11651,9 +11776,7 @@ def _summarise_effect_observation_journal(
                 }
             entry[phase_name] = phase_projection
         entry["available_phases"] = available_phases
-        entry["latest_phase"] = (
-            available_phases[-1] if available_phases else None
-        )
+        entry["latest_phase"] = available_phases[-1] if available_phases else None
         late_terminal = raw_entry.get("late_terminal")
         turn_terminal = raw_entry.get("turn_terminal")
         outcome_resolved = False
@@ -11671,8 +11794,7 @@ def _summarise_effect_observation_journal(
             receipt = turn_terminal.get("receipt")
             outcome_resolved = bool(
                 isinstance(transport, Mapping)
-                and transport.get("outcome")
-                not in {None, "timed_out"}
+                and transport.get("outcome") not in {None, "timed_out"}
                 and turn_terminal.get("effect_status")
                 not in {None, "indeterminate", "unknown"}
                 and isinstance(receipt, Mapping)
@@ -15398,8 +15520,16 @@ def _bounded_delegated_telemetry_payload(
     max_limit = 75_000
     raw_offset = arguments.get("offset", 0)
     raw_limit = arguments.get("limit", default_limit)
-    offset = raw_offset if isinstance(raw_offset, int) and not isinstance(raw_offset, bool) else 0
-    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else default_limit
+    offset = (
+        raw_offset
+        if isinstance(raw_offset, int) and not isinstance(raw_offset, bool)
+        else 0
+    )
+    limit = (
+        raw_limit
+        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
+        else default_limit
+    )
     offset = max(0, offset)
     limit = min(max_limit, max(1, limit))
     canonical_json = json.dumps(
@@ -15424,11 +15554,7 @@ def _bounded_delegated_telemetry_payload(
         "next_offset": end if end < total_chars else None,
         "json_chunk": canonical_json[offset:end] if offset <= total_chars else "",
     }
-    if (
-        preserve_inline_below_limit
-        and offset == 0
-        and total_chars <= limit
-    ):
+    if preserve_inline_below_limit and offset == 0 and total_chars <= limit:
         return {
             **dict(payload),
             "bounded_read": {
@@ -15751,9 +15877,7 @@ def _turn_execution_get_live_progress(**kwargs):
         anonymous_session_id=(
             None
             if authorisation.get("delegated")
-            else _clean_optional_string(
-                effective_kwargs.get("anonymous_session_id")
-            )
+            else _clean_optional_string(effective_kwargs.get("anonymous_session_id"))
         ),
         scope_key=(
             None
@@ -15778,12 +15902,8 @@ def _turn_execution_get_live_progress(**kwargs):
         delegated_actor = _normalise_optional_concept_id(
             effective_kwargs.get("user_concept_id")
         )
-        expected_scope_key = (
-            f"user:{delegated_actor}" if delegated_actor else None
-        )
-        resolved_scope_key = _clean_optional_string(
-            payload.get("resolved_scope_key")
-        )
+        expected_scope_key = f"user:{delegated_actor}" if delegated_actor else None
+        resolved_scope_key = _clean_optional_string(payload.get("resolved_scope_key"))
         if expected_scope_key and resolved_scope_key != expected_scope_key:
             return make_error_response(
                 "READ_DELEGATION_CANONICAL_TARGET_MISMATCH",
@@ -15796,9 +15916,7 @@ def _turn_execution_get_live_progress(**kwargs):
                             "bound": expected_scope_key,
                         }
                     ],
-                    "identifier_binding": authorisation.get(
-                        "identifier_binding"
-                    ),
+                    "identifier_binding": authorisation.get("identifier_binding"),
                 },
             )
         from ...services.conversation_scope_binding_service import (
@@ -15821,9 +15939,7 @@ def _turn_execution_get_live_progress(**kwargs):
                             effective_kwargs.get("session_id")
                         ),
                         history_owner_user_id=_normalise_optional_concept_id(
-                            effective_kwargs.get(
-                                "_delegated_history_owner_user_id"
-                            )
+                            effective_kwargs.get("_delegated_history_owner_user_id")
                         ),
                         read_namespace=_clean_optional_string(
                             effective_kwargs.get("_delegated_read_namespace")
@@ -15979,9 +16095,7 @@ def _turn_execution_get_diagnostics(**kwargs):
             ),
             (
                 "history_owner_user_id",
-                _normalise_optional_concept_id(
-                    payload.get("derived_user_concept_id")
-                ),
+                _normalise_optional_concept_id(payload.get("derived_user_concept_id")),
                 _normalise_optional_concept_id(
                     effective_kwargs.get("_delegated_history_owner_user_id")
                 ),
@@ -16014,9 +16128,7 @@ def _turn_execution_get_diagnostics(**kwargs):
                 "Canonical turn diagnostics do not match the signed delegation target",
                 details={
                     "field_mismatches": canonical_mismatches,
-                    "identifier_binding": authorisation.get(
-                        "identifier_binding"
-                    ),
+                    "identifier_binding": authorisation.get("identifier_binding"),
                 },
             )
         payload["read_delegation"] = authorisation.get("read_delegation")
@@ -16271,9 +16383,7 @@ def _context_bundle_build_benchmark(**kwargs):
 
 
 def _testing_theory_create_slice(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial(
-        "testing control plane"
-    ):
+    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
         return denial
     from ...services.testing_theory_service import create_testing_theory_slice
 
@@ -18800,8 +18910,7 @@ def _internal_mcp_actor_scoped_read_denial(
     if source == "trusted_operator_payload_fallback":
         return None
     if source is None and not bool(
-        get_effective_user_concept_id()
-        or get_effective_organisation_concept_id()
+        get_effective_user_concept_id() or get_effective_organisation_concept_id()
     ):
         # Preserve explicit in-process operator/startup calls. Gateway and
         # proxy callers always bind a source and cannot reach this branch.
@@ -18891,11 +19000,11 @@ def _authorise_internal_mcp_telemetry_read(
     if not verified.get("success"):
         return make_error_response(
             str(verified.get("error_code") or "INVALID_CONTEXT_BINDING"),
-            str(verified.get("error_message") or "Telemetry read delegation is invalid"),
+            str(
+                verified.get("error_message") or "Telemetry read delegation is invalid"
+            ),
             details={
-                "identifier_binding": dict(
-                    verified.get("identifier_binding") or {}
-                )
+                "identifier_binding": dict(verified.get("identifier_binding") or {})
             },
         )
 
@@ -18903,9 +19012,7 @@ def _authorise_internal_mcp_telemetry_read(
     actor_user_id = _normalise_optional_concept_id(
         verified.get("delegated_actor_user_id")
     )
-    actor_namespace = _clean_optional_string(
-        verified.get("delegated_actor_namespace")
-    )
+    actor_namespace = _clean_optional_string(verified.get("delegated_actor_namespace"))
     organisation_concept_id = _normalise_optional_concept_id(
         verified.get("organisation_concept_id")
     )
@@ -18922,16 +19029,13 @@ def _authorise_internal_mcp_telemetry_read(
         ),
         (
             "organisation_concept_id",
-            _normalise_optional_concept_id(
-                payload.get("organisation_concept_id")
-            ),
+            _normalise_optional_concept_id(payload.get("organisation_concept_id")),
             organisation_concept_id,
         ),
         (
             "session_id",
             _clean_optional_string(
-                payload.get("session_id")
-                or payload.get("conversation_session_id")
+                payload.get("session_id") or payload.get("conversation_session_id")
             ),
             bound_session_id,
         ),
@@ -18947,11 +19051,7 @@ def _authorise_internal_mcp_telemetry_read(
                 if isinstance(payload.get("history_index"), int)
                 else None
             ),
-            (
-                bound_history_index
-                if isinstance(bound_history_index, int)
-                else None
-            ),
+            (bound_history_index if isinstance(bound_history_index, int) else None),
         ),
     )
     mismatches = [
@@ -18988,9 +19088,7 @@ def _authorise_internal_mcp_telemetry_read(
         effective["request_id"] = bound_request_id
     if isinstance(bound_history_index, int):
         effective["history_index"] = bound_history_index
-    effective["_verified_read_delegation"] = dict(
-        verified.get("read_delegation") or {}
-    )
+    effective["_verified_read_delegation"] = dict(verified.get("read_delegation") or {})
     effective["_verified_identifier_binding"] = dict(
         verified.get("identifier_binding") or {}
     )
@@ -23791,8 +23889,7 @@ def _rag_get_item(**kwargs):
         direct_tool_invocations = doc.get("tool_invocations")
         tool_invocations = (
             direct_tool_invocations
-            if isinstance(direct_tool_invocations, list)
-            and direct_tool_invocations
+            if isinstance(direct_tool_invocations, list) and direct_tool_invocations
             else execution_payload.get("tool_invocations")
         )
         discovery_payload_raw = workflow_routing_diagnostics.get("discovery")
@@ -23833,15 +23930,11 @@ def _rag_get_item(**kwargs):
         (
             late_effect_observations,
             late_effect_observation_count,
-        ) = _summarise_late_effect_observations(
-            doc.get("late_effect_observations")
-        )
+        ) = _summarise_late_effect_observations(doc.get("late_effect_observations"))
         (
             effect_observation_journal,
             effect_observation_journal_count,
-        ) = _summarise_effect_observation_journal(
-            doc.get("effect_observation_journal")
-        )
+        ) = _summarise_effect_observation_journal(doc.get("effect_observation_journal"))
 
         payload = {
             "collection": collection,
@@ -23889,13 +23982,10 @@ def _rag_get_item(**kwargs):
             "late_effect_observations_truncated": (
                 late_effect_observation_count > len(late_effect_observations)
             ),
-            "effect_observation_journal_count": (
-                effect_observation_journal_count
-            ),
+            "effect_observation_journal_count": (effect_observation_journal_count),
             "effect_observation_journal": effect_observation_journal,
             "effect_observation_journal_truncated": (
-                effect_observation_journal_count
-                > len(effect_observation_journal)
+                effect_observation_journal_count > len(effect_observation_journal)
             ),
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,
@@ -25514,9 +25604,7 @@ def _github_get_auth_config(**kwargs):
         "env_keys_used": {
             "token": token_key,
             "command": (
-                "VON_GITHUB_MCP_COMMAND"
-                if env.get("VON_GITHUB_MCP_COMMAND")
-                else None
+                "VON_GITHUB_MCP_COMMAND" if env.get("VON_GITHUB_MCP_COMMAND") else None
             ),
             "args": "VON_GITHUB_MCP_ARGS" if env.get("VON_GITHUB_MCP_ARGS") else None,
             "allow_list": "VON_GITHUB_REPO_ALLOW_LIST",
@@ -28453,9 +28541,7 @@ def _chat_introspect(
 
             gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
             gateway_enabled = getattr(gateway, "enabled", None)
-            startup_status = current_app.config.get(
-                "INTERNAL_MCP_ORCHESTRATOR_STATUS"
-            )
+            startup_status = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR_STATUS")
             if isinstance(startup_status, dict):
                 legacy_orchestrator_status = str(
                     startup_status.get("state") or legacy_orchestrator_status
@@ -28549,9 +28635,7 @@ def _chat_introspect(
         "automatic workflow selector or general controller on this path. Explicit "
         "workflows remain separately callable through their registered interfaces."
     )
-    tool_guidance_hash = hashlib.sha256(
-        tool_guidance_text.encode("utf-8")
-    ).hexdigest()
+    tool_guidance_hash = hashlib.sha256(tool_guidance_text.encode("utf-8")).hexdigest()
     tool_guidance_preview = None
     if include_tool_guidance_preview and max_preview_chars_int:
         tool_guidance_preview = tool_guidance_text[:max_preview_chars_int]
@@ -33084,6 +33168,47 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ),
         ),
         MethodDefinition(
+            name="upsert_scoped_assertion",
+            handler=_upsert_scoped_assertion,
+            input_schema=_upsert_scoped_assertion_input_schema(),
+            output_schema=_upsert_scoped_assertion_output_schema(),
+            category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+                "turn_id": "turn_id",
+            },
+            ordinary_turn_fixed_arguments={"canonical_publication": False},
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=8.0,
+            description=(
+                "Assert provenance-bearing user- or organisation-scoped knowledge "
+                "about any concept visible to the current actor, including globally "
+                "visible concepts. This does not alter or publish the concept's "
+                "canonical Vontology record. Use this instead of upsert_text_relation "
+                "or add_relationship when the actor can see but does not own the "
+                "canonical subject. Provide exactly one of target_text or "
+                "target_concept_id; choose scope_mode='organisation' only for "
+                "knowledge intended to be shared with the authenticated organisation."
+            ),
+        ),
+        MethodDefinition(
+            name="list_scoped_assertions",
+            handler=_list_scoped_assertions,
+            input_schema=_list_scoped_assertions_input_schema(),
+            output_schema=_list_scoped_assertions_output_schema(),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+            },
+            description=(
+                "Read provenance-bearing non-canonical assertions visible to the "
+                "trusted user or organisation, with bounded filters."
+            ),
+        ),
+        MethodDefinition(
             name="upsert_text_relation",
             handler=_upsert_text_relation,
             input_schema=_upsert_text_relation_input_schema(),
@@ -33096,7 +33221,13 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_effect=True,
             effect_admission_window_sec=8.0,
             ordinary_turn_mutation_subject_argument="concept_id",
-            description="Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types. More general than add_names which is specialized for hasName relations only.",
+            description=(
+                "Add or update a canonical text relation when the actor has mutation "
+                "authority over the subject concept. For knowledge about a visible "
+                "concept the actor does not own, use upsert_scoped_assertion instead. "
+                "Supports hasContent, hasDescription, hasNote, hasName, and existing "
+                "custom predicate concepts."
+            ),
         ),
         MethodDefinition(
             name="get_text_relations",
@@ -34146,9 +34277,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> List[
-    MethodDefinition
-]:
+def _build_default_catalogue_external_integration_definitions() -> (
+    List[MethodDefinition]
+):
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -34670,9 +34801,9 @@ def _build_default_catalogue_external_integration_definitions() -> List[
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
-    MethodDefinition
-]:
+def _build_default_catalogue_diagnostics_and_research_definitions() -> (
+    List[MethodDefinition]
+):
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",

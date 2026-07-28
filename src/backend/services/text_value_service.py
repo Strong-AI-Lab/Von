@@ -503,15 +503,51 @@ def get_texts_for_concepts(
     rows_by_concept: Dict[str, List[Dict[str, Any]]] = {
         subject_id: [] for subject_id in ordered_subject_ids
     }
-    if not relations:
-        return rows_by_concept
-
-    rows = _resolve_text_rows_from_relations(
-        relations,
-        lang=lang,
-        limit=None,
-        max_time_ms=max_time_ms,
+    rows = (
+        _resolve_text_rows_from_relations(
+            relations,
+            lang=lang,
+            limit=None,
+            max_time_ms=max_time_ms,
+        )
+        if relations
+        else []
     )
+    from .scoped_assertion_service import (
+        list_visible_scoped_assertions,
+        scoped_text_assertion_to_relation_row,
+    )
+
+    scoped_assertions = list_visible_scoped_assertions(
+        subject_concept_ids=ordered_subject_ids,
+        predicates=(
+            [predicate]
+            if predicate
+            else [
+                str(item).strip()
+                for item in predicates or ()
+                if isinstance(item, str) and str(item).strip()
+            ]
+            or None
+        ),
+        object_kind="text",
+        limit=max(len(ordered_subject_ids) * max(limit_per_concept, 1), 1),
+    )
+    for assertion in scoped_assertions:
+        scoped_row = scoped_text_assertion_to_relation_row(assertion)
+        if scoped_row is None:
+            continue
+        if lang and scoped_row.get("lang") != lang:
+            continue
+        rows.append(scoped_row)
+
+    if recent_first:
+        rows.sort(
+            key=lambda row: str(
+                row.get("relation_updated_at") or row.get("relation_created_at") or ""
+            ),
+            reverse=True,
+        )
     for row in rows:
         subject_concept_id = row.get("subject_concept_id")
         if not isinstance(subject_concept_id, str):
@@ -716,42 +752,23 @@ def get_preferred_texts_for_concepts(
     if not ordered_subject_ids:
         return {}
 
-    relation_filter: Dict[str, Any] = {
-        "subject_concept_id": {"$in": ordered_subject_ids}
-    }
     normalised_precedence = _normalise_predicate_precedence(predicate_precedence)
-    if normalised_precedence:
-        allowed_predicates = sorted(
+    allowed_predicates = (
+        sorted(
             {
                 predicate
                 for predicate_group in normalised_precedence
                 for predicate in predicate_group
             }
         )
-        relation_filter["predicate"] = {"$in": allowed_predicates}
-
-    relation_limit = max(len(ordered_subject_ids) * max(limit_per_concept, 1), 1)
-    relations = list(
-        TextRelationsRepository.find(relation_filter, limit=relation_limit)
+        if normalised_precedence
+        else None
     )
-    if not relations:
-        return {}
-
-    rows = _resolve_text_rows_from_relations(relations, limit=None)
-    if not rows:
-        return {}
-
-    rows_by_subject: Dict[str, List[Dict[str, Any]]] = {
-        subject_id: [] for subject_id in ordered_subject_ids
-    }
-    for row in rows:
-        subject_concept_id = row.get("subject_concept_id")
-        if not isinstance(subject_concept_id, str):
-            continue
-        subject_rows = rows_by_subject.get(subject_concept_id)
-        if subject_rows is None or len(subject_rows) >= limit_per_concept:
-            continue
-        subject_rows.append(row)
+    rows_by_subject = get_texts_for_concepts(
+        ordered_subject_ids,
+        predicates=allowed_predicates,
+        limit_per_concept=limit_per_concept,
+    )
 
     preferred_rows: Dict[str, Dict[str, Any]] = {}
     for subject_concept_id, subject_rows in rows_by_subject.items():
@@ -1150,6 +1167,47 @@ def get_text_relations_summary(
                 bucket["latest_updated_at"] = updated_at
                 bucket["latest_relation_id"] = rel_id
 
+    from .scoped_assertion_service import list_visible_scoped_assertions
+
+    scoped_assertions = list_visible_scoped_assertions(
+        subject_concept_ids=[subject_concept_id],
+        predicates=predicates,
+        object_kind="text",
+        limit=1000,
+    )
+    for assertion in scoped_assertions:
+        object_text = assertion.get("object_text")
+        if not isinstance(object_text, dict):
+            continue
+        predicate = str(assertion.get("predicate") or "")
+        lang = str(object_text.get("language") or "")
+        if language_allow is not None and lang not in language_allow:
+            continue
+        key = (predicate, lang)
+        bucket = grouped.get(key)
+        if bucket is None:
+            bucket = {
+                "predicate": predicate,
+                "language": lang,
+                "count": 0,
+                "relation_ids": [],
+                "latest_relation_id": None,
+                "latest_updated_at": None,
+            }
+            grouped[key] = bucket
+        bucket["count"] += 1
+        bucket["scoped_count"] = int(bucket.get("scoped_count") or 0) + 1
+        assertion_id = str(assertion.get("assertion_id") or "")
+        if assertion_id and len(bucket["relation_ids"]) < max_relation_ids_per_group:
+            bucket["relation_ids"].append(assertion_id)
+        updated_at = assertion.get("updated_at") or assertion.get("created_at")
+        current_latest = bucket.get("latest_updated_at")
+        if updated_at is not None and (
+            current_latest is None or str(updated_at) > str(current_latest)
+        ):
+            bucket["latest_updated_at"] = updated_at
+            bucket["latest_relation_id"] = assertion_id
+
     summary_items = list(grouped.values())
     summary_items.sort(
         key=lambda x: (x.get("predicate") or "", x.get("language") or "")
@@ -1165,7 +1223,8 @@ def get_text_relations_summary(
         "concept_id": subject_concept_id,
         "groups": summary_items,
         "groups_found": len(summary_items),
-        "total_relations_scanned": len(rels),
+        "total_relations_scanned": len(rels) + len(scoped_assertions),
+        "scoped_relations_scanned": len(scoped_assertions),
         "max_relation_ids_per_group": max_relation_ids_per_group,
     }
 
