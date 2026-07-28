@@ -23,6 +23,7 @@ from src.backend.services.blob_uploads import BlobUploadError, put_bytes_durable
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.session import ClientSession
 from mcp import types as mcp_types
+from .mcp_proxy_base import summarise_mcp_tool_arguments
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = "[arxiv_proxy]"
@@ -97,10 +98,10 @@ class ArxivMCPProxy:
         server_params = self._get_server_params()
 
         logger.info(
-            "%s Calling tool %s with arguments %s",
+            "%s Calling tool %s with argument_shape=%s",
             _LOG_TAG,
             tool_name,
-            arguments,
+            summarise_mcp_tool_arguments(arguments),
         )
 
         try:

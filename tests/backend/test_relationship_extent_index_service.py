@@ -141,6 +141,50 @@ def test_relationship_extent_readiness_has_total_deadline_and_fails_closed(
     ]
 
 
+def test_relationship_extent_readiness_requires_explicit_complete_state(
+    monkeypatch,
+):
+    from src.backend.services import relationship_extent_index_service as service
+
+    client = mongomock.MongoClient()
+    index = client.db.relationship_extent_index
+    settings = client.db.application_settings
+    index.insert_one(
+        {
+            "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+            "relation_id": "one-incrementally-written-row",
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "get_relationship_extent_index_collection",
+        lambda: index,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_application_settings_collection",
+        lambda: settings,
+    )
+
+    assert service.relationship_extent_index_ready() is False
+    assert service.query_relationship_extent_index(
+        target_value="#V#missing-from-partial-index"
+    ) == ([], -1)
+
+    settings.insert_one(
+        {
+            "setting_name": service.RELATIONSHIP_EXTENT_INDEX_STATE_SETTING,
+            "value": {
+                "status": "ready",
+                "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+            },
+        }
+    )
+    service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
+
+    assert service.relationship_extent_index_ready() is True
+
+
 def test_relationship_extent_query_cursor_and_count_share_total_deadline(
     monkeypatch,
 ):
@@ -148,6 +192,8 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
 
     deadline_active = False
     observed_timeouts: list[float] = []
+    observed_projection = None
+    observed_batch_size = None
     expected_doc = {
         "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
         "relation_id": "row-1",
@@ -173,13 +219,20 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
         def limit(self, _value):
             return self
 
+        def batch_size(self, value):
+            nonlocal observed_batch_size
+            observed_batch_size = value
+            return self
+
         def __iter__(self):
             assert deadline_active is True
             return iter([expected_doc])
 
     class DeadlineAwareCollection:
-        def find(self, _query):
+        def find(self, _query, projection=None):
+            nonlocal observed_projection
             assert deadline_active is True
+            observed_projection = projection
             return DeadlineAwareCursor()
 
         def count_documents(self, _query):
@@ -199,11 +252,15 @@ def test_relationship_extent_query_cursor_and_count_share_total_deadline(
         offset=1,
         limit=1,
         sort=[("relation_id", 1)],
+        projection={"_id": 0, "source_concept_id": 1},
+        batch_size=20_000,
     )
 
     assert docs == [expected_doc]
     assert total == 1
     assert observed_timeouts == [service.RELATIONSHIP_EXTENT_READ_TIMEOUT_SECONDS]
+    assert observed_projection == {"_id": 0, "source_concept_id": 1}
+    assert observed_batch_size == 20_000
 
 
 def test_relationship_extent_query_timeout_returns_fallback_sentinel(monkeypatch):
@@ -500,6 +557,16 @@ def test_relationship_extent_index_materialises_dynamic_incoming_rows(monkeypatc
 
     assert result["success"] is True
     assert result["inserted"] == 2
+    settings.insert_one(
+        {
+            "setting_name": service.RELATIONSHIP_EXTENT_INDEX_STATE_SETTING,
+            "value": {
+                "status": "ready",
+                "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+            },
+        }
+    )
+    service._READINESS_CACHE.update({"ready": None, "checked_at": 0.0})
 
     rows, used_index = service.incoming_dynamic_extent_rows_for_target("#V#target")
 

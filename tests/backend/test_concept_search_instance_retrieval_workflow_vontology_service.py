@@ -129,9 +129,6 @@ def test_bootstrap_materialises_concept_search_instance_retrieval_workflow(
         "find_relations_with_argument",
     ]
     assert llm_policy.get("max_tool_invocations") == 6
-    assert retrieval_step.actions[0].action_id != "workflow_gap.execute_candidate"
-
-
 def test_concept_search_instance_retrieval_prompt_support_seeds_content(
     _reset_mock_db: Any,
 ) -> None:

@@ -22,21 +22,21 @@ from .transport import (
     raise_if_internal_mcp_cancelled,
 )
 from .schemas import Schema, SchemaValidationError, validate_payload
+from ...services.request_progress_service import (
+    CancellationRequested,
+    ProgressTracker,
+)
 
 if TYPE_CHECKING:
     from .orchestrator import (
-        CancellationRequested,
         InternalMCPChatOrchestrator,
         OrchestratorResult,
-        ProgressTracker,
         ToolCallParsingError,
     )
 
 _ORCHESTRATOR_EXPORTS = {
-    "CancellationRequested",
     "InternalMCPChatOrchestrator",
     "OrchestratorResult",
-    "ProgressTracker",
     "ToolCallParsingError",
 }
 
@@ -44,18 +44,14 @@ _ORCHESTRATOR_EXPORTS = {
 def __getattr__(name: str):
     if name in _ORCHESTRATOR_EXPORTS:
         from .orchestrator import (
-            CancellationRequested,
             InternalMCPChatOrchestrator,
             OrchestratorResult,
-            ProgressTracker,
             ToolCallParsingError,
         )
 
         exports = {
-            "CancellationRequested": CancellationRequested,
             "InternalMCPChatOrchestrator": InternalMCPChatOrchestrator,
             "OrchestratorResult": OrchestratorResult,
-            "ProgressTracker": ProgressTracker,
             "ToolCallParsingError": ToolCallParsingError,
         }
         value = exports[name]

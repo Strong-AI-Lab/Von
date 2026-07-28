@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Mapping, Optional, Sequence, cast
+from typing import Any, Mapping, Optional, Sequence
 
 from src.backend.integrations.internal_mcp.gateway import (
     InternalMCPGateway,
@@ -87,48 +87,6 @@ class _LLM:
         return self._response
 
 
-def test_tool_call_payload_coercion_allows_numeric_string() -> None:
-    gateway = _Gateway()
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
-
-    llm = _LLM(
-        '{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"test","top_k":"20"}}'
-    )
-
-    result = orchestrator.run(
-        prompt="Search the knowledge base",
-        context=[],
-        llm_client=llm,
-        model=None,
-        user_namespace="#V#user",
-    )
-
-    assert result.tool_invocations
-    assert gateway.invocations
-    payload = gateway.invocations[0]["payload"]
-    assert payload["top_k"] == 20
-
-
-def test_tool_unavailable_returns_validation_error() -> None:
-    gateway = _Gateway()
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
-
-    llm = _LLM(
-        '{"action":"call_tool","tool":"missing_tool","payload":{"query":"test"}}'
-    )
-
-    result = orchestrator.run(
-        prompt="Try an unavailable tool",
-        context=[],
-        llm_client=llm,
-        model=None,
-        user_namespace="#V#user",
-    )
-
-    assert not gateway.invocations
-    assert result.tool_invocations
-    assert result.tool_invocations[-1]["tool"] == "__tool_call_validation_error__"
-    assert "Unavailable tools" in result.response_text
 
 
 def test_tool_calling_loop_records_terminal_timeout_not_late_success(

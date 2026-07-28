@@ -40,7 +40,7 @@ _WORKFLOW_DOMAIN_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("arxiv", "paper", "scholarly"), "Scholarly paper representation"),
     (("talk", "presentation", "seminar"), "Talk and presentation representation"),
     (("parent_specificity", "taxonomy", "dossier"), "Taxonomy refinement and parent-specificity analysis"),
-    (("workflow_gap", "introspection", "maintenance", "enrichment", "rag"), "Workflow maintenance and knowledge-store synchronisation"),
+    (("introspection", "maintenance", "enrichment", "rag"), "Workflow maintenance and knowledge-store synchronisation"),
     (("entity", "identity", "duplicate"), "Entity identity resolution and ontology maintenance"),
     (("conversation", "chat", "tool_calling", "planning", "rumination", "turn"), "Conversation orchestration and tool-assisted reasoning"),
     (("testing", "experiment", "benchmark", "promotion", "theory"), "Workflow testing and experiment evaluation"),

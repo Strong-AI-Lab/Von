@@ -1,39 +1,36 @@
 from __future__ import annotations
 
+from typing import Any
+
 from flask import Flask
 
-
-class _CapturingOrchestrator:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    def run(self, **kwargs):
-        return self.execute_conversation_turn_supervised(**kwargs)
-
-    def execute_conversation_turn_supervised(self, **kwargs):
-        self.calls.append(kwargs)
-
-        from src.backend.integrations.internal_mcp.orchestrator import (
-            OrchestratorResult,
-        )
-
-        return OrchestratorResult(
-            response_text="ok",
-            extra_messages=[],
-            tool_invocations=[],
-            aux_llm_calls=[],
-        )
+from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
 
 
 def _make_app(monkeypatch, history_calls: list[dict[str, object]]) -> Flask:
-    import src.backend.workflows.durable.registry_factory as registry_factory
+    from src.backend.workflows.durable import registry_factory
 
-    monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [])
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_von_generate_session_override")
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", list)
     monkeypatch.setattr(
         registry_factory, "_launch_deferred_registry_work", lambda **_kwargs: None
     )
 
-    from src.backend.server.routes.von_routes import von_bp
+    from src.backend.server.routes import von_routes
+
+    adaptive_calls: list[dict[str, Any]] = []
+
+    def _execute_adaptive_turn(**kwargs: Any) -> AdaptiveTurnResult:
+        adaptive_calls.append(dict(kwargs))
+        return AdaptiveTurnResult(
+            response_text="ok",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+        )
+
+    monkeypatch.setattr(von_routes, "execute_adaptive_turn", _execute_adaptive_turn)
 
     monkeypatch.setenv("VON_INTERNAL_MCP_ALLOW_USER_TOOL_CALLS", "0")
     monkeypatch.setenv("VON_WORKFLOW_DISCOVERY_ENABLE", "0")
@@ -64,7 +61,7 @@ def _make_app(monkeypatch, history_calls: list[dict[str, object]]) -> Flask:
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_llm_client",
-        lambda **_kwargs: None,
+        lambda **_kwargs: object(),
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes._resolve_shared_conversation_owner",
@@ -116,17 +113,16 @@ def _make_app(monkeypatch, history_calls: list[dict[str, object]]) -> Flask:
     app.secret_key = "test-secret"
     app.config["TESTING"] = True
     app.config["PROPAGATE_EXCEPTIONS"] = True
-    app.register_blueprint(von_bp, url_prefix="/von")
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
     app.config["CONTEXT"] = []
-    app.config["INTERNAL_MCP_GATEWAY"] = object()
+    app.config["_ADAPTIVE_TURN_CALLS"] = adaptive_calls
+    app.config["INTERNAL_MCP_GATEWAY"] = None
     return app
 
 
 def test_generate_honours_explicit_conversation_session_id(monkeypatch):
     history_calls: list[dict[str, object]] = []
-    orchestrator = _CapturingOrchestrator()
     app = _make_app(monkeypatch, history_calls)
-    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
 
     client = app.test_client()
     resp = client.post(
@@ -139,8 +135,7 @@ def test_generate_honours_explicit_conversation_session_id(monkeypatch):
     )
 
     assert resp.status_code == 200, resp.get_json()
-    assert orchestrator.calls, "expected orchestrator.run() to be called"
-    assert orchestrator.calls[0]["conversation_session_id"] == "session-override"
+    assert app.config["_ADAPTIVE_TURN_CALLS"]
     assert history_calls, "expected chat history writes"
     assert all(
         call.get("session_id") == "session-override" for call in history_calls
@@ -150,7 +145,6 @@ def test_generate_honours_explicit_conversation_session_id(monkeypatch):
 def test_generate_rejects_non_string_conversation_session_id(monkeypatch):
     history_calls: list[dict[str, object]] = []
     app = _make_app(monkeypatch, history_calls)
-    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _CapturingOrchestrator()
 
     client = app.test_client()
     resp = client.post(
@@ -168,9 +162,7 @@ def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active
     monkeypatch,
 ):
     history_calls: list[dict[str, object]] = []
-    orchestrator = _CapturingOrchestrator()
     app = _make_app(monkeypatch, history_calls)
-    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
 
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_effective_context",
@@ -221,11 +213,7 @@ def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active
     assert body["conversation_session_created"] is True
     assert body["conversation_session_name"] == "Chat 2026-04-13 18:30"
 
-    assert orchestrator.calls, "expected orchestrator.run() to be called"
-    assert (
-        orchestrator.calls[0]["conversation_session_id"]
-        == body["conversation_session_id"]
-    )
+    assert app.config["_ADAPTIVE_TURN_CALLS"]
     assert history_calls, "expected chat history writes"
     assert all(
         call.get("session_id") == body["conversation_session_id"]

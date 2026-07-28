@@ -305,15 +305,15 @@ def test_strip_transient_execution_defaults_from_authoring_spec_removes_persiste
                     },
                     "static_input_bindings": [
                         {
-                            "tool_param": "workflow_gap_base_response_text",
+                            "tool_param": "candidate_base_response_text",
                             "value": "Fallback reply.",
                         },
                         {"tool_param": "limit", "value": 5},
                     ],
                     "context_input_mappings": [
                         {
-                            "tool_param": "workflow_gap_request_text",
-                            "context_key": "workflow_gap_request_text",
+                            "tool_param": "candidate_request_text",
+                            "context_key": "candidate_request_text",
                         }
                     ],
                 }
@@ -326,8 +326,8 @@ def test_strip_transient_execution_defaults_from_authoring_spec_removes_persiste
     assert step["static_input_bindings"] == [{"tool_param": "limit", "value": 5}]
     assert step["context_input_mappings"] == [
         {
-            "tool_param": "workflow_gap_request_text",
-            "context_key": "workflow_gap_request_text",
+            "tool_param": "candidate_request_text",
+            "context_key": "candidate_request_text",
         }
     ]
 
@@ -341,8 +341,8 @@ def test_authoring_roundtrip_preserves_explicit_step_concept_ids():
                 state_id="execute",
                 actions=(
                     WorkflowActionInvocation(
-                        action_id="workflow_gap.execute_candidate",
-                        inputs={"prompt_concept_id": "#V#workflow_gap_candidate_execution_prompt"},
+                        action_id="candidate.execute",
+                        inputs={"prompt_concept_id": "#V#candidate_execution_prompt"},
                     ),
                 ),
                 transitions=(

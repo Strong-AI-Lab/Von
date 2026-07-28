@@ -1,12 +1,18 @@
 """Ollama client with structured tool calling support."""
 
+import asyncio
 import json
 import logging
+from collections.abc import Mapping
+from time import monotonic
 from typing import Any, Dict, List, Optional, Sequence
-import asyncio
 
 from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
-from ..client import LLMClient, LLMClientConfig
+from ..client import (
+    LLMClient,
+    LLMClientConfig,
+    split_request_timeout_from_llm_params,
+)
 from ....integrations.internal_mcp.tool_call_contracts import validation_diagnostic
 
 logger = logging.getLogger(__name__)
@@ -44,20 +50,81 @@ class OllamaClient(LLMClient):
     ) -> LLMResponse:
         """Generate response using Ollama with JSON constraint grammar."""
 
-        # Validate tools
         for tool in available_tools:
             self._validate_input_schema(tool)
 
-        # Run sync implementation in thread pool
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self.generate_with_tools_sync,
-            prompt,
-            available_tools,
-            context,
-            system_message,
+        request_kwargs = dict(kwargs)
+        _, request_timeout_seconds = split_request_timeout_from_llm_params(
+            request_kwargs.pop("llm_params", None)
         )
+        request_deadline_monotonic = (
+            monotonic() + request_timeout_seconds
+            if request_timeout_seconds is not None
+            else None
+        )
+        request_client_kwargs: dict[str, Any] = {"host": self._base_url}
+        if request_deadline_monotonic is not None:
+            remaining_seconds = request_deadline_monotonic - monotonic()
+            if remaining_seconds <= 0.0:
+                raise ToolCallError(
+                    "Ollama structured-tool request deadline exhausted."
+                )
+            request_client_kwargs["timeout"] = remaining_seconds
+        request_client = self._ollama.AsyncClient(**request_client_kwargs)
+
+        try:
+            enhanced_prompt = self._build_constrained_prompt(
+                prompt,
+                available_tools,
+                system_message,
+            )
+            messages = self._build_messages(enhanced_prompt, context)
+
+            async def _request() -> str:
+                stream = await request_client.chat(
+                    model=self.config.model,
+                    messages=messages,
+                    stream=True,
+                )
+                full_response = ""
+                async for chunk in stream:
+                    message = (
+                        chunk.get("message")
+                        if isinstance(chunk, Mapping)
+                        else getattr(chunk, "message", None)
+                    )
+                    content = (
+                        message.get("content", "")
+                        if isinstance(message, Mapping)
+                        else getattr(message, "content", "")
+                    )
+                    full_response += str(content or "")
+                return full_response
+
+            if request_deadline_monotonic is None:
+                full_response = await _request()
+            else:
+                remaining_seconds = request_deadline_monotonic - monotonic()
+                if remaining_seconds <= 0.0:
+                    raise TimeoutError(
+                        "Ollama structured-tool request deadline exhausted."
+                    )
+                async with asyncio.timeout(remaining_seconds):
+                    full_response = await _request()
+
+            return self._parse_response(full_response, available_tools)
+        except TimeoutError as exc:
+            self.logger.error("Ollama structured-tool request deadline exhausted.")
+            raise ToolCallError(
+                "Ollama structured-tool request deadline exhausted."
+            ) from exc
+        except Exception as exc:
+            self.logger.error("Ollama API error: %s", exc)
+            if self.config.fallback_to_json_text:
+                self.logger.info("Tool calling may be degraded with Ollama")
+            raise ToolCallError(f"Ollama call failed: {exc}") from exc
+        finally:
+            await request_client.close()
 
     def generate_with_tools_sync(
         self,
@@ -67,40 +134,22 @@ class OllamaClient(LLMClient):
         system_message: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Synchronous implementation using Ollama."""
+        """Synchronous wrapper around the same bounded transport."""
 
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            # Build prompt with tool descriptions and JSON constraint
-            enhanced_prompt = self._build_constrained_prompt(
-                prompt,
-                available_tools,
-                system_message,
+            return loop.run_until_complete(
+                self.generate_with_tools(
+                    prompt,
+                    available_tools,
+                    context,
+                    system_message,
+                    **kwargs,
+                )
             )
-
-            # Build message list
-            messages = self._build_messages(enhanced_prompt, context)
-
-            # Call Ollama with optional format constraint
-            stream = self._ollama.chat(
-                model=self.config.model,
-                messages=messages,
-                stream=True,
-                **kwargs,
-            )
-
-            # Collect streamed response
-            full_response = ""
-            for chunk in stream:
-                if isinstance(chunk, dict) and "message" in chunk:
-                    full_response += chunk["message"].get("content", "")
-
-            return self._parse_response(full_response, available_tools)
-
-        except Exception as exc:
-            self.logger.error(f"Ollama API error: {exc}")
-            if self.config.fallback_to_json_text:
-                self.logger.info("Tool calling may be degraded with Ollama")
-            raise ToolCallError(f"Ollama call failed: {exc}") from exc
+        finally:
+            loop.close()
 
     def _build_constrained_prompt(
         self,

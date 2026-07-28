@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, List, Mapping, Sequence, cast
 
 from pymongo import DESCENDING
+from src.backend.services.workflow_actor_scope_service import WorkflowActorScopeError
 
 from .dynamic_tool_loader import load_dynamic_method_definitions
 from .gateway import MethodCatalogue, MethodDefinition
@@ -43,8 +44,6 @@ from .spreadsheet_record_tools import build_spreadsheet_record_tool_definitions
 from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
-from src.backend.services.prompt_template_service import PromptTemplateService
-from src.backend.services.workflow_actor_scope_service import WorkflowActorScopeError
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +60,6 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _get_internal_mcp_chat_orchestrator_cls():
-    """Lazy-import orchestrator class to avoid heavy import side effects."""
-    from .orchestrator import InternalMCPChatOrchestrator
-
-    return InternalMCPChatOrchestrator
-
-
 def _run_async_compat(async_fn):
     """Run an async function from sync code.
 
@@ -79,14 +71,20 @@ def _run_async_compat(async_fn):
 
     import asyncio
     import concurrent.futures
+    import contextvars
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(async_fn())
 
+    caller_context = contextvars.copy_context()
+
+    def _run_in_worker():
+        return asyncio.run(async_fn())
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(lambda: asyncio.run(async_fn())).result()
+        return executor.submit(caller_context.run, _run_in_worker).result()
 
 
 def _get_vontology_tree(**kwargs):
@@ -864,7 +862,10 @@ def _normalise_create_concepts_scope_mode(raw_value: Any) -> str | None:
 
 
 def _create_concepts(**kwargs):
-    from .transport import raise_if_internal_mcp_cancelled
+    from .transport import (
+        InternalMCPHandlerCancelled,
+        raise_if_internal_mcp_cancelled,
+    )
 
     # A handler may sit in the bounded executor queue until after its caller's
     # deadline. Never begin a write-side preflight in that state.
@@ -873,11 +874,27 @@ def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
     from ...services.create_concepts_duplicate_guard_service import (
+        CreateConceptDuplicateGuardBlock,
+        build_canonical_identity_conflict_create_concepts_result,
+        build_duplicate_guard_block_create_concepts_result,
         build_duplicate_prevented_create_concepts_result,
         find_existing_concept_for_create_concepts,
     )
+    from ...services.concept_external_identity_service import (
+        ExternalIdentityInputError,
+        canonical_concept_id_for_external_identifiers,
+        normalise_create_external_identifiers,
+        persist_external_identity_markers,
+    )
     from ...services.create_concepts_parent_resolution_service import (
         resolve_parent_for_create_concepts,
+    )
+    from ...services.relationship_extent_index_service import (
+        defer_relationship_extent_index_sync,
+    )
+    from ...security.access_control import (
+        override_current_organisation,
+        override_current_user,
     )
 
     parent_id: str | None = kwargs.get("parent_id")
@@ -1092,97 +1109,663 @@ def _create_concepts(**kwargs):
                 "Provide an array of concept objects, e.g., concepts=[{name: 'MyType'}]"
             ],
         )
+    requested_non_predicate_kinds = {
+        (
+            str(concept_data.get("kind") or "type").strip().lower()
+            if isinstance(concept_data, dict)
+            else "invalid"
+        )
+        for concept_data in concepts
+        if not (
+            isinstance(concept_data, dict)
+            and str(concept_data.get("kind") or "type").strip().lower()
+            == "predicate"
+        )
+    }
+    if (
+        parent_resolution.resolved_parent_kind is not None
+        and parent_resolution.resolved_parent_kind != "type"
+        and requested_non_predicate_kinds
+    ):
+        return make_error_response(
+            "parent_is_not_a_type",
+            (
+                f"Parent concept '{validated_parent_id}' is "
+                f"{parent_resolution.resolved_parent_kind!r}, not a semantic "
+                "type. No concepts were created."
+            ),
+            details={
+                "original_parent_id": parent_id,
+                "resolved_parent_id": validated_parent_id,
+                "resolved_parent_kind": parent_resolution.resolved_parent_kind,
+                "requested_child_kinds": sorted(requested_non_predicate_kinds),
+            },
+            suggestions=[
+                "Choose an existing semantic type for parent_id",
+                (
+                    "Use scope_mode or organisation_concept_id for ownership and "
+                    "visibility; do not use an organisation or owner individual "
+                    "as parent_id"
+                ),
+                (
+                    "If the intended type does not exist, create that type first "
+                    "under a semantically close type parent"
+                ),
+            ],
+            related_concept_ids=[validated_parent_id],
+        )
 
     results = []
-    for concept_data in concepts:
-        # This is both the batch boundary and the safe cancellation point after
-        # the preceding concept's complete logical write bundle.
-        raise_if_internal_mcp_cancelled()
-        if not isinstance(concept_data, dict):
-            results.append({"error": "Concept must be an object", "data": concept_data})
-            continue
+    cancelled_after_partial_error: str | None = None
 
-        name = concept_data.get("name")
-        kind = (concept_data.get("kind") or "type").strip().lower()
-
-        if not name:
-            results.append(
-                {"error": "Concept missing required 'name' field", "data": concept_data}
-            )
-            continue
-
-        # Map kind to create_as_instance parameter
-        if kind == "individual":
-            kind = "instance"
-
-        if kind == "predicate":
-            create_as_instance = True
-            parent_id_for_concept = PREDICATE_TYPE_ID
+    def _identity_persistence_outcome(
+        receipt: Mapping[str, Any],
+    ) -> tuple[str, bool | None, list[dict[str, Any]], list[dict[str, Any]]]:
+        failures = [
+            dict(item)
+            for item in (receipt.get("failures") or [])
+            if isinstance(item, Mapping)
+        ]
+        indeterminate_failures = [
+            dict(item)
+            for item in (receipt.get("indeterminate_failures") or [])
+            if isinstance(item, Mapping)
+        ]
+        raw_status = str(receipt.get("effect_status") or "").strip().lower()
+        if indeterminate_failures or raw_status == "indeterminate":
+            effect_status = "indeterminate"
+        elif raw_status in {"failed", "partial", "succeeded"}:
+            effect_status = raw_status
+        elif failures or receipt.get("success") is False:
+            effect_status = "failed"
         else:
-            create_as_instance = kind == "instance"
-            parent_id_for_concept = validated_parent_id
+            effect_status = "succeeded"
 
-        duplicate_match = find_existing_concept_for_create_concepts(
-            concept_name=str(name),
-            kind=kind,
-            parent_id_for_concept=parent_id_for_concept,
-            preferred_language="en-NZ",
-            allow_duplicate_instances=allow_duplicate_instances,
-            duplicate_resolution_mode=(
-                _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
-                if canonical_id_only
-                else None
-            ),
-        )
-        if duplicate_match is not None:
-            result = build_duplicate_prevented_create_concepts_result(
-                requested_name=str(name),
-                requested_kind=kind,
-                existing_concept_id=duplicate_match.existing_concept_id,
-                guard_scope=duplicate_match.guard_scope,
-                match_source=duplicate_match.match_source,
+        if "changed" in receipt and (
+            isinstance(receipt.get("changed"), bool)
+            or receipt.get("changed") is None
+        ):
+            changed = receipt.get("changed")
+        else:
+            writes = receipt.get("writes")
+            changed = bool(
+                isinstance(writes, list)
+                and any(
+                    isinstance(write, Mapping)
+                    and (
+                        write.get("relation_created")
+                        or write.get("context_updated")
+                    )
+                    for write in writes
+                )
             )
-            result["concept_id"] = duplicate_match.existing_concept_id
-            results.append(result)
-            continue
+        return effect_status, changed, failures, indeterminate_failures
 
-        # Duplicate preflights are read-only and may consume the entire
-        # transport budget. Never start an insert after cancellation.
-        raise_if_internal_mcp_cancelled()
-        result = create_vontology_concept(
-            parent_id=parent_id_for_concept,
-            new_concept_name=name,
-            create_as_instance=create_as_instance,
-            description=concept_data.get("description"),
-            notes=concept_data.get("notes"),
-            created_by_concept_id=actor_user_id,
-            organisation_concept_id=actor_org_id,
-            event_namespace=namespace,
-            visibility_scope_mode=scope_mode,
+    def _identity_candidate_ids(
+        concept_data: Mapping[str, Any],
+        *,
+        field_name: str,
+    ) -> tuple[tuple[str, ...], bool]:
+        raw_values = concept_data.get(field_name)
+        if raw_values is None:
+            return (), False
+        error_suffix = field_name.removeprefix("identity_")
+        if not isinstance(raw_values, list):
+            raise ExternalIdentityInputError(
+                f"invalid_identity_{error_suffix}",
+                f"{field_name} must be a list of actor-visible concept IDs.",
+            )
+        invalid_indexes = [
+            index
+            for index, candidate_id in enumerate(raw_values)
+            if not isinstance(candidate_id, str) or not candidate_id.strip()
+        ]
+        if invalid_indexes:
+            raise ExternalIdentityInputError(
+                f"invalid_identity_{error_suffix}",
+                f"{field_name} entries must be non-empty concept ID strings.",
+                details={"invalid_indexes": invalid_indexes[:50]},
+            )
+        candidate_ids = tuple(
+            dict.fromkeys(
+                str(candidate_id).strip()
+                for candidate_id in raw_values
+                if isinstance(candidate_id, str) and candidate_id.strip()
+            )
         )
-        # Enrich result with the requested name for traceability and surface
-        # the canonical created concept_id at a stable top-level key so UI
-        # summaries can reliably name what was created.
-        result["requested_name"] = name
-        result["requested_kind"] = kind
-        concept_id_value = result.get("concept_id")
-        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-            nested_concept = result.get("concept")
-            if isinstance(nested_concept, dict):
-                nested_id = nested_concept.get("concept_id")
-                if isinstance(nested_id, str) and nested_id.strip():
-                    concept_id_value = nested_id
-        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-            canonical_id = result.get("canonical_concept_id")
-            if isinstance(canonical_id, str) and canonical_id.strip():
-                concept_id_value = canonical_id
-        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-            existing_id = result.get("existing_concept_id")
-            if isinstance(existing_id, str) and existing_id.strip():
-                concept_id_value = existing_id
-        if isinstance(concept_id_value, str) and concept_id_value.strip():
-            result["concept_id"] = concept_id_value.strip()
-        results.append(result)
+        if len(candidate_ids) > 50:
+            raise ExternalIdentityInputError(
+                f"too_many_identity_{error_suffix}",
+                f"{field_name} accepts at most 50 distinct concept IDs.",
+            )
+        return candidate_ids, True
+
+    def _cancelled_after_completed_items() -> bool:
+        nonlocal cancelled_after_partial_error
+        try:
+            raise_if_internal_mcp_cancelled()
+        except InternalMCPHandlerCancelled as exc:
+            if not results:
+                raise
+            cancelled_after_partial_error = str(exc)
+            return True
+        return False
+
+    with (
+        override_current_user(actor_user_id),
+        override_current_organisation(actor_org_id),
+        defer_relationship_extent_index_sync(),
+    ):
+        for concept_data in concepts:
+            # This is both the batch boundary and the safe cancellation point after
+            # the preceding concept's complete logical write bundle.
+            if _cancelled_after_completed_items():
+                break
+            if not isinstance(concept_data, dict):
+                results.append(
+                    {"error": "Concept must be an object", "data": concept_data}
+                )
+                continue
+
+            name = concept_data.get("name")
+            kind = (concept_data.get("kind") or "type").strip().lower()
+
+            if not name:
+                results.append(
+                    {
+                        "error": "Concept missing required 'name' field",
+                        "data": concept_data,
+                    }
+                )
+                continue
+
+            # Map kind to create_as_instance parameter
+            if kind == "individual":
+                kind = "instance"
+
+            if kind == "predicate":
+                create_as_instance = True
+                parent_id_for_concept = PREDICATE_TYPE_ID
+            else:
+                create_as_instance = kind == "instance"
+                parent_id_for_concept = validated_parent_id
+
+            try:
+                external_identifiers = normalise_create_external_identifiers(
+                    external_identifiers=concept_data.get("external_identifiers"),
+                    concept_name=str(name),
+                    kind=kind,
+                )
+            except ExternalIdentityInputError as exc:
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": exc.error_code,
+                        "message": str(exc),
+                        "error_details": dict(exc.details),
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
+
+            canonical_concept_id_override = None
+            if external_identifiers:
+                canonical_concept_id_override = (
+                    canonical_concept_id_for_external_identifiers(
+                        external_identifiers,
+                        kind=kind,
+                        parent_id=parent_id_for_concept,
+                        scope_mode=scope_mode,
+                        actor_user_id=actor_user_id,
+                        actor_org_id=actor_org_id,
+                    )
+                )
+                if canonical_concept_id_override is None:
+                    results.append(
+                        {
+                            "success": False,
+                            "effect_status": "failed",
+                            "changed": False,
+                            "error_code": "external_identity_creation_incompatible",
+                            "message": (
+                                "The external identity could not be mapped to a "
+                                "stable concept identity for the requested concept "
+                                "kind. No concept was created."
+                            ),
+                            "concept": None,
+                            "input_name": str(name),
+                            "requested_name": str(name),
+                            "requested_kind": kind,
+                            "requested_parent_id": parent_id_for_concept,
+                            "external_identifiers": [
+                                identifier.to_dict()
+                                for identifier in external_identifiers
+                            ],
+                        }
+                    )
+                    continue
+
+            try:
+                (
+                    identity_candidate_concept_ids,
+                    identity_candidates_supplied,
+                ) = _identity_candidate_ids(
+                    concept_data,
+                    field_name="identity_candidate_concept_ids",
+                )
+                (
+                    identity_rejected_candidate_concept_ids,
+                    identity_rejected_candidates_supplied,
+                ) = _identity_candidate_ids(
+                    concept_data,
+                    field_name="identity_rejected_candidate_concept_ids",
+                )
+            except ExternalIdentityInputError as exc:
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": exc.error_code,
+                        "message": str(exc),
+                        "error_details": dict(exc.details),
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
+
+            if (
+                (
+                    identity_candidates_supplied
+                    or identity_rejected_candidates_supplied
+                )
+                and not external_identifiers
+            ):
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": (
+                            "identity_candidates_require_external_identifier"
+                        ),
+                        "message": (
+                            "Identity candidate decisions can only apply to an "
+                            "explicit external identity. Include the same "
+                            "external_identifiers value used in the original "
+                            "create or repair attempt."
+                        ),
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
+            conflicting_candidate_ids = sorted(
+                set(identity_candidate_concept_ids).intersection(
+                    identity_rejected_candidate_concept_ids
+                )
+            )
+            if conflicting_candidate_ids:
+                results.append(
+                    {
+                        "success": False,
+                        "effect_status": "failed",
+                        "changed": False,
+                        "error_code": "conflicting_identity_candidate_review",
+                        "message": (
+                            "The same concept cannot be both confirmed and "
+                            "rejected for one external identity."
+                        ),
+                        "error_details": {
+                            "conflicting_candidate_concept_ids": (
+                                conflicting_candidate_ids
+                            )
+                        },
+                        "concept": None,
+                        "input_name": str(name),
+                        "requested_name": str(name),
+                        "requested_kind": kind,
+                    }
+                )
+                continue
+
+            duplicate_match = find_existing_concept_for_create_concepts(
+                concept_name=str(name),
+                kind=kind,
+                parent_id_for_concept=parent_id_for_concept,
+                preferred_language="en-NZ",
+                allow_duplicate_instances=allow_duplicate_instances,
+                duplicate_resolution_mode=(
+                    _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                    if canonical_id_only
+                    else None
+                ),
+                external_identifiers=external_identifiers,
+                external_identity_concept_ids=(
+                    (canonical_concept_id_override,)
+                    if canonical_concept_id_override
+                    else ()
+                ),
+                identity_candidate_concept_ids=identity_candidate_concept_ids,
+                identity_rejected_candidate_concept_ids=(
+                    identity_rejected_candidate_concept_ids
+                ),
+            )
+            if duplicate_match is not None:
+                if isinstance(
+                    duplicate_match,
+                    CreateConceptDuplicateGuardBlock,
+                ):
+                    result = build_duplicate_guard_block_create_concepts_result(
+                        requested_name=str(name),
+                        requested_kind=kind,
+                        block=duplicate_match,
+                    )
+                    results.append(result)
+                    continue
+                if duplicate_match.identity_conflict:
+                    is_external_identity = duplicate_match.match_source.startswith(
+                        "external_identifier:"
+                    )
+                    result = build_canonical_identity_conflict_create_concepts_result(
+                        requested_name=str(name),
+                        requested_kind=kind,
+                        existing_concept_id=duplicate_match.existing_concept_id,
+                        guard_scope=duplicate_match.guard_scope,
+                        existing_kind=duplicate_match.existing_kind,
+                        existing_parent_ids=duplicate_match.existing_parent_ids,
+                        requested_parent_id=duplicate_match.requested_parent_id,
+                        mismatch_reasons=duplicate_match.mismatch_reasons,
+                        error_code=(
+                            "external_identity_conflict"
+                            if is_external_identity
+                            else "canonical_identity_conflict"
+                        ),
+                        match_source=duplicate_match.match_source,
+                    )
+                else:
+                    result = build_duplicate_prevented_create_concepts_result(
+                        requested_name=str(name),
+                        requested_kind=kind,
+                        existing_concept_id=duplicate_match.existing_concept_id,
+                        guard_scope=duplicate_match.guard_scope,
+                        match_source=duplicate_match.match_source,
+                    )
+                    if duplicate_match.match_source.startswith(
+                        "external_identifier:"
+                    ):
+                        # Duplicate resolution is read-only and may consume the
+                        # remaining transport budget. Do not begin the marker
+                        # repair after cancellation.
+                        if _cancelled_after_completed_items():
+                            break
+                        identity_persistence = persist_external_identity_markers(
+                            concept_id=duplicate_match.existing_concept_id,
+                            identifiers=external_identifiers,
+                        )
+                        (
+                            identity_effect_status,
+                            identity_changed,
+                            identity_failures,
+                            identity_indeterminate_failures,
+                        ) = _identity_persistence_outcome(
+                            identity_persistence
+                        )
+                        result["effect_status"] = identity_effect_status
+                        result["changed"] = identity_changed
+                        result["external_identity"] = {
+                            "identifiers": [
+                                identifier.to_dict()
+                                for identifier in external_identifiers
+                            ],
+                            "persistence": identity_persistence,
+                        }
+                        result["requested_parent_id"] = (
+                            duplicate_match.requested_parent_id
+                        )
+                        result["existing_parent_ids"] = list(
+                            duplicate_match.existing_parent_ids
+                        )
+                        result["requested_parent_already_present"] = bool(
+                            duplicate_match.requested_parent_id
+                            and duplicate_match.requested_parent_id
+                            in set(duplicate_match.existing_parent_ids)
+                        )
+                        if identity_effect_status == "indeterminate":
+                            result.update(
+                                {
+                                    "success": False,
+                                    "error_code": (
+                                        "external_identity_persistence_indeterminate"
+                                    ),
+                                    "indeterminate_failures": (
+                                        identity_indeterminate_failures
+                                        or [
+                                            {
+                                                "stage": (
+                                                    "external_identity_persistence"
+                                                ),
+                                                "outcome": "indeterminate",
+                                            }
+                                        ]
+                                    ),
+                                }
+                            )
+                        elif (
+                            identity_failures
+                            or identity_effect_status in {"failed", "partial"}
+                        ):
+                            persistence_failures = (
+                                identity_failures
+                                or [
+                                    {
+                                        "stage": "external_identity_persistence",
+                                        "outcome": identity_effect_status,
+                                    }
+                                ]
+                            )
+                            result.update(
+                                {
+                                    "success": False,
+                                    "effect_status": (
+                                        "partial"
+                                        if identity_changed is True
+                                        else "failed"
+                                    ),
+                                    "error_code": (
+                                        "external_identity_persistence_failed"
+                                    ),
+                                    "partial_failures": persistence_failures,
+                                }
+                            )
+                if duplicate_match.resolution_source:
+                    result["external_identity_resolution_source"] = (
+                        duplicate_match.resolution_source
+                    )
+                result["concept_id"] = duplicate_match.existing_concept_id
+                results.append(result)
+                continue
+
+            # Duplicate preflights are read-only and may consume the entire
+            # transport budget. Never start an insert after cancellation.
+            if _cancelled_after_completed_items():
+                break
+            result = create_vontology_concept(
+                parent_id=parent_id_for_concept,
+                new_concept_name=name,
+                create_as_instance=create_as_instance,
+                allow_duplicate_instance_suffix=allow_duplicate_instances,
+                description=concept_data.get("description"),
+                notes=concept_data.get("notes"),
+                created_by_concept_id=actor_user_id,
+                organisation_concept_id=actor_org_id,
+                event_namespace=namespace,
+                visibility_scope_mode=scope_mode,
+                canonical_concept_id_override=canonical_concept_id_override,
+            )
+            if (
+                external_identifiers
+                and canonical_concept_id_override
+                and result.get("error_code") == "already_exists"
+            ):
+                # The external-identity preflight did not verify this record.
+                # A unique-key collision may be a concurrent legitimate create,
+                # an actor-invisible record, or an unrelated record occupying the
+                # predicted ID. None is safe to report as successful reuse until
+                # a later actor-scoped lookup verifies the persisted identity.
+                result = {
+                    "success": False,
+                    "effect_status": "failed",
+                    "changed": False,
+                    "error_code": "external_identity_collision_unverified",
+                    "message": (
+                        "The actor-scoped external identity became occupied before "
+                        "creation completed, but its identity was not verified. "
+                        "No existing concept was exposed or reused."
+                    ),
+                    "concept": None,
+                    "canonical_concept_id": canonical_concept_id_override,
+                    "input_name": name,
+                    "retryable": True,
+                }
+            # Enrich result with the requested name for traceability and surface
+            # the canonical created concept_id at a stable top-level key so UI
+            # summaries can reliably name what was created.
+            result["requested_name"] = name
+            result["requested_kind"] = kind
+            concept_id_value = result.get("concept_id")
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                nested_concept = result.get("concept")
+                if isinstance(nested_concept, dict):
+                    nested_id = nested_concept.get("concept_id")
+                    if isinstance(nested_id, str) and nested_id.strip():
+                        concept_id_value = nested_id
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                canonical_id = result.get("canonical_concept_id")
+                if isinstance(canonical_id, str) and canonical_id.strip():
+                    concept_id_value = canonical_id
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                existing_id = result.get("existing_concept_id")
+                if isinstance(existing_id, str) and existing_id.strip():
+                    concept_id_value = existing_id
+            if isinstance(concept_id_value, str) and concept_id_value.strip():
+                result["concept_id"] = concept_id_value.strip()
+                if result.get("success") and external_identifiers:
+                    try:
+                        raise_if_internal_mcp_cancelled()
+                    except InternalMCPHandlerCancelled as exc:
+                        # The primary concept is already durable. Preserve that
+                        # receipt, but do not begin the logically subsequent
+                        # identity-marker write after cancellation.
+                        persistence_failure = {
+                            "stage": "external_identity_persistence",
+                            "error_code": (
+                                "external_identity_persistence_not_started_"
+                                "after_concept_creation"
+                            ),
+                            "effect_status": "not_started",
+                            "dispatched": False,
+                        }
+                        identity_persistence = {
+                            "success": False,
+                            "effect_status": "not_started",
+                            "changed": False,
+                            "writes": [],
+                            "failures": [],
+                            "indeterminate_failures": [],
+                            "error_code": persistence_failure["error_code"],
+                            "cancellation": str(exc),
+                        }
+                        result["external_identity"] = {
+                            "identifiers": [
+                                identifier.to_dict()
+                                for identifier in external_identifiers
+                            ],
+                            "canonical_concept_id_override": (
+                                canonical_concept_id_override
+                            ),
+                            "persistence": identity_persistence,
+                        }
+                        result["partial_failures"] = [persistence_failure]
+                        if isinstance(result.get("concept"), dict):
+                            result["concept"]["partial_failures"] = [
+                                persistence_failure
+                            ]
+                        result["effect_status"] = "partial"
+                        result["changed"] = True
+                        results.append(result)
+                        cancelled_after_partial_error = str(exc)
+                        break
+                    identity_persistence = persist_external_identity_markers(
+                        concept_id=concept_id_value.strip(),
+                        identifiers=external_identifiers,
+                    )
+                    result["external_identity"] = {
+                        "identifiers": [
+                            identifier.to_dict() for identifier in external_identifiers
+                        ],
+                        "canonical_concept_id_override": (
+                            canonical_concept_id_override
+                        ),
+                        "persistence": identity_persistence,
+                    }
+                    (
+                        identity_effect_status,
+                        _identity_changed,
+                        identity_failures,
+                        identity_indeterminate_failures,
+                    ) = _identity_persistence_outcome(identity_persistence)
+                    if identity_effect_status == "indeterminate":
+                        # Concept creation is known durable, while marker
+                        # finality is unknown. Preserve both facts and force
+                        # canonical inspection before another effect.
+                        result["effect_status"] = "indeterminate"
+                        result["changed"] = True
+                        result["indeterminate_failures"] = (
+                            identity_indeterminate_failures
+                            or [
+                                {
+                                    "stage": "external_identity_persistence",
+                                    "outcome": "indeterminate",
+                                }
+                            ]
+                        )
+                    elif (
+                        identity_failures
+                        or identity_effect_status in {"failed", "partial"}
+                    ):
+                        persistence_failures = (
+                            identity_failures
+                            or [
+                                {
+                                    "stage": "external_identity_persistence",
+                                    "outcome": identity_effect_status,
+                                }
+                            ]
+                        )
+                        result["partial_failures"] = persistence_failures
+                        if isinstance(result.get("concept"), dict):
+                            concept_partial_failures = result["concept"].setdefault(
+                                "partial_failures",
+                                [],
+                            )
+                            if isinstance(concept_partial_failures, list):
+                                concept_partial_failures.extend(
+                                    persistence_failures
+                                )
+                        result["effect_status"] = "partial"
+                        result["changed"] = True
+            results.append(result)
 
     # Count different outcome types for summary
     successful = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
@@ -1199,6 +1782,52 @@ def _create_concepts(**kwargs):
         and isinstance(r.get("concept_id"), str)
         and str(r.get("concept_id")).strip()
     ]
+
+    def _collect_item_failures(field: str) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item_result in results:
+            if not isinstance(item_result, dict):
+                continue
+            concept_id = str(item_result.get("concept_id") or "").strip() or None
+            sources: list[Any] = [item_result.get(field)]
+            nested_concept = item_result.get("concept")
+            if isinstance(nested_concept, dict):
+                sources.append(nested_concept.get(field))
+            for source in sources:
+                if not isinstance(source, list):
+                    continue
+                for failure in source:
+                    if not isinstance(failure, Mapping):
+                        continue
+                    row = {"concept_id": concept_id, **dict(failure)}
+                    signature = repr(sorted(row.items(), key=lambda pair: pair[0]))
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    collected.append(row)
+        return collected
+
+    partial_failures = _collect_item_failures("partial_failures")
+    indeterminate_failures = _collect_item_failures("indeterminate_failures")
+    item_effect_statuses = {
+        str(item.get("effect_status") or "").strip().lower()
+        for item in results
+        if isinstance(item, dict)
+    }
+    failed = len(results) - successful - already_exists
+    if indeterminate_failures or "indeterminate" in item_effect_statuses:
+        effect_status = "indeterminate"
+    elif (
+        partial_failures
+        or "partial" in item_effect_statuses
+        or (failed > 0 and (successful > 0 or already_exists > 0))
+    ):
+        effect_status = "partial"
+    elif failed > 0:
+        effect_status = "failed"
+    else:
+        effect_status = "succeeded"
     applied_scope_modes = sorted(
         {
             str(
@@ -1222,12 +1851,46 @@ def _create_concepts(**kwargs):
         }
     )
 
-    return {
+    item_changed_values: list[bool | None] = []
+    for item_result in results:
+        if not isinstance(item_result, dict):
+            continue
+        raw_changed = item_result.get("changed")
+        if isinstance(raw_changed, bool) or (
+            "changed" in item_result and raw_changed is None
+        ):
+            item_changed_values.append(raw_changed)
+        elif item_result.get("effect_status") == "indeterminate":
+            item_changed_values.append(None)
+        elif item_result.get("success"):
+            item_changed_values.append(True)
+        else:
+            item_changed_values.append(False)
+    changed: bool | None
+    if any(value is True for value in item_changed_values):
+        changed = True
+    elif any(value is None for value in item_changed_values):
+        changed = None
+    else:
+        changed = False
+    response = {
+        "success": (
+            failed == 0
+            and not partial_failures
+            and not indeterminate_failures
+            and effect_status == "succeeded"
+        ),
+        "effect_status": effect_status,
+        "changed": changed,
         "results": results,
         "total": len(concepts),
         "successful": successful,
         "already_existed": already_exists,
-        "failed": len(concepts) - successful - already_exists,
+        "failed": failed,
+        "partial_failure_count": len(partial_failures),
+        "partial_failures": partial_failures,
+        "indeterminate_failure_count": len(indeterminate_failures),
+        "indeterminate_failures": indeterminate_failures,
         "created_concept_ids": created_concept_ids,
         "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
         "parent_resolution": parent_resolution.to_dict(),
@@ -1244,6 +1907,28 @@ def _create_concepts(**kwargs):
             "namespace": namespace,
         },
     }
+    if cancelled_after_partial_error is not None:
+        response.update(
+            {
+                "success": False,
+                "effect_status": (
+                    "indeterminate"
+                    if effect_status == "indeterminate"
+                    else "partial"
+                ),
+                "error_code": "handler_cancelled_after_partial_completion",
+                "error": (
+                    "Concept creation was cancelled after one or more batch items "
+                    "had completed. Completed item receipts are preserved and no "
+                    "later item was started."
+                ),
+                "cancellation_requested": True,
+                "cancellation_error": cancelled_after_partial_error,
+                "completed_before_cancellation": len(results),
+                "unattempted_count": len(concepts) - len(results),
+            }
+        )
+    return response
 
 
 def _extract_annotations(**kwargs):
@@ -1256,6 +1941,33 @@ def _search_concepts(**kwargs):
     from ...services.concept_search_service import search_concepts
 
     return search_concepts(**kwargs)
+
+
+def _indeterminate_effect_error(
+    message: str,
+    *,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    """Report an unexpected write-path exception without inventing finality."""
+
+    response = make_error_response(
+        "effect_outcome_unknown",
+        message,
+        details=details,
+        suggestions=["Inspect canonical state before retrying the effect."],
+    )
+    response.update(
+        {
+            "effect_status": "indeterminate",
+            "mutation_outcome": "unknown",
+            "changed": None,
+            "retryable": False,
+            "recovery_affordances": [
+                {"action_type": "inspect_operation_state_before_retry"}
+            ],
+        }
+    )
+    return response
 
 
 def _upsert_text_relation(**kwargs):
@@ -1275,6 +1987,7 @@ def _upsert_text_relation(**kwargs):
     context = kwargs.get("context")
     provenance = kwargs.get("provenance")
     namespace = kwargs.get("namespace")
+    mutation_dispatched = False
 
     if not concept_id:
         return make_error_response(
@@ -1303,6 +2016,7 @@ def _upsert_text_relation(**kwargs):
     try:
         predicate_resolution = resolve_text_relation_predicate_for_write(predicate)
         storage_predicate = predicate_resolution.storage_predicate
+        mutation_dispatched = True
         result = upsert_text_for_concept(
             subject_concept_id=concept_id,
             predicate=storage_predicate,
@@ -1323,9 +2037,14 @@ def _upsert_text_relation(**kwargs):
         text_preview = text[:100] + "..." if len(text) > 100 else text
         return {
             "success": True,
+            "effect_status": "succeeded",
+            "changed": bool(
+                result.get("relation_created") or result.get("context_updated")
+            ),
             "text_value_id": str(result.get("text_value_id")),
             "relation_id": str(result.get("relation_id")),
             "relation_created": result.get("relation_created"),
+            "context_updated": result.get("context_updated"),
             "predicate": storage_predicate,
             "input_predicate": predicate_resolution.input_predicate,
             "predicate_concept_id": predicate_resolution.predicate_concept_id,
@@ -1340,10 +2059,23 @@ def _upsert_text_relation(**kwargs):
             suggestions=exc.suggestions,
         )
     except Exception as exc:
-        return make_error_response(
-            "exception",
-            f"Failed to upsert text relation: {exc}",
-            details={"exception_type": type(exc).__name__},
+        if not mutation_dispatched:
+            return make_error_response(
+                "exception",
+                f"Failed to prepare text relation: {exc}",
+                details={"exception_type": type(exc).__name__},
+            )
+        return _indeterminate_effect_error(
+            (
+                "The text-relation operation raised unexpectedly; canonical "
+                "state may already have changed."
+            ),
+            details={
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "concept_id": concept_id,
+                "predicate": predicate,
+            },
         )
 
 
@@ -1865,10 +2597,82 @@ def _add_relationship(**kwargs):
     """Add a relationship between two concepts or from concept to text value."""
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...services.text_value_service import upsert_text_for_concept
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from .transport import (
+        InternalMCPHandlerCancelled,
+        raise_if_internal_mcp_cancelled,
+    )
+
+    raise_if_internal_mcp_cancelled()
 
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
+    predicate_if_missing = kwargs.get("predicate_if_missing")
+    mutation_dispatched = False
+    predicate_dependency: dict[str, Any] | None = None
+    predicate_dependency_changed = False
+    predicate_dependency_partial_failures: list[dict[str, Any]] = []
+    actor_user_id = get_effective_user_concept_id()
+    actor_org_id = get_effective_organisation_concept_id()
+    raw_namespace = kwargs.get("namespace")
+    namespace = (
+        raw_namespace.strip()
+        if isinstance(raw_namespace, str) and raw_namespace.strip()
+        else None
+    )
+
+    def _cancellation_after_predicate_dependency() -> dict[str, Any] | None:
+        try:
+            raise_if_internal_mcp_cancelled()
+        except InternalMCPHandlerCancelled as exc:
+            if predicate_dependency is None:
+                raise
+            dependency_changed = predicate_dependency_changed
+            dependency_was_partial = bool(
+                dependency_changed or predicate_dependency_partial_failures
+            )
+            response = make_error_response(
+                "relationship_not_started_after_predicate_dependency",
+                (
+                    "The predicate dependency was resolved, but cancellation "
+                    "arrived before the relationship write started."
+                ),
+                details={
+                    "source_id": source_id,
+                    "predicate": predicate,
+                    "target": target,
+                    "cancellation": str(exc),
+                },
+            )
+            response.update(
+                {
+                    "effect_status": (
+                        "partial" if dependency_was_partial else "not_started"
+                    ),
+                    "changed": dependency_changed,
+                    "mutation_outcome": (
+                        "partial" if dependency_was_partial else "not_started"
+                    ),
+                    "outcome_finality": "terminal_for_turn",
+                    "predicate_dependency": predicate_dependency,
+                    "partial_failures": [
+                        *predicate_dependency_partial_failures,
+                        {
+                            "stage": "relationship",
+                            "error_code": (
+                                "relationship_not_started_after_predicate_dependency"
+                            ),
+                            "dispatched": False,
+                        },
+                    ],
+                }
+            )
+            return response
+        return None
 
     if not source_id:
         return make_error_response(
@@ -1904,13 +2708,53 @@ def _add_relationship(**kwargs):
             suggestions=["Use different concept IDs for source and target"],
         )
 
+    predicate_dependency_name: str | None = None
+    predicate_dependency_description: str | None = None
+    if predicate_if_missing is not None:
+        if not isinstance(predicate_if_missing, Mapping):
+            return make_error_response(
+                "invalid_predicate_if_missing",
+                "predicate_if_missing must be an object.",
+                details={
+                    "value_type": type(predicate_if_missing).__name__,
+                    "required_fields": ["name"],
+                    "optional_fields": ["description"],
+                },
+            )
+        raw_dependency_name = predicate_if_missing.get("name")
+        if not isinstance(raw_dependency_name, str) or not raw_dependency_name.strip():
+            return make_error_response(
+                "invalid_predicate_if_missing",
+                "predicate_if_missing.name must be a non-empty string.",
+                details={"required_fields": ["name"]},
+            )
+        predicate_dependency_name = raw_dependency_name.strip()
+        raw_dependency_description = predicate_if_missing.get("description")
+        if raw_dependency_description is not None and not isinstance(
+            raw_dependency_description, str
+        ):
+            return make_error_response(
+                "invalid_predicate_if_missing",
+                "predicate_if_missing.description must be a string when supplied.",
+                details={
+                    "field": "description",
+                    "value_type": type(raw_dependency_description).__name__,
+                },
+            )
+        if isinstance(raw_dependency_description, str):
+            predicate_dependency_description = (
+                raw_dependency_description.strip() or None
+            )
+
     try:
         repo = ConceptsRepository
 
         from ...services.relationship_write_service import (
             add_relationship,
             normalise_structural_predicate,
+            validate_predicate_concept,
         )
+        from ...utils.concept_id_utils import canonicalise_vontology_concept_id
 
         # Check if source exists
         src = repo.find_one({"concept_id": source_id})
@@ -1937,8 +2781,247 @@ def _add_relationship(**kwargs):
             predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
         )
         well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
+        if predicate_dependency_name is not None:
+            canonical_dependency_id = canonicalise_vontology_concept_id(
+                predicate_dependency_name
+            )
+            if (
+                not predicate_str.startswith("#V#")
+                or predicate_normalised in well_known_text_predicates
+            ):
+                return make_error_response(
+                    "predicate_dependency_requires_dynamic_predicate",
+                    (
+                        "predicate_if_missing can only ensure an exact dynamic "
+                        "predicate identified by a #V# concept ID."
+                    ),
+                    details={
+                        "predicate": predicate_str,
+                        "canonical_dependency_id": canonical_dependency_id,
+                    },
+                )
+            if canonical_dependency_id != predicate_str:
+                return make_error_response(
+                    "predicate_dependency_identity_mismatch",
+                    (
+                        "predicate_if_missing.name does not canonically identify "
+                        "the requested predicate."
+                    ),
+                    details={
+                        "predicate": predicate_str,
+                        "predicate_if_missing_name": predicate_dependency_name,
+                        "canonical_dependency_id": canonical_dependency_id,
+                    },
+                    related_concept_ids=[predicate_str],
+                )
+
+            (
+                predicate_is_valid,
+                predicate_error_code,
+                predicate_error_details,
+            ) = validate_predicate_concept(predicate_str, repo)
+            if not predicate_is_valid:
+                if predicate_error_code != "predicate_concept_not_found":
+                    return make_error_response(
+                        str(predicate_error_code or "predicate_dependency_invalid"),
+                        (
+                            "The requested predicate exists but is not a valid "
+                            "predicate dependency. It was not changed."
+                        ),
+                        details={
+                            "predicate": predicate_str,
+                            "predicate_validation": predicate_error_details or {},
+                        },
+                        related_concept_ids=[predicate_str],
+                    )
+
+                target_id = str(target).strip()
+                target_doc = repo.find_one(
+                    {"concept_id": target_id},
+                    {"concept_id": 1},
+                )
+                if not target_doc:
+                    return make_error_response(
+                        "target_concept_not_found",
+                        (
+                            f"Target concept '{target_id}' was not found. The "
+                            "predicate dependency and relationship were not "
+                            "created."
+                        ),
+                        details={
+                            "role": "target",
+                            "concept_id": target_id,
+                            "predicate": predicate_str,
+                        },
+                        suggestions=[
+                            "Create or resolve the target concept before retrying "
+                            "the relationship."
+                        ],
+                        related_concept_ids=[target_id],
+                    )
+
+                predicate_concept: dict[str, Any] = {
+                    "name": predicate_dependency_name,
+                    "kind": "predicate",
+                }
+                if predicate_dependency_description is not None:
+                    predicate_concept["description"] = predicate_dependency_description
+
+                mutation_dispatched = True
+                try:
+                    creation_result = _create_concepts(
+                        parent_id="#V#predicate",
+                        concepts=[predicate_concept],
+                        duplicate_resolution_mode=(
+                            _CREATE_CONCEPTS_DUPLICATE_RESOLUTION_CANONICAL_ID_ONLY
+                        ),
+                        namespace=namespace,
+                        created_by_concept_id=actor_user_id,
+                        organisation_concept_id=actor_org_id,
+                    )
+                except InternalMCPHandlerCancelled:
+                    raise
+                except Exception as exc:
+                    response = _indeterminate_effect_error(
+                        (
+                            "Predicate dependency creation raised unexpectedly; "
+                            "the predicate may already exist. The relationship was "
+                            "not attempted."
+                        ),
+                        details={
+                            "stage": "predicate_dependency_creation",
+                            "predicate": predicate_str,
+                            "source_id": source_id,
+                            "target": target,
+                            "exception_type": type(exc).__name__,
+                            "exception": str(exc),
+                        },
+                    )
+                    response["predicate_dependency"] = {
+                        "concept_id": predicate_str,
+                        "name": predicate_dependency_name,
+                        "status": "indeterminate",
+                        "verified": False,
+                        "changed": None,
+                    }
+                    return response
+
+                if (
+                    creation_result.get("effect_status") == "indeterminate"
+                    or creation_result.get("changed") is None
+                ):
+                    response = _indeterminate_effect_error(
+                        (
+                            "Predicate dependency creation has an indeterminate "
+                            "outcome. The relationship was not attempted."
+                        ),
+                        details={
+                            "stage": "predicate_dependency_creation",
+                            "predicate": predicate_str,
+                            "source_id": source_id,
+                            "target": target,
+                            "creation_result": creation_result,
+                        },
+                    )
+                    response["predicate_dependency"] = {
+                        "concept_id": predicate_str,
+                        "name": predicate_dependency_name,
+                        "status": "indeterminate",
+                        "verified": False,
+                        "changed": None,
+                        "creation_result": creation_result,
+                    }
+                    return response
+
+                predicate_dependency_changed = creation_result.get("changed") is True
+                creation_effect_status = str(
+                    creation_result.get("effect_status") or ""
+                ).strip()
+                predicate_dependency = {
+                    "concept_id": predicate_str,
+                    "name": predicate_dependency_name,
+                    "status": "unverified",
+                    "verified": False,
+                    "changed": predicate_dependency_changed,
+                    "creation_result": creation_result,
+                }
+                if creation_effect_status == "partial" or not creation_result.get(
+                    "success"
+                ):
+                    predicate_dependency_partial_failures.append(
+                        {
+                            "stage": "predicate_dependency",
+                            "error_code": (
+                                creation_result.get("error_code")
+                                or "predicate_dependency_creation_partial"
+                            ),
+                            "details": creation_result,
+                        }
+                    )
+                (
+                    predicate_is_valid,
+                    predicate_error_code,
+                    predicate_error_details,
+                ) = validate_predicate_concept(predicate_str, repo)
+                if not predicate_is_valid:
+                    response = make_error_response(
+                        (
+                            "predicate_dependency_verification_failed"
+                            if creation_result.get("success")
+                            else "predicate_dependency_creation_failed"
+                        ),
+                        (
+                            "The predicate dependency could not be verified after "
+                            "the canonical create/reuse attempt. The relationship "
+                            "was not attempted."
+                        ),
+                        details={
+                            "predicate": predicate_str,
+                            "predicate_validation_error": predicate_error_code,
+                            "predicate_validation": predicate_error_details or {},
+                            "creation_result": creation_result,
+                        },
+                        related_concept_ids=[predicate_str],
+                    )
+                    response.update(
+                        {
+                            "effect_status": (
+                                "partial" if predicate_dependency_changed else "failed"
+                            ),
+                            "changed": predicate_dependency_changed,
+                            "predicate_dependency": predicate_dependency,
+                        }
+                    )
+                    if predicate_dependency_partial_failures:
+                        response["partial_failures"] = list(
+                            predicate_dependency_partial_failures
+                        )
+                    return response
+
+                predicate_dependency.update(
+                    {
+                        "status": (
+                            "created"
+                            if predicate_dependency_changed
+                            else "reused_existing"
+                        ),
+                        "verified": True,
+                    }
+                )
+            else:
+                predicate_dependency = {
+                    "concept_id": predicate_str,
+                    "name": predicate_dependency_name,
+                    "status": "reused_existing",
+                    "verified": True,
+                    "changed": False,
+                }
+
         if predicate_normalised in well_known_text_predicates:
             target_text = target if isinstance(target, str) else str(target)
+            if cancellation_response := _cancellation_after_predicate_dependency():
+                return cancellation_response
+            mutation_dispatched = True
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
                 predicate=predicate_normalised,
@@ -1948,6 +3031,10 @@ def _add_relationship(**kwargs):
             )
             return {
                 "success": True,
+                "effect_status": "succeeded",
+                "changed": bool(
+                    result.get("relation_created") or result.get("context_updated")
+                ),
                 "relationship_type": "text_relation",
                 "source_id": source_id,
                 "predicate": predicate_normalised,
@@ -1955,6 +3042,11 @@ def _add_relationship(**kwargs):
                 "target": target_text,
                 "text_value_id": str(result.get("text_value_id")),
                 "relation_id": str(result.get("relation_id")),
+                **(
+                    {"predicate_dependency": predicate_dependency}
+                    if predicate_dependency is not None
+                    else {}
+                ),
             }
 
         # Determine if this is a text predicate (binary_text_predicate instance)
@@ -1973,6 +3065,9 @@ def _add_relationship(**kwargs):
 
         # Handle text predicates (target is text value, not concept)
         if is_text_predicate:
+            if cancellation_response := _cancellation_after_predicate_dependency():
+                return cancellation_response
+            mutation_dispatched = True
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
                 predicate=predicate_str,
@@ -1982,15 +3077,27 @@ def _add_relationship(**kwargs):
             )
             return {
                 "success": True,
+                "effect_status": "succeeded",
+                "changed": bool(
+                    result.get("relation_created") or result.get("context_updated")
+                ),
                 "relationship_type": "text_relation",
                 "source_id": source_id,
                 "predicate": predicate_str,
                 "target": target,
                 "text_value_id": str(result.get("text_value_id")),
                 "relation_id": str(result.get("relation_id")),
+                **(
+                    {"predicate_dependency": predicate_dependency}
+                    if predicate_dependency is not None
+                    else {}
+                ),
             }
 
         # Concept-to-concept relationships use the single authoritative pathway.
+        if cancellation_response := _cancellation_after_predicate_dependency():
+            return cancellation_response
+        mutation_dispatched = True
         result = add_relationship(
             source_id=source_id,
             predicate=predicate_str,
@@ -2000,7 +3107,7 @@ def _add_relationship(**kwargs):
 
         if not result.get("success"):
             error_code = result.get("error") or "relationship_add_failed"
-            return make_error_response(
+            response = make_error_response(
                 str(error_code),
                 str(error_code),
                 details={
@@ -2013,11 +3120,48 @@ def _add_relationship(**kwargs):
                     [source_id, target] if target.startswith("#V#") else [source_id]
                 ),
             )
+            if predicate_dependency is not None:
+                response["predicate_dependency"] = predicate_dependency
+            if (
+                predicate_dependency_changed
+                or predicate_dependency_partial_failures
+            ):
+                response.update(
+                    {
+                        "effect_status": "partial",
+                        "changed": predicate_dependency_changed,
+                        "mutation_outcome": "partial",
+                        "message": (
+                            (
+                                "The predicate dependency persisted, but the "
+                                "relationship was not added."
+                            )
+                            if predicate_dependency_changed
+                            else (
+                                "Predicate dependency resolution reported a "
+                                "partial failure, and the relationship was not "
+                                "added."
+                            )
+                        ),
+                        "partial_failures": [
+                            *predicate_dependency_partial_failures,
+                            {
+                                "stage": "relationship",
+                                "error_code": str(error_code),
+                                "details": result,
+                            },
+                        ],
+                    }
+                )
+            return response
 
         predicate_out = result.get("predicate") or predicate_str
         target_out = result.get("target_id") or target
         response: dict[str, Any] = {
             "success": True,
+            "effect_status": (
+                "partial" if result.get("inverse_error") else "succeeded"
+            ),
             "relationship_type": "concept_relation",
             "source_id": source_id,
             "predicate": predicate_out,
@@ -2029,6 +3173,9 @@ def _add_relationship(**kwargs):
                 else result.get("modified")
             ),
         }
+        response["changed"] = bool(response["added"] or predicate_dependency_changed)
+        if predicate_dependency is not None:
+            response["predicate_dependency"] = predicate_dependency
         if "inverse_predicate" in result or "inverse_modified" in result:
             response["inverse"] = {
                 "predicate": result.get("inverse_predicate"),
@@ -2037,19 +3184,68 @@ def _add_relationship(**kwargs):
         # Propagate warning from service layer (e.g. vacuous typing, JVNAUTOSCI-1010)
         if "warning" in result:
             response["warning"] = result["warning"]
+        if result.get("inverse_error"):
+            response["partial_failures"] = [
+                {
+                    "stage": "inverse_relationship",
+                    "error": str(result["inverse_error"]),
+                }
+            ]
+        if predicate_dependency_partial_failures:
+            response["effect_status"] = "partial"
+            response["partial_failures"] = [
+                *predicate_dependency_partial_failures,
+                *list(response.get("partial_failures") or []),
+            ]
         return response
 
+    except InternalMCPHandlerCancelled:
+        raise
     except Exception as e:
-        return make_error_response(
-            "exception",
-            f"Exception: {str(e)}",
+        if not mutation_dispatched:
+            return make_error_response(
+                "exception",
+                f"Failed to prepare relationship: {e}",
+                details={
+                    "source_id": source_id,
+                    "predicate": predicate,
+                    "target": target,
+                    "exception_type": type(e).__name__,
+                },
+            )
+        response = _indeterminate_effect_error(
+            (
+                "The relationship operation raised unexpectedly; canonical "
+                "state may already have changed."
+            ),
             details={
                 "source_id": source_id,
                 "predicate": predicate,
                 "target": target,
                 "exception_type": type(e).__name__,
+                "exception": str(e),
             },
         )
+        if predicate_dependency is not None:
+            response["predicate_dependency"] = predicate_dependency
+        if predicate_dependency_changed:
+            response["changed"] = True
+            response["known_changes"] = [
+                {
+                    "stage": "predicate_dependency",
+                    "concept_id": (
+                        predicate_dependency.get("concept_id")
+                        if predicate_dependency is not None
+                        else predicate_str
+                    ),
+                    "changed": True,
+                }
+            ]
+        if predicate_dependency_partial_failures:
+            response["partial_failures"] = list(
+                predicate_dependency_partial_failures
+            )
+        return response
 
 
 def _remove_relationship(**kwargs):
@@ -6420,11 +7616,24 @@ def _search_proxy_diagnostics(**kwargs):
     from .search_proxy_mcp import get_search_proxy, SearchProxyError
 
     include_health_check = kwargs.get("include_health_check", False)
+    safe_summary_only = bool(kwargs.get("safe_summary_only", False))
 
     async def _async_diagnostics():
         try:
             proxy = await get_search_proxy()
             diagnostics = proxy.get_diagnostics()
+            if safe_summary_only:
+                config = diagnostics.get("config")
+                diagnostics = {
+                    "stats": diagnostics.get("stats"),
+                    "config": {
+                        "api_key_set": bool(
+                            config.get("api_key_set")
+                            if isinstance(config, Mapping)
+                            else False
+                        )
+                    },
+                }
 
             if include_health_check:
                 health = await proxy.check_health()
@@ -6661,8 +7870,17 @@ def _resilient_extract_url(**kwargs):
     fallback_query = kwargs.get("fallback_query")
     context = kwargs.get("context")
 
-    max_fallback_results = int(kwargs.get("max_fallback_results", 5) or 5)
-    max_extracts = int(kwargs.get("max_extracts", 4) or 4)
+    # Public fallback extraction performs paid/external calls. Keep the
+    # caller's choice within an algorithmic fan-out ceiling rather than
+    # replacing the caller's search or extraction strategy.
+    max_fallback_results = max(
+        1,
+        min(10, int(kwargs.get("max_fallback_results", 5) or 5)),
+    )
+    max_extracts = max(
+        0,
+        min(8, int(kwargs.get("max_extracts", 4) or 4)),
+    )
     max_chars = int(kwargs.get("max_chars", 12000) or 12000)
     min_content_chars = int(kwargs.get("min_content_chars", 200) or 200)
     search_depth = kwargs.get("search_depth", "basic")
@@ -7037,7 +8255,27 @@ def _concepts_create_input_schema() -> Schema:
         },
         allow_unknown=True,
         description=(
-            "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). "
+            "create_concepts input: parent_id (str, semantic type concept_id; not an owner, organisation, user, or container individual), "
+            "concepts (list of {name, kind?, description?, notes?, "
+            "external_identifiers?, identity_candidate_concept_ids?, "
+            "identity_rejected_candidate_concept_ids?}). "
+            "external_identifiers accepts at most one explicit identity object, "
+            "for example {scheme:'registry.example', canonical_value:'record-1234', "
+            "role:'identity'}. The value must already be the canonical stable value "
+            "established by grounded evidence; create_concepts does not infer or "
+            "normalise domain-specific identifier syntax from names. Preserve the "
+            "same explicit identity on every repair or retry rather than falling "
+            "back to a title-derived create. A cited source is provenance, not "
+            "necessarily the target entity's identity. Legacy textual references "
+            "are returned only as unverified candidates. When grounded evidence "
+            "establishes one candidate as the identified entity, repeat the call "
+            "with its actor-visible concept ID in identity_candidate_concept_ids. "
+            "When every returned legacy candidate has been inspected and none "
+            "matches, repeat the exact returned set in "
+            "identity_rejected_candidate_concept_ids; partial or stale sets do "
+            "not bypass review. "
+            "An exact identity may reuse a same-kind concept under another parent "
+            "without silently changing its classifications. "
             "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
             "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
@@ -7061,6 +8299,13 @@ def _concepts_create_output_schema() -> Schema:
         },
         optional={
             "scope_selection": (dict,),
+            "success": (bool,),
+            "effect_status": (str,),
+            "changed": (bool, type(None)),
+            "partial_failure_count": (int,),
+            "partial_failures": (list,),
+            "indeterminate_failure_count": (int,),
+            "indeterminate_failures": (list,),
         },
         allow_unknown=True,
         description="create_concepts output: results (list of creation results), total (int), successful (int)",
@@ -7206,6 +8451,9 @@ def _upsert_text_relation_output_schema() -> Schema:
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "relation_created": (bool, type(None)),
+            "context_updated": (bool, type(None)),
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
             "predicate": (str, type(None)),
             "input_predicate": (str, type(None)),
             "predicate_concept_id": (str, type(None)),
@@ -7793,9 +9041,19 @@ def _add_relationship_input_schema() -> Schema:
             "predicate": str,
             "target": str,
         },
-        optional={},
+        optional={
+            "predicate_if_missing": (dict, type(None)),
+            "namespace": (str, type(None)),
+        },
         allow_unknown=True,
-        description="add_relationship input: source_id (str, concept ID like '#V#nikola_k._kasabov'), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'), target (str, target concept ID like '#V#professor' or text value for text predicates like 'Auckland University')",
+        description=(
+            "add_relationship input: source_id (str), predicate (str, structural "
+            "relationship name or exact #V# predicate concept ID), target (str). "
+            "For a missing dynamic predicate only, predicate_if_missing may be "
+            "{name: str, description?: str}; its name must canonically identify "
+            "the exact requested predicate. The capability creates or reuses and "
+            "verifies that predicate before attempting the edge."
+        ),
     )
 
 
@@ -7812,6 +9070,10 @@ def _add_relationship_output_schema() -> Schema:
             "target": (str, type(None)),
             "already_existed": (bool, type(None)),
             "added": (bool, type(None)),
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
+            "partial_failures": (list, type(None)),
+            "predicate_dependency": (dict, type(None)),
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "error": (str, type(None)),
@@ -7819,7 +9081,11 @@ def _add_relationship_output_schema() -> Schema:
             "error_details": (dict, type(None)),
         },
         allow_unknown=True,
-        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str), error_code (str), error_details (dict)",
+        description=(
+            "add_relationship output: success, effect_status, changed, edge "
+            "details, optional predicate_dependency create/reuse verification, "
+            "and typed partial or indeterminate failure evidence."
+        ),
     )
 
 
@@ -9125,9 +10391,16 @@ def _extract_url_output_schema() -> Schema:
 def _search_proxy_diagnostics_input_schema() -> Schema:
     return Schema(
         required={},
-        optional={"include_health_check": (bool,)},
+        optional={
+            "include_health_check": (bool,),
+            "safe_summary_only": (bool,),
+        },
         allow_unknown=True,
-        description="search_proxy_diagnostics input: include_health_check (bool, default false, runs a test search to verify Tavily connectivity)",
+        description=(
+            "search_proxy_diagnostics input: include_health_check (bool, default "
+            "false, runs a test search to verify Tavily connectivity); "
+            "safe_summary_only omits recent-call and host-command details"
+        ),
     )
 
 
@@ -9324,7 +10597,7 @@ def _resilient_extract_url_input_schema() -> Schema:
         allow_unknown=True,
         description=(
             "resilient_extract_url input: url (str, required), optional fallback_query (str, overrides derived search query), "
-            "context (str, optional context for context_search), max_fallback_results (int, default 5), max_extracts (int, default 4), "
+            "context (str, optional context for context_search), max_fallback_results (int, default 5, maximum 10), max_extracts (int, default 4, maximum 8), "
             "search_depth ('basic'|'advanced', default 'basic'), max_chars (int, default 12000), min_content_chars (int, default 200), "
             "include_domains/exclude_domains (list of domains)."
         ),
@@ -9512,6 +10785,8 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
     org_candidate = _normalise_concept_id(kwargs.get("organisation_concept_id"))
     if org_candidate is None:
         org_candidate = _normalise_concept_id(kwargs.get("org_id"))
+    payload_user_candidate = user_candidate
+    payload_org_candidate = org_candidate
 
     def _derive_namespace_from_components(
         user_component: str | None, organisation_component: str | None
@@ -9593,6 +10868,59 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
                 org_candidate,
             )
         return enriched
+
+    from .gateway import get_internal_mcp_preexisting_actor_context
+
+    preexisting_actor = get_internal_mcp_preexisting_actor_context()
+    if preexisting_actor is not None:
+        trusted_user = _normalise_concept_id(preexisting_actor[0])
+        trusted_org = _normalise_concept_id(preexisting_actor[1])
+        trusted_namespace = _derive_namespace_from_components(
+            trusted_user,
+            trusted_org,
+        )
+        mismatch_fields: list[str] = []
+        if (
+            payload_user_candidate is not None
+            and payload_user_candidate != trusted_user
+        ):
+            mismatch_fields.append("user_concept_id")
+        if (
+            payload_org_candidate is not None
+            and payload_org_candidate != trusted_org
+        ):
+            mismatch_fields.append("organisation_concept_id")
+        if (
+            explicit_namespace is not None
+            and explicit_namespace != trusted_namespace
+        ):
+            mismatch_fields.append("namespace")
+
+        user_candidate = trusted_user
+        org_candidate = trusted_org
+        derived_namespace = trusted_namespace
+        if mismatch_fields:
+            return _finalise_report(
+                {
+                    "namespace": None,
+                    "namespace_source": "conflict",
+                    "namespace_resolution_note": "namespace_mismatch",
+                    "namespace_mismatch": True,
+                    "mismatch_fields": mismatch_fields,
+                    "provided_namespace": explicit_namespace,
+                    "derived_namespace": trusted_namespace,
+                }
+            )
+        return _finalise_report(
+            {
+                "namespace": trusted_namespace,
+                "namespace_source": "trusted_actor_context",
+                "namespace_resolution_note": "derived_from_trusted_actor",
+                "namespace_mismatch": False,
+                "provided_namespace": explicit_namespace,
+                "derived_namespace": trusted_namespace,
+            }
+        )
 
     if (
         explicit_namespace
@@ -9741,19 +11069,19 @@ def _derive_turn_execution_failure_recommendations(
 
     if mutation_not_executed > 0:
         recommendations.append(
-            "Increase selector pressure for mutation-intent turns so they route through #V#conversation_turn_execution_workflow and execute write-capable tools."
+            "Inspect the sampled turns to distinguish missing authority, unavailable capability, model abandonment, or failed execution, while preserving bounded strategies that remain available."
         )
     if failed_or_blocked > 0:
         recommendations.append(
-            "Capture and surface write-tool failure causes (blocked/permissions/tool errors) and attach deterministic recovery steps."
+            "Surface the specific failure evidence and the bounded recovery or retry options that remain available."
         )
     if verification_issues > 0:
         recommendations.append(
-            "Strengthen postcondition checks to require state re-query verification before completion is allowed."
+            "Inspect canonical read-back for consequential effects and report uncertainty honestly when evidence is inconclusive."
         )
     if false_completion > 0:
         recommendations.append(
-            "Tighten completion-gate invariants so completed decisions are impossible while unresolved effects or unverified checks remain."
+            "Compare the reply with recorded effects and evidence, and make the terminal state reflect the observed outcome."
         )
     if not recommendations:
         recommendations.append(
@@ -9872,6 +11200,190 @@ def _summarise_turn_execution_tool_invocations(
             break
 
     return summary
+
+
+def _summarise_late_effect_observations(
+    raw_observations: Any,
+    *,
+    max_items: int = 32,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return an actor-safe bounded receipt projection for late effects."""
+
+    if not isinstance(raw_observations, list):
+        return [], 0
+
+    summary: list[dict[str, Any]] = []
+    for raw_entry in raw_observations[-max_items:]:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry = {
+            key: raw_entry.get(key)
+            for key in (
+                "schema_version",
+                "observation_id",
+                "effect_id",
+                "execution_id",
+                "call_id",
+                "capability_name",
+                "method_name",
+                "outcome",
+                "effect_status",
+                "changed",
+                "observed_at_utc",
+                "output_schema_validation",
+                "output_schema_valid",
+                "output_schema_error",
+                "payload_truncated",
+                "payload_redacted",
+                "storage_transformed",
+                "error_type",
+                "error",
+            )
+            if key in raw_entry
+        }
+        payload = raw_entry.get("payload")
+        if isinstance(payload, Mapping):
+            entry["receipt"] = {
+                key: payload.get(key)
+                for key in (
+                    "success",
+                    "status",
+                    "effect_status",
+                    "changed",
+                    "error",
+                    "error_code",
+                    "mutation_outcome",
+                    "partial_failures",
+                )
+                if key in payload
+            }
+        summary.append(entry)
+    return summary, len(raw_observations)
+
+
+def _summarise_effect_observation_journal(
+    raw_journal: Any,
+    *,
+    max_items: int = 32,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return a bounded mechanical lifecycle projection for ordinary effects."""
+
+    if not isinstance(raw_journal, Mapping):
+        return [], 0
+    items = [
+        (str(effect_id), value)
+        for effect_id, value in raw_journal.items()
+        if isinstance(effect_id, str) and isinstance(value, Mapping)
+    ]
+    summary: list[dict[str, Any]] = []
+    for effect_id, raw_entry in items[-max_items:]:
+        identity = (
+            raw_entry.get("identity")
+            if isinstance(raw_entry.get("identity"), Mapping)
+            else {}
+        )
+        entry: dict[str, Any] = {
+            "schema_version": identity.get("schema_version"),
+            "effect_id": effect_id,
+        }
+        for field_name in ("call_id", "capability_name", "created_at_utc"):
+            if field_name in identity:
+                entry[field_name] = identity.get(field_name)
+
+        available_phases: list[str] = []
+        for phase_name in (
+            "dispatch_intent",
+            "turn_terminal",
+            "late_terminal",
+        ):
+            raw_phase = raw_entry.get(phase_name)
+            if not isinstance(raw_phase, Mapping):
+                continue
+            available_phases.append(phase_name)
+            phase_projection = {
+                key: raw_phase.get(key)
+                for key in (
+                    "phase",
+                    "recorded_at_utc",
+                    "dispatch_state",
+                    "execution_id",
+                    "outcome",
+                    "effect_status",
+                    "changed",
+                    "output_schema_validation",
+                    "output_schema_valid",
+                    "payload_truncated",
+                    "error_type",
+                    "error",
+                )
+                if key in raw_phase
+            }
+            transport = raw_phase.get("transport")
+            if isinstance(transport, Mapping):
+                phase_projection["transport"] = {
+                    key: transport.get(key)
+                    for key in (
+                        "execution_id",
+                        "outcome",
+                        "timeout_sec",
+                        "configured_hard_timeout_sec",
+                        "minimum_execution_window_sec",
+                        "timeout_phase",
+                        "late_result_policy",
+                    )
+                    if key in transport
+                }
+            receipt = raw_phase.get("receipt")
+            if not isinstance(receipt, Mapping):
+                payload = raw_phase.get("payload")
+                receipt = payload if isinstance(payload, Mapping) else None
+            if isinstance(receipt, Mapping):
+                phase_projection["receipt"] = {
+                    key: receipt.get(key)
+                    for key in (
+                        "success",
+                        "status",
+                        "effect_status",
+                        "changed",
+                        "error",
+                        "error_code",
+                        "mutation_outcome",
+                        "partial_failures",
+                    )
+                    if key in receipt
+                }
+            entry[phase_name] = phase_projection
+        entry["available_phases"] = available_phases
+        entry["latest_phase"] = (
+            available_phases[-1] if available_phases else None
+        )
+        late_terminal = raw_entry.get("late_terminal")
+        turn_terminal = raw_entry.get("turn_terminal")
+        outcome_resolved = False
+        if isinstance(late_terminal, Mapping):
+            late_payload = late_terminal.get("payload")
+            outcome_resolved = bool(
+                late_terminal.get("outcome") == "late_success"
+                and late_terminal.get("effect_status")
+                not in {None, "indeterminate", "unknown"}
+                and isinstance(late_payload, Mapping)
+                and late_payload.get("mutation_outcome") != "unknown"
+            )
+        elif isinstance(turn_terminal, Mapping):
+            transport = turn_terminal.get("transport")
+            receipt = turn_terminal.get("receipt")
+            outcome_resolved = bool(
+                isinstance(transport, Mapping)
+                and transport.get("outcome")
+                not in {None, "timed_out"}
+                and turn_terminal.get("effect_status")
+                not in {None, "indeterminate", "unknown"}
+                and isinstance(receipt, Mapping)
+                and receipt.get("mutation_outcome") != "unknown"
+            )
+        entry["outcome_resolved"] = outcome_resolved
+        summary.append(entry)
+    return summary, len(items)
 
 
 def _extract_turn_execution_tool_invocation_summary(
@@ -12204,8 +13716,6 @@ def _combine_dashboard_recommendations(
 
 
 def _turn_execution_build_benchmark(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
-        return denial
     from ...db.connection_manager import get_db
     from ...services.turn_execution_record_service import (
         TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
@@ -12863,8 +14373,14 @@ def _benchmark_suite_source_system(
 
 
 def _turn_execution_build_selector_benchmark(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn benchmark"):
-        return denial
+    if (
+        kwargs.get("bundle_path") is not None
+        and not _internal_mcp_global_workflow_admin_authorised()
+    ):
+        return make_error_response(
+            "host_path_authority_required",
+            "Selecting a host-local selector benchmark bundle requires trusted operator authority.",
+        )
     from ...services.workflow_selector_benchmark_service import (
         build_selector_routing_benchmark_report,
     )
@@ -12914,8 +14430,14 @@ def _turn_execution_build_selector_benchmark(**kwargs):
 
 
 def _turn_execution_build_context_answering_benchmark(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn benchmark"):
-        return denial
+    if (
+        kwargs.get("bundle_path") is not None
+        and not _internal_mcp_global_workflow_admin_authorised()
+    ):
+        return make_error_response(
+            "host_path_authority_required",
+            "Selecting a host-local context benchmark bundle requires trusted operator authority.",
+        )
     from ...services.context_grounded_answering_benchmark_service import (
         build_context_grounded_answering_benchmark_report,
     )
@@ -13556,7 +15078,7 @@ def _turn_execution_namespace_coverage_report(**kwargs):
 
 
 def _chat_history_get_segments(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("chat history"):
         return denial
     from ...services import chat_history_service
 
@@ -13621,7 +15143,7 @@ def _chat_history_get_segments(**kwargs):
 
 
 def _chat_history_get_debug_entry(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("chat history"):
         return denial
     from ...services import chat_history_service
 
@@ -13704,7 +15226,7 @@ def _chat_history_get_debug_entry(**kwargs):
 
 
 def _conversation_telemetry_get_locator(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("chat telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("conversation telemetry"):
         return denial
     from ...services.conversation_telemetry_locator_service import (
         build_conversation_llm_telemetry_locator,
@@ -13802,7 +15324,7 @@ def _turn_execution_get_live_progress(**kwargs):
 
 
 def _turn_execution_list(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("turn telemetry"):
         return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
@@ -13810,7 +15332,7 @@ def _turn_execution_list(**kwargs):
 
 
 def _turn_execution_get(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("turn telemetry"):
         return denial
     request_id = kwargs.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
@@ -13884,12 +15406,20 @@ def _turn_execution_get_diagnostics(**kwargs):
 
 
 def _failure_case_intake_collect(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "failure-case learning evidence"
+    ):
+        return denial
     from ...services.failure_case_intake_service import collect_failure_case_intake
 
     return collect_failure_case_intake(**kwargs)
 
 
 def _failure_case_reference_resolve(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "failure-case learning evidence"
+    ):
+        return denial
     from ...services.failure_case_intake_service import resolve_failure_case_reference
 
     return resolve_failure_case_reference(**kwargs)
@@ -13911,9 +15441,7 @@ def _turn_execution_get_critic_bundle(**kwargs):
 
 
 def _experiment_run_list(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial(
-        "experiment control plane"
-    ):
+    if denial := _internal_mcp_actor_scoped_read_denial("experiment telemetry"):
         return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "experiment_runs"
@@ -13921,9 +15449,7 @@ def _experiment_run_list(**kwargs):
 
 
 def _experiment_run_get(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial(
-        "experiment control plane"
-    ):
+    if denial := _internal_mcp_actor_scoped_read_denial("experiment telemetry"):
         return denial
     run_id = kwargs.get("run_id")
     session_id = kwargs.get("session_id")
@@ -13942,12 +15468,16 @@ def _experiment_run_get(**kwargs):
 
 
 def _episode_critique_memory_list(**kwargs):
+    if denial := _internal_mcp_actor_scoped_read_denial("episode critique memory"):
+        return denial
     forwarded = dict(kwargs)
     forwarded["collection"] = "episode_critique_memories"
     return _rag_list_indexed(**forwarded)
 
 
 def _episode_critique_memory_get(**kwargs):
+    if denial := _internal_mcp_actor_scoped_read_denial("episode critique memory"):
+        return denial
     memory_id = kwargs.get("memory_id")
     session_id = kwargs.get("session_id")
     target = memory_id if memory_id is not None else session_id
@@ -14084,6 +15614,14 @@ def _context_bundle_build_reconstructed_workspace(**kwargs):
 
 
 def _context_bundle_build_benchmark(**kwargs):
+    if (
+        kwargs.get("bundle_path") is not None
+        and not _internal_mcp_global_workflow_admin_authorised()
+    ):
+        return make_error_response(
+            "host_path_authority_required",
+            "Selecting a host-local context-bundle benchmark requires trusted operator authority.",
+        )
     from ...services.context_bundle_benchmark_service import (
         build_context_bundle_benchmark_report,
     )
@@ -14097,7 +15635,9 @@ def _context_bundle_build_benchmark(**kwargs):
 
 
 def _testing_theory_create_slice(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("testing control plane"):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "testing control plane"
+    ):
         return denial
     from ...services.testing_theory_service import create_testing_theory_slice
 
@@ -14483,7 +16023,7 @@ def _testing_cleanup_arxiv_paper_ingestion_artifacts(**kwargs):
 
 
 def _turn_execution_search_failures(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
+    if denial := _internal_mcp_actor_scoped_read_denial("turn telemetry"):
         return denial
     from ...services.turn_execution_record_service import (
         build_turn_execution_correctness_summary,
@@ -16083,6 +17623,10 @@ def _workflow_concept_parity_audit(**kwargs):
 
 
 def _coding_agent_mcp_access_profile(**kwargs):
+    if denial := _internal_mcp_operator_control_plane_denial(
+        "coding-agent runtime configuration"
+    ):
+        return denial
     from ...services.coding_agent_mcp_access_profile_service import (
         build_coding_agent_mcp_access_profile,
     )
@@ -16591,6 +18135,47 @@ def _internal_mcp_operator_control_plane_denial(
     return make_error_response(
         "workflow_global_admin_authority_required",
         f"{surface.strip().capitalize()} access requires trusted operator authority.",
+    )
+
+
+def _internal_mcp_actor_scoped_read_denial(
+    surface: str,
+) -> dict[str, Any] | None:
+    """Require real actor provenance for reads whose storage is actor-scoped.
+
+    An authenticated request/workflow actor and the deliberately configured
+    local-operator MCP route are both sufficient. Raw tool arguments are not
+    identity authority, so a payload-only caller cannot select another actor's
+    namespace merely by naming it.
+    """
+
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from .gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+    )
+
+    source = get_internal_mcp_actor_context_source()
+    if get_internal_mcp_preexisting_actor_context() is not None:
+        return None
+    if source == "trusted_operator_payload_fallback":
+        return None
+    if source is None and not bool(
+        get_effective_user_concept_id()
+        or get_effective_organisation_concept_id()
+    ):
+        # Preserve explicit in-process operator/startup calls. Gateway and
+        # proxy callers always bind a source and cannot reach this branch.
+        return None
+    return make_error_response(
+        "authenticated_actor_context_required",
+        (
+            f"{surface.strip().capitalize()} access requires an authenticated "
+            "actor or trusted operator route."
+        ),
     )
 
 
@@ -19243,6 +20828,8 @@ def _rag_get_status(**kwargs):
 def _mongo_query_diagnostics_report(**kwargs):
     """Build a bounded, redacted Mongo query-targeting diagnostics report."""
 
+    if denial := _internal_mcp_operator_control_plane_denial("Mongo diagnostics"):
+        return denial
     from ...services.mongo_query_diagnostics_service import (
         build_von_mongo_query_diagnostics_report,
     )
@@ -19275,6 +20862,8 @@ def _mongo_query_diagnostics_report(**kwargs):
 def _mongo_cost_guardrails_report(**kwargs):
     """Build a compact, redacted Mongo cost guardrail report."""
 
+    if denial := _internal_mcp_operator_control_plane_denial("Mongo diagnostics"):
+        return denial
     from ...db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri
     from ...db.mongo_uri_redaction import (
         classify_mongo_connection_location,
@@ -21385,6 +22974,18 @@ def _rag_get_item(**kwargs):
                 source="turn_execution_get.turn_execution_record",
             )
         )
+        (
+            late_effect_observations,
+            late_effect_observation_count,
+        ) = _summarise_late_effect_observations(
+            doc.get("late_effect_observations")
+        )
+        (
+            effect_observation_journal,
+            effect_observation_journal_count,
+        ) = _summarise_effect_observation_journal(
+            doc.get("effect_observation_journal")
+        )
 
         payload = {
             "collection": collection,
@@ -21426,6 +23027,19 @@ def _rag_get_item(**kwargs):
             "prompt_preview": prompt_payload.get("preview"),
             "tool_invocation_summary": _summarise_turn_execution_tool_invocations(
                 tool_invocations
+            ),
+            "late_effect_observation_count": late_effect_observation_count,
+            "late_effect_observations": late_effect_observations,
+            "late_effect_observations_truncated": (
+                late_effect_observation_count > len(late_effect_observations)
+            ),
+            "effect_observation_journal_count": (
+                effect_observation_journal_count
+            ),
+            "effect_observation_journal": effect_observation_journal,
+            "effect_observation_journal_truncated": (
+                effect_observation_journal_count
+                > len(effect_observation_journal)
             ),
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,
@@ -23017,7 +24631,7 @@ def _github_execute_write_tool(
 def _github_get_auth_config(**kwargs):
     import os
     import shlex
-    from ...utils.runtime_env import apply_repo_dotenv_overrides
+    from ...utils.runtime_env import read_repo_dotenv_values
     from .github_proxy_mcp import (
         GitHubProxyError,
         GITHUB_PROXY_ENV_OVERRIDE_KEYS,
@@ -23025,12 +24639,13 @@ def _github_get_auth_config(**kwargs):
         resolve_github_token,
     )
 
-    applied_overrides = apply_repo_dotenv_overrides(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
+    dotenv_values = read_repo_dotenv_values(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
     env = os.environ.copy()
+    env.update(dotenv_values)
     token_key, token = resolve_github_token(env)
 
-    command = str(os.getenv("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
-    raw_args = os.getenv("VON_GITHUB_MCP_ARGS")
+    command = str(env.get("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
+    raw_args = env.get("VON_GITHUB_MCP_ARGS")
     if isinstance(raw_args, str) and raw_args.strip():
         args = shlex.split(raw_args.strip())
     else:
@@ -23044,14 +24659,15 @@ def _github_get_auth_config(**kwargs):
             "token": token_key,
             "command": (
                 "VON_GITHUB_MCP_COMMAND"
-                if os.getenv("VON_GITHUB_MCP_COMMAND")
+                if env.get("VON_GITHUB_MCP_COMMAND")
                 else None
             ),
-            "args": "VON_GITHUB_MCP_ARGS" if os.getenv("VON_GITHUB_MCP_ARGS") else None,
+            "args": "VON_GITHUB_MCP_ARGS" if env.get("VON_GITHUB_MCP_ARGS") else None,
             "allow_list": "VON_GITHUB_REPO_ALLOW_LIST",
             "execute_mode": "VON_INTERNAL_MCP_GITHUB_EXECUTE_MODE",
         },
-        "dotenv_overrides_applied": sorted(applied_overrides.keys()),
+        "dotenv_overrides_applied": sorted(dotenv_values.keys()),
+        "process_environment_mutated": False,
         "allow_repositories": _github_repo_allow_list(),
         "execute_mode_enabled": _github_execute_mode_enabled(),
         "command": command,
@@ -25676,36 +27292,12 @@ def _chat_get_prompt_context(
     behaviour_prompt_concepts = _format_fragments(behaviour_fragments)
     narration_prompt_concepts = _format_fragments(narration_fragments)
 
-    orchestrator_cls = _get_internal_mcp_chat_orchestrator_cls()
-    template_service = PromptTemplateService()
-    classifier_prompt_id, classifier_prompt_text = template_service.resolve_prompt_text(
-        orchestrator_cls._MISSING_TOOL_CLASSIFIER_PROMPTS,
-        fallback=None,
-        max_chars=max_chars_int,
-    )
-    retry_prompt_id, retry_prompt_text = template_service.resolve_prompt_text(
-        orchestrator_cls._MISSING_TOOL_RETRY_PROMPTS,
-        fallback=None,
-        max_chars=max_chars_int,
-    )
-    classifier_preview = (
-        classifier_prompt_text[:max_chars_int] if classifier_prompt_text else ""
-    )
-    retry_preview = retry_prompt_text[:max_chars_int] if retry_prompt_text else ""
     narration_preview = ""
     if narration_fragments and isinstance(narration_fragments[0], dict):
         content = narration_fragments[0].get("content")
         if isinstance(content, str):
             narration_preview = content[:max_chars_int]
     resolved_templates = {
-        "missing_tool_call_classifier": {
-            "prompt_id": classifier_prompt_id,
-            "preview": classifier_preview,
-        },
-        "missing_tool_call_retry": {
-            "prompt_id": retry_prompt_id,
-            "preview": retry_preview,
-        },
         "behaviour_prompt": {"prompt_id": None, "preview": prompt_text or ""},
         "narration_prompt": {
             "prompt_id": (
@@ -25890,7 +27482,6 @@ def _chat_introspect(
 
     # User-specific prompt fragments (JVNAUTOSCI-797)
     from src.backend.services.chat_auxiliary_prompt_service import (
-        build_user_specific_system_prompt,
         get_user_specific_prompt_fragments,
     )
 
@@ -25917,18 +27508,6 @@ def _chat_introspect(
         for f in narration_fragments
         if isinstance(f.get("concept_id"), str)
     ]
-
-    auxiliary_prompt_text = (
-        build_user_specific_system_prompt(
-            namespace,
-            prompt_types=(
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            ),
-        )
-        or ""
-    )
 
     prompt_concepts: list[dict] = []
     for fragment in behaviour_fragments:
@@ -26008,6 +27587,7 @@ def _chat_introspect(
     )
 
     gateway_enabled = None
+    legacy_orchestrator_status = "retired"
     orchestrator_max_tool_invocations = None
     orchestrator_tool_batch_cap = None
     orchestrator_missing_tool_call_retry_cap = None
@@ -26016,29 +27596,18 @@ def _chat_introspect(
             from flask import current_app
 
             gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-            orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
             gateway_enabled = getattr(gateway, "enabled", None)
-            orchestrator_max_tool_invocations = getattr(
-                orchestrator, "_max_tool_invocations", None
+            startup_status = current_app.config.get(
+                "INTERNAL_MCP_ORCHESTRATOR_STATUS"
             )
-            orchestrator_tool_batch_cap = getattr(orchestrator, "_tool_batch_cap", None)
-            orchestrator_missing_tool_call_retry_cap = getattr(
-                orchestrator,
-                "_max_missing_tool_call_retries_per_turn",
-                None,
-            )
+            if isinstance(startup_status, dict):
+                legacy_orchestrator_status = str(
+                    startup_status.get("state") or legacy_orchestrator_status
+                )
         except Exception:
             gateway_enabled = None
-            orchestrator_max_tool_invocations = None
-            orchestrator_tool_batch_cap = None
-            orchestrator_missing_tool_call_retry_cap = None
 
-    workflow_selector_enabled = True
     workflow_trace_enabled = _env_flag("VON_WORKFLOWS_TRACE_ENABLED", default="0")
-    critic_enabled = _env_flag("VON_CRITIC_ENABLE", default="0")
-    deterministic_introspection_enabled = _env_flag(
-        "VON_DETERMINISTIC_INTROSPECTION", default="0"
-    )
     workflow_model_policy_enabled = _env_flag(
         "VON_WORKFLOW_MODEL_POLICY_ENABLE", default="0"
     )
@@ -26082,27 +27651,24 @@ def _chat_introspect(
         if existing != workflow_id:
             event_workflow_bindings[event_type] = [existing, workflow_id]
 
-    if gateway_enabled is False:
-        inferred_runtime_mode = "llm_only"
-    elif (
-        isinstance(orchestrator_max_tool_invocations, int)
-        and orchestrator_max_tool_invocations <= 0
-    ):
-        inferred_runtime_mode = "llm_only"
-    else:
-        inferred_runtime_mode = "workflow_routed_tool_calling"
+    inferred_runtime_mode = (
+        "direct_adaptive_model_only"
+        if gateway_enabled is False
+        else "direct_adaptive_capabilities"
+    )
 
     workflow_mode = {
         "runtime_mode": inferred_runtime_mode,
-        "workflow_selector_enabled": workflow_selector_enabled,
-        "deterministic_introspection_enabled": deterministic_introspection_enabled,
-        "workflow_trace_enabled": workflow_trace_enabled,
-        "critic_enabled": critic_enabled,
-        "workflow_model_policy_enabled": workflow_model_policy_enabled,
-        "write_tools_enabled": write_tools_enabled,
-        "durable_workflows_enabled": durable_workflows_enabled,
+        "ordinary_turn_path": "direct_adaptive_turn",
+        "ordinary_turn_capability_mode": "bounded_capabilities",
+        "automatic_workflow_selector_enabled": False,
+        "legacy_orchestrator_status": legacy_orchestrator_status,
+        "explicit_workflow_trace_enabled": workflow_trace_enabled,
+        "explicit_workflow_model_policy_enabled": workflow_model_policy_enabled,
+        "explicit_effect_tools_enabled": write_tools_enabled,
+        "explicit_workflows_enabled": durable_workflows_enabled,
         "event_workflow_integration_enabled": event_workflow_integration_enabled,
-        "jira_execute_mode_enabled": jira_execute_mode_enabled,
+        "explicit_jira_execute_mode_enabled": jira_execute_mode_enabled,
     }
 
     try:
@@ -26117,50 +27683,22 @@ def _chat_introspect(
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    # Tool-guidance fingerprint (stable-ish) without dumping full text by default
-    tool_guidance_text = ""
-    tool_guidance_hash = None
+    # Fingerprint the ordinary-turn capability surface without reactivating the
+    # retired controller merely to ask it how it would have controlled a turn.
+    tool_guidance_text = (
+        "Ordinary chat turns use the direct adaptive turn path. The model may "
+        "inspect delegated capabilities with turn_capabilities, invoke an authorised "
+        "capability with turn_invoke_capability, and hydrate bounded "
+        "evidence by provenance handle with turn_read_evidence. There is no "
+        "automatic workflow selector or general controller on this path. Explicit "
+        "workflows remain separately callable through their registered interfaces."
+    )
+    tool_guidance_hash = hashlib.sha256(
+        tool_guidance_text.encode("utf-8")
+    ).hexdigest()
     tool_guidance_preview = None
-
-    try:
-        # Prefer the live orchestrator (includes the real tool listing) when available.
-        orchestrator_cls = _get_internal_mcp_chat_orchestrator_cls()
-        live_orchestrator = None
-        try:
-            from flask import current_app
-
-            live_orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
-        except Exception:
-            live_orchestrator = None
-
-        if live_orchestrator is not None and hasattr(
-            live_orchestrator, "_instruction_message"
-        ):
-            tool_guidance_text = live_orchestrator._instruction_message(  # type: ignore[attr-defined]
-                user_namespace=namespace,
-                auxiliary_system_prompt=auxiliary_prompt_text,
-                preferred_language=None,
-            )
-        else:
-
-            class _StubGateway:
-                def describe_methods(self):
-                    return {}
-
-            dummy_orchestrator = orchestrator_cls(gateway=_StubGateway())  # type: ignore[arg-type]
-            tool_guidance_text = dummy_orchestrator._instruction_message(
-                user_namespace=namespace,
-                auxiliary_system_prompt=auxiliary_prompt_text,
-                preferred_language=None,
-            )
-
-        tool_guidance_hash = hashlib.sha256(
-            tool_guidance_text.encode("utf-8")
-        ).hexdigest()
-        if include_tool_guidance_preview and max_preview_chars_int:
-            tool_guidance_preview = tool_guidance_text[:max_preview_chars_int]
-    except Exception:
-        tool_guidance_hash = None
+    if include_tool_guidance_preview and max_preview_chars_int:
+        tool_guidance_preview = tool_guidance_text[:max_preview_chars_int]
 
     # Keep these keys aligned with the MethodDefinition output_schema for
     # chat_introspect: InternalMCPGateway validates success payloads end-to-end.
@@ -28106,19 +29644,31 @@ def _resolve_shared_conversation_actor_context(
         resolve_event_actor_context,
     )
 
-    namespace = _clean_optional_string(payload.get("namespace"))
-    requested_user = _normalise_optional_concept_id(
-        payload.get("user_concept_id")
-        or payload.get("acting_user_concept_id")
-        or payload.get("actor_user_id")
-        or payload.get("on_behalf_of_user_concept_id")
-    )
-    requested_org = _normalise_optional_concept_id(
-        payload.get("organisation_concept_id") or payload.get("org_id")
-    )
-    actor_concept_id = _normalise_optional_concept_id(
-        payload.get("actor_concept_id") or payload.get("agent_concept_id")
-    )
+    from .gateway import get_internal_mcp_preexisting_actor_context
+
+    preexisting_actor = get_internal_mcp_preexisting_actor_context()
+    if preexisting_actor is not None:
+        # These fields denote the acting principal for this capability, rather
+        # than a target or filter. The gateway's pre-existing actor context
+        # therefore outranks all payload spellings as one indivisible scope.
+        requested_user = _normalise_optional_concept_id(preexisting_actor[0])
+        requested_org = _normalise_optional_concept_id(preexisting_actor[1])
+        namespace = _derive_namespace_for_actor(requested_user, requested_org)
+        actor_concept_id = None
+    else:
+        namespace = _clean_optional_string(payload.get("namespace"))
+        requested_user = _normalise_optional_concept_id(
+            payload.get("user_concept_id")
+            or payload.get("acting_user_concept_id")
+            or payload.get("actor_user_id")
+            or payload.get("on_behalf_of_user_concept_id")
+        )
+        requested_org = _normalise_optional_concept_id(
+            payload.get("organisation_concept_id") or payload.get("org_id")
+        )
+        actor_concept_id = _normalise_optional_concept_id(
+            payload.get("actor_concept_id") or payload.get("agent_concept_id")
+        )
     # Keep shared-conversation read paths side-effect free: bootstrap writes are
     # only allowed when the caller explicitly opts in on write-category paths.
     if allow_actor_bootstrap_writes:
@@ -30245,6 +31795,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="get_context output: context info including user, org, llm_model (string), llm_provider, language. User/org managed client-side per JVNAUTOSCI-628.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="server_runtime_context",
             description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
         ),
         MethodDefinition(
@@ -30313,6 +31864,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="User-specific chat prompt context for debugging and transparency.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="cross_namespace_prompt_configuration",
             description=(
                 "Report which Vontology chat behaviour prompt concepts (including legacy "
                 "`#V#von_llm_prompt`, linked via `#V#specific_to_von_user`) apply to the authenticated "
@@ -30377,6 +31929,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="Chat context introspection snapshot (safe, no secrets).",
             ),
             category="read",
+            ordinary_turn_excluded_reason="server_runtime_context",
             description=(
                 "Introspect chat context influences for a user: model configuration, Vontology prompt concepts, "
                 "and tool-guidance fingerprint. Useful for debugging and transparency."
@@ -30412,6 +31965,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 ),
             ),
             category="read",
+            ordinary_turn_excluded_reason="host_local_configuration",
             description=(
                 "Report the effective coding-agent Vontology MCP access profile, including "
                 "dev/test/prod-like authority state, write defaults, and safety boundaries."
@@ -30439,6 +31993,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 description="Public settings snapshot (no secrets).",
             ),
             category="read",
+            ordinary_turn_excluded_reason="cross_namespace_model_configuration",
             description=(
                 "Return a safe subset of settings (no secrets), including the active LLM and resolved LLM when "
                 "user/org IDs are provided."
@@ -30481,7 +32036,43 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_concepts_create_input_schema(),
             output_schema=_concepts_create_output_schema(),
             category="write",
-            description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+                "created_by_concept_id": "actor_user_concept_id",
+            },
+            ordinary_turn_fixed_arguments={
+                "organisation_concept_id": None,
+                "org_id": None,
+                "scope_mode": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+                "visibility_scope_mode": None,
+            },
+            ordinary_turn_effect=True,
+            description=(
+                "Create one or more concepts (instances, types, or predicates). "
+                "Each concept needs name and kind ('instance' for individuals, "
+                "'type' for subtypes/default, 'predicate' for relationships). "
+                "Accepts an array of {name, kind?, description?, notes?, "
+                "external_identifiers?, identity_candidate_concept_ids?, "
+                "identity_rejected_candidate_concept_ids?}. An "
+                "external identity is one explicit opaque {scheme, "
+                "canonical_value, role:'identity'} pair grounded by the caller; "
+                "this tool does not infer or normalise domain-specific IDs from "
+                "names. Preserve that same pair on repair/retry. Unverified "
+                "actor-visible candidates may be explicitly confirmed through "
+                "identity_candidate_concept_ids. If every returned legacy "
+                "candidate was inspected and none matches, supply the exact set "
+                "in identity_rejected_candidate_concept_ids. For deterministic stable "
+                "identities, duplicate_resolution_mode='canonical_id_only' skips "
+                "semantic name resolution after an exact concept-id miss; "
+                "omitting it preserves the default semantic fallback. Default "
+                "visibility is user+organisation scoped when authenticated "
+                "context exists. Override with "
+                "scope_mode='organisation_general' for organisation-shared "
+                "concepts, or scope_mode='global_general' for broadly visible "
+                "concepts when the concept is clearly general. Supports "
+                "singleton arrays. Use add_names afterward for alternative "
+                "names/translations."
+            ),
         ),
         MethodDefinition(
             name="get_source_processing_marker",
@@ -30531,6 +32122,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_predicate_extent_input_schema(),
             output_schema=_predicate_extent_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="cross_namespace_raw_relation_extent",
             description=(
                 "Return the extent (all uses) of a predicate concept. Supports filtering by subject/object type, "
                 "source (text_relations|structured|all), pagination, and optional sampling (sample_size). "
@@ -30550,10 +32142,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "argument_index='subject' means inspect outgoing subject-side relations, "
                 "not that the payload should contain a subject field. Use when you need "
                 "distinct predicates plus counts before choosing a predicate-specific "
-                "extent or filtered relation lookup. For kind-specific turns such as "
-                "papers, projects, students, organisations, or other represented related "
-                "things, set include_argument_type_counts=true to get direct asserted "
-                "type distributions for non-anchor arguments. Set role_expansion_mode="
+                "extent or filtered relation lookup. Start with bounded minimal incidence "
+                "(a modest limit, without argument type counts, previews, or text snippets), "
+                "then request those richer fields only when the initial evidence shows they "
+                "are needed; avoid concurrent rich incidence probes by default. Set "
+                "role_expansion_mode="
                 "'explicit' with represented node-type or role-predicate filters when "
                 "the immediate neighbour is a reified/event/claim node whose other role "
                 "fillers are the useful retrieval targets."
@@ -30600,6 +32193,13 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_upsert_text_relation_input_schema(),
             output_schema=_upsert_text_relation_output_schema(),
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_fixed_arguments={"provenance": None},
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=8.0,
+            ordinary_turn_mutation_subject_argument="concept_id",
             description="Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types. More general than add_names which is specialized for hasName relations only.",
         ),
         MethodDefinition(
@@ -30672,7 +32272,20 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_add_relationship_input_schema(),
             output_schema=_add_relationship_output_schema(),
             category="write",
-            description="Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=5.0,
+            ordinary_turn_mutation_subject_argument="source_id",
+            description=(
+                "Add one concept-to-concept or concept-to-text relationship. "
+                "Structural predicates use their existing aliases; a custom "
+                "predicate uses its exact #V# concept ID. If that exact custom "
+                "predicate is missing, predicate_if_missing={name, description?} "
+                "can canonically create or reuse and verify it before this "
+                "relationship attempt."
+            ),
         ),
         MethodDefinition(
             name="upsert_uncertain_relationship_assertion",
@@ -31016,6 +32629,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_search_arxiv_input_schema(),
             output_schema=_search_arxiv_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=30.0,
             description="Search arXiv.org for scholarly articles. Use when user asks to find papers by author, keyword, topic, or date range. Returns list of papers with id, title, authors, summary, and publication date. Supports boolean operators in query (AND, OR, NOT). Example: 'causal reasoning AND neural networks'. Results can be sorted by relevance, submission date, or last updated date.",
         ),
@@ -31025,6 +32639,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_get_paper_metadata_input_schema(),
             output_schema=_get_paper_metadata_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=20.0,
             description="Get detailed metadata for a single arXiv paper (title, authors, abstract, categories, DOI, pdf_url). Use when a user needs paper details without downloading the PDF.",
         ),
@@ -31060,12 +32675,12 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             handler=_build_paper_recommendations,
             input_schema=_build_paper_recommendations_input_schema(),
             output_schema=_build_paper_recommendations_output_schema(),
-            category="read",
+            category="write",
             timeout_sec=30.0,
             description=(
-                "Rank represented scholarly-paper candidates against a represented user "
-                "paper recommendation profile and return grounded rationale/provenance. "
-                "This is the workflow-first ranking core, independent of later delivery surfaces."
+                "Rank represented scholarly-paper candidates against a represented "
+                "user paper recommendation profile, materialise the resulting "
+                "recommendation assertions, and return grounded rationale/provenance."
             ),
         ),
         MethodDefinition(
@@ -31113,6 +32728,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_skill_catalogue_list_input_schema(),
             output_schema=_skill_catalogue_list_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_configuration",
             timeout_sec=20.0,
             description=(
                 "Discover external SKILL artefacts across configured roots and return "
@@ -31139,6 +32755,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_list_papers_input_schema(),
             output_schema=_list_papers_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_process_cache",
             timeout_sec=15.0,
             description="List arXiv papers available in the local cache directory used by the external arXiv toolchain. This may not reflect all documents stored in the blob store. Use when user asks 'what papers do I have?' or similar.",
         ),
@@ -31223,6 +32840,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_list_recent_screenshots_input_schema(),
             output_schema=_list_recent_screenshots_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "List recent screenshot files from local machine folders and optionally "
@@ -31237,6 +32855,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_list_exports_input_schema(),
             output_schema=_linkedin_list_exports_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=20.0,
             description=(
                 "List available LinkedIn data exports from the configured local data root. "
@@ -31249,6 +32868,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_list_files_input_schema(),
             output_schema=_linkedin_list_files_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=20.0,
             description=(
                 "List files within one LinkedIn export. "
@@ -31261,6 +32881,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_profile_input_schema(),
             output_schema=_linkedin_get_profile_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=20.0,
             description=(
                 "Get profile information from Profile.csv for a selected LinkedIn export."
@@ -31272,6 +32893,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_csv_data_input_schema(),
             output_schema=_linkedin_get_csv_data_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "Read sampled rows from any CSV file in a LinkedIn export "
@@ -31284,6 +32906,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_company_stats_input_schema(),
             output_schema=_linkedin_get_company_stats_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "Get top company counts from Connections.csv for a LinkedIn export."
@@ -31295,6 +32918,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_linkedin_get_messages_input_schema(),
             output_schema=_linkedin_get_messages_output_schema(),
             category="read",
+            ordinary_turn_excluded_reason="host_local_private_data",
             timeout_sec=25.0,
             description=(
                 "Retrieve message rows from a LinkedIn export (optionally filtered by query text)."
@@ -31307,8 +32931,17 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_search_web_input_schema(),
             output_schema=_search_web_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=15.0,
-            description="⚠️ USE FOR RECENT/CURRENT INFORMATION ⚠️ Search the web for information published after your training cutoff. REQUIRED when user asks for: recent, latest, current, new, breaking, today's, this week's, 2024+, 2025+, 'what's new', 'recent advances', 'latest research', 'current developments'. Returns web pages with titles, URLs, content snippets, and relevance scores. Supports advanced search (search_depth='advanced'), domain filtering (include_domains/exclude_domains), AI-generated answers (include_answer=true), full page content (include_raw_content=true), and images (include_images=true).",
+            description=(
+                "Search the web for current or otherwise externally grounded "
+                "information. Returns pages with titles, URLs, content snippets, "
+                "and relevance scores. Supports advanced search, domain filters, "
+                "an optional provider-generated answer, raw page content, and "
+                "image URLs. This is one available evidence source; choose it "
+                "when it helps the request rather than treating recency wording "
+                "as a compulsory route."
+            ),
         ),
         MethodDefinition(
             name="context_search",
@@ -31334,6 +32967,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_extract_url_input_schema(),
             output_schema=_extract_url_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=15.0,
             description="Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
         ),
@@ -31343,6 +32977,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_resilient_extract_url_input_schema(),
             output_schema=_resilient_extract_url_output_schema(),
             category="read",
+            ordinary_turn_public=True,
             timeout_sec=30.0,
             description=(
                 "Extract main text from a URL with deterministic fallbacks. First tries direct extraction; if the page is empty/blocked "
@@ -31356,12 +32991,14 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_search_proxy_diagnostics_input_schema(),
             output_schema=_search_proxy_diagnostics_output_schema(),
             category="read",
+            ordinary_turn_fixed_arguments={
+                "include_health_check": False,
+                "safe_summary_only": True,
+            },
             timeout_sec=30.0,
             description=(
-                "Get diagnostics and health status for the Tavily search proxy. Returns stats (call count, error rate, "
-                "average latency), recent call telemetry with timing and error details, and configuration. "
-                "Set include_health_check=true to run a live connectivity test. "
-                "Use this to debug search/extraction failures or verify Tavily API connectivity."
+                "Get aggregate Tavily search-proxy diagnostics: call count, error "
+                "rate, average latency, and whether an API key is configured."
             ),
         ),
         # Gmail MCP tools (profile-scoped read/write surface)
@@ -31371,6 +33008,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_list_profiles_input_schema,
             output_schema=gmail_list_profiles_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=10.0,
             description=(
                 "List the Gmail profiles configured for this deployment, with "
@@ -31389,6 +33027,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_get_auth_config_input_schema,
             output_schema=gmail_get_auth_config_output_schema,
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile_id": "gmail_profile",
+            },
             timeout_sec=10.0,
             description=(
                 "Return the OAuth scope and token status for a configured Gmail "
@@ -31426,6 +33067,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_list_messages_input_schema,
             output_schema=_gmail_list_messages_output_schema(),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=20.0,
             description=(
                 "List Gmail messages for a profile with optional query and label "
@@ -31454,6 +33098,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=gmail_get_message_input_schema,
             output_schema=_gmail_get_message_output_schema(),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=20.0,
             description=(
                 "Fetch a Gmail message for a profile using message_id from "
@@ -31497,6 +33144,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 description="Gmail API attachment response",
             ),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=20.0,
             description="Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
         ),
@@ -31511,6 +33161,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 description="Gmail API labels response",
             ),
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "profile": "gmail_profile",
+            },
             timeout_sec=15.0,
             description="List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
         ),
@@ -31674,6 +33327,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_auth_config_input_schema(),
             output_schema=github_get_auth_config_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=12.0,
             description=(
                 "Inspect GitHub MCP auth/config state (token presence, allow-list, execute mode, command args) "
@@ -31686,6 +33340,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_tools_input_schema(),
             output_schema=github_list_tools_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_connector",
             timeout_sec=20.0,
             description="List tools exposed by the configured external GitHub MCP server.",
         ),
@@ -31695,6 +33350,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_me_input_schema(),
             output_schema=github_get_me_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="Get details of the authenticated GitHub user.",
         ),
@@ -31704,6 +33360,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_file_contents_input_schema(),
             output_schema=github_get_file_contents_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Get the contents of a file or directory from a GitHub repository.",
         ),
@@ -31713,6 +33370,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_commits_input_schema(),
             output_schema=github_list_commits_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="List commits for a branch, tag, or repository default branch.",
         ),
@@ -31722,6 +33380,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_search_code_input_schema(),
             output_schema=github_search_code_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Search code across GitHub repositories using GitHub search syntax.",
         ),
@@ -31731,6 +33390,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_pull_requests_input_schema(),
             output_schema=github_list_pull_requests_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="List pull requests for a GitHub repository.",
         ),
@@ -31740,6 +33400,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_pull_request_read_input_schema(),
             output_schema=github_pull_request_read_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Read pull request details/files/reviews/status for a repository pull request.",
         ),
@@ -31749,6 +33410,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_issue_read_input_schema(),
             output_schema=github_issue_read_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=30.0,
             description="Read issue details/comments/labels for a repository issue.",
         ),
@@ -31758,6 +33420,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_releases_input_schema(),
             output_schema=github_list_releases_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="List releases in a GitHub repository.",
         ),
@@ -31767,6 +33430,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_get_latest_release_input_schema(),
             output_schema=github_get_latest_release_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="Get the latest release in a GitHub repository.",
         ),
@@ -31776,6 +33440,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_tags_input_schema(),
             output_schema=github_list_tags_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="List tags in a GitHub repository.",
         ),
@@ -31785,6 +33450,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_github_list_branches_input_schema(),
             output_schema=github_list_branches_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="List branches in a GitHub repository.",
         ),
@@ -31853,6 +33519,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_search_input_schema(),
             output_schema=jira_search_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=20.0,
             description="Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields. Requires valid ATLASSIAN_BASE_URL, ATLASSIAN_EMAIL, and ATLASSIAN_API_TOKEN in the environment. Returns the Jira search response including issues array.",
         ),
@@ -31862,6 +33529,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_issue_input_schema(),
             output_schema=jira_get_issue_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). "
@@ -31875,6 +33543,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_project_issue_types_input_schema(),
             output_schema=jira_get_project_issue_types_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "Inspect a Jira project's style and available issue types. Use to "
@@ -31888,6 +33557,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_bulk_operation_progress_input_schema(),
             output_schema=jira_get_bulk_operation_progress_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "Read the progress state of a previously submitted Jira bulk operation. "
@@ -31900,6 +33570,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_transitions_input_schema(),
             output_schema=jira_get_transitions_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=15.0,
             description=(
                 "List available Jira workflow transitions/status changes for an "
@@ -32012,6 +33683,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_myself_input_schema(),
             output_schema=jira_get_myself_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=10.0,
             description=(
                 "Return the Jira user profile for the currently configured Atlassian credentials. "
@@ -32024,6 +33696,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_get_auth_config_input_schema(),
             output_schema=jira_get_auth_config_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             description=(
                 "Inspect Jira auth configuration (base URL, email, whether a token is present) from environment variables. "
                 "Does not contact Jira and never returns the token. Use when Jira calls return 401 and you need to confirm which account is configured."
@@ -32035,6 +33708,7 @@ def _build_default_catalogue_external_integration_definitions() -> List[
             input_schema=_jira_hygiene_discover_input_schema(),
             output_schema=jira_hygiene_discover_output_schema,
             category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
             timeout_sec=25.0,
             description=(
                 "Discover Jira hygiene candidates for a project: epic catalogue, true orphans, "
@@ -32111,6 +33785,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status.",
         ),
         MethodDefinition(
@@ -32147,6 +33822,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             timeout_sec=30.0,
             description=(
                 "Run read-only Mongo query-targeting diagnostics for trusted operator "
@@ -32173,6 +33849,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             timeout_sec=10.0,
             description=(
                 "Summarise recent Mongo operation volume, slow calls, large write "
@@ -32339,6 +34016,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Fetch a bounded live progress snapshot for an active turn so thinking "
                 "telemetry can be dereferenced through MCP without oversized stdio "
@@ -32496,6 +34174,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="host_local_repository",
             description=(
                 "Inspect one tracked repo file safely with bounded content, tracked blob receipt, and secret-aware sanitisation."
             ),
@@ -32518,6 +34197,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="host_local_repository",
             description=(
                 "Search tracked repo files with bounded match output and receipts suitable for critic-grounded diagnosis."
             ),
@@ -32577,6 +34257,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="host_local_repository",
             description=(
                 "Inspect bounded git metadata for critic or maintenance workflows without exposing unrestricted shell access."
             ),
@@ -32727,6 +34408,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_fixed_arguments={"bundle_path": None},
             description=(
                 "Generate the ablation/retained-case evaluation report for context bundles, dossiers, and report revision."
             ),
@@ -32794,6 +34476,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description="Compare theory-local assertions against canonical state and identify promotion-ready entries.",
         ),
         MethodDefinition(
@@ -33129,6 +34812,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Fetch the full persisted turn diagnostics payload by request_id, including progress history, "
                 "activity history, workflow routing diagnostics, stage diagnostics, timing breakdown, "
@@ -33173,6 +34857,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Collect compact prompt, model, workflow, tool-ledger, critic, "
                 "completion-gate, user-visible-response, and response-surface "
@@ -33212,6 +34897,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Resolve a same-conversation failure reference to the concrete "
                 "prior request_id so represented workflows can start failure-case "
@@ -33236,6 +34922,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Return a bounded critic-ready evidence bundle with receipts over turn execution, "
                 "chat-history debug context, tool ledger, workflow runtime state, and trace artefacts."
@@ -33325,6 +35012,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_fixed_arguments={"bundle_path": None},
             description=(
                 "Evaluate workflow selector routing against a reviewable benchmark corpus while emitting the shared execution-correctness outcome labels."
             ),
@@ -33348,6 +35036,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_fixed_arguments={"bundle_path": None},
             description=(
                 "Evaluate context-grounded answering coverage across direct-response, tool-pipeline, continuation, and workflow-result answer paths."
             ),
@@ -33396,6 +35085,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Generate dashboards and regression views for selector accuracy, intent completion, false success, and pre-dispatch latency."
             ),
@@ -33429,10 +35119,11 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
                 ),
             ),
             output_schema=None,
-            category="read",
+            category="write",
             description=(
                 "Report bounded actor/critic benchmark metrics, recurrence and remediation proxies, "
-                "and sampled meta-audit cases with fresh evidence-bundle receipts."
+                "and sampled meta-audit cases with fresh evidence-bundle receipts. "
+                "When run_id is supplied, the benchmark observation is persisted."
             ),
         ),
         MethodDefinition(
@@ -33478,6 +35169,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Report namespace-by-namespace turn execution coverage, request-id overlap, "
                 "and gap signals so benchmark readiness can be validated."
@@ -33723,14 +35415,14 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "offset": (int, type(None)),
                 },
                 allow_unknown=True,
-                description="Search tasks with Jira-like rich filtering.",
+                description="Search Von internal tasks with rich filtering.",
             ),
             output_schema=task_search_output_schema,
             category="read",
             description=(
-                "Search Von tasks with rich filters (status, assignee, creator, report-to, "
-                "labels, planning metadata, category/source semantics, hierarchy, date ranges, "
-                "dependency state) to support Jira-like triage and planning."
+                "Search Von's internal task store with rich filters (status, assignee, "
+                "creator, report-to, labels, planning metadata, category/source semantics, "
+                "hierarchy, date ranges, and dependency state)."
             ),
         ),
         MethodDefinition(
@@ -34461,6 +36153,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Workflow MCP health-check result with per-tool diagnostics.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Run lightweight workflow/introspection MCP health checks through "
                 "InternalMCPGateway.invoke() and return actionable diagnostics."
@@ -34504,6 +36197,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 ),
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Explain whether missing workflow/testing concepts reflect a "
                 "fresh/test DB, skipped bootstrap, pending parity, partial "
@@ -34549,6 +36243,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 ),
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "Audit multiple workflow/testing concepts at once and return parity "
                 "counts, per-concept states, and environment/bootstrap provenance."
@@ -34698,6 +36393,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="List of event->workflow bindings.",
             ),
             category="read",
+            ordinary_turn_excluded_reason="operator_control_plane",
             description=(
                 "List authoritative persisted event bindings from workflow storage."
             ),

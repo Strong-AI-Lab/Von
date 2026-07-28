@@ -13,6 +13,11 @@ from src.backend.integrations.internal_mcp.orchestrator import (
 )
 from src.backend.integrations.internal_mcp.schemas import Schema
 from src.backend.services.prompt_template_service import RenderedPrompt
+from src.backend.services.synthesiser_context_framing_service import (
+    SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+    SynthesiserContextFramingTemplate,
+)
+from src.backend.workflows.durable import synthesiser_context_prep_actions as synth_mod
 
 
 @dataclass(frozen=True)
@@ -179,14 +184,6 @@ class _SequencedLLM:
         return self._responses.pop(0)
 
 
-_TEST_BASE_PROMPT = (
-    "You have access to internal MCP tools.\n\n"
-    "{auth_status}\n"
-    "INTERNAL EXECUTION GUARDRAILS:\n"
-    "- Do NOT mention budgets, caps, or internal limits unless the user explicitly asks for diagnostics.\n"
-    "Available tools:\n"
-    "{listing}"
-)
 _TEST_TOOL_CALL_REPAIR_PROMPT = (
     "Return ONLY repaired tool-call JSON.\n"
     "Available tools:\n"
@@ -255,6 +252,8 @@ def _tool_calling_request(
             gateway=gateway,
             model=None,
             user_namespace="#V#user",
+            user_concept_id="#V#user",
+            org_concept_id=None,
             max_tool_invocations=4,
             max_tool_result_chars=4000,
             max_tool_result_field_chars=2000,
@@ -312,6 +311,8 @@ def _validation_request(
             gateway=gateway,
             model=None,
             user_namespace="#V#user",
+            user_concept_id="#V#user",
+            org_concept_id=None,
             max_tool_invocations=4,
             max_tool_result_chars=4000,
             max_tool_result_field_chars=2000,
@@ -326,13 +327,22 @@ def _validation_request(
 
 @pytest.fixture(autouse=True)
 def _stub_authoritative_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        InternalMCPChatOrchestrator,
-        "_load_base_system_prompt_from_vontology",
-        lambda self, preferred_language=None: (
-            _TEST_BASE_PROMPT,
-            "#V#test_base_prompt",
+    template = SynthesiserContextFramingTemplate(
+        prompt_concept_id="#V#test_synthesiser_context_framing_prompt",
+        loaded_prompt_concept_id="#V#test_synthesiser_context_framing_prompt",
+        schema_version=SYNTHESISER_CONTEXT_FRAMING_TEMPLATE_SCHEMA,
+        active_request_template="Active request: {active_user_message}",
+        tool_hints_template="Tool {tool_concept_id}:\n{hint_sections}",
+        collection_presentation_hint_template=(
+            "Collection: {collection_presentation_hint}"
         ),
+        item_summary_hint_template="Item: {item_summary_hint}",
+        diagnostics={"source": "represented_test_template"},
+    )
+    monkeypatch.setattr(
+        synth_mod,
+        "resolve_synthesiser_context_framing_template",
+        lambda **_kwargs: (template, dict(template.diagnostics)),
     )
 
     def _fake_render_prompt(
@@ -372,37 +382,6 @@ def _stub_authoritative_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_tool_call_repair_recovers_invalid_payload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VON_TOOL_CALL_REPAIR_ENABLE", "1")
-
-    gateway = _Gateway()
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
-
-    llm = _SequencedLLM(
-        [
-            '{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"test","top_k":"bad"}}',
-            '{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"test","top_k":20}}',
-            "All done.",
-        ]
-    )
-
-    result = orchestrator.run(
-        prompt="Search the knowledge base",
-        context=[],
-        llm_client=llm,
-        model=None,
-        user_namespace="#V#user",
-    )
-
-    assert gateway.invocations
-    assert gateway.invocations[0]["tool"] == "search_knowledge_base"
-    assert isinstance(gateway.invocations[0]["payload"]["query"], str)
-    assert gateway.invocations[0]["payload"]["query"].strip()
-    assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
-    assert "validation error" not in result.response_text.lower()
-
 
 def test_required_tool_validation_failure_surfaces_missing_required_tool() -> None:
     gateway = _CreateConceptsGateway()
@@ -428,37 +407,6 @@ def test_required_tool_validation_failure_surfaces_missing_required_tool() -> No
     assert "parent_id" in required_errors[0]["message"]
     assert gateway.invocations == []
 
-
-def test_tool_call_repair_recovers_unknown_tool_with_params(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VON_TOOL_CALL_REPAIR_ENABLE", "1")
-
-    gateway = _Gateway()
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
-
-    llm = _SequencedLLM(
-        [
-            '[{"tool":"#V_concept_search","params":{"query":"test"}}]',
-            '{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"test","top_k":5}}',
-            "All done.",
-        ]
-    )
-
-    result = orchestrator.run(
-        prompt="Search the knowledge base",
-        context=[],
-        llm_client=llm,
-        model=None,
-        user_namespace="#V#user",
-    )
-
-    assert gateway.invocations
-    assert gateway.invocations[0]["tool"] == "search_knowledge_base"
-    assert isinstance(gateway.invocations[0]["payload"]["query"], str)
-    assert gateway.invocations[0]["payload"]["query"].strip()
-    assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
-    assert "validation error" not in result.response_text.lower()
 
 
 def test_tool_call_repair_recovers_mixed_jira_plan_with_invalid_duplicate(

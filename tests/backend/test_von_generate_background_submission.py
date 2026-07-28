@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from flask import Flask, jsonify, request, session
 from typing import Any, Mapping, cast
 
+from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
 from src.backend.services.tool_progress_store_service import (
     reset_tool_progress_persistence_queue_for_tests,
 )
@@ -27,22 +30,13 @@ class _DummyLLM:
         raise AssertionError("LLM generate() should not be called directly in this test")
 
 
-class _StubOrchestrator:
+class _StubAdaptiveTurn:
     def __init__(self, result):
         self._result = result
         self.calls: list[dict[str, Any]] = []
 
-    def configure_execution_caps(self, **_kwargs) -> None:
-        return None
-
-    def _extract_json_blob(self, _text: str):
-        return None
-
-    def run(self, **_kwargs):
-        return self.execute_conversation_turn_supervised(**_kwargs)
-
-    def execute_conversation_turn_supervised(self, **_kwargs):
-        self.calls.append(dict(_kwargs))
+    def execute(self, **kwargs: Any) -> AdaptiveTurnResult:
+        self.calls.append(dict(kwargs))
         return self._result
 
 
@@ -90,23 +84,46 @@ class _CapturingTaskRegistry:
         return _SubmittedTaskStatus(str(kwargs.get("status") or "completed"))
 
 
-def _make_app(monkeypatch, orchestrator, task_registry) -> Flask:
-    from src.backend.server.routes.von_routes import von_bp
+def _make_app(monkeypatch, adaptive_turn, task_registry) -> Flask:
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_von_generate_background_submission")
+
+    import src.backend.server.routes.von_routes as von_routes
 
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.get_llm_client",
+        von_routes,
+        "get_llm_client",
         lambda **_kwargs: _DummyLLM(),
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.get_active_model_name",
+        von_routes,
+        "get_active_model_name",
         lambda *args, **kwargs: "gpt-5.4-nano",
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        von_routes,
+        "get_show_tool_use_during_thinking",
         lambda: False,
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.background_task_registry",
+        von_routes,
+        "execute_adaptive_turn",
+        adaptive_turn.execute,
+    )
+    monkeypatch.setattr(von_routes, "get_buttonify_model_enabled", lambda: False)
+    monkeypatch.setattr(
+        von_routes,
+        "get_display_elements_screen_fence_compat_enabled",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        von_routes.PromptTemplateService,
+        "resolve_prompt_text",
+        lambda *_args, **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "background_task_registry",
         task_registry,
     )
     monkeypatch.setattr(
@@ -124,31 +141,52 @@ def _make_app(monkeypatch, orchestrator, task_registry) -> Flask:
         raising=False,
     )
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes._resolve_shared_conversation_owner",
+        von_routes,
+        "_resolve_shared_conversation_owner",
         lambda **_kwargs: (None, None),
     )
 
     app = Flask(__name__)
     app.secret_key = "test-secret"
     app.config["TESTING"] = True
-    app.register_blueprint(von_bp, url_prefix="/von")
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
     app.config["CONTEXT"] = []
-    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
-    app.config["INTERNAL_MCP_GATEWAY"] = object()
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = object()
+    app.config["INTERNAL_MCP_GATEWAY"] = None
     return app
 
 
-def test_background_generate_submits_immediately(monkeypatch):
-    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+def _authorised_turn_inputs(call: Mapping[str, Any]) -> dict[str, Any]:
+    context = call.get("context")
+    assert isinstance(context, list)
+    for message in context:
+        if not isinstance(message, Mapping) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except ValueError:
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("type") == "authorised_turn_inputs"
+            and isinstance(payload.get("inputs"), dict)
+        ):
+            return dict(payload["inputs"])
+    raise AssertionError("adaptive turn did not receive the authorised turn inputs")
 
-    orchestrator_result = OrchestratorResult(
+
+def test_background_generate_submits_immediately(monkeypatch):
+    adaptive_result = AdaptiveTurnResult(
         response_text="ok",
         extra_messages=(),
         tool_invocations=(),
         aux_llm_calls=(),
     )
     task_registry = _CapturingTaskRegistry()
-    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result), task_registry)
+    app = _make_app(monkeypatch, _StubAdaptiveTurn(adaptive_result), task_registry)
 
     def fail_progress_setting_lookup() -> bool:
         raise AssertionError(
@@ -184,20 +222,18 @@ def test_background_generate_submits_immediately(monkeypatch):
     assert body["task_id"] == submitted["task_id"]
 
 
-def test_background_generate_reentry_passes_workflow_inputs_to_orchestrator(
+def test_background_generate_reentry_passes_authorised_inputs_to_adaptive_turn(
     monkeypatch,
 ):
-    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
-
-    orchestrator_result = OrchestratorResult(
+    adaptive_result = AdaptiveTurnResult(
         response_text="ok",
         extra_messages=(),
         tool_invocations=(),
         aux_llm_calls=(),
     )
     task_registry = _CapturingTaskRegistry()
-    orchestrator = _StubOrchestrator(orchestrator_result)
-    app = _make_app(monkeypatch, orchestrator, task_registry)
+    adaptive_turn = _StubAdaptiveTurn(adaptive_result)
+    app = _make_app(monkeypatch, adaptive_turn, task_registry)
 
     client = app.test_client()
     response = client.post(
@@ -220,8 +256,8 @@ def test_background_generate_reentry_passes_workflow_inputs_to_orchestrator(
     assert callable(task_callable)
     task_callable()
 
-    assert orchestrator.calls
-    assert orchestrator.calls[0]["workflow_launch_inputs"] == {
+    assert adaptive_turn.calls
+    assert _authorised_turn_inputs(adaptive_turn.calls[0]) == {
         "base_gmail_query": "arxiv.org newer_than:365d",
         "gmail_max_results": 1,
     }
@@ -233,6 +269,41 @@ def test_background_generate_reentry_passes_workflow_inputs_to_orchestrator(
     llm_debug = terminal_result["llm_debug"]
     assert llm_debug.get("background_result_source") is None
     assert isinstance(llm_debug.get("turn_execution_record"), dict)
+
+
+def test_background_generate_preserves_adaptive_non_success(monkeypatch):
+    adaptive_result = AdaptiveTurnResult(
+        response_text="The model call failed.",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        terminal_status="model_error",
+    )
+    task_registry = _CapturingTaskRegistry()
+    app = _make_app(
+        monkeypatch,
+        _StubAdaptiveTurn(adaptive_result),
+        task_registry,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Run this in the background",
+            "background": True,
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+
+    assert response.status_code == 202
+    submitted = cast(dict[str, Any], task_registry.calls[0])
+    task_callable = submitted["callable"]
+    assert callable(task_callable)
+    with pytest.raises(RuntimeError, match="non-success model_error"):
+        task_callable()
+    assert task_registry.terminal_updates == []
 
 
 def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
@@ -290,21 +361,20 @@ def test_background_generate_reenters_with_task_progress_metadata(monkeypatch):
 def test_background_generate_reentry_projects_progress_for_mcp_live_readback(
     monkeypatch,
 ):
-    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
     from src.backend.services.turn_execution_live_progress_service import (
         get_turn_execution_live_progress_payload,
     )
 
     import src.backend.server.routes.von_routes as von_routes
 
-    orchestrator_result = OrchestratorResult(
+    adaptive_result = AdaptiveTurnResult(
         response_text="ok",
         extra_messages=(),
         tool_invocations=(),
         aux_llm_calls=(),
     )
     task_registry = _CapturingTaskRegistry()
-    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result), task_registry)
+    app = _make_app(monkeypatch, _StubAdaptiveTurn(adaptive_result), task_registry)
 
     monkeypatch.setattr(
         von_routes,
@@ -345,18 +415,16 @@ def test_background_generate_reentry_projects_progress_for_mcp_live_readback(
     assert live_progress["stage"] == "context_build"
 
 
-def test_generate_passes_workflow_inputs_to_supervised_orchestrator(monkeypatch):
-    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
-
-    orchestrator_result = OrchestratorResult(
+def test_generate_passes_authorised_inputs_to_adaptive_turn(monkeypatch):
+    adaptive_result = AdaptiveTurnResult(
         response_text="ok",
         extra_messages=(),
         tool_invocations=(),
         aux_llm_calls=(),
     )
     task_registry = _CapturingTaskRegistry()
-    orchestrator = _StubOrchestrator(orchestrator_result)
-    app = _make_app(monkeypatch, orchestrator, task_registry)
+    adaptive_turn = _StubAdaptiveTurn(adaptive_result)
+    app = _make_app(monkeypatch, adaptive_turn, task_registry)
 
     client = app.test_client()
     response = client.post(
@@ -374,11 +442,46 @@ def test_generate_passes_workflow_inputs_to_supervised_orchestrator(monkeypatch)
     )
 
     assert response.status_code == 200
-    assert orchestrator.calls
-    assert orchestrator.calls[0]["workflow_launch_inputs"] == {
+    assert adaptive_turn.calls
+    assert _authorised_turn_inputs(adaptive_turn.calls[0]) == {
         "base_gmail_query": "arxiv.org newer_than:365d",
         "gmail_max_results": 1,
     }
+
+
+def test_generate_surfaces_adaptive_terminal_status_without_rejudging_it(
+    monkeypatch,
+):
+    adaptive_result = AdaptiveTurnResult(
+        response_text="I could not complete the request before the deadline.",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        terminal_status="turn_deadline_exceeded",
+    )
+    task_registry = _CapturingTaskRegistry()
+    app = _make_app(
+        monkeypatch,
+        _StubAdaptiveTurn(adaptive_result),
+        task_registry,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Try this",
+            "background": False,
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["success"] is False
+    assert body["terminal_status"] == "turn_deadline_exceeded"
+    assert body["response"] == adaptive_result.response_text
 
 
 def test_orchestrator_projects_namespaced_workflow_launch_inputs_safely() -> None:
@@ -422,6 +525,28 @@ def test_normalise_background_generate_result_preserves_json_payload() -> None:
     llm_debug = payload.get("llm_debug")
     assert isinstance(llm_debug, dict)
     assert llm_debug.get("response") == "ok"
+
+
+def test_normalise_background_generate_result_rejects_typed_non_success() -> None:
+    from flask import Flask, jsonify
+
+    import src.backend.server.routes.von_routes as von_routes
+
+    app = Flask(__name__)
+    with app.app_context():
+        with pytest.raises(RuntimeError, match="non-success model_error"):
+            von_routes._normalise_background_generate_result(
+                (
+                    jsonify(
+                        {
+                            "success": False,
+                            "terminal_status": "model_error",
+                            "response": "Provider failed.",
+                        }
+                    ),
+                    200,
+                )
+            )
 
 
 def test_resolve_generate_requested_model_prefers_explicit_request_model(monkeypatch):
@@ -524,6 +649,10 @@ def test_resolve_generate_requested_model_preserves_scoped_model_parameters(
     import src.backend.server.routes.von_routes as von_routes
 
     monkeypatch.setattr(
+        "src.backend.services.model_parameter_service._registry_parameter_policy",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
         von_routes,
         "get_active_model_name",
         lambda *args, **kwargs: "gpt-5.5",
@@ -550,45 +679,6 @@ def test_resolve_generate_requested_model_preserves_scoped_model_parameters(
     assert model_parameters == {"reasoning_effort": "low"}
 
 
-def test_build_generate_conversation_turn_instance_inputs_preserves_requested_model() -> (
-    None
-):
-    from src.backend.server.routes.generate_route_support import (
-        _build_generate_conversation_turn_instance_inputs,
-    )
-
-    payload = _build_generate_conversation_turn_instance_inputs(
-        session_id="session-1",
-        request_id="request-1",
-        namespace_source="window_context",
-        presenter_mode_requested=False,
-        request_gmail_profile="profile-1",
-        request_language="en-NZ",
-        requested_model="gemma4:26b",
-        requested_model_parameters={"reasoning_effort": "low"},
-        requested_client_type="ollama",
-        agent_test_selector_replay_mode="represented_selector_llm",
-        prompt_text="What do you know about my current research interests?",
-        workflow_discovery_result={"selected_workflow_id": "#V#concept_search"},
-        workflow_continuation_context={"applied": False},
-        workflow_launch_inputs={"gmail_max_results": 1},
-    )
-
-    assert payload["requested_model"] == "gemma4:26b"
-    assert payload["requested_model_parameters"] == {"reasoning_effort": "low"}
-    assert payload["requested_client_type"] == "ollama"
-    assert payload["agent_test_selector_replay_mode"] == "represented_selector_llm"
-    assert payload["prompt"] == "What do you know about my current research interests?"
-    assert payload["user_prompt"] == (
-        "What do you know about my current research interests?"
-    )
-    assert payload["workflow_discovery"] == {
-        "selected_workflow_id": "#V#concept_search"
-    }
-    assert payload["continuation_context"] == {"applied": False}
-    assert payload["workflow_launch_inputs"] == {"gmail_max_results": 1}
-
-
 def test_normalise_generate_workflow_launch_inputs_validates_shape() -> None:
     from src.backend.server.routes.von_routes import (
         _normalise_generate_workflow_launch_inputs,
@@ -606,100 +696,3 @@ def test_normalise_generate_workflow_launch_inputs_validates_shape() -> None:
 
     with pytest.raises(ValueError, match="invalid keys"):
         _normalise_generate_workflow_launch_inputs({"__private": True})
-
-
-def test_submit_generate_conversation_turn_instance_skips_in_agent_test(
-    monkeypatch,
-) -> None:
-    from src.backend.server.routes.generate_route_support import (
-        _GenerateConversationTurnInstanceState,
-        _submit_generate_conversation_turn_instance,
-    )
-
-    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
-    auxiliary_llm_calls: list[dict[str, Any]] = []
-
-    def fail_get_instance_manager():
-        raise AssertionError("AgentTest should not submit durable turn instances")
-
-    def fail_submit_verified_workflow_instance(**_kwargs):
-        raise AssertionError("AgentTest should not submit durable turn instances")
-
-    _submit_generate_conversation_turn_instance(
-        state=_GenerateConversationTurnInstanceState(),
-        auxiliary_llm_calls=auxiliary_llm_calls,
-        session_id="session-1",
-        request_id="request-1",
-        user_namespace="#V#user@#V#org",
-        user_concept_id="#V#user",
-        org_concept_id="#V#org",
-        namespace_source="test",
-        presenter_mode_requested=False,
-        request_gmail_profile=None,
-        request_language="en-NZ",
-        requested_model="gemma4:e4b",
-        requested_model_parameters=None,
-        requested_client_type="ollama",
-        agent_test_selector_replay_mode=None,
-        prompt_text="Prompt",
-        workflow_discovery_result=None,
-        workflow_continuation_context=None,
-        workflow_launch_inputs=None,
-        get_instance_manager_fn=fail_get_instance_manager,
-        submit_verified_workflow_instance_fn=fail_submit_verified_workflow_instance,
-    )
-
-    assert auxiliary_llm_calls
-    assert auxiliary_llm_calls[0]["status"] == "submission_skipped"
-    assert auxiliary_llm_calls[0]["reason_code"] == "agent_test_instance"
-
-
-def test_submit_generate_conversation_turn_instance_skips_background_reentry() -> None:
-    from src.backend.server.routes.generate_route_support import (
-        _GenerateConversationTurnInstanceState,
-        _submit_generate_conversation_turn_instance,
-    )
-
-    auxiliary_llm_calls: list[dict[str, Any]] = []
-    state = _GenerateConversationTurnInstanceState()
-
-    def fail_get_instance_manager():
-        raise AssertionError(
-            "background re-entry should not submit durable turn instances"
-        )
-
-    def fail_submit_verified_workflow_instance(**_kwargs):
-        raise AssertionError(
-            "background re-entry should not submit durable turn instances"
-        )
-
-    _submit_generate_conversation_turn_instance(
-        state=state,
-        auxiliary_llm_calls=auxiliary_llm_calls,
-        session_id="session-1",
-        request_id="request-1",
-        user_namespace="#V#user@#V#org",
-        user_concept_id="#V#user",
-        org_concept_id="#V#org",
-        namespace_source="test",
-        presenter_mode_requested=False,
-        request_gmail_profile=None,
-        request_language="en-NZ",
-        requested_model="gemma4:e4b",
-        requested_model_parameters=None,
-        requested_client_type="ollama",
-        agent_test_selector_replay_mode=None,
-        prompt_text="Prompt",
-        workflow_discovery_result=None,
-        workflow_continuation_context=None,
-        workflow_launch_inputs=None,
-        get_instance_manager_fn=fail_get_instance_manager,
-        submit_verified_workflow_instance_fn=fail_submit_verified_workflow_instance,
-        background_task_id="task-123",
-    )
-
-    assert state.manager is None
-    assert state.instance_id is None
-    assert auxiliary_llm_calls
-    assert auxiliary_llm_calls[0]["status"] == "submission_skipped"
-    assert auxiliary_llm_calls[0]["reason_code"] == "background_task_reentry"

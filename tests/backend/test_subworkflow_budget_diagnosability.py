@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 from src.backend.workflows.action_registry import (
     ActionRegistry,
-    WorkflowActionRequest,
     WorkflowEnvironment,
 )
 from src.backend.workflows.durable.subworkflow_actions import (
@@ -22,21 +21,6 @@ from src.backend.workflows.durable.subworkflow_actions import (
     is_subworkflow_resource_exhaustion_error,
     register_subworkflow_actions,
 )
-from src.backend.workflows.durable.turn_execution_actions import (
-    _build_turn_execution_execute_selected_handler,
-    _build_turn_execution_prepare_recovery_retry_handler,
-)
-
-
-def _request(data: dict, *, inputs: dict | None = None) -> WorkflowActionRequest:
-    return WorkflowActionRequest(
-        action_id="test_action",
-        inputs=inputs or {},
-        environment=WorkflowEnvironment(llm_client=None),
-        data=data,
-        workflow_id="#V#conversation_turn_execution_workflow",
-        workflow_state_id="execution",
-    )
 
 
 def test_resource_exhaustion_error_classification():
@@ -113,38 +97,6 @@ def test_budget_exceeded_failure_carries_ledger_summary(monkeypatch):
     assert summary["per_parent_state"] == {"execution": 2}
     assert execution.outputs["subworkflow_budget_exhausted"] is True
     assert execution.outputs["denied_child_workflow_id"] == "#V#another_child"
-
-
-def test_recovery_retry_blocked_when_not_viable():
-    handler = _build_turn_execution_prepare_recovery_retry_handler()
-    result = handler(
-        _request(
-            {
-                "turn_recovery_retry_viable": False,
-                "turn_recovery_retry_block_reason": "subworkflow_resource_exhausted",
-                "selected_workflow_id": "#V#general_mail_review_workflow",
-            }
-        )
-    )
-    assert result.status == "failed"
-    assert result.error == (
-        "turn_recovery_retry_not_viable:subworkflow_resource_exhausted"
-    )
-    assert result.outputs["turn_recovery_retry_blocked"] is True
-
-
-def test_recovery_retry_counts_attempts():
-    handler = _build_turn_execution_prepare_recovery_retry_handler()
-    result = handler(
-        _request(
-            {
-                "selected_workflow_id": "#V#general_mail_review_workflow",
-                "turn_recovery_attempt_count": 2,
-            }
-        )
-    )
-    assert result.status == "success"
-    assert result.outputs["turn_recovery_attempt_count"] == 3
 
 
 def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
@@ -231,50 +183,3 @@ def test_persist_failed_turn_execution_record_requires_request_id():
         terminal_status="failed",
     )
     assert outcome == {"updated": False, "reason": "missing_request_id"}
-
-
-def test_execute_selected_fails_fast_when_budget_exhausted(monkeypatch):
-    monkeypatch.setenv("VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS", "2")
-    handler = _build_turn_execution_execute_selected_handler()
-    data = {
-        "selected_workflow_id": "#V#general_mail_review_workflow",
-        "__workflow_subworkflow_invocation_count": 2,
-        "__workflow_subworkflow_invocation_ledger": [
-            {
-                "index": 1,
-                "child_workflow_id": "#V#workflow_experience_context_prelude",
-                "parent_state_id": "workflow_experience_context_prelude",
-                "route": "workflow_invoke_subworkflow",
-            },
-            {
-                "index": 2,
-                "child_workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
-                "parent_state_id": "critic",
-                "route": "workflow_invoke_subworkflow",
-            },
-        ],
-    }
-
-    registry_path = (
-        "src.backend.workflows.durable.registry_factory"
-        ".get_shared_durable_action_registry"
-    )
-    with patch(registry_path) as mocked_registry:
-        result = handler(_request(data))
-
-    # The selected workflow must never be invoked once the budget is gone.
-    mocked_registry.assert_not_called()
-    assert result.outputs["turn_recovery_retry_viable"] is False
-    assert (
-        result.outputs["turn_recovery_retry_block_reason"]
-        == "subworkflow_budget_exhausted"
-    )
-    summary = result.outputs["subworkflow_invocation_ledger_summary"]
-    assert summary["total_invocations"] == 2
-    assert result.outputs["subworkflow_invocation_budget_state"]["exhausted"] is True
-    assert (
-        result.outputs["selected_workflow_final_state"]
-        == "subworkflow_budget_exhausted"
-        or result.outputs.get("final_state") == "subworkflow_budget_exhausted"
-        or "subworkflow_budget_exhausted" in str(result.outputs)
-    )

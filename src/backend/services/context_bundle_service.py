@@ -1004,8 +1004,6 @@ def resolve_effective_context(
     local_default_bundle_ids: Sequence[str] = (),
     include_type_hierarchy: bool = True,
 ) -> dict[str, Any]:
-    ensure_canonical_context_bundle_ontology(create_missing_concepts=False)
-
     resolved_subject_kind = _safe_str(subject_kind).lower()
     resolved_subject_id = _safe_str(subject_id)
     if resolved_subject_kind not in {"concept", "workflow"} or not resolved_subject_id:

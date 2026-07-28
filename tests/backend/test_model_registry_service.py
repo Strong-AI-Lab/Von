@@ -288,6 +288,141 @@ def test_runtime_parameter_policy_uses_graph_registry_snapshot(monkeypatch) -> N
     )
 
 
+def test_runtime_parameter_policy_is_scoped_to_selected_profile(monkeypatch) -> None:
+    import src.backend.services.model_registry_service as mod
+
+    snapshot = {
+        "source": "vontology_graph",
+        "models": [
+            {
+                "model_id": "same-surface-deployment",
+                "provider": "openai",
+                "registry_entry_id": "#V#same_surface_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#connection_a_responses",
+                        "api_surface": "responses",
+                        "parameter_constraints": [
+                            {
+                                "parameter": "temperature",
+                                "action": "omit",
+                            }
+                        ],
+                    },
+                    {
+                        "profile_concept_id": "#V#connection_b_responses",
+                        "api_surface": "responses",
+                        "parameter_constraints": [
+                            {
+                                "parameter": "temperature",
+                                "action": "fixed_value",
+                                "fixed_value": "0.25",
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        mod,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: snapshot,
+    )
+
+    assert (
+        mod.sanitise_model_parameter_value(
+            model="same-surface-deployment",
+            provider="openai",
+            parameter="temperature",
+            value=0.7,
+            api_surface="responses",
+            profile_concept_id="#V#connection_a_responses",
+        )
+        is None
+    )
+    assert (
+        mod.sanitise_model_parameter_value(
+            model="same-surface-deployment",
+            provider="openai",
+            parameter="temperature",
+            value=0.7,
+            api_surface="responses",
+            profile_concept_id="#V#connection_b_responses",
+        )
+        == 0.25
+    )
+    assert (
+        mod.resolve_model_parameter_policy(
+            model="same-surface-deployment",
+            provider="openai",
+            parameter="temperature",
+            api_surface="responses",
+            profile_concept_id="#V#connection_b_responses",
+        )["profile_concept_id"]
+        == "#V#connection_b_responses"
+    )
+
+
+def test_runtime_parameter_policy_prefers_exact_entry_over_family(monkeypatch) -> None:
+    import src.backend.services.model_registry_service as mod
+
+    snapshot = {
+        "source": "vontology_graph",
+        "models": [
+            {
+                "model_id": "gpt-5",
+                "provider": "openai",
+                "registry_entry_id": "#V#gpt_5_family_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#gpt_5_family_responses",
+                        "api_surface": "responses",
+                        "parameter_constraints": [
+                            {"parameter": "temperature", "action": "omit"}
+                        ],
+                    }
+                ],
+            },
+            {
+                "model_id": "gpt-5.6-terra",
+                "provider": "openai",
+                "registry_entry_id": "#V#terra_exact_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#terra_exact_responses",
+                        "api_surface": "responses",
+                        "parameter_constraints": [
+                            {
+                                "parameter": "temperature",
+                                "action": "fixed_value",
+                                "fixed_value": "0.4",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        mod,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: snapshot,
+    )
+
+    policy = mod.resolve_model_parameter_policy(
+        model="gpt-5.6-terra",
+        provider="openai",
+        parameter="temperature",
+        api_surface="responses",
+        profile_concept_id="#V#terra_exact_responses",
+    )
+
+    assert policy is not None
+    assert policy["registry_entry_id"] == "#V#terra_exact_entry"
+    assert policy["action"] == "fixed_value"
+
+
 def test_runtime_parameter_policy_rejects_values_outside_graph_allowed_set(
     monkeypatch,
 ) -> None:

@@ -4,8 +4,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-import pytest
-
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
@@ -674,8 +672,6 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "#V#file_copy_upload_classification_workflow" in def_ids
     assert "#V#file_copy_upload_handler_workflow" in def_ids
     assert "#V#file_copy_interpretation_workflow" in def_ids
-    assert "#V#workflow_discovery_gap_recovery_workflow" in def_ids
-    assert "#V#workflow_gap_test_workflow" in def_ids
     source_by_workflow_id = {
         item["workflow_id"]: str(item.get("source") or "").strip().lower()
         for item in result["definitions"]
@@ -706,11 +702,6 @@ def test_workflow_list_definitions_exists_and_returns_data():
         source_by_workflow_id["#V#parent_specificity_rumination_workflow"]
         == "vontology"
     )
-    assert (
-        source_by_workflow_id["#V#workflow_discovery_gap_recovery_workflow"]
-        == "vontology"
-    )
-    assert source_by_workflow_id["#V#workflow_gap_test_workflow"] == "vontology"
     assert source_by_workflow_id["#V#file_copy_typing_workflow"] == "vontology"
     assert (
         source_by_workflow_id["#V#file_copy_upload_classification_workflow"]
@@ -3028,18 +3019,7 @@ def test_workflow_concept_parity_audit_gateway_invoke_success_path(monkeypatch):
     assert payload.get("concepts", [])[0]["diagnostic_state"] == "authority_drift"
 
 
-@pytest.mark.parametrize(
-    "tool_name,payload",
-    [
-        ("workflow_mcp_health_check", {"include_introspection": False}),
-        ("workflow_materialisation_diagnostics", {}),
-        ("workflow_concept_parity_audit", {}),
-    ],
-)
-def test_authenticated_actor_cannot_read_global_workflow_control_diagnostics(
-    tool_name,
-    payload,
-):
+def test_authenticated_actor_cannot_read_host_inventory_workflow_health():
     from src.backend.security import access_control
 
     gateway = _build_gateway()
@@ -3047,10 +3027,57 @@ def test_authenticated_actor_cannot_read_global_workflow_control_diagnostics(
         user_concept_id="#V#ordinary_user",
         organisation_concept_id="#V#ordinary_org",
     ):
-        result = gateway.invoke(tool_name, payload).payload
+        result = gateway.invoke(
+            "workflow_mcp_health_check",
+            {"include_introspection": False},
+        ).payload
 
     assert result["success"] is False
     assert result["error_code"] == "workflow_global_admin_authority_required"
+
+
+def test_authenticated_actor_cannot_read_deployment_global_workflow_diagnostics(
+    monkeypatch,
+):
+    from src.backend.security import access_control
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_materialisation_diagnostics",
+        lambda **_kwargs: {
+            "success": True,
+            "classification": {"state": "healthy"},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "build_workflow_concept_parity_audit",
+        lambda **_kwargs: {
+            "success": True,
+            "summary": {"audited_count": 0},
+            "concepts": [],
+        },
+    )
+
+    gateway = _build_gateway()
+    with access_control.override_current_actor(
+        user_concept_id="#V#ordinary_user",
+        organisation_concept_id="#V#ordinary_org",
+    ):
+        materialisation = gateway.invoke(
+            "workflow_materialisation_diagnostics",
+            {},
+        ).payload
+        parity = gateway.invoke("workflow_concept_parity_audit", {}).payload
+
+    assert materialisation["success"] is False
+    assert parity["success"] is False
+    assert (
+        materialisation["error_code"]
+        == "workflow_global_admin_authority_required"
+    )
+    assert parity["error_code"] == "workflow_global_admin_authority_required"
 
 
 def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
@@ -3247,8 +3274,8 @@ def test_authenticated_actor_cannot_inspect_or_mutate_global_event_bindings(
         user_concept_id="#V#ordinary_user",
         organisation_concept_id="#V#shared_org",
     ):
-        results = [
-            gateway.invoke("workflow_list_event_bindings", {}).payload,
+        listed = gateway.invoke("workflow_list_event_bindings", {}).payload
+        mutations = [
             gateway.invoke(
                 "workflow_bind_event",
                 {
@@ -3266,10 +3293,12 @@ def test_authenticated_actor_cannot_inspect_or_mutate_global_event_bindings(
             ).payload,
         ]
 
-    assert all(result["success"] is False for result in results)
+    assert listed["success"] is False
+    assert listed["error_code"] == "workflow_global_admin_authority_required"
+    assert all(result["success"] is False for result in mutations)
     assert all(
         result["error_code"] == "workflow_global_admin_authority_required"
-        for result in results
+        for result in mutations
     )
     assert manager.get_event_binding(binding_id) is not None
     assert manager.get_event_binding(binding_id).enabled is True
@@ -3324,10 +3353,52 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     assert len(manager.instances) == 2
 
 
-def test_ordinary_actor_cannot_access_unowned_experiment_or_turn_control_records():
+def test_ordinary_actor_cannot_access_unowned_experiment_or_turn_control_records(
+    monkeypatch,
+):
     from src.backend.security import access_control
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
     catalogue = build_default_catalogue()
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    actor_safe_reads = {
+        "experiment_run_list",
+        "experiment_run_get",
+        "chat_history_get_segments",
+        "chat_history_get_debug_entry",
+        "conversation_telemetry_get_locator",
+        "turn_execution_list",
+        "turn_execution_get",
+        "turn_execution_search_failures",
+    }
+    monkeypatch.setattr(
+        catalogue_module,
+        "_rag_list_indexed",
+        lambda **_kwargs: {
+            "success": False,
+            "error_code": "not_found",
+        },
+    )
+    monkeypatch.setattr(
+        catalogue_module,
+        "_rag_get_item",
+        lambda **_kwargs: {
+            "success": False,
+            "error_code": "not_found",
+        },
+    )
+    monkeypatch.setattr(
+        catalogue_module,
+        "_resolve_chat_history_read_target",
+        lambda _kwargs: {
+            "success": False,
+            "error_code": "not_found",
+        },
+    )
     calls = [
         ("testing_theory_create_slice", {"name": "guessed theory"}),
         (
@@ -3389,12 +3460,37 @@ def test_ordinary_actor_cannot_access_unowned_experiment_or_turn_control_records
         user_concept_id="#V#ordinary_user",
         organisation_concept_id="#V#ordinary_org",
     ):
-        results = [catalogue.get(name).handler(**arguments) for name, arguments in calls]
+        results = {
+            name: (
+                gateway.invoke(name, arguments).payload
+                if name in actor_safe_reads
+                else catalogue.get(name).handler(**arguments)
+            )
+            for name, arguments in calls
+        }
 
-    assert all(result["success"] is False for result in results)
-    assert {
-        result["error_code"] for result in results
-    } == {"workflow_global_admin_authority_required"}
+    still_global_reads = {
+        "turn_execution_get_diagnostics",
+        "turn_execution_get_live_progress",
+        "turn_execution_get_critic_bundle",
+    }
+    mutation_names = set(results) - actor_safe_reads - still_global_reads
+
+    assert all(
+        results[name].get("error_code")
+        != "workflow_global_admin_authority_required"
+        for name in actor_safe_reads
+    )
+    assert all(results[name]["success"] is False for name in still_global_reads)
+    assert all(
+        results[name]["error_code"] == "workflow_global_admin_authority_required"
+        for name in still_global_reads
+    )
+    assert all(results[name]["success"] is False for name in mutation_names)
+    assert all(
+        results[name]["error_code"] == "workflow_global_admin_authority_required"
+        for name in mutation_names
+    )
 
 
 def test_trusted_operator_gateway_retains_testing_control_plane_access(monkeypatch):

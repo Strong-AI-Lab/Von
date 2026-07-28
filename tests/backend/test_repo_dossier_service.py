@@ -108,6 +108,10 @@ def test_repo_dossier_workflow_definition_get_uses_registry_identity(monkeypatch
         lambda defer_parity_work=True: registry,
     )
     monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    monkeypatch.setattr(
         svc,
         "build_workflow_definition_identity",
         lambda **kwargs: {
@@ -121,6 +125,31 @@ def test_repo_dossier_workflow_definition_get_uses_registry_identity(monkeypatch
     assert result["success"] is True
     assert result["definition_summary"]["state_count"] == 1
     assert result["definition_identity"]["workflow_source"] == "vontology"
+
+
+def test_repo_dossier_workflow_definition_get_hides_inaccessible_workflow(
+    monkeypatch,
+):
+    from src.backend.services import repo_dossier_service as svc
+
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
+        lambda _workflow_ids: [],
+    )
+    monkeypatch.setattr(
+        svc,
+        "build_durable_workflow_registry_read_only",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("inaccessible workflow must not reach the registry")
+        ),
+    )
+
+    result = svc.repo_dossier_workflow_definition_get(
+        workflow_id="#V#private_workflow"
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "workflow_not_found"
 
 
 def test_repo_dossier_prompt_definition_get_returns_prompt_text(monkeypatch):

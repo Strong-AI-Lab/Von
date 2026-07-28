@@ -1,7 +1,7 @@
 {
   "family_id": "workflow_template_seed_bundle",
   "schema_version": "repo_seed_workflow_template_bundle.v1",
-  "seed_version": "3",
+  "seed_version": "4",
   "source_tag": "JVNAUTOSCI-2577",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "workflow_creation.person_representation": {
@@ -2770,68 +2770,6 @@
             "writes_context_keys": [
               "response_text"
             ],
-            "next_state": "completed",
-            "on_failure_state": "failed"
-          },
-          {
-            "state_id": "completed",
-            "terminal": true
-          },
-          {
-            "state_id": "failed",
-            "terminal": true
-          }
-        ]
-      }
-    },
-    {
-      "template_id": "workflow_gap_recovery.candidate_execution",
-      "name": "Workflow Gap Recovery Candidate Execution Template",
-      "description": "Authored workflow template for workflow-gap candidate execution workflows.",
-      "default_workflow_description": "Candidate workflow created from workflow-gap recovery.",
-      "template_profile": {
-        "schema_version": "workflow_template_profile.v1",
-        "selection_mode": "explicit_only",
-        "priority": 100,
-        "keywords": [
-          "workflow gap candidate",
-          "gap recovery"
-        ],
-        "exemplars": [
-          "Create a candidate workflow to recover from a missing applicable workflow."
-        ],
-        "requires_synthesis_policy": false
-      },
-      "workflow_spec_template": {
-        "workflow_id": "{workflow_id}",
-        "name": "{workflow_name}",
-        "description": "{workflow_description}",
-        "parent_type_id": "#V#ai_workflow",
-        "required_effects": [
-          "context:candidate_response_present=True"
-        ],
-        "postcondition_probe": {
-          "candidate_response_present": true
-        },
-        "verification_inputs": {
-          "workflow_gap_dry_run": true
-        },
-        "steps": [
-          {
-            "state_id": "execute_candidate",
-            "action_id": "workflow_gap.execute_candidate",
-            "inputs": {
-              "prompt_concept_id": "{prompt_concept_id}",
-              "workflow_name": "{workflow_name}",
-              "workflow_description": "{workflow_description}",
-              "default_request_text": "{request_text}",
-              "default_recent_turns_json": "{recent_turns_json}",
-              "default_base_response_text": "{base_response_text}",
-              "workflow_guidance_json": "{workflow_guidance_json}",
-              "acceptance_requirements_json": "{acceptance_requirements_json}",
-              "intent_summary": "{intent_summary}",
-              "gap_summary": "{gap_summary}"
-            },
             "next_state": "completed",
             "on_failure_state": "failed"
           },

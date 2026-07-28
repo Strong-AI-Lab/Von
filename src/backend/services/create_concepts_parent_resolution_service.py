@@ -11,10 +11,12 @@ required for concept creation; it does not imply uniqueness of parentage.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Tuple
+from typing import Any, Iterable, Mapping, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..security.access_control import bypass_access_control
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+from .relationship_write_service import compute_kind_from_relationships
 from ..workflows.workflow_concept_authority_service import (
     WORKFLOW_INSTANCE_TYPE_ID_CANDIDATES,
     resolve_available_workflow_type_ids,
@@ -22,6 +24,16 @@ from ..workflows.workflow_concept_authority_service import (
 
 
 _WORKFLOW_DEFINITION_SLUGS = frozenset({"workflowdefinition", "workflowdef"})
+_PARENT_VISIBILITY_PROJECTION = {"concept_id": 1}
+_PARENT_KIND_PROJECTION = {
+    "concept_id": 1,
+    "kind": 1,
+    "computed_kind": 1,
+    "relationships.is_a_type_of": 1,
+    "relationships.#V#is_a_type_of": 1,
+    "relationships.is_an_instance_of": 1,
+    "relationships.#V#is_an_instance_of": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +44,7 @@ class ParentResolutionResult:
     fallback_used: bool
     fallback_candidates_checked: Tuple[str, ...]
     fallback_selected_parent_id: str | None
+    resolved_parent_kind: str | None = None
 
     @property
     def success(self) -> bool:
@@ -45,11 +58,71 @@ class ParentResolutionResult:
             "fallback_used": self.fallback_used,
             "fallback_candidates_checked": list(self.fallback_candidates_checked),
             "fallback_selected_parent_id": self.fallback_selected_parent_id,
+            "resolved_parent_kind": self.resolved_parent_kind,
         }
 
 
-def _concept_exists(concept_id: str) -> bool:
-    return bool(ConceptsRepository.find_one({"concept_id": concept_id}))
+@dataclass(frozen=True)
+class _VisibleParentClassification:
+    concept_id: str
+    structural_kind: str | None
+
+
+def _find_concept(concept_id: str) -> _VisibleParentClassification | None:
+    visible_concept = ConceptsRepository.find_one(
+        {"concept_id": concept_id},
+        _PARENT_VISIBILITY_PROJECTION,
+    )
+    if not isinstance(visible_concept, Mapping):
+        return None
+
+    # Relationship sanitisation correctly removes targets the actor cannot
+    # inspect, but those removals must not change the parent's own structural
+    # classification. After actor visibility of the parent is established,
+    # derive only the scalar kind under bypass and do not return the raw edges.
+    with bypass_access_control():
+        structural_projection = ConceptsRepository.find_one(
+            {"concept_id": concept_id},
+            _PARENT_KIND_PROJECTION,
+        )
+    if not isinstance(structural_projection, Mapping):
+        return None
+    return _VisibleParentClassification(
+        concept_id=concept_id,
+        structural_kind=_concept_kind(structural_projection),
+    )
+
+
+def _concept_kind(concept: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(concept, Mapping):
+        return None
+
+    relationships = concept.get("relationships")
+    if isinstance(relationships, Mapping):
+        normalised_relationships = dict(relationships)
+        for canonical_key, compatibility_key in (
+            ("is_a_type_of", "#V#is_a_type_of"),
+            ("is_an_instance_of", "#V#is_an_instance_of"),
+        ):
+            if canonical_key not in normalised_relationships:
+                compatibility_value = normalised_relationships.get(compatibility_key)
+                if compatibility_value:
+                    normalised_relationships[canonical_key] = compatibility_value
+
+        if any(
+            normalised_relationships.get(key)
+            for key in ("is_a_type_of", "is_an_instance_of")
+        ):
+            return compute_kind_from_relationships(normalised_relationships)
+
+    for field_name in ("computed_kind", "kind"):
+        raw_kind = concept.get(field_name)
+        if not isinstance(raw_kind, str):
+            continue
+        kind = raw_kind.strip().lower()
+        if kind in {"type", "predicate", "individual", "instance"}:
+            return kind
+    return None
 
 
 def _canonicalise_candidates(candidates: Iterable[str]) -> tuple[str, ...]:
@@ -91,7 +164,8 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
     """
 
     canonical_parent = canonicalise_vontology_concept_id(parent_id)
-    if canonical_parent and _concept_exists(canonical_parent):
+    canonical_concept = _find_concept(canonical_parent) if canonical_parent else None
+    if canonical_parent and canonical_concept is not None:
         return ParentResolutionResult(
             requested_parent_id=parent_id,
             canonical_parent_id=canonical_parent,
@@ -99,6 +173,7 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
             fallback_used=False,
             fallback_candidates_checked=(),
             fallback_selected_parent_id=None,
+            resolved_parent_kind=canonical_concept.structural_kind,
         )
 
     fallback_candidates = _fallback_candidates_for_parent(canonical_parent)
@@ -107,7 +182,8 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
         if candidate == canonical_parent:
             continue
         checked.append(candidate)
-        if _concept_exists(candidate):
+        candidate_concept = _find_concept(candidate)
+        if candidate_concept is not None:
             return ParentResolutionResult(
                 requested_parent_id=parent_id,
                 canonical_parent_id=canonical_parent,
@@ -115,6 +191,7 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
                 fallback_used=True,
                 fallback_candidates_checked=tuple(checked),
                 fallback_selected_parent_id=candidate,
+                resolved_parent_kind=candidate_concept.structural_kind,
             )
 
     return ParentResolutionResult(
@@ -125,4 +202,3 @@ def resolve_parent_for_create_concepts(parent_id: str) -> ParentResolutionResult
         fallback_candidates_checked=tuple(checked),
         fallback_selected_parent_id=None,
     )
-

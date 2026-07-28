@@ -57,7 +57,6 @@ def _write_zero_baseline(root: Path) -> Path:
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -182,7 +181,6 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -211,7 +209,6 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "repo_seed_authority_drift_path_count": 0,
         "vontology_first_seed_fallback_violation_count": 0,
         "workflow_id_special_case_count": 0,
-        "supervised_fail_open_fallback_count": 0,
         "support_surface_policy_contract_violation_count": 0,
         "synthesized_launch_contract_count": 0,
         "monolith_line_count_orchestrator": 0,
@@ -346,7 +343,6 @@ def test_build_workflow_purity_report_flags_baseline_regressions(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -399,7 +395,6 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -474,7 +469,6 @@ def test_build_workflow_purity_report_flags_repo_seed_authority_drift(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -535,7 +529,6 @@ def test_build_workflow_purity_report_allows_episode_seed_bootstrap_service(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -590,7 +583,6 @@ def test_build_workflow_purity_report_allows_conversation_turn_seed_bootstrap_se
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -671,7 +663,6 @@ def test_build_workflow_purity_report_allows_retrieval_monitoring_seed_bootstrap
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -765,7 +756,6 @@ def test_build_workflow_purity_report_allows_vontology_materialisation_seed_serv
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -827,7 +817,6 @@ def test_build_workflow_purity_report_flags_workflow_id_special_case_branches(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -850,68 +839,6 @@ def test_build_workflow_purity_report_flags_workflow_id_special_case_branches(
             "line": 2,
             "workflow_ids": ["#V#arxiv_paper_representation_workflow"],
             "operators": ["Eq"],
-        }
-    ]
-
-
-def test_build_workflow_purity_report_flags_supervised_fail_open_fallbacks(
-    tmp_path: Path,
-) -> None:
-    _write(
-        "src/backend/integrations/internal_mcp/orchestrator.py",
-        (
-            "class Orchestrator:\n"
-            "    def execute_conversation_turn_supervised(self):\n"
-            "        return self.run(prompt='retry the old path')\n"
-        ),
-        root=tmp_path,
-    )
-    baseline_path = (
-        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
-    )
-    baseline_path.parent.mkdir(parents=True, exist_ok=True)
-    baseline_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "workflow_purity_baseline.v1",
-                "counters": {
-                    "built_in_registration_count": 0,
-                    "remaining_python_workflow_family_count": 0,
-                    "python_authored_canonical_workflow_source_count": 0,
-                    "python_authored_workflow_prompt_source_count": 0,
-                    "python_authored_support_prompt_source_count": 0,
-                    "direct_instance_create_callsite_count": 0,
-                    "env_event_binding_count": 0,
-                    "legacy_selector_mode_count": 0,
-                    "builtin_capability_override_count": 0,
-                    "non_vontology_discoverable_workflow_count": 0,
-                    "repo_seed_authority_drift_path_count": 0,
-                    "vontology_first_seed_fallback_violation_count": 0,
-                    "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
-                    "support_surface_policy_contract_violation_count": 0,
-                    "synthesized_launch_contract_count": 0,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    report = build_workflow_purity_report(
-        registry=None,
-        project_root=tmp_path,
-        baseline_path=baseline_path,
-    )
-
-    fail_open = report["details"]["supervised_fail_open_fallbacks"]
-    assert report["counters"]["supervised_fail_open_fallback_count"] == 1
-    assert fail_open["status"] == "violation"
-    assert fail_open["offending_matches"] == [
-        {
-            "path": "src/backend/integrations/internal_mcp/orchestrator.py",
-            "function": "execute_conversation_turn_supervised",
-            "pattern": "fallback_to_legacy_run",
-            "line": 3,
         }
     ]
 
@@ -961,7 +888,6 @@ def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violat
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -988,10 +914,10 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
     tmp_path: Path,
 ) -> None:
     _write(
-        "src/backend/services/workflow_gap_vontology_service.py",
+        "src/backend/services/example_workflow_vontology_service.py",
         (
-            'WORKFLOW_GAP_ANALYSIS_PROMPT = "Return JSON that analyses the gap and '
-            'proposes reusable workflow behaviour for the user request."\n\n'
+            'INLINE_WORKFLOW_PROMPT = "Return JSON that proposes reusable '
+            'workflow behaviour for the user request."\n\n'
             "def _build_candidate_prompt_template():\n"
             '    return "Create a candidate workflow prompt body with acceptance checks '
             'and recent-turn context."\n'
@@ -1020,7 +946,6 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -1038,13 +963,13 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
     assert report["counters"]["python_authored_workflow_prompt_source_count"] == 2
     assert report["details"]["python_authored_workflow_prompt_sources"] == [
         {
-            "path": "src/backend/services/workflow_gap_vontology_service.py",
+            "path": "src/backend/services/example_workflow_vontology_service.py",
             "kind": "assignment",
-            "symbol": "WORKFLOW_GAP_ANALYSIS_PROMPT",
+            "symbol": "INLINE_WORKFLOW_PROMPT",
             "line": 1,
         },
         {
-            "path": "src/backend/services/workflow_gap_vontology_service.py",
+            "path": "src/backend/services/example_workflow_vontology_service.py",
             "kind": "function",
             "symbol": "_build_candidate_prompt_template",
             "line": 3,
@@ -1067,8 +992,8 @@ def test_build_workflow_purity_report_ignores_prompt_metadata_specs(
             "prompt concept; the body remains in text relations.',\n"
             "    },\n"
             ")\n\n"
-            "WORKFLOW_GAP_ANALYSIS_PROMPT = 'Return JSON that analyses the gap "
-            "and proposes reusable workflow behaviour for the user request.'\n"
+            "INLINE_WORKFLOW_PROMPT = 'Return JSON that proposes reusable "
+            "workflow behaviour for the user request.'\n"
         ),
         root=tmp_path,
     )
@@ -1094,7 +1019,6 @@ def test_build_workflow_purity_report_ignores_prompt_metadata_specs(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -1114,7 +1038,7 @@ def test_build_workflow_purity_report_ignores_prompt_metadata_specs(
         {
             "path": "src/backend/services/episode_evaluation_workflow_vontology_service.py",
             "kind": "assignment",
-            "symbol": "WORKFLOW_GAP_ANALYSIS_PROMPT",
+            "symbol": "INLINE_WORKFLOW_PROMPT",
             "line": 10,
         },
     ]
@@ -1184,7 +1108,6 @@ def test_build_workflow_purity_report_flags_post_cleanup_support_surface_drift(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -1272,7 +1195,6 @@ def test_build_workflow_purity_report_ignores_explanatory_docstrings_in_guarded_
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -1332,7 +1254,6 @@ def test_build_workflow_purity_report_detects_presenter_nested_evidence_drift(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -1393,7 +1314,6 @@ def test_build_workflow_purity_report_detects_screen_backfill_guardrail_drift(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -1588,7 +1508,6 @@ def test_build_workflow_purity_report_detects_annotation_and_workflow_creation_d
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },
@@ -1655,7 +1574,6 @@ def test_build_workflow_purity_report_detects_file_copy_representation_drift(
                     "repo_seed_authority_drift_path_count": 0,
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
-                    "supervised_fail_open_fallback_count": 0,
                     "support_surface_policy_contract_violation_count": 0,
                     "synthesized_launch_contract_count": 0,
                 },

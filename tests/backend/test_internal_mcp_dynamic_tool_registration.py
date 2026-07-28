@@ -70,6 +70,7 @@ def test_dynamic_loader_supports_fixed_payload_with_gateway_invoke(monkeypatch):
         ),
         category="read",
         description="Echo base tool.",
+        ordinary_turn_excluded_reason="operator_only_test_surface",
     )
 
     load_result = load_dynamic_method_definitions(
@@ -81,6 +82,10 @@ def test_dynamic_loader_supports_fixed_payload_with_gateway_invoke(monkeypatch):
     assert dynamic_definition.name == "echo_proxy"
     assert dynamic_definition.input_schema.required == {}
     assert "name" not in dynamic_definition.input_schema.optional
+    assert (
+        dynamic_definition.ordinary_turn_excluded_reason
+        == "operator_only_test_surface"
+    )
 
     catalogue = MethodCatalogue()
     catalogue.register(base_definition)
@@ -104,7 +109,191 @@ def test_dynamic_loader_supports_fixed_payload_with_gateway_invoke(monkeypatch):
         pass
 
 
+def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):
+    _set_dynamic_tool_docs(
+        monkeypatch,
+        [
+            {
+                "concept_id": "#V#dynamic_schema_proxy",
+                "attributes": {
+                    "mcp_tool_name": "schema_proxy",
+                    "dynamic_registration_enabled": True,
+                    "dynamic_registration_approved": True,
+                    "dynamic_target_tool_name": "schema_base",
+                    "dynamic_fixed_payload": {"mode": "safe"},
+                },
+            }
+        ],
+    )
+
+    base_definition = MethodDefinition(
+        name="schema_base",
+        handler=lambda **kwargs: {"success": True, **kwargs},
+        input_schema=Schema(
+            required={"target": str, "mode": str},
+            optional={"filters": list, "scope": str},
+            allow_unknown=False,
+            aliases={
+                "target_id": "target",
+                "mode_alias": "mode",
+            },
+            batch_propagated_fields=("target", "mode", "filters"),
+            enum_values={
+                "mode": ("safe", "unsafe"),
+                "scope": ("brief", "full"),
+            },
+            scalar_source_fields={
+                "target": ("concept_id",),
+                "mode": ("value",),
+            },
+            comma_separated_list_fields=("filters",),
+        ),
+        category="read",
+    )
+
+    load_result = load_dynamic_method_definitions(
+        base_definitions={"schema_base": base_definition},
+        protected_method_names={"schema_base"},
+    )
+
+    assert len(load_result.definitions) == 1
+    dynamic_definition = load_result.definitions[0]
+    schema = dynamic_definition.input_schema
+    assert schema.aliases == {"target_id": "target"}
+    assert schema.batch_propagated_fields == ("target", "filters")
+    assert schema.enum_values == {"scope": ("brief", "full")}
+    assert schema.scalar_source_fields == {"target": ("concept_id",)}
+    assert schema.comma_separated_list_fields == ("filters",)
+
+    catalogue = MethodCatalogue()
+    catalogue.register(base_definition)
+    catalogue.register(dynamic_definition)
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "schema_proxy",
+        {
+            "target_id": {"concept_id": "#V#project"},
+            "filters": "active, represented",
+            "scope": "brief",
+        },
+    )
+    assert result.payload == {
+        "success": True,
+        "target": "#V#project",
+        "filters": ["active", "represented"],
+        "scope": "brief",
+        "mode": "safe",
+    }
+
+
+def test_dynamic_proxy_cannot_fix_a_trusted_bound_argument(monkeypatch):
+    _set_dynamic_tool_docs(
+        monkeypatch,
+        [
+            {
+                "concept_id": "#V#dynamic_mail_proxy",
+                "attributes": {
+                    "mcp_tool_name": "mail_proxy",
+                    "dynamic_registration_enabled": True,
+                    "dynamic_registration_approved": True,
+                    "dynamic_target_tool_name": "mail_base",
+                    "dynamic_fixed_payload": {
+                        "profile": "globally-configured-profile",
+                    },
+                },
+            }
+        ],
+    )
+    base_definition = MethodDefinition(
+        name="mail_base",
+        handler=lambda **kwargs: {"success": True, **kwargs},
+        input_schema=Schema(
+            required={"profile": str},
+            optional={"query": str},
+            allow_unknown=False,
+        ),
+        category="read",
+        ordinary_turn_trusted_argument_bindings={
+            "profile": "gmail_profile",
+        },
+    )
+
+    load_result = load_dynamic_method_definitions(
+        base_definitions={"mail_base": base_definition},
+        protected_method_names={"mail_base"},
+    )
+
+    assert load_result.definitions == ()
+    assert load_result.status["failed_count"] == 1
+    failure = load_result.status["failed"][0]
+    assert failure["reason"] == "fixed_payload_overrides_trusted_argument"
+    assert failure["conflicting_argument_names"] == ["profile"]
+
+
+def test_dynamic_proxy_cannot_bypass_ordinary_turn_fixed_argument(monkeypatch):
+    _set_dynamic_tool_docs(
+        monkeypatch,
+        [
+            {
+                "concept_id": "#V#dynamic_unsafe_reset_proxy",
+                "attributes": {
+                    "mcp_tool_name": "unsafe_reset_proxy",
+                    "dynamic_registration_enabled": True,
+                    "dynamic_registration_approved": True,
+                    "dynamic_target_tool_name": "diagnostics_base",
+                    "dynamic_fixed_payload": {"clear": True},
+                },
+            },
+            {
+                "concept_id": "#V#dynamic_safe_reset_proxy",
+                "attributes": {
+                    "mcp_tool_name": "safe_reset_proxy",
+                    "dynamic_registration_enabled": True,
+                    "dynamic_registration_approved": True,
+                    "dynamic_target_tool_name": "diagnostics_base",
+                    "dynamic_fixed_payload": {"reset": False},
+                },
+            },
+        ],
+    )
+    base_definition = MethodDefinition(
+        name="diagnostics_base",
+        handler=lambda **kwargs: {"success": True, **kwargs},
+        input_schema=Schema(
+            optional={"reset": bool, "query": str},
+            aliases={"clear": "reset"},
+            allow_unknown=True,
+        ),
+        category="read",
+        ordinary_turn_fixed_arguments={"reset": False},
+    )
+
+    load_result = load_dynamic_method_definitions(
+        base_definitions={"diagnostics_base": base_definition},
+        protected_method_names={"diagnostics_base"},
+    )
+
+    definitions = {
+        definition.name: definition for definition in load_result.definitions
+    }
+    assert (
+        definitions["unsafe_reset_proxy"].ordinary_turn_excluded_reason
+        == "dynamic_proxy_overrides_ordinary_turn_fixed_argument"
+    )
+    assert definitions["safe_reset_proxy"].ordinary_turn_excluded_reason is None
+    assert definitions["safe_reset_proxy"].ordinary_turn_fixed_arguments == {
+        "reset": False
+    }
+
+
 def test_build_default_catalogue_registers_enabled_dynamic_tool(monkeypatch):
+    from src.backend.services import settings_service
+
     _set_dynamic_tool_docs(
         monkeypatch,
         [
@@ -118,6 +307,24 @@ def test_build_default_catalogue_registers_enabled_dynamic_tool(monkeypatch):
                 },
             }
         ],
+    )
+    # This is a dynamic-registration test, not an integration test for the
+    # settings store. Keep the proxied read deterministic when Mongo is absent
+    # so the MCP hard deadline is tested independently.
+    monkeypatch.setattr(
+        settings_service,
+        "resolve_llm_setting",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        settings_service,
+        "get_preferred_language",
+        lambda: "en-NZ",
+    )
+    monkeypatch.setattr(
+        settings_service,
+        "get_setting",
+        lambda _name: None,
     )
 
     catalogue = build_default_catalogue()

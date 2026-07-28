@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Governing instructions for work in this repository, subordinate
   to current explicit user direction and higher-level safety rules
-- **Last reviewed:** 25 July 2026
+- **Last reviewed:** 27 July 2026
 - **Review trigger:** A material change to Von's product focus, authority model,
   security posture, or acceptance doctrine
 
@@ -114,6 +114,13 @@ never be forced onto newer evidence.
    warrant an LLM. Mechanically exact operations may remain deterministic and
    observable when that is still the simplest adequate path; their current
    encoding is not evidence that the surrounding policy or stage is necessary.
+   Treat model choice as an evidenced design variable: when a failure plausibly
+   reflects inadequate model capability, compare a stronger suitable model
+   before adding durable semantic code unless existing evidence already
+   distinguishes the cause; when adequate behaviour is too slow or costly,
+   compare a faster or cheaper model. Diagnose tool, transport, authority, and
+   context failures before blaming the model, keep comparisons bounded, and do
+   not turn one successful replay into a permanent routing rule.
 7. **Vontology is first-class, not all-consuming.** It is the live authority for
    represented concepts, relations, prompts, workflows, and policies. Raw
    documents, traces, operational events, caches, and transactional data may
@@ -266,6 +273,10 @@ hypothetical danger the same veto.
 - Low-risk reversible work should normally proceed with provenance and
   canonical read-back. A URL or identifier may be strong evidence about the
   intended object, but it does not create authority for unrelated effects.
+- Read-only is a semantic-effect boundary, not a zero-write storage guarantee.
+  Bounded derived maintenance is compatible with a read only when it leaves
+  represented meaning, visibility, and authority unchanged, and any failure is
+  observable and recoverable.
 - If required authority or risk evidence is unavailable, deny only the effect
   whose residual risk cannot be justified. Preserve safe reads, bounded
   alternatives, partial progress, and a typed explanation instead of failing

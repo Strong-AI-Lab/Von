@@ -1,11 +1,4 @@
-"""Regression guardrails for scholarly metadata representation routing.
-
-JVNAUTOSCI-2185 captured a near miss where Von correctly inferred how pasted
-ACM article metadata should be represented, but no Vontology write tools were
-used. These assertions pin the represented prompt/seed guidance so future edits
-do not turn metadata-only scholarly article representation back into a
-plan-only response or a file-copy-only path.
-"""
+"""Retained represented guidance for tool use and workflow discovery."""
 
 from __future__ import annotations
 
@@ -14,133 +7,6 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SEED_DIR = _REPO_ROOT / "src" / "backend" / "workflows" / "repo_seed_bundles"
-
-
-def test_expected_outcome_prompt_recognises_pasted_scholarly_metadata() -> None:
-    prompt_text = (
-        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
-    ).read_text(encoding="utf-8")
-
-    lowered = prompt_text.lower()
-    assert "pasted scholarly bibliographic metadata" in lowered
-    assert "how about with this too" in lowered
-    assert "do not require an uploaded file" in lowered
-    assert "#v#scholarly_article" in lowered
-    assert "create it as a predicate concept" in lowered
-    assert "do not create title/field concepts as individuals" in lowered
-    assert "bare non-arXiv scholarly article URLs" in prompt_text
-    assert "workflow_execute" in prompt_text
-    assert "workflow_concept_ids" in prompt_text
-    assert "#V#scholarly_article_metadata_representation_workflow" in prompt_text
-    assert '"workflow_concept_ids":["#V#scholarly_article_metadata_representation_workflow"]' in (
-        prompt_text
-    )
-
-
-def test_expected_outcome_prompt_targets_arxiv_representation_workflow() -> None:
-    prompt_text = (
-        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
-    ).read_text(encoding="utf-8")
-
-    lowered = prompt_text.lower()
-    assert "arxiv paper urls" in lowered
-    assert "grounded prior-turn arxiv references" in lowered
-    assert "#V#arxiv_paper_representation_workflow" in prompt_text
-    assert "do not invent workflow ids" in lowered
-    assert "conditional_required_tools" in prompt_text
-    assert (
-        "when the turn first requires another retrieval surface to find whether "
-        "an arxiv target exists"
-    ) in lowered
-    assert "put only the retrieval tools in `required_tools`" in lowered
-    assert "put `workflow_execute` in `conditional_required_tools`" in lowered
-    assert "gmail-to-arxiv conditional representation example" not in lowered
-    assert '"workflow_concept_ids":["#V#arxiv_paper_representation_workflow"]' in (
-        prompt_text
-    )
-
-
-def test_expected_outcome_prompt_requires_represented_labels_to_write_and_readback() -> (
-    None
-):
-    prompt_text = (
-        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
-    ).read_text(encoding="utf-8")
-
-    lowered = prompt_text.lower()
-    assert "represented labels, categories, tags, role markers" in lowered
-    assert "workflow progress markers" in lowered
-    assert "ontology-native mutation plan and read-back" in lowered
-    assert "external label-list tool is not evidence" in lowered
-    assert "listing existing external-system labels" in lowered
-    assert "write-only required tool list is not sufficient" in lowered
-    assert "Represented label/marker creation example" in prompt_text
-    assert (
-        '"required_tools":["search_concepts","create_concepts","add_relationship",'
-        '"upsert_singleton_text_relation","fetch_concept",'
-        '"get_text_relations_summary"]'
-    ) in prompt_text
-
-
-def test_expected_outcome_prompt_binds_type_targets_for_predicate_schema_turns() -> (
-    None
-):
-    prompt_text = (
-        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
-    ).read_text(encoding="utf-8")
-
-    lowered = prompt_text.lower()
-    assert "predicates, relation schema, usage, incidence" in lowered
-    assert "represented class/type" in lowered
-    assert "target_type_ids" in prompt_text
-    assert "get_predicate_incidence" in prompt_text
-    assert "instance_of" in prompt_text
-    assert "authenticated user" in lowered
-
-
-def test_expected_outcome_prompt_requires_read_only_jira_lookup_evidence() -> None:
-    prompt_text = (
-        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
-    ).read_text(encoding="utf-8")
-
-    lowered = prompt_text.lower()
-    assert "read-only jira retrieval" in lowered
-    assert "latest, most recent, newest" in lowered
-    assert "jira_get_issue" in prompt_text
-    assert "jira_search" in prompt_text
-    assert "do not use jira import/reconciliation workflows" in lowered
-    assert "#V#jira_task_full_reconciliation_workflow" in prompt_text
-    assert "#V#jira_task_incremental_import_workflow" in prompt_text
-    assert "task_import_jira_issues" in prompt_text
-    assert "Jira recency/list lookup example" in prompt_text
-    assert '"required_tools":["jira_search"]' in prompt_text
-    assert "concrete predicate before `ORDER BY`" in prompt_text
-    assert "never use a bare `ORDER BY updated DESC`" in prompt_text
-    assert "issuetype = Task ORDER BY created DESC" in prompt_text
-    assert "project = JVNAUTOSCI AND issuetype = Task ORDER BY created DESC" in (
-        prompt_text
-    )
-    assert "created DESC" in prompt_text
-    assert "updated DESC" in prompt_text
-    assert "recency basis" in lowered
-
-
-def test_expected_outcome_prompt_requires_direct_jira_issue_lookup_evidence() -> None:
-    prompt_text = (
-        _SEED_DIR / "prompt_turn_execution_expected_outcome_inference_seed.md"
-    ).read_text(encoding="utf-8")
-
-    lowered = prompt_text.lower()
-    assert "concrete jira issue key" in lowered
-    assert "Jira direct issue-key lookup example" in prompt_text
-    assert "JVNAUTOSCI-150" in prompt_text
-    assert "jira_get_issue" in prompt_text
-    assert '"required_tools":["jira_get_issue"]' in prompt_text
-    assert "Preserve the exact issue key" in prompt_text
-    assert "Do not use #V#jira_task_full_reconciliation_workflow" in prompt_text
-    assert "#V#jira_task_incremental_import_workflow" in prompt_text
-    assert "task_import_jira_issues" in prompt_text
-    assert "not memory or search snippets" in prompt_text
 
 
 def test_missing_tool_retry_prompt_preserves_represented_label_authority() -> None:
@@ -153,23 +19,6 @@ def test_missing_tool_retry_prompt_preserves_represented_label_authority() -> No
     assert "vontology mutation plus read-back request" in lowered
     assert "do not substitute external label-listing tools" in lowered
     assert "get_text_relations_summary" in prompt_text
-
-
-def test_selector_prompt_treats_scholarly_metadata_continuations_as_authoring() -> None:
-    prompt_text = (_SEED_DIR / "prompt_chat_turn_classifier_seed.md").read_text(
-        encoding="utf-8"
-    )
-
-    lowered = prompt_text.lower()
-    assert "scholarly article/paper metadata" in lowered
-    assert "doi" in lowered
-    assert "abstract" in lowered
-    assert "how about with this too" in lowered
-    assert "authoring intent" in lowered
-    assert (
-        "specialised executable scholarly-metadata representation workflow" in lowered
-    )
-    assert "#V#tool_calling_workflow" in prompt_text
 
 
 def test_tool_calling_workflow_has_generic_write_discovery_exemplars() -> None:

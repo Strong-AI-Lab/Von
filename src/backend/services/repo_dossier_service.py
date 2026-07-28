@@ -743,6 +743,19 @@ def repo_dossier_workflow_definition_get(**kwargs: Any) -> dict[str, Any]:
                 "Missing required parameter: workflow_id",
                 {"missing": ["workflow_id"]},
             )
+        from ..workflows.workflow_listing_service import (
+            filter_workflow_ids_for_current_actor,
+        )
+
+        visible_workflow_ids = set(
+            filter_workflow_ids_for_current_actor([workflow_id])
+        )
+        if workflow_id not in visible_workflow_ids:
+            raise RepoDossierError(
+                "workflow_not_found",
+                "Workflow definition was not found in the authoritative registry.",
+                {"workflow_id": workflow_id},
+            )
         registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
         registration = registry.get_registration(workflow_id)
         if registration is None:

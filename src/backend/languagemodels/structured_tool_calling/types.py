@@ -49,6 +49,20 @@ class StructuredToolProtocolError(StructuredToolTransportError):
     failure_kind = "structured_tool_protocol_error"
 
 
+class StructuredToolContextLimitError(StructuredToolTransportError):
+    """Raised when the provider rejects the exact model-visible context size.
+
+    Retrying the identical request is deliberately not marked retryable.  A
+    controller may recover only after it has produced materially different,
+    smaller context and can demonstrate that change independently.
+    """
+
+    failure_kind = "structured_tool_context_limit_exceeded"
+    retryable = False
+    retryable_after_context_change = True
+    requires_material_context_change = True
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     """Definition of a tool available to the LLM.

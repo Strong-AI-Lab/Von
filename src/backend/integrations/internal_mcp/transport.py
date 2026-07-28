@@ -10,8 +10,10 @@ Deadlines have two deliberately separate meanings:
 
 * the advisory budget is telemetry only and never changes a successful result;
 * the hard deadline is terminal for the current turn and returns a typed MCP
-  timeout payload.  A handler that later completes is diagnostics-only and its
-  payload is discarded rather than allowed to rewrite the turn outcome.
+  timeout payload.  A handler that later completes cannot rewrite that outcome.
+  Reads and calls without an observer discard the late payload; an explicitly
+  observed handler-started write may emit one bounded out-of-band completion
+  observation.
 
 The pool and its queue are both bounded.  Python cannot forcibly stop an
 arbitrary running thread, so handlers may also use the cooperative cancellation
@@ -22,6 +24,8 @@ queued calls.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import queue
@@ -31,7 +35,8 @@ import uuid
 from collections import deque
 from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +46,24 @@ _DEFAULT_WRITE_ADVISORY_TIMEOUT_SEC = 20.0
 _DEFAULT_WRITE_HARD_TIMEOUT_SEC = 20.0
 _DEFAULT_HANDLER_WORKER_COUNT = 8
 _DEFAULT_HANDLER_QUEUE_CAPACITY = 32
+# A task admitted with a minimum equal to its hard timeout necessarily loses a
+# few microseconds between the submission and worker locks.  This is the only
+# scheduling tolerance applied at handler start; materially queued work must
+# still retain its configured minimum.
+_EFFECT_ADMISSION_START_TOLERANCE_SEC = 0.005
 _LATE_COMPLETION_HISTORY_LIMIT = 50
+_LATE_COMPLETION_MAX_PAYLOAD_CHARS = 32_000
+_LATE_COMPLETION_MAX_RECEIPT_FIELD_CHARS = 4_000
+_LATE_COMPLETION_RECEIPT_FIELDS = (
+    "success",
+    "status",
+    "effect_status",
+    "changed",
+    "error",
+    "error_code",
+    "mutation_outcome",
+    "partial_failures",
+)
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -58,6 +80,58 @@ def _positive_int_env(name: str, default: int) -> int:
     except (TypeError, ValueError):
         value = int(default)
     return value if value > 0 else int(default)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _bounded_late_completion_value(value: Any) -> tuple[Any, bool]:
+    """Return a small JSON-compatible handler-result projection."""
+
+    try:
+        serialised = json.dumps(
+            value,
+            default=str,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except Exception as exc:
+        return {
+            "_truncated": True,
+            "_type": type(value).__name__,
+            "_serialisation_error": type(exc).__name__,
+        }, True
+    if len(serialised) <= _LATE_COMPLETION_MAX_PAYLOAD_CHARS:
+        return json.loads(serialised), False
+
+    projection: dict[str, Any] = {
+        "_truncated": True,
+        "_original_char_count": len(serialised),
+        "_sha256": hashlib.sha256(serialised.encode("utf-8")).hexdigest(),
+    }
+    if isinstance(value, Mapping):
+        for key in _LATE_COMPLETION_RECEIPT_FIELDS:
+            if key not in value:
+                continue
+            try:
+                field_text = json.dumps(
+                    value.get(key),
+                    default=str,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except Exception:
+                continue
+            if len(field_text) > _LATE_COMPLETION_MAX_RECEIPT_FIELD_CHARS:
+                projection[key] = (
+                    field_text[:_LATE_COMPLETION_MAX_RECEIPT_FIELD_CHARS] + "..."
+                )
+            else:
+                projection[key] = json.loads(field_text)
+    return projection, True
 
 
 @dataclass(frozen=True)
@@ -127,6 +201,9 @@ class TransportResult:
     handler_elapsed_ms: float | None = None
     transport_overhead_ms: float | None = None
     timeout_phase: str | None = None
+    late_result_policy: str = "discard_from_turn"
+    configured_hard_timeout_sec: float | None = None
+    minimum_execution_window_sec: float | None = None
 
     @property
     def timed_out(self) -> bool:
@@ -148,8 +225,13 @@ class TransportResult:
             "handler_elapsed_ms": self.handler_elapsed_ms,
             "transport_overhead_ms": self.transport_overhead_ms,
             "timeout_phase": self.timeout_phase,
-            "late_result_policy": "discard_from_turn",
+            "late_result_policy": self.late_result_policy,
+            "configured_hard_timeout_sec": self.configured_hard_timeout_sec,
+            "minimum_execution_window_sec": self.minimum_execution_window_sec,
         }
+
+
+LateCompletionObserver = Callable[[Dict[str, Any]], None]
 
 
 @dataclass
@@ -162,15 +244,22 @@ class _HandlerTask:
     deadline_monotonic: float
     submitted_at: float
     on_late_completion: Callable[["_HandlerTask"], None]
+    category: str = "read"
+    minimum_execution_window_sec: float | None = None
+    late_completion_observer: LateCompletionObserver | None = None
     cancellation_event: threading.Event = field(default_factory=threading.Event)
     done_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
     started_at: float | None = None
     completed_at: float | None = None
+    completed_monotonic: float | None = None
     result: Any = None
     exception: BaseException | None = None
     terminal_returned: bool = False
     cancelled_before_start: bool = False
+    admission_denied_before_start: bool = False
+    admission_remaining_window_sec: float | None = None
+    late_completion_recorded: bool = False
 
     def _invoke(self) -> Any:
         scope = InternalMCPExecutionScope(
@@ -190,8 +279,28 @@ class _HandlerTask:
             if self.cancellation_event.is_set():
                 self.cancelled_before_start = True
                 self.completed_at = time.perf_counter()
+                self.completed_monotonic = time.monotonic()
                 self.done_event.set()
                 return
+            admission_checked_monotonic = time.monotonic()
+            if self.minimum_execution_window_sec is not None:
+                remaining_window_sec = max(
+                    0.0,
+                    self.deadline_monotonic - admission_checked_monotonic,
+                )
+                self.admission_remaining_window_sec = remaining_window_sec
+                if (
+                    remaining_window_sec
+                    + _EFFECT_ADMISSION_START_TOLERANCE_SEC
+                    < self.minimum_execution_window_sec
+                ):
+                    self.admission_denied_before_start = True
+                    # No handler starts, so no late receipt can exist.
+                    self.late_completion_observer = None
+                    self.completed_at = time.perf_counter()
+                    self.completed_monotonic = admission_checked_monotonic
+                    self.done_event.set()
+                    return
             self.started_at = time.perf_counter()
 
         try:
@@ -203,11 +312,17 @@ class _HandlerTask:
             exception = None
 
         completed_at = time.perf_counter()
+        completed_monotonic = time.monotonic()
         with self.lock:
             self.result = result
             self.exception = exception
             self.completed_at = completed_at
-            was_late = self.terminal_returned
+            self.completed_monotonic = completed_monotonic
+            was_late = bool(
+                self.terminal_returned
+                or completed_monotonic > self.deadline_monotonic
+            )
+            # Wake the caller before any potentially blocking durable observer.
             self.done_event.set()
 
         if was_late:
@@ -412,11 +527,68 @@ class InternalMCPTransport:
         return queue_duration_ms, handler_duration_ms, handler_elapsed_ms
 
     def _record_late_completion(self, task: _HandlerTask) -> None:
+        with task.lock:
+            if task.late_completion_recorded:
+                return
+            task.late_completion_recorded = True
         terminal_at = task.completed_at or time.perf_counter()
         queue_ms, handler_ms, _ = self._timing_snapshot(
             task,
             terminal_at=terminal_at,
         )
+        is_observable_write = (
+            str(task.category or "").strip().lower() == "write"
+            and task.late_completion_observer is not None
+        )
+        observer_notified = False
+        observer_error_type: str | None = None
+        if is_observable_write:
+            bounded_payload = None
+            payload_truncated = False
+            error_text = None
+            if task.exception is None:
+                bounded_payload, payload_truncated = (
+                    _bounded_late_completion_value(task.result)
+                )
+            else:
+                bounded_error, payload_truncated = (
+                    _bounded_late_completion_value(str(task.exception))
+                )
+                error_text = str(bounded_error)
+            observation = {
+                "schema_version": "internal_mcp_late_completion.v1",
+                "execution_id": task.execution_id,
+                "method_name": task.method_name,
+                "category": "write",
+                "outcome": (
+                    "late_error" if task.exception is not None else "late_success"
+                ),
+                "observed_at_utc": _utc_now_iso(),
+                "queue_duration_ms": queue_ms,
+                "handler_duration_ms": handler_ms,
+                "payload": bounded_payload,
+                "payload_truncated": payload_truncated,
+                "error_type": (
+                    type(task.exception).__name__
+                    if task.exception is not None
+                    else None
+                ),
+                "error": error_text,
+                "output_schema_validation": "not_checked",
+                "output_schema_valid": None,
+                "output_schema_error": None,
+            }
+            try:
+                task.late_completion_observer(observation)
+                observer_notified = True
+            except BaseException as exc:
+                observer_error_type = type(exc).__name__
+                logger.exception(
+                    "[mcp_transport] late-completion observer failed for %s "
+                    "(execution_id=%s)",
+                    task.method_name,
+                    task.execution_id,
+                )
         with self._diagnostics_lock:
             self._late_completion_count += 1
             self._late_completions.append(
@@ -428,11 +600,15 @@ class InternalMCPTransport:
                     ),
                     "queue_duration_ms": queue_ms,
                     "handler_duration_ms": handler_ms,
-                    "payload_discarded": True,
+                    "payload_discarded": not observer_notified,
+                    "observer_notified": observer_notified,
+                    "observer_error_type": observer_error_type,
                 }
             )
         logger.warning(
-            "[mcp_transport] discarded late %s for %s (execution_id=%s, handler=%.2fms)",
+            "[mcp_transport] %s late %s for %s "
+            "(execution_id=%s, handler=%.2fms)",
+            "observed" if observer_notified else "discarded",
             "error" if task.exception is not None else "result",
             task.method_name,
             task.execution_id,
@@ -450,8 +626,10 @@ class InternalMCPTransport:
         timeout_phase: str,
         queue_duration_ms: float,
         handler_elapsed_ms: float | None,
+        late_result_policy: str = "discard_from_turn",
     ) -> Dict[str, Any]:
         is_write = str(category or "").strip().lower() == "write"
+        outcome_unknown = is_write and timeout_phase == "handler"
         payload: Dict[str, Any] = {
             "success": False,
             "status": "timed_out",
@@ -460,10 +638,12 @@ class InternalMCPTransport:
                 f"{timeout_sec:.1f}s hard deadline."
             ),
             "error_code": (
-                "tool_timeout_outcome_unknown" if is_write else "tool_timeout"
+                "tool_timeout_outcome_unknown"
+                if outcome_unknown
+                else "tool_timeout"
             ),
             "error_type": "deadline_exceeded",
-            "retryable": not is_write,
+            "retryable": not outcome_unknown,
             "timeout_seconds": timeout_sec,
             "advisory_timeout_seconds": advisory_timeout_sec,
             "timeout_phase": timeout_phase,
@@ -473,14 +653,16 @@ class InternalMCPTransport:
             "cancellation_requested": True,
             "handler_isolation": "bounded_worker_pool",
             "outcome_finality": "terminal_for_turn",
-            "late_result_policy": "discard_from_turn",
+            "late_result_policy": late_result_policy,
         }
-        if is_write:
+        if outcome_unknown:
             payload["mutation_outcome"] = "unknown"
             payload["recovery_affordances"] = [
                 {"action_type": "inspect_operation_state_before_retry"}
             ]
         else:
+            if is_write:
+                payload["mutation_outcome"] = "not_started"
             payload["recovery_affordances"] = [
                 {"action_type": "bounded_retry"},
                 {"action_type": "choose_alternate_represented_path"},
@@ -498,27 +680,75 @@ class InternalMCPTransport:
         advisory_timeout_sec: float,
     ) -> Dict[str, Any]:
         is_write = str(category or "").strip().lower() == "write"
-        return {
+        payload: Dict[str, Any] = {
             "success": False,
             "status": "failed",
             "error": "The bounded internal MCP handler pool is saturated.",
             "error_code": "internal_mcp_handler_pool_saturated",
             "error_type": "capacity_exhausted",
-            "retryable": not is_write,
+            "retryable": True,
             "execution_id": execution_id,
             "timeout_seconds": timeout_sec,
             "advisory_timeout_seconds": advisory_timeout_sec,
             "handler_isolation": "bounded_worker_pool",
             "outcome_finality": "terminal_for_turn",
-            "recovery_affordances": (
-                [{"action_type": "inspect_operation_state_before_retry"}]
-                if is_write
-                else [
-                    {"action_type": "bounded_retry"},
-                    {"action_type": "choose_alternate_represented_path"},
-                ]
-            ),
+            "recovery_affordances": [
+                {"action_type": "bounded_retry"},
+                {"action_type": "choose_alternate_represented_path"},
+            ],
         }
+        if is_write:
+            payload["mutation_outcome"] = "not_started"
+        return payload
+
+    @staticmethod
+    def _admission_denied_payload(
+        *,
+        method_name: str,
+        execution_id: str,
+        category: str,
+        configured_hard_timeout_sec: float,
+        minimum_window_sec: float,
+        effective_window_sec: float,
+        remaining_window_sec: float,
+        timeout_phase: str,
+        queue_duration_ms: float,
+    ) -> Dict[str, Any]:
+        is_write = str(category or "").strip().lower() == "write"
+        payload: Dict[str, Any] = {
+            "success": False,
+            "status": "not_started",
+            "error": (
+                f"{method_name!r} was not started because the caller's "
+                "remaining window is shorter than its minimum admission "
+                "window."
+            ),
+            "error_code": (
+                "insufficient_effect_window"
+                if is_write
+                else "insufficient_execution_window"
+            ),
+            "error_type": "admission_denied",
+            "retryable": True,
+            "execution_id": execution_id,
+            "configured_hard_timeout_seconds": configured_hard_timeout_sec,
+            "minimum_admission_window_seconds": minimum_window_sec,
+            "effective_execution_window_seconds": effective_window_sec,
+            "remaining_execution_window_seconds": remaining_window_sec,
+            "timeout_phase": timeout_phase,
+            "queue_duration_ms": queue_duration_ms,
+            "outcome_finality": "terminal_for_turn",
+            "recovery_affordances": [
+                {
+                    "action_type": (
+                        "return_bounded_failure_or_retry_in_new_turn"
+                    )
+                }
+            ],
+        }
+        if is_write:
+            payload["mutation_outcome"] = "not_started"
+        return payload
 
     def execute(
         self,
@@ -529,16 +759,24 @@ class InternalMCPTransport:
         timeout_sec: float | None,
         category: str = "read",
         advisory_timeout_sec: float | None = None,
+        deadline_monotonic: float | None = None,
+        minimum_execution_window_sec: float | None = None,
         log_tag: str = "[mcp_gateway]",
+        late_completion_observer: LateCompletionObserver | None = None,
     ) -> TransportResult:
         """Execute a handler within a bounded hard deadline.
 
         The returned result is immutable for the current turn.  If the handler
-        ignores cooperative cancellation and completes late, only bounded
-        aggregate diagnostics are updated; the late payload is never surfaced.
+        ignores cooperative cancellation and completes late, the terminal
+        result remains unchanged.  Reads and calls without an observer discard
+        the late payload.  A dispatched write with an observer emits exactly
+        one bounded observation out of band after the handler starts.  A write
+        cancelled while still queued reports ``not_started`` and cannot promise
+        an observation.  A caller may provide an absolute monotonic deadline to
+        shorten, but never extend, the method's configured hard timeout.
         """
 
-        hard_timeout_sec = float(
+        configured_hard_timeout_sec = float(
             timeout_sec
             if timeout_sec is not None and float(timeout_sec) > 0.0
             else (
@@ -547,27 +785,120 @@ class InternalMCPTransport:
                 else self._read_timeout_sec
             )
         )
+        minimum_window_sec: float | None = None
+        if minimum_execution_window_sec is not None:
+            minimum_window_sec = float(minimum_execution_window_sec)
+            if minimum_window_sec <= 0.0:
+                raise ValueError("minimum_execution_window_sec must be positive")
+            if minimum_window_sec > configured_hard_timeout_sec:
+                raise ValueError(
+                    "minimum_execution_window_sec cannot exceed the configured "
+                    "hard timeout"
+                )
+        submitted_at = time.perf_counter()
+        submitted_monotonic = time.monotonic()
+        hard_timeout_sec = configured_hard_timeout_sec
+        if deadline_monotonic is not None:
+            hard_timeout_sec = min(
+                configured_hard_timeout_sec,
+                max(0.0, float(deadline_monotonic) - submitted_monotonic),
+            )
         advisory_sec = float(
             advisory_timeout_sec
             if advisory_timeout_sec is not None and advisory_timeout_sec > 0.0
             else self.advisory_timeout_sec(
                 category,
-                hard_timeout_sec=hard_timeout_sec,
+                hard_timeout_sec=configured_hard_timeout_sec,
             )
         )
         advisory_sec = min(advisory_sec, hard_timeout_sec)
-        submitted_at = time.perf_counter()
         execution_id = f"mcp_{uuid.uuid4().hex}"
-        deadline_monotonic = submitted_at + hard_timeout_sec
+        handler_deadline_monotonic = submitted_monotonic + hard_timeout_sec
+        observe_late_write = (
+            str(category or "").strip().lower() == "write"
+            and late_completion_observer is not None
+        )
+        dispatched_late_result_policy = (
+            "observe_out_of_band"
+            if observe_late_write
+            else "discard_from_turn"
+        )
+
+        if (
+            minimum_window_sec is not None
+            and hard_timeout_sec < minimum_window_sec
+        ):
+            payload = self._admission_denied_payload(
+                method_name=method_name,
+                execution_id=execution_id,
+                category=category,
+                configured_hard_timeout_sec=configured_hard_timeout_sec,
+                minimum_window_sec=minimum_window_sec,
+                effective_window_sec=hard_timeout_sec,
+                remaining_window_sec=hard_timeout_sec,
+                timeout_phase="pre_dispatch",
+                queue_duration_ms=0.0,
+            )
+            return TransportResult(
+                payload=payload,
+                duration_ms=max(0.0, (time.perf_counter() - submitted_at) * 1000.0),
+                execution_id=execution_id,
+                outcome="not_started",
+                timeout_sec=hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                queue_duration_ms=0.0,
+                handler_duration_ms=None,
+                handler_elapsed_ms=None,
+                transport_overhead_ms=0.0,
+                timeout_phase="pre_dispatch",
+                configured_hard_timeout_sec=configured_hard_timeout_sec,
+                minimum_execution_window_sec=minimum_window_sec,
+            )
+
+        if hard_timeout_sec <= 0.0:
+            with self._diagnostics_lock:
+                self._timeout_count += 1
+            timeout_payload = self._timeout_payload(
+                method_name=method_name,
+                execution_id=execution_id,
+                category=category,
+                timeout_sec=hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                timeout_phase="pre_dispatch",
+                queue_duration_ms=0.0,
+                handler_elapsed_ms=None,
+            )
+            return TransportResult(
+                payload=timeout_payload,
+                duration_ms=max(0.0, (time.perf_counter() - submitted_at) * 1000.0),
+                execution_id=execution_id,
+                outcome="timed_out",
+                timeout_sec=hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                advisory_budget_exceeded=True,
+                queue_duration_ms=0.0,
+                handler_duration_ms=None,
+                handler_elapsed_ms=None,
+                transport_overhead_ms=0.0,
+                timeout_phase="pre_dispatch",
+                configured_hard_timeout_sec=configured_hard_timeout_sec,
+                minimum_execution_window_sec=minimum_window_sec,
+            )
+
         task = _HandlerTask(
             execution_id=execution_id,
             method_name=method_name,
             context=copy_context(),
             handler=handler,
             payload=dict(payload),
-            deadline_monotonic=deadline_monotonic,
+            deadline_monotonic=handler_deadline_monotonic,
             submitted_at=submitted_at,
             on_late_completion=self._record_late_completion,
+            category=category,
+            minimum_execution_window_sec=minimum_window_sec,
+            late_completion_observer=(
+                late_completion_observer if observe_late_write else None
+            ),
         )
         logger.info(
             "%s invoking %s (advisory=%.1fs, hard_deadline=%.1fs, execution_id=%s)",
@@ -601,20 +932,38 @@ class InternalMCPTransport:
                 handler_elapsed_ms=None,
                 transport_overhead_ms=0.0,
                 timeout_phase="queue",
+                configured_hard_timeout_sec=configured_hard_timeout_sec,
+                minimum_execution_window_sec=minimum_window_sec,
             )
 
         completed = task.done_event.wait(timeout=hard_timeout_sec)
         terminal_at = time.perf_counter()
         with task.lock:
-            if completed or task.done_event.is_set():
+            completed_within_deadline = bool(
+                (completed or task.done_event.is_set())
+                and task.completed_monotonic is not None
+                and task.completed_monotonic <= handler_deadline_monotonic
+            )
+            if completed_within_deadline:
                 task_completed = True
             else:
                 task.terminal_returned = True
                 task.cancellation_event.set()
+                if task.started_at is None:
+                    # A queued task will observe cancellation before invoking
+                    # its handler.  Remove the observer while holding the task
+                    # lock so no future worker path can imply otherwise.
+                    task.late_completion_observer = None
                 task_completed = False
             result = task.result
             exception = task.exception
             started_at = task.started_at
+            admission_denied_before_start = (
+                task.admission_denied_before_start
+            )
+            admission_remaining_window_sec = (
+                task.admission_remaining_window_sec
+            )
 
         queue_ms, handler_ms, handler_elapsed_ms = self._timing_snapshot(
             task,
@@ -622,10 +971,60 @@ class InternalMCPTransport:
         )
         duration_ms = max(0.0, (terminal_at - submitted_at) * 1000.0)
 
+        if task_completed and admission_denied_before_start:
+            remaining_window_sec = max(
+                0.0,
+                float(admission_remaining_window_sec or 0.0),
+            )
+            admission_payload = self._admission_denied_payload(
+                method_name=method_name,
+                execution_id=execution_id,
+                category=category,
+                configured_hard_timeout_sec=configured_hard_timeout_sec,
+                minimum_window_sec=float(minimum_window_sec or 0.0),
+                effective_window_sec=hard_timeout_sec,
+                remaining_window_sec=remaining_window_sec,
+                timeout_phase="queue",
+                queue_duration_ms=queue_ms,
+            )
+            advisory_exceeded = duration_ms > advisory_sec * 1000.0
+            logger.info(
+                "%s denied queued admission for %s after %.2fms "
+                "(remaining=%.3fs, minimum=%.3fs, execution_id=%s)",
+                log_tag,
+                method_name,
+                duration_ms,
+                remaining_window_sec,
+                minimum_window_sec,
+                execution_id,
+            )
+            return TransportResult(
+                payload=admission_payload,
+                duration_ms=duration_ms,
+                execution_id=execution_id,
+                outcome="not_started",
+                timeout_sec=hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                advisory_budget_exceeded=advisory_exceeded,
+                queue_duration_ms=queue_ms,
+                handler_duration_ms=None,
+                handler_elapsed_ms=None,
+                transport_overhead_ms=max(0.0, duration_ms - queue_ms),
+                timeout_phase="queue",
+                late_result_policy="discard_from_turn",
+                configured_hard_timeout_sec=configured_hard_timeout_sec,
+                minimum_execution_window_sec=minimum_window_sec,
+            )
+
         if not task_completed:
             with self._diagnostics_lock:
                 self._timeout_count += 1
             timeout_phase = "handler" if started_at is not None else "queue"
+            late_result_policy = (
+                dispatched_late_result_policy
+                if timeout_phase == "handler"
+                else "discard_from_turn"
+            )
             transport_overhead_ms = max(
                 0.0,
                 duration_ms - queue_ms - (handler_elapsed_ms or 0.0),
@@ -650,6 +1049,7 @@ class InternalMCPTransport:
                 timeout_phase=timeout_phase,
                 queue_duration_ms=queue_ms,
                 handler_elapsed_ms=handler_elapsed_ms,
+                late_result_policy=late_result_policy,
             )
             return TransportResult(
                 payload=timeout_payload,
@@ -664,6 +1064,9 @@ class InternalMCPTransport:
                 handler_elapsed_ms=handler_elapsed_ms,
                 transport_overhead_ms=transport_overhead_ms,
                 timeout_phase=timeout_phase,
+                late_result_policy=late_result_policy,
+                configured_hard_timeout_sec=configured_hard_timeout_sec,
+                minimum_execution_window_sec=minimum_window_sec,
             )
 
         if exception is not None:
@@ -695,6 +1098,8 @@ class InternalMCPTransport:
             handler_duration_ms=handler_ms,
             handler_elapsed_ms=handler_ms,
             transport_overhead_ms=transport_overhead_ms,
+            configured_hard_timeout_sec=configured_hard_timeout_sec,
+            minimum_execution_window_sec=minimum_window_sec,
         )
 
     def get_diagnostics(self) -> Dict[str, Any]:

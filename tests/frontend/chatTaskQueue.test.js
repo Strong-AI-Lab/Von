@@ -715,6 +715,7 @@ describe('chat task queue', () => {
         expect(labels).toEqual(['Running • Background', 'Next up • Current']);
         const runningItem = document.querySelector('.chat-task-queue-item-running');
         expect(runningItem?.querySelector('.chat-task-queue-delete')).toBeNull();
+        expect(runningItem?.querySelector('.chat-task-queue-dismiss')).toBeNull();
         expect(runningItem?.querySelector('.chat-task-queue-restart')).toBeNull();
     }, 15000);
 
@@ -759,9 +760,138 @@ describe('chat task queue', () => {
             'The final response did not return from Von.'
         );
         expect(document.querySelector('.chat-task-queue-delete')).toBeNull();
+        expect(document.querySelector('.chat-task-queue-dismiss')?.textContent).toBe('Dismiss');
         expect(document.querySelector('.chat-task-queue-restart')).toBeNull();
         expect(fetchCalls.some((call) => String(call.url).startsWith('/von/generate'))).toBe(false);
         expect(fetchCalls.some((call) => String(call.url).includes('/claim'))).toBe(false);
+    }, 15000);
+
+    test('keeps a failed row visible until dismissal succeeds without executing it', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        const fetchCalls = [];
+        let resolveDismiss = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            fetchCalls.push({ url, options });
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [],
+                        recent_failed_items: [{
+                            queue_id: 'queue-failed',
+                            prompt_raw: 'Expired task',
+                            status: 'failed',
+                            session_id: 'session-1',
+                            session_name: 'Current',
+                            last_error: 'Prompt queue record expired after being in progress for more than 24 hours.'
+                        }]
+                    })
+                });
+            }
+            if (
+                typeof url === 'string'
+                && url === '/von/api/chat_prompt_queue/queue-failed'
+                && options.method === 'DELETE'
+            ) {
+                return new Promise((resolve) => {
+                    resolveDismiss = () => resolve({
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            item: {
+                                queue_id: 'queue-failed',
+                                status: 'cancelled',
+                                last_error: 'Prompt queue record expired after being in progress for more than 24 hours.'
+                            }
+                        })
+                    });
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        const dismissButton = document.querySelector('.chat-task-queue-dismiss');
+        expect(dismissButton).toBeTruthy();
+
+        dismissButton.click();
+        await flushMicrotasks();
+
+        expect(resolveDismiss).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-item-failed')).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-dismiss')?.disabled).toBe(true);
+
+        resolveDismiss();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(document.querySelector('.chat-task-queue-item-failed')).toBeNull();
+        expect(fetchCalls.filter((call) => call.options.method === 'DELETE')).toHaveLength(1);
+        expect(fetchCalls.some((call) => String(call.url).startsWith('/von/generate'))).toBe(false);
+        expect(fetchCalls.some((call) => String(call.url).includes('/claim'))).toBe(false);
+        expect(fetchCalls.some((call) => String(call.url).includes('/requeue'))).toBe(false);
+        expect(fetchCalls.some((call) => call.options.method === 'PATCH')).toBe(false);
+        expect(fetchCalls.some((call) => call.options.method === 'POST')).toBe(false);
+    }, 15000);
+
+    test('retains a failed row with a useful warning when dismissal fails', async () => {
+        const {
+            __testOnly_refreshChatPromptQueueFromServer,
+        } = require(chatTabModulePath);
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url === '/von/api/chat_prompt_queue') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        items: [],
+                        recent_failed_items: [{
+                            queue_id: 'queue-failed',
+                            prompt_raw: 'Expired task',
+                            status: 'failed',
+                            session_id: 'session-1',
+                            session_name: 'Current',
+                            last_error: 'Prompt queue record expired after being in progress for more than 24 hours.'
+                        }]
+                    })
+                });
+            }
+            if (
+                typeof url === 'string'
+                && url === '/von/api/chat_prompt_queue/queue-failed'
+                && options.method === 'DELETE'
+            ) {
+                return Promise.resolve({
+                    ok: false,
+                    status: 503,
+                    json: async () => ({
+                        success: false,
+                        error: 'chat prompt queue storage is unavailable',
+                        error_code: 'backend_unavailable'
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        });
+
+        await __testOnly_refreshChatPromptQueueFromServer();
+        document.querySelector('.chat-task-queue-dismiss').click();
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(document.querySelector('.chat-task-queue-item-failed')).toBeTruthy();
+        expect(document.querySelector('.chat-task-queue-failure-message')?.textContent).toContain(
+            'expired after being in progress'
+        );
+        expect(document.querySelector('.chat-task-queue-sync-warning')?.textContent).toBe(
+            'Queue storage is temporarily unavailable.'
+        );
+        expect(document.querySelector('.chat-task-queue-dismiss')?.disabled).toBe(false);
     }, 15000);
 
     test('resubmits the focused failed persisted prompt through the normal send path', async () => {

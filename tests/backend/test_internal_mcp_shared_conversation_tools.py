@@ -43,6 +43,34 @@ def test_shared_conversation_methods_registered_in_catalogue():
     assert not missing, f"Missing shared conversation methods: {missing}"
 
 
+def test_shared_conversation_actor_fields_follow_bound_gateway_actor():
+    from src.backend.integrations.internal_mcp import catalogue as cat
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
+    )
+
+    with bind_internal_mcp_actor_context_source(
+        "preexisting_authenticated_or_workflow_context",
+        preexisting_actor_context=("#V#person", "#V#org"),
+    ):
+        user_id, org_id, agent_id, namespace = (
+            cat._resolve_shared_conversation_actor_context(
+                {
+                    "user_concept_id": "#V#spoof",
+                    "acting_user_concept_id": "#V#spoof",
+                    "organisation_concept_id": "#V#other_org",
+                    "namespace": "#V#spoof@other_org",
+                    "agent_concept_id": "#V#spoof_agent",
+                }
+            )
+        )
+
+    assert user_id == "#V#person"
+    assert org_id == "#V#org"
+    assert namespace == "#V#person@org"
+    assert agent_id is None
+
+
 def test_shared_conversation_invite_lifecycle_gateway_and_schema(monkeypatch):
     gateway = _build_gateway()
     bootstrap_calls: list[dict] = []
@@ -189,6 +217,10 @@ def test_shared_conversation_join_gateway_success_and_permission_error_schema(
     monkeypatch.setattr(
         "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
         _fake_resolve_event_actor_context,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.coding_agent_identity_bootstrap_service.ensure_coding_agent_identity_concepts",
+        lambda **_kwargs: {"cached": False, "errors": []},
     )
     monkeypatch.setattr(
         "src.backend.services.organisation_membership_service.get_user_memberships",

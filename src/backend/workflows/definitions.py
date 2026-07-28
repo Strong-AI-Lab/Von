@@ -1,8 +1,9 @@
-"""Canonical workflow identity constants for conversation-turn orchestration.
+"""Workflow identity constants for explicit chat and durable capabilities.
 
 The executable definitions for these workflows are Vontology-authored and are
-loaded through the workflow registry's authoritative loader. Python no longer
-defines or registers the workflow graphs for this family.
+loaded through the workflow registry's authoritative loader. Retired universal
+turn-controller identities remain as historical compatibility constants, but
+are not members of the active chat workflow family.
 """
 
 from __future__ import annotations
@@ -46,9 +47,5 @@ CONVERSATION_TURN_WORKFLOW_IDS: tuple[str, ...] = (
     GENERAL_MAIL_REVIEW_WORKFLOW_ID,
     GMAIL_MESSAGE_DETAIL_FETCH_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
-    TURN_COMPLETION_GATE_WORKFLOW_ID,
-    WORKFLOW_EXPERIENCE_CONTEXT_PRELUDE_WORKFLOW_ID,
     WORKFLOW_MODEL_SELECTION_WORKFLOW_ID,
-    TURN_PROMPT_CONTEXT_ADJUDICATION_WORKFLOW_ID,
-    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )

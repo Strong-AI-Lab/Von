@@ -102,3 +102,36 @@ def test_catalogue_resilient_extract_url_falls_back_to_search(monkeypatch):
     attempted_urls = [attempt["url"] for attempt in result["attempted"]]
     assert primary_url in attempted_urls
     assert fallback_url in attempted_urls
+
+
+def test_catalogue_resilient_extract_url_caps_public_external_fanout(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    extracted_urls: list[str] = []
+
+    def _failed_extract(*, url):
+        extracted_urls.append(url)
+        return {"success": False, "url": url, "content": ""}
+
+    def _many_search_results(**_kwargs):
+        return {
+            "success": True,
+            "results": [
+                {"url": f"https://example.test/{index}"}
+                for index in range(250)
+            ],
+        }
+
+    monkeypatch.setattr(catalogue, "_extract_url", _failed_extract)
+    monkeypatch.setattr(catalogue, "_search_web", _many_search_results)
+
+    result = catalogue._resilient_extract_url(
+        url="https://primary.example.test/profile",
+        max_fallback_results=250,
+        max_extracts=250,
+    )
+
+    assert result["success"] is False
+    assert len(extracted_urls) == 9

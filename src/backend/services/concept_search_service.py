@@ -421,6 +421,7 @@ def _search_text_relations(
     prefix: bool = False,
     include_description: bool = False,
     result_limit: Optional[int] = None,
+    allow_fallback_scan: bool = True,
 ) -> set[str]:
     """Search modern text_relations schema for matching concept IDs.
 
@@ -434,6 +435,9 @@ def _search_text_relations(
         prefix: If True, match query at start of text (prefix match)
         include_description: If True, search hasDescription predicate too
         result_limit: Caller result window used to bound intermediate candidates
+        allow_fallback_scan: If False, return after indexed text lookup misses
+            instead of scanning predicate-linked text values. Staged callers can
+            use this when their next broader stage subsumes the exact match.
 
     Returns:
         Set of concept_ids that have matching text relations
@@ -493,7 +497,7 @@ def _search_text_relations(
                 )
             )
 
-    if not matching_texts:
+    if not matching_texts and allow_fallback_scan:
         matching_texts = _scan_text_values_for_match(
             normalized_query,
             predicates,

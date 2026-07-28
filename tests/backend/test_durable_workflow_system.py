@@ -1784,8 +1784,8 @@ class TestWorkflowInstanceManager:
         assert finalised[0]["terminal_stage"] == "tool_execution"
         assert finalised[0]["termination_code"] == "tool_timeout"
 
-    def test_find_and_claim_prioritises_conversation_turn_instances(self) -> None:
-        """User-facing conversation turns should not sit behind maintenance backlog."""
+    def test_find_and_claim_prioritises_active_conversation_workflows(self) -> None:
+        """Active user work is prioritised without reviving the retired controller."""
         manager = WorkflowInstanceManager()
 
         stale_conversation_instance_id = manager.create_instance(
@@ -1809,7 +1809,7 @@ class TestWorkflowInstanceManager:
             source_event_type="episode.created",
         )
         conversation_instance_id = manager.create_instance(
-            "#V#conversation_turn_execution_workflow",
+            "#V#chat_assistant_workflow",
             user_id="user-1",
             org_id="org-1",
             namespace="user-1/org-1",
@@ -1820,13 +1820,16 @@ class TestWorkflowInstanceManager:
 
         assert claimed is not None
         assert claimed.instance_id == conversation_instance_id
-        assert claimed.workflow_id == "#V#conversation_turn_execution_workflow"
+        assert claimed.workflow_id == "#V#chat_assistant_workflow"
 
         second_claim = manager.find_and_claim_instance("worker-priority-test-2")
 
         assert second_claim is not None
         assert second_claim.instance_id == background_instance_id
         assert second_claim.workflow_id == "#V#episode_evaluation_workflow"
+        retired = manager.get_instance(stale_conversation_instance_id)
+        assert retired is not None
+        assert retired.status == WorkflowInstanceStatus.PENDING
 
     def test_find_and_claim_returns_none_when_empty(self) -> None:
         """find_and_claim_instance() should return None when no instances available."""

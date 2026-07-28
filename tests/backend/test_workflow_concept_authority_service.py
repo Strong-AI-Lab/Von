@@ -843,9 +843,6 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
     from src.backend.workflows.durable.parent_specificity_rumination_workflow import (
         PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
     )
-    from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
-        WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-    )
     from src.backend.workflows.durable.registry_factory import build_workflow_registry_read_only
     from src.backend.workflows.vontology_loader import build_workflow_process_graph
     from workflow_test_support import bootstrap_authoritative_reasoning_recovery_workflows
@@ -856,7 +853,6 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
     )
     assert PLANNING_WORKFLOW_ID not in errors
     assert PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID not in errors
-    assert WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID not in errors
 
     registry = build_workflow_registry_read_only()
     for registration in (
@@ -937,39 +933,6 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
             "condition": {"kind": "always"},
         },
     ]
-
-    workflow_gap_graph, workflow_gap_warnings = build_workflow_process_graph(
-        WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
-    )
-    assert workflow_gap_graph is not None
-    assert workflow_gap_warnings == []
-    assert _graph_step_control_flow_conditions(
-        graph=workflow_gap_graph,
-        workflow_id=WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-        state_id="analyse_gap",
-    ) == [
-        {
-            "to": authority_service._step_concept_id(
-                workflow_id=WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-                state_id="prepare_candidate",
-            ),
-            "reason": "candidate_needed",
-            "condition": {
-                "kind": "context_flag",
-                "key": "workflow_gap_should_create_candidate",
-                "expected": True,
-            },
-        },
-        {
-            "to": authority_service._step_concept_id(
-                workflow_id=WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-                state_id="complete",
-            ),
-            "reason": "no_candidate_needed",
-            "condition": {"kind": "always"},
-        },
-    ]
-
 
 def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contract(
     _reset_mock_workflow_graph_db,
@@ -1513,10 +1476,10 @@ def test_publish_workflow_definition_from_definition_rejects_transient_execution
                 state_id="start",
                 actions=(
                     WorkflowActionInvocation(
-                        action_id="workflow_gap.execute_candidate",
+                        action_id="candidate.execute",
                         inputs={
                             "default_request_text": "Recover this missing workflow.",
-                            "prompt_concept_id": "#V#workflow_gap_candidate_execution_prompt",
+                            "prompt_concept_id": "#V#candidate_execution_prompt",
                         },
                     ),
                 ),
@@ -1548,7 +1511,7 @@ def test_publish_workflow_definition_from_definition_rejects_transient_execution
     assert validation["transient_execution_input_issues"] == [
         {
             "state_id": "start",
-            "action_id": "workflow_gap.execute_candidate",
+            "action_id": "candidate.execute",
             "tool_param": "default_request_text",
             "reason_code": "transient_request_text_default_persisted",
         }

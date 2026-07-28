@@ -28,6 +28,7 @@ STATUS_CANCELLED = "cancelled"
 
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_IN_PROGRESS)
 TERMINAL_STATUSES = (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED)
+CANCELLABLE_STATUSES = ACTIVE_STATUSES + (STATUS_FAILED,)
 VALID_STATUSES = set(ACTIVE_STATUSES + TERMINAL_STATUSES)
 MAX_PROMPT_RAW_CHARS = 100_000
 MAX_SESSION_NAME_CHARS = 500
@@ -597,4 +598,51 @@ def finish_prompt_record(
 
 
 def cancel_prompt_record(*, scope: Mapping[str, Any], queue_id: str) -> dict[str, Any]:
-    return finish_prompt_record(scope=scope, queue_id=queue_id, status=STATUS_CANCELLED)
+    queue_id_clean = _coerce_scope_value(queue_id, field="queue_id")
+    now = _now()
+    canonical_scope = _scope_query(scope)
+
+    doc = _collection().find_one_and_update(
+        {
+            **_compatible_scope_query(scope),
+            "queue_id": queue_id_clean,
+            "status": {"$in": ACTIVE_STATUSES},
+        },
+        {
+            "$set": {
+                **canonical_scope,
+                "status": STATUS_CANCELLED,
+                "updated_at": now,
+                "completed_at": now,
+                "last_error": None,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        # Failed records keep their original completion time and diagnostic
+        # evidence when explicitly dismissed.
+        doc = _collection().find_one_and_update(
+            {
+                **_compatible_scope_query(scope),
+                "queue_id": queue_id_clean,
+                "status": STATUS_FAILED,
+            },
+            {
+                "$set": {
+                    **canonical_scope,
+                    "status": STATUS_CANCELLED,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+    record = serialise_queue_record(doc)
+    if record is None:
+        raise _transition_not_found_error(
+            scope=scope,
+            queue_id=queue_id_clean,
+            expected_statuses=CANCELLABLE_STATUSES,
+            fallback_message="cancellable prompt was not found",
+        )
+    return record

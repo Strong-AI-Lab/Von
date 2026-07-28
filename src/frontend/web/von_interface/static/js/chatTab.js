@@ -30635,6 +30635,38 @@ function ensureChatTaskQueuePanel() {
                 })();
                 return;
             }
+            const dismissButton = target.closest('.chat-task-queue-dismiss');
+            if (dismissButton) {
+                const queueId = String(dismissButton.getAttribute('data-queue-id') || '').trim();
+                if (!queueId) {
+                    return;
+                }
+                const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
+                if (!queued || queued.status !== CHAT_PROMPT_QUEUE_STATUS_FAILED) {
+                    return;
+                }
+                dismissButton.disabled = true;
+                void (async () => {
+                    try {
+                        await deletePersistedChatPromptQueueEntry(queued);
+                        queuedChatPrompts = queuedChatPrompts.filter((entry) => entry.id !== queued.id);
+                        if (selectedChatPromptQueueEntryId === queued.id) {
+                            selectedChatPromptQueueEntryId = null;
+                        }
+                        renderChatTaskQueuePanel();
+                        refreshChatSessionTabActivityIndicators();
+                        updateSendButtonForCurrentChatState();
+                    } catch (error) {
+                        queued.syncError = describeChatPromptQueueApiError(
+                            error,
+                            'Failed task could not be dismissed on the server.'
+                        );
+                        console.warn('[chatTab] Unable to dismiss failed prompt:', error);
+                        renderChatTaskQueuePanel();
+                    }
+                })();
+                return;
+            }
             const deleteButton = target.closest('.chat-task-queue-delete');
             if (!deleteButton) {
                 return;
@@ -30784,6 +30816,15 @@ function renderChatTaskQueuePanel() {
             deleteButton.setAttribute('data-queue-id', entry.id);
             deleteButton.setAttribute('aria-label', isInterrupted ? `Delete interrupted task ${index + 1}` : `Delete queued task ${index + 1}`);
             actions.appendChild(deleteButton);
+        }
+        if (isFailed) {
+            const dismissButton = document.createElement('button');
+            dismissButton.type = 'button';
+            dismissButton.className = 'btn-mini chat-task-queue-dismiss';
+            dismissButton.textContent = 'Dismiss';
+            dismissButton.setAttribute('data-queue-id', entry.id);
+            dismissButton.setAttribute('aria-label', `Dismiss failed task ${index + 1}`);
+            actions.appendChild(dismissButton);
         }
 
         item.appendChild(label);

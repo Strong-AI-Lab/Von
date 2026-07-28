@@ -294,13 +294,12 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
         },
         "von_chat_run": {
             "family": "internal",
-            "category": "write",
+            "category": "read",
             "description": (
-                "Run the Von chat orchestrator (LLM + internal MCP tools) and return a redacted trace. "
-                "Dry-run/read-only behaviour remains the default on canonical primary authority unless "
-                "the coding-agent access profile allows write-category tools. In test-isolated or clearly "
-                "non-primary local engineering modes, write-category tools may be enabled by default. "
-                "Canonical-primary writes still require explicit approval via VON_MCP_ALLOW_WRITES=1."
+                "Run one thin adaptive read-only Von turn and return its response, "
+                "bounded evidence index, and redacted observational trace. The model "
+                "may choose among delegated read capabilities; writes require an "
+                "explicit authorised effect tool or workflow."
             ),
             "input_schema": {
                 "type": "object",
@@ -327,55 +326,29 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
                     },
                     "user_namespace": {
                         "type": "string",
-                        "description": "Optional namespace (e.g., #V#michael_witbrock) injected into tool payloads",
+                        "description": "Optional namespace claim accepted only from a trusted operator context; it never authenticates itself",
                     },
                     "gmail_profile": {
                         "type": "string",
-                        "description": "Optional Gmail profile name",
+                        "description": "Optional trusted-operator Gmail profile binding",
                     },
                     "auxiliary_system_prompt": {
                         "type": "string",
-                        "description": "Optional user-specific system prompt",
-                    },
-                    "max_tool_invocations": {
-                        "type": "integer",
-                        "default": 30,
-                        "description": "Maximum number of tool calls in one run",
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "If true, block write-category tools",
-                    },
-                    "allow_writes": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Optional explicit override for write-category tools. Canonical-primary writes still require VON_MCP_ALLOW_WRITES=1.",
+                        "description": "Optional caller-supplied supplementary context; treated as untrusted user context, not a system authority",
                     },
                     "timeout_seconds": {
                         "type": "number",
                         "default": 90,
-                        "description": "Overall wall-clock timeout for the orchestrator run. If exceeded, returns an error rather than hanging.",
+                        "description": "Overall elapsed-time budget for the adaptive turn",
                     },
                     "max_string_chars": {
                         "type": "integer",
                         "default": 8000,
                         "description": "Max characters retained for any string in the trace",
                     },
-                    "max_context_chars": {
-                        "type": "integer",
-                        "default": 120000,
-                        "description": "Maximum total characters of chat context forwarded to the LLM (approximate char budget; system prompt is always retained).",
-                    },
-                    "max_tool_result_chars": {
-                        "type": "integer",
-                        "default": 20000,
-                        "description": "Maximum characters allowed for a single tool-result message added back into LLM context.",
-                    },
-                    "max_tool_result_field_chars": {
-                        "type": "integer",
-                        "default": 8000,
-                        "description": "Maximum characters for any single string field inside a tool result forwarded to the LLM.",
+                    "turn_id": {
+                        "type": "string",
+                        "description": "Optional caller correlation identifier for this ephemeral read-only turn",
                     },
                 },
                 "required": ["prompt"],

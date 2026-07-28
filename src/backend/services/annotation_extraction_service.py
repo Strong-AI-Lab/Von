@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import threading
 import time
 from typing import List, Dict, Any, Optional
 from ..services import concept_service
@@ -27,10 +28,13 @@ try:
 except Exception:  # pragma: no cover - safety import
     ConceptsRepository = None  # type: ignore
 
-# Dynamic phrase candidate cache (names aggregated from all concepts)
-_PHRASE_CACHE: Dict[str, Any] = {"phrases": [], "ts": 0.0}
+# Dynamic phrase candidate cache (names aggregated from concepts visible to one
+# actor scope).  A single process-global entry can otherwise retain names read
+# under one actor and expose them as matches to the next actor.
+_PHRASE_CACHE: Dict[str, Dict[str, Any]] = {}
 _PHRASE_CACHE_TTL = 300  # seconds
 _PHRASE_MAX = 5000  # safety cap
+_PHRASE_CACHE_MAX_SCOPES = 32
 
 # Cached LLM prompt instruction (sourced from special concept description)
 _LLM_PROMPT_CACHE: Dict[str, Any] = {"text": None, "ts": 0.0, "source_predicate": None}
@@ -46,22 +50,66 @@ _FALLBACK_NONJSON_METRIC: Dict[str, Any] = {
     "last_prompt_len": None,
     "last_response_len": None,
     "last_concept_id": None,  # prompt concept id used when building prompt
-    "last_preview": None,  # truncated prompt preview
-    "last_response_preview": None,  # truncated response preview
 }
 
-# Last LLM prompt/output used for span generation (for transparency in UI)
-_LAST_LLM_IO: Dict[str, Any] = {}
+# Last LLM prompt/output used for span generation, scoped to the authenticated
+# actor that caused the call. Anonymous or unbound calls are deliberately not
+# retained because a process-global transparency cache disclosed one actor's
+# prompt and output to the next.
+_LAST_LLM_IO_BY_ACTOR: Dict[str, Dict[str, Any]] = {}
+_LAST_LLM_IO_LOCK = threading.Lock()
+_LAST_LLM_IO_MAX_ACTORS = 32
+
+
+def _llm_io_actor_key() -> str | None:
+    from ..security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+
+    user_id = get_effective_user_concept_id()
+    if not isinstance(user_id, str) or not user_id.strip():
+        return None
+    org_id = get_effective_organisation_concept_id()
+    return f"user:{user_id.strip()}|org:{str(org_id or 'none').strip()}"
 
 
 def get_last_llm_io() -> Dict[str, Any]:
-    """Return shallow copy of last LLM IO (prompt/output) for annotation spans.
-    Empty dict if none recorded. Not cleared automatically so route can read after extraction.
-    """
+    """Return this authenticated actor's last annotation LLM prompt/output."""
+
+    actor_key = _llm_io_actor_key()
+    if actor_key is None:
+        return {}
     try:  # pragma: no cover - defensive simplicity
-        return dict(_LAST_LLM_IO) if _LAST_LLM_IO else {}
+        with _LAST_LLM_IO_LOCK:
+            entry = _LAST_LLM_IO_BY_ACTOR.get(actor_key)
+            return dict(entry) if entry else {}
     except Exception:
         return {}
+
+
+def _record_last_llm_io(*, prompt: str, output: Any) -> None:
+    actor_key = _llm_io_actor_key()
+    if actor_key is None:
+        return
+    entry = {
+        "prompt": prompt,
+        "output": output if isinstance(output, str) else str(output),
+        "ts": int(time.time() * 1000),
+    }
+    with _LAST_LLM_IO_LOCK:
+        if (
+            actor_key not in _LAST_LLM_IO_BY_ACTOR
+            and len(_LAST_LLM_IO_BY_ACTOR) >= _LAST_LLM_IO_MAX_ACTORS
+        ):
+            oldest_actor_key = min(
+                _LAST_LLM_IO_BY_ACTOR,
+                key=lambda key: int(
+                    _LAST_LLM_IO_BY_ACTOR[key].get("ts") or 0
+                ),
+            )
+            _LAST_LLM_IO_BY_ACTOR.pop(oldest_actor_key, None)
+        _LAST_LLM_IO_BY_ACTOR[actor_key] = entry
 
 
 def fallback_nonjson_metric_stats() -> Dict[str, Any]:
@@ -171,8 +219,38 @@ def prompt_concept_health_status() -> Dict[str, Any]:
 
 def invalidate_phrase_cache():
     """Invalidate the dynamic phrase cache (call after concept mutations)."""
-    _PHRASE_CACHE["phrases"] = []
-    _PHRASE_CACHE["ts"] = 0.0
+    _PHRASE_CACHE.clear()
+
+
+def _phrase_cache_scope_key() -> str:
+    from ..security.access_control import cache_scope_key
+
+    return cache_scope_key()
+
+
+def _phrase_cache_entry(*, now: float) -> Dict[str, Any]:
+    scope_key = _phrase_cache_scope_key()
+    stale_scope_keys = [
+        key
+        for key, entry in _PHRASE_CACHE.items()
+        if now - float(entry.get("ts") or 0.0) >= _PHRASE_CACHE_TTL
+    ]
+    for key in stale_scope_keys:
+        _PHRASE_CACHE.pop(key, None)
+
+    entry = _PHRASE_CACHE.get(scope_key)
+    if entry is not None:
+        return entry
+
+    while len(_PHRASE_CACHE) >= _PHRASE_CACHE_MAX_SCOPES:
+        oldest_scope_key = min(
+            _PHRASE_CACHE,
+            key=lambda key: float(_PHRASE_CACHE[key].get("ts") or 0.0),
+        )
+        _PHRASE_CACHE.pop(oldest_scope_key, None)
+    entry = {"phrases": [], "ts": 0.0}
+    _PHRASE_CACHE[scope_key] = entry
+    return entry
 
 
 def phrase_cache_stats() -> Dict[str, Any]:
@@ -181,8 +259,9 @@ def phrase_cache_stats() -> Dict[str, Any]:
     Provided for diagnostics endpoint consumption. Does not force rebuild.
     """
     now = time.time()
-    phrases = _PHRASE_CACHE.get("phrases") or []
-    ts = _PHRASE_CACHE.get("ts", 0.0)
+    entry = _PHRASE_CACHE.get(_phrase_cache_scope_key()) or {}
+    phrases = entry.get("phrases") or []
+    ts = entry.get("ts", 0.0)
     age = None
     if ts:
         try:
@@ -205,8 +284,12 @@ def get_phrase_candidates() -> List[str]:
     Falls back to an empty list if repository unavailable; caller should handle absence.
     """
     now = time.time()
-    if _PHRASE_CACHE["phrases"] and now - _PHRASE_CACHE["ts"] < _PHRASE_CACHE_TTL:
-        return _PHRASE_CACHE["phrases"]
+    cache_entry = _phrase_cache_entry(now=now)
+    if (
+        cache_entry["phrases"]
+        and now - cache_entry["ts"] < _PHRASE_CACHE_TTL
+    ):
+        return cache_entry["phrases"]
     phrases: List[str] = []
     seen = set()
     try:
@@ -246,8 +329,8 @@ def get_phrase_candidates() -> List[str]:
     except Exception as e:
         logger.debug(f"Phrase aggregation failed; using empty list: {e}")
         phrases = []
-    _PHRASE_CACHE["phrases"] = phrases
-    _PHRASE_CACHE["ts"] = now
+    cache_entry["phrases"] = phrases
+    cache_entry["ts"] = now
     return phrases
 
 
@@ -523,10 +606,7 @@ def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
         return []
     # Record the raw prompt & output for later retrieval (UI transparency)
     try:
-        _LAST_LLM_IO.clear()
-        _LAST_LLM_IO["prompt"] = prompt
-        _LAST_LLM_IO["output"] = raw if isinstance(raw, str) else str(raw)
-        _LAST_LLM_IO["ts"] = int(time.time() * 1000)
+        _record_last_llm_io(prompt=prompt, output=raw)
     except Exception:  # pragma: no cover - defensive
         pass
     json_text = raw.strip()
@@ -599,25 +679,16 @@ def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
                     _FALLBACK_NONJSON_METRIC["last_response_len"] = (
                         len(raw) if isinstance(raw, str) else None
                     )
-                    # Truncate previews for safety
-                    _FALLBACK_NONJSON_METRIC["last_preview"] = prompt[:500] + (
-                        "…" if len(prompt) > 500 else ""
-                    )
-                    if isinstance(raw, str):
-                        _FALLBACK_NONJSON_METRIC["last_response_preview"] = raw[
-                            :500
-                        ] + ("…" if len(raw) > 500 else "")
                 except Exception:
                     pass
                 try:
-                    # Log key context (lengths only; previews truncated) to avoid huge log lines.
+                    # Retain aggregate diagnostics without copying extracted text.
                     logger.info(
-                        "[tag_fallback] using numbered list extraction (no JSON) count=%s prompt_concept=%s prompt_len=%s response_len=%s first_span=%s",
+                        "[tag_fallback] using numbered list extraction (no JSON) count=%s prompt_concept=%s prompt_len=%s response_len=%s",
                         len(spans),
                         PROMPT_CONCEPT_ID,
                         len(prompt),
                         len(raw) if isinstance(raw, str) else None,
-                        spans[0]["text"] if spans else None,
                     )
                 except Exception:
                     pass

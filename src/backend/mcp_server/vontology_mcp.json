@@ -25,7 +25,7 @@
         },
         {
             "name": "add_relationship",
-            "description": "Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' \u2192 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
+            "description": "Add one concept-to-concept or concept-to-text relationship. Structural predicates use their existing aliases; a custom predicate uses its exact #V# concept ID. If that exact custom predicate is missing, predicate_if_missing={name, description?} can canonically create or reuse and verify it before this relationship attempt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -37,6 +37,19 @@
                     },
                     "target": {
                         "type": "string"
+                    },
+                    "predicate_if_missing": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -45,7 +58,7 @@
                     "target"
                 ],
                 "additionalProperties": true,
-                "description": "add_relationship input: source_id (str, concept ID like '#V#nikola_k._kasabov'), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'), target (str, target concept ID like '#V#professor' or text value for text predicates like 'Auckland University')"
+                "description": "add_relationship input: source_id (str), predicate (str, structural relationship name or exact #V# predicate concept ID), target (str). For a missing dynamic predicate only, predicate_if_missing may be {name: str, description?: str}; its name must canonically identify the exact requested predicate. The capability creates or reuses and verifies that predicate before attempting the edge."
             }
         },
         {
@@ -97,7 +110,7 @@
         },
         {
             "name": "build_paper_recommendations",
-            "description": "Rank represented scholarly-paper candidates against a represented user paper recommendation profile and return grounded rationale/provenance. This is the workflow-first ranking core, independent of later delivery surfaces.",
+            "description": "Rank represented scholarly-paper candidates against a represented user paper recommendation profile, materialise the resulting recommendation assertions, and return grounded rationale/provenance.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -766,7 +779,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts an array of {name, kind?, description?, notes?, external_identifiers?, identity_candidate_concept_ids?, identity_rejected_candidate_concept_ids?}. An external identity is one explicit opaque {scheme, canonical_value, role:'identity'} pair grounded by the caller; this tool does not infer or normalise domain-specific IDs from names. Preserve that same pair on repair/retry. Unverified actor-visible candidates may be explicitly confirmed through identity_candidate_concept_ids. If every returned legacy candidate was inspected and none matches, supply the exact set in identity_rejected_candidate_concept_ids. For deterministic stable identities, duplicate_resolution_mode='canonical_id_only' skips semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -826,7 +839,7 @@
                     "concepts"
                 ],
                 "additionalProperties": true,
-                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Scope defaults to authenticated user+organisation visibility when context is available. Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
+                "description": "create_concepts input: parent_id (str, semantic type concept_id; not an owner, organisation, user, or container individual), concepts (list of {name, kind?, description?, notes?, external_identifiers?, identity_candidate_concept_ids?, identity_rejected_candidate_concept_ids?}). external_identifiers accepts at most one explicit identity object, for example {scheme:'registry.example', canonical_value:'record-1234', role:'identity'}. The value must already be the canonical stable value established by grounded evidence; create_concepts does not infer or normalise domain-specific identifier syntax from names. Preserve the same explicit identity on every repair or retry rather than falling back to a title-derived create. A cited source is provenance, not necessarily the target entity's identity. Legacy textual references are returned only as unverified candidates. When grounded evidence establishes one candidate as the identified entity, repeat the call with its actor-visible concept ID in identity_candidate_concept_ids. When every returned legacy candidate has been inspected and none matches, repeat the exact returned set in identity_rejected_candidate_concept_ids; partial or stale sets do not bypass review. An exact identity may reuse a same-kind concept under another parent without silently changing its classifications. kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. For deterministic stable identities, set duplicate_resolution_mode='canonical_id_only' to skip semantic name resolution after an exact concept-id miss; omitting it preserves the default semantic fallback. Scope defaults to authenticated user+organisation visibility when context is available. Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
             }
         },
         {
@@ -982,7 +995,7 @@
         },
         {
             "name": "episode_critique_build_benchmark",
-            "description": "Report bounded actor/critic benchmark metrics, recurrence and remediation proxies, and sampled meta-audit cases with fresh evidence-bundle receipts.",
+            "description": "Report bounded actor/critic benchmark metrics, recurrence and remediation proxies, and sampled meta-audit cases with fresh evidence-bundle receipts. When run_id is supplied, the benchmark observation is persisted.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4620,7 +4633,7 @@
         },
         {
             "name": "search_web",
-            "description": "\u26a0\ufe0f USE FOR RECENT/CURRENT INFORMATION \u26a0\ufe0f Search the web for information published after your training cutoff. REQUIRED when user asks for: recent, latest, current, new, breaking, today's, this week's, 2024+, 2025+, 'what's new', 'recent advances', 'latest research', 'current developments'. Returns web pages with titles, URLs, content snippets, and relevance scores. Supports advanced search (search_depth='advanced'), domain filtering (include_domains/exclude_domains), AI-generated answers (include_answer=true), full page content (include_raw_content=true), and images (include_images=true).",
+            "description": "Search the web for current or otherwise externally grounded information. Returns pages with titles, URLs, content snippets, and relevance scores. Supports advanced search, domain filters, an optional provider-generated answer, raw page content, and image URLs. This is one available evidence source; choose it when it helps the request rather than treating recency wording as a compulsory route.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6233,7 +6246,7 @@
         },
         {
             "name": "von_chat_run",
-            "description": "Run the Von chat orchestrator (LLM + internal MCP tools) and return a redacted trace. Dry-run/read-only behaviour remains the default on canonical primary authority unless the coding-agent access profile allows write-category tools. In test-isolated or clearly non-primary local engineering modes, write-category tools may be enabled by default. Canonical-primary writes still require explicit approval via VON_MCP_ALLOW_WRITES=1.",
+            "description": "Run one thin adaptive read-only Von turn and return its response, bounded evidence index, and redacted observational trace. The model may choose among delegated read capabilities; writes require an explicit authorised effect tool or workflow.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6267,55 +6280,29 @@
                     },
                     "user_namespace": {
                         "type": "string",
-                        "description": "Optional namespace (e.g., #V#michael_witbrock) injected into tool payloads"
+                        "description": "Optional namespace claim accepted only from a trusted operator context; it never authenticates itself"
                     },
                     "gmail_profile": {
                         "type": "string",
-                        "description": "Optional Gmail profile name"
+                        "description": "Optional trusted-operator Gmail profile binding"
                     },
                     "auxiliary_system_prompt": {
                         "type": "string",
-                        "description": "Optional user-specific system prompt"
-                    },
-                    "max_tool_invocations": {
-                        "type": "integer",
-                        "default": 30,
-                        "description": "Maximum number of tool calls in one run"
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "If true, block write-category tools"
-                    },
-                    "allow_writes": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Optional explicit override for write-category tools. Canonical-primary writes still require VON_MCP_ALLOW_WRITES=1."
+                        "description": "Optional caller-supplied supplementary context; treated as untrusted user context, not a system authority"
                     },
                     "timeout_seconds": {
                         "type": "number",
                         "default": 90,
-                        "description": "Overall wall-clock timeout for the orchestrator run. If exceeded, returns an error rather than hanging."
+                        "description": "Overall elapsed-time budget for the adaptive turn"
                     },
                     "max_string_chars": {
                         "type": "integer",
                         "default": 8000,
                         "description": "Max characters retained for any string in the trace"
                     },
-                    "max_context_chars": {
-                        "type": "integer",
-                        "default": 120000,
-                        "description": "Maximum total characters of chat context forwarded to the LLM (approximate char budget; system prompt is always retained)."
-                    },
-                    "max_tool_result_chars": {
-                        "type": "integer",
-                        "default": 20000,
-                        "description": "Maximum characters allowed for a single tool-result message added back into LLM context."
-                    },
-                    "max_tool_result_field_chars": {
-                        "type": "integer",
-                        "default": 8000,
-                        "description": "Maximum characters for any single string field inside a tool result forwarded to the LLM."
+                    "turn_id": {
+                        "type": "string",
+                        "description": "Optional caller correlation identifier for this ephemeral read-only turn"
                     }
                 },
                 "required": [

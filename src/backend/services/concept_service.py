@@ -643,6 +643,7 @@ def create_concept(
         result: InsertOneResult = concepts_coll.insert_one(concept_doc)
         # Fetch the document to ensure all defaults/triggers (if any) are included
         created_concept = concepts_coll.find_one({"_id": result.inserted_id})
+        partial_failures: List[Dict[str, str]] = []
 
         # CRITICAL: Create name as text_relation immediately (modern approach)
         # This prevents migrate-on-read from triggering and creating duplicates
@@ -712,6 +713,13 @@ def create_concept(
 
             except Exception as name_err:
                 # Non-fatal: concept is created, relation write failed.
+                partial_failures.append(
+                    {
+                        "stage": "text_relations",
+                        "error": str(name_err),
+                        "error_class": type(name_err).__name__,
+                    }
+                )
                 logger.warning(
                     f"[create_concept] Failed to create text relations for {concept_identifier}: {name_err}"
                 )
@@ -723,6 +731,13 @@ def create_concept(
                     concept_doc.get("relationships") or {},
                 )
         except Exception as reconcile_err:
+            partial_failures.append(
+                {
+                    "stage": "relationship_reconciliation",
+                    "error": str(reconcile_err),
+                    "error_class": type(reconcile_err).__name__,
+                }
+            )
             logger.warning(
                 "create_concept: relationship reconciliation best-effort failure for %s: %s",
                 concept_doc.get("concept_id"),
@@ -812,6 +827,8 @@ def create_concept(
                 pass
             if workflow_event_launches:
                 created_concept["workflow_event_launch"] = workflow_event_launches
+            if partial_failures:
+                created_concept["partial_failures"] = partial_failures
         _invalidate_concept_mutation_caches()
         return created_concept if created_concept else {}
 
@@ -1097,36 +1114,13 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
 def enrich_concept_with_text_relations(
     concept: Dict[str, Any], logger=None
 ) -> Dict[str, Any]:
+    """Return a read-only projection enriched from text relations.
+
+    Legacy inline names and descriptions remain readable, but this read helper
+    never migrates or deletes them.  Schema migration belongs to an explicit,
+    authorised maintenance operation rather than an ordinary fetch.
     """
-    Enriches a concept document with names and descriptions from text relations.
-    Also performs migrate-on-read for legacy names/descriptions in concept document.
-
-    This is the SHARED implementation used by both HTTP API endpoints and internal MCP.
-
-    Args:
-        concept: The concept document to enrich
-        logger: Optional logger instance (uses module logger if not provided)
-
-
-        # Maintain relationship invariants for parent/child edges using the central helper
-        try:
-            concept_identifier = concept_doc.get("concept_id")
-            if concept_identifier:
-                ConceptsRepository.reconcile_relationships(
-                    concept_identifier,
-                    concept_doc.get("relationships") or {},
-                )
-        except Exception as reconcile_err:
-            logger.warning(
-                "create_concept: relationship reconciliation best-effort failure for %s: %s",
-                concept_doc.get("concept_id"),
-                reconcile_err,
-            )
-    Returns:
-        The enriched concept document with 'names' array populated from text relations
-    """
-    from .text_value_service import get_texts_for_concept, upsert_text_for_concept
-    from ..db.repositories.concepts_repository import ConceptsRepository
+    from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
     if not logger:
         logger = globals().get("logger")
@@ -1143,73 +1137,55 @@ def enrich_concept_with_text_relations(
         concept["names"] = []
         return concept
 
-    # MIGRATE-ON-READ: Legacy names field → text relations
     legacy_names = concept.get("names", [])
-    if legacy_names and isinstance(legacy_names, list) and len(legacy_names) > 0:
-        if logger:
-            logger.info(
-                f"[migrate-on-read] Migrating {len(legacy_names)} legacy names for {concept_id}"
-            )
-        migrated_count = 0
-        for legacy_name in legacy_names:
-            try:
-                name_text = (
-                    legacy_name.get("name", "")
-                    if isinstance(legacy_name, dict)
-                    else str(legacy_name)
-                )
-                if not name_text:
-                    continue
-                lang = (
-                    legacy_name.get("language", "en")
-                    if isinstance(legacy_name, dict)
-                    else "en"
-                )
-                name_type = (
-                    legacy_name.get("type", "NL")
-                    if isinstance(legacy_name, dict)
-                    else "NL"
-                )
 
-                result = upsert_text_for_concept(
-                    subject_concept_id=concept_id,
-                    predicate="hasName",
-                    text=name_text,
-                    lang=lang,
-                    context={"name_type": name_type},
-                )
-                if result:
-                    migrated_count += 1
-                    if logger:
-                        logger.debug(
-                            f"[migrate-on-read] Migrated name: {name_text} ({lang})"
-                        )
-            except Exception as e:
-                if logger:
-                    logger.warning(
-                        f"[migrate-on-read] Failed to migrate name {legacy_name}: {e}"
-                    )
-
-        # Remove legacy names field
-        if migrated_count > 0:
-            try:
-                ConceptsRepository.update_one(
-                    {"concept_id": concept_id}, {"$unset": {"names": ""}}
-                )
-                if logger:
-                    logger.info(
-                        f"[migrate-on-read] Removed legacy 'names' field after migrating {migrated_count} names"
-                    )
-            except Exception as e:
-                if logger:
-                    logger.error(
-                        f"[migrate-on-read] Failed to remove legacy names field: {e}"
-                    )
-
-    # Fetch names from text relations (authoritative source)
-    names_from_relations = get_texts_for_concept(
-        subject_concept_id=concept_id, predicate="hasName", limit=100
+    # The ordinary fetch path needs three predicates. Fetch them with one
+    # relation/text join while the bounded batch is known to be complete. If
+    # the batch reaches its cap, retain the older per-predicate reads so a
+    # name-heavy concept cannot crowd out content or notes.
+    enrichment_batch_cap = 102
+    batch_query_metadata: Dict[str, Any] = {}
+    batched_rows = get_texts_for_concepts(
+        [concept_id],
+        predicates=("hasName", "hasContent", "hasNote"),
+        limit_per_concept=enrichment_batch_cap,
+        query_metadata=batch_query_metadata,
+    ).get(concept_id, [])
+    relation_query_truncated = batch_query_metadata.get(
+        "relation_query_truncated"
     )
+    batch_complete = (
+        not relation_query_truncated
+        if isinstance(relation_query_truncated, bool)
+        else len(batched_rows) < enrichment_batch_cap
+    )
+    if batch_complete:
+        names_from_relations = [
+            row for row in batched_rows if row.get("predicate") == "hasName"
+        ][:100]
+        content_relations = [
+            row for row in batched_rows if row.get("predicate") == "hasContent"
+        ][:1]
+        note_relations = [
+            row for row in batched_rows if row.get("predicate") == "hasNote"
+        ][:1]
+    else:
+        names_from_relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            limit=100,
+        )
+        content_relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasContent",
+            limit=1,
+        )
+        note_relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasNote",
+            limit=1,
+        )
+
     # Convert to frontend format
     concept["names"] = [
         {
@@ -1220,6 +1196,50 @@ def enrich_concept_with_text_relations(
         }
         for item in names_from_relations
     ]
+
+    # Preserve readable legacy data without mutating storage.  Existing text
+    # relations take precedence; legacy values add only genuinely missing names.
+    existing_name_keys = {
+        (
+            str(item.get("name") or "").strip(),
+            str(item.get("language") or "").strip() or "en",
+            str(item.get("type") or "").strip().upper() or "NL",
+        )
+        for item in concept["names"]
+        if isinstance(item, dict)
+    }
+    if isinstance(legacy_names, list):
+        for legacy_name in legacy_names:
+            name_text = (
+                legacy_name.get("name", "")
+                if isinstance(legacy_name, dict)
+                else str(legacy_name)
+            )
+            name_text = str(name_text or "").strip()
+            if not name_text:
+                continue
+            language = (
+                str(legacy_name.get("language") or "en")
+                if isinstance(legacy_name, dict)
+                else "en"
+            )
+            name_type = (
+                str(legacy_name.get("type") or "NL")
+                if isinstance(legacy_name, dict)
+                else "NL"
+            )
+            key = (name_text, language.strip() or "en", name_type.strip().upper() or "NL")
+            if key in existing_name_keys:
+                continue
+            concept["names"].append(
+                {
+                    "name": name_text,
+                    "language": language,
+                    "type": name_type,
+                    "relation_id": None,
+                }
+            )
+            existing_name_keys.add(key)
 
     # Ensure CODE identifiers are present for UI/debugging (JVNAUTOSCI-938):
     # Some concepts may not have had CODE names persisted historically, but users
@@ -1280,60 +1300,11 @@ def enrich_concept_with_text_relations(
     if isinstance(maybe_guid, str) and maybe_guid.strip():
         _add_code_name(maybe_guid)
 
-    # MIGRATE-ON-READ: Legacy description field → text relations
-    legacy_description = concept.get("description")
-    if (
-        legacy_description
-        and isinstance(legacy_description, str)
-        and legacy_description.strip()
-    ):
-        if logger:
-            logger.info(f"[migrate-on-read] Found legacy description for {concept_id}")
-        try:
-            existing_descriptions = get_texts_for_concept(
-                subject_concept_id=concept_id, predicate="hasDescription", limit=1
-            )
-
-            if not existing_descriptions:
-                if logger:
-                    logger.info(
-                        "[migrate-on-read] Migrating legacy description to text relations"
-                    )
-                upsert_text_for_concept(
-                    subject_concept_id=concept_id,
-                    predicate="hasDescription",
-                    text=legacy_description,
-                    lang="en",
-                    context={"source": "OpenCyc", "format": "html"},
-                )
-
-            # Remove legacy description field
-            try:
-                ConceptsRepository.update_one(
-                    {"concept_id": concept_id}, {"$unset": {"description": ""}}
-                )
-                if logger:
-                    logger.info("[migrate-on-read] Removed legacy 'description' field")
-            except Exception as e:
-                if logger:
-                    logger.error(
-                        f"[migrate-on-read] Failed to remove legacy description: {e}"
-                    )
-        except Exception as e:
-            if logger:
-                logger.warning(f"[migrate-on-read] Failed to migrate description: {e}")
-
     # Fetch content from text relations (for diary entries, articles, etc.)
-    content_relations = get_texts_for_concept(
-        subject_concept_id=concept_id, predicate="hasContent", limit=1
-    )
     if content_relations:
         concept["content"] = content_relations[0].get("text", "")
 
     # Fetch notes from text relations
-    note_relations = get_texts_for_concept(
-        subject_concept_id=concept_id, predicate="hasNote", limit=1
-    )
     if note_relations:
         concept["note"] = note_relations[0].get("text", "")
 
