@@ -363,6 +363,7 @@ def test_subject_relation_predicate_filter_precedes_target_access_checks(
         },
     }
     checked_concept_ids: list[str] = []
+    checked_target_batches: list[list[str]] = []
 
     monkeypatch.setattr(service, "should_enforce_access_control", lambda: True)
 
@@ -371,6 +372,14 @@ def test_subject_relation_predicate_filter_precedes_target_access_checks(
         return True
 
     monkeypatch.setattr(service, "can_access_concept", fake_can_access_concept)
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: (
+            checked_target_batches.append(list(concept_ids))
+            or {"#V#gmail_profile"}
+        ),
+    )
     monkeypatch.setattr(
         service.ConceptsRepository,
         "find_one",
@@ -386,7 +395,8 @@ def test_subject_relation_predicate_filter_precedes_target_access_checks(
     assert loaded["relationships"] == {
         "#V#has_default_mail_profile": ["#V#gmail_profile"]
     }
-    assert checked_concept_ids == ["#V#alice", "#V#gmail_profile"]
+    assert checked_concept_ids == ["#V#alice"]
+    assert checked_target_batches == [["#V#gmail_profile"]]
 
 
 def test_get_predicate_incidence_counts_other_argument_types() -> None:

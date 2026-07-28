@@ -203,6 +203,158 @@ def test_incoming_asserted_binary_uses_extent_index_without_changing_results(
     }
 
 
+def test_relation_hits_include_source_previews_for_both_directions(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    focal_id = "#V#focal"
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: {
+            "concept_id": focal_id,
+            "relationships": {"#V#direct_relation": ["#V#outgoing_related"]},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "query_relationship_extent_index",
+        lambda **_kwargs: (
+            [
+                {
+                    "source_concept_id": "#V#incoming_related",
+                    "predicate_id": "#V#inverse_relation",
+                    "target_value": focal_id,
+                    "target_index": 0,
+                    "source_updated_at": None,
+                }
+            ],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+    preview_docs = {
+        focal_id: {"concept_id": focal_id, "name": "Focal", "relationships": {}},
+        "#V#outgoing_related": {
+            "concept_id": "#V#outgoing_related",
+            "name": "Outgoing Related",
+            "relationships": {"is_an_instance_of": ["#V#requested_type"]},
+        },
+        "#V#incoming_related": {
+            "concept_id": "#V#incoming_related",
+            "name": "Incoming Related",
+            "relationships": {"is_an_instance_of": ["#V#requested_type"]},
+        },
+    }
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_preview_document",
+        lambda concept_id: preview_docs.get(concept_id),
+    )
+
+    payload = service.find_relations_with_argument(
+        focal_id,
+        argument_index="any",
+        predicate_filter=["#V#direct_relation", "#V#inverse_relation"],
+        relation_kind="binary",
+        include_concept_preview=True,
+        limit=10,
+    )
+
+    hits_by_source = {hit["source_concept_id"]: hit for hit in payload["hits"]}
+    assert hits_by_source[focal_id]["source_concept_preview"]["name"] == "Focal"
+    assert (
+        hits_by_source["#V#incoming_related"]["source_concept_preview"]["name"]
+        == "Incoming Related"
+    )
+    assert hits_by_source["#V#incoming_related"]["source_concept_preview"][
+        "type_ids"
+    ] == ["#V#requested_type"]
+
+
+def test_incoming_relation_previews_batch_uncached_sources(monkeypatch) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    target_id = "#V#target"
+    preview_queries: list[tuple[dict[str, Any], dict[str, int]]] = []
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "query_relationship_extent_index",
+        lambda **_kwargs: (
+            [
+                {
+                    "source_concept_id": source_id,
+                    "predicate_id": "#V#relation",
+                    "target_value": target_id,
+                    "target_index": 0,
+                    "source_updated_at": None,
+                }
+                for source_id in ("#V#source_a", "#V#source_b")
+            ],
+            2,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+    monkeypatch.setattr(
+        service,
+        "should_enforce_access_control",
+        lambda: True,
+    )
+
+    def fake_find(query, projection):
+        preview_queries.append((query, projection))
+        return [
+            {
+                "concept_id": source_id,
+                "name": source_id.removeprefix("#V#"),
+                "relationships": {},
+            }
+            for source_id in (target_id, "#V#source_a", "#V#source_b")
+        ]
+
+    monkeypatch.setattr(
+        service.ConceptsRepository, "find", staticmethod(fake_find)
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_preview_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("batched source previews must avoid point reads")
+        ),
+    )
+
+    payload = service.find_relations_with_argument(
+        target_id,
+        relation_kind="binary",
+        include_concept_preview=True,
+    )
+
+    assert len(preview_queries) == 1
+    assert preview_queries[0][0] == {
+        "concept_id": {
+            "$in": [target_id, "#V#source_a", "#V#source_b"]
+        }
+    }
+    assert {
+        hit["source_concept_preview"]["concept_id"]
+        for hit in payload["hits"]
+    } == {"#V#source_a", "#V#source_b"}
+
+
 def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
     monkeypatch,
 ) -> None:
@@ -210,15 +362,18 @@ def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
 
     target_id = "#V#target"
     updated_at = datetime(2026, 7, 26, 5, 6, tzinfo=UTC)
-    aggregate_pipelines: list[list[dict[str, Any]]] = []
+    exact_queries: list[
+        tuple[dict[str, Any], dict[str, Any], int | None]
+    ] = []
 
-    def fake_aggregate(pipeline):
-        aggregate_pipelines.append(pipeline)
+    def fake_find(query, projection, *, max_time_ms=None):
+        exact_queries.append((query, projection, max_time_ms))
         return [
             {
                 "concept_id": "#V#source",
-                "predicate": "#V#supervises",
-                "targets": ["#V#other", target_id],
+                "relationships": {
+                    "#V#supervises": ["#V#other", target_id],
+                },
                 "updated_at": updated_at,
             }
         ]
@@ -241,9 +396,12 @@ def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
         ),
     )
     monkeypatch.setattr(
+        service.ConceptsRepository, "find", staticmethod(fake_find)
+    )
+    monkeypatch.setattr(
         service.ConceptsRepository,
         "aggregate",
-        staticmethod(fake_aggregate),
+        staticmethod(_fail_if_aggregated),
     )
 
     payload = service.find_relations_with_argument(
@@ -254,7 +412,18 @@ def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
         include_concept_preview=False,
     )
 
-    assert len(aggregate_pipelines) == 1
+    assert exact_queries == [
+        (
+            {"$or": [{"relationships.#V#supervises": target_id}]},
+            {
+                "_id": 0,
+                "concept_id": 1,
+                "updated_at": 1,
+                "relationships.#V#supervises": 1,
+            },
+            8_000,
+        )
+    ]
     assert payload["total_hits"] == 1
     hit = payload["hits"][0]
     assert hit["source_concept_id"] == "#V#source"
@@ -268,13 +437,60 @@ def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
     }
     assert payload["relation_query_diagnostics"]["incoming_asserted_binary"] == {
         "requested": True,
-        "path": "canonical_aggregation",
+        "path": "canonical_exact_predicate_query",
         "used_relationship_extent_index": False,
         "fallback_reason": "relationship_extent_index_unavailable",
         "index_rows_examined": 0,
         "canonical_rows_returned": 1,
         "rows_filtered_by_access": 0,
     }
+
+
+def test_unresolved_predicate_label_preserves_general_canonical_fallback(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    aggregate_pipelines: list[list[dict[str, Any]]] = []
+
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "query_relationship_extent_index",
+        lambda **_kwargs: ([], -1),
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find",
+        staticmethod(_fail_if_aggregated),
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "aggregate",
+        staticmethod(
+            lambda pipeline: aggregate_pipelines.append(pipeline) or []
+        ),
+    )
+
+    payload = service.find_relations_with_argument(
+        "#V#target",
+        predicate_filter=["supervises"],
+        relation_kind="binary",
+        include_concept_preview=False,
+    )
+
+    assert len(aggregate_pipelines) == 1
+    diagnostics = payload["relation_query_diagnostics"][
+        "incoming_asserted_binary"
+    ]
+    assert diagnostics["path"] == "canonical_aggregation"
+    assert diagnostics["fallback_reason"] == (
+        "relationship_extent_index_unavailable"
+    )
 
 
 def test_empty_available_extent_index_does_not_trigger_canonical_fallback(

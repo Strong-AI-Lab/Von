@@ -172,21 +172,25 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         response_contract
     )
     assert "Never send relation-query arguments to fetch_concept" in response_contract
+    assert "represented inverse or relation-family metadata" in response_contract
+    assert "related_concept_id, related_name, related_type_ids" in response_contract
     assert llm_policy.get("tool_argument_defaults") == {
-            "get_predicate_incidence": {
-                "argument_index": "subject",
-                "relation_kind": "binary",
-                "include_argument_type_counts": True,
-                "include_concept_preview": False,
-                "limit": 32,
-            },
+        "get_predicate_incidence": {
+            "argument_index": "any",
+            "relation_kind": "binary",
+            "include_argument_type_counts": True,
+            "include_concept_preview": False,
+            "limit": 32,
+        },
         "get_text_relations_summary": {
             "max_relation_ids_per_group": 25,
         },
         "find_relations_with_argument": {
-            "argument_index": "subject",
+            "argument_index": "any",
             "relation_kind": "binary",
             "limit": 20,
+            "__expand_predicate_family_from_vontology": True,
+            "__predicate_family_max_predicates": 12,
             "__derive_predicate_filter_from_recent_incidence": {
                 "enabled": True,
                 "max_predicates": 2,
@@ -287,6 +291,9 @@ def test_entity_information_retrieval_prompt_support_seeds_content_from_repo_ass
     assert "first ontology-native" in prompt_text_lower
     assert "anchor entity always goes in `concept_id`" in prompt_text_lower
     assert "payload keys named `subject` or `object`" in prompt_text_lower
+    assert '`argument_index: "any"`' in prompt_text_lower
+    assert "represented inverse and relation-family metadata" in prompt_text_lower
+    assert "`related_concept_id`" in prompt_text_lower
     assert "preserve the full `#v#" in prompt_text_lower
     assert "must include a `predicate_filter`" in prompt_text_lower
     assert "before any broader relation paging" in prompt_text_lower
