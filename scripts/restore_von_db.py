@@ -33,6 +33,18 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     from backup_von_db import BACKUP_RECEIPT_SIDECAR_SUFFIX
 
 
+DEFAULT_MONGORESTORE_TIMEOUT_SECONDS = 6 * 60 * 60
+
+
+def _env_int(value: str | None, *, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except Exception:
+        return default
+
+
 def _redact_mongo_uri(uri: str) -> str:
     if not uri or "@" not in uri:
         return uri
@@ -258,21 +270,45 @@ def _run_mongorestore(
     target_db_name: str,
     drop_target: bool,
 ) -> None:
-    cmd = [
-        "mongorestore",
-        "--uri",
-        mongo_uri,
-        "--dir",
-        str(dump_root),
-        "--nsFrom",
-        f"{source_db_name}.*",
-        "--nsTo",
-        f"{target_db_name}.*",
-        "--stopOnError",
-    ]
-    if drop_target:
-        cmd.append("--drop")
-    subprocess.run(cmd, check=True)
+    timeout_seconds = _env_int(
+        os.environ.get("VON_BACKUP_MONGORESTORE_TIMEOUT_SECONDS"),
+        default=DEFAULT_MONGORESTORE_TIMEOUT_SECONDS,
+    )
+    if timeout_seconds < 1:
+        timeout_seconds = DEFAULT_MONGORESTORE_TIMEOUT_SECONDS
+    with tempfile.TemporaryDirectory(prefix="von-mongorestore-") as config_dir:
+        config_root = Path(config_dir)
+        os.chmod(config_root, 0o700)
+        config_path = config_root / "config.yml"
+        config_path.write_text(
+            f"uri: {json.dumps(mongo_uri)}\n",
+            encoding="utf-8",
+        )
+        os.chmod(config_path, 0o600)
+        cmd = [
+            "mongorestore",
+            "--config",
+            str(config_path),
+            "--dir",
+            str(dump_root),
+            "--nsFrom",
+            f"{source_db_name}.*",
+            "--nsTo",
+            f"{target_db_name}.*",
+            "--stopOnError",
+        ]
+        if drop_target:
+            cmd.append("--drop")
+        try:
+            subprocess.run(cmd, check=True, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"mongorestore exceeded the configured {timeout_seconds}s timeout"
+            ) from None
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"mongorestore failed with exit code {exc.returncode}"
+            ) from None
 
 
 def main(argv: list[str] | None = None) -> int:
