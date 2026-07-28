@@ -308,3 +308,74 @@ def test_list_recent_failed_queue_records_is_bounded_and_scoped() -> None:
     assert [item["queue_id"] for item in recent] == [failed["queue_id"]]
     assert recent[0]["prompt_raw"] == "Visible failed task"
     assert recent[0]["last_error"] == "The final response did not return from Von."
+
+
+def test_cancel_failed_record_is_scoped_durable_and_preserves_failure_evidence() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    other_scope = queue_service.build_queue_scope(
+        user_concept_id="#V#other",
+        organisation_concept_id="#V#org",
+        namespace="#V#other@org",
+    )
+    queued = queue_service.create_queue_record(scope=scope, prompt_raw="Expired task")
+    queue_service.claim_queue_record(scope=scope, queue_id=queued["queue_id"])
+    failed = queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        status=queue_service.STATUS_FAILED,
+        error=queue_service.STALE_IN_PROGRESS_LAST_ERROR,
+    )
+
+    with pytest.raises(queue_service.ChatPromptQueueRecordNotFound) as exc_info:
+        queue_service.cancel_prompt_record(
+            scope=other_scope,
+            queue_id=queued["queue_id"],
+        )
+
+    assert exc_info.value.error_code == "scope_mismatch"
+    recent_failed = queue_service.list_recent_failed_queue_records(scope=scope)
+    assert recent_failed[0]["queue_id"] == queued["queue_id"]
+
+    dismissed = queue_service.cancel_prompt_record(
+        scope=scope,
+        queue_id=queued["queue_id"],
+    )
+
+    assert dismissed["status"] == queue_service.STATUS_CANCELLED
+    assert dismissed["last_error"] == queue_service.STALE_IN_PROGRESS_LAST_ERROR
+    assert dismissed["completed_at"] == failed["completed_at"]
+    assert queue_service.list_queue_visibility_records(scope=scope) == {
+        "items": [],
+        "recent_failed_items": [],
+    }
+
+    coll = mongo_client.get_chat_prompt_queue_collection()
+    assert coll is not None
+    persisted = coll.find_one({"queue_id": queued["queue_id"]})
+    assert persisted is not None
+    assert persisted["status"] == queue_service.STATUS_CANCELLED
+    assert persisted["last_error"] == queue_service.STALE_IN_PROGRESS_LAST_ERROR
+
+
+def test_cancel_prompt_record_still_rejects_completed_records() -> None:
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    queued = queue_service.create_queue_record(scope=scope, prompt_raw="Completed task")
+    queue_service.finish_prompt_record(
+        scope=scope,
+        queue_id=queued["queue_id"],
+        status=queue_service.STATUS_COMPLETED,
+    )
+
+    with pytest.raises(queue_service.ChatPromptQueueRecordNotFound) as exc_info:
+        queue_service.cancel_prompt_record(scope=scope, queue_id=queued["queue_id"])
+
+    assert exc_info.value.error_code == "wrong_state"
+    assert exc_info.value.details["current_status"] == queue_service.STATUS_COMPLETED

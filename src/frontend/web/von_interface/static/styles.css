@@ -9742,13 +9742,15 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     background: #dbeafe;
 }
 
-.chat-task-queue-delete {
+.chat-task-queue-delete,
+.chat-task-queue-dismiss {
     border: 1px solid #fca5a5;
     background: #fff5f5;
     color: #b91c1c;
 }
 
-.chat-task-queue-delete:hover {
+.chat-task-queue-delete:hover,
+.chat-task-queue-dismiss:hover {
     background: #ffe4e6;
 }
 

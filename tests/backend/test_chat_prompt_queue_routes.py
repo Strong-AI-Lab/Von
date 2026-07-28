@@ -146,3 +146,39 @@ def test_chat_prompt_queue_route_lists_recent_failed_items_separately(client) ->
         payload["recent_failed_items"][0]["last_error"]
         == "The final response did not return from Von."
     )
+
+
+def test_chat_prompt_queue_route_dismisses_failed_record_durably(client) -> None:
+    create_resp = client.post(
+        "/von/api/chat_prompt_queue",
+        json={"prompt_raw": "Expired task"},
+    )
+    assert create_resp.status_code == 201
+    queue_id = create_resp.get_json()["item"]["queue_id"]
+    assert client.post(f"/von/api/chat_prompt_queue/{queue_id}/claim").status_code == 200
+
+    failure_message = (
+        "Prompt queue record expired after being in progress for more than 24 hours."
+    )
+    finish_resp = client.post(
+        f"/von/api/chat_prompt_queue/{queue_id}/finish",
+        json={"status": "failed", "error": failure_message},
+    )
+    assert finish_resp.status_code == 200
+    failed = finish_resp.get_json()["item"]
+
+    dismiss_resp = client.delete(f"/von/api/chat_prompt_queue/{queue_id}")
+
+    assert dismiss_resp.status_code == 200
+    dismissed = dismiss_resp.get_json()["item"]
+    assert dismissed["status"] == "cancelled"
+    assert dismissed["last_error"] == failure_message
+    assert dismissed["completed_at"] == failed["completed_at"]
+
+    list_resp = client.get("/von/api/chat_prompt_queue")
+    assert list_resp.status_code == 200
+    assert list_resp.get_json() == {
+        "success": True,
+        "items": [],
+        "recent_failed_items": [],
+    }
