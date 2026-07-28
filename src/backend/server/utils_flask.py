@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 from flask import Flask, g, jsonify, redirect, request, url_for
 
@@ -1382,6 +1383,7 @@ def create_flask_app(
 
     _install_request_timing_middleware(app)
     _configure_flask_app_core(app, list_models_func, generate_func)
+    _install_local_browser_origin_canonicalisation(app)
     _register_default_blueprints(app)
 
     # --- Log App Version ---
@@ -2252,6 +2254,81 @@ def _install_request_timing_middleware(app: Flask) -> None:
                     elapsed_ms,
                     response.status_code,
                 )
+        return response
+
+
+_LOCAL_BROWSER_ENTRY_PATHS = frozenset(
+    {
+        "/",
+        "/von",
+        "/von/",
+        "/von/workflow-studio",
+    }
+)
+
+
+def build_browser_entry_url(bind_host: str, port: int) -> str:
+    """Build the UI URL, using the OAuth-compatible loopback hostname."""
+    browser_host = (
+        "localhost" if bind_host.strip().lower() == "127.0.0.1" else bind_host
+    )
+    return f"http://{browser_host}:{port}/von/"
+
+
+def _configured_localhost_oauth_origin() -> tuple[str, int] | None:
+    """Return an explicit localhost OAuth origin, if local canonicalisation applies."""
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    if not redirect_uri:
+        return None
+
+    try:
+        parsed = urlparse(redirect_uri)
+        if (
+            parsed.scheme.lower() != "http"
+            or (parsed.hostname or "").lower() != "localhost"
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        port = parsed.port or 80
+    except ValueError:
+        return None
+
+    netloc = "localhost" if port == 80 else f"localhost:{port}"
+    return f"http://{netloc}", port
+
+
+def _install_local_browser_origin_canonicalisation(app: Flask) -> None:
+    """Canonicalise only local UI entry navigation needed for Google OAuth."""
+    canonical = _configured_localhost_oauth_origin()
+    if canonical is None:
+        return
+    canonical_origin, canonical_port = canonical
+
+    @app.before_request
+    def _canonicalise_local_browser_origin():
+        if (
+            request.method not in {"GET", "HEAD"}
+            or request.path not in _LOCAL_BROWSER_ENTRY_PATHS
+            or request.scheme.lower() != "http"
+        ):
+            return None
+
+        try:
+            requested = urlparse(f"//{request.host}")
+            requested_host = (requested.hostname or "").lower()
+            requested_port = requested.port or 80
+        except ValueError:
+            return None
+
+        if requested_host != "127.0.0.1" or requested_port != canonical_port:
+            return None
+
+        target = f"{canonical_origin}{request.path}"
+        if request.query_string:
+            target = f"{target}?{request.query_string.decode('latin-1')}"
+        response = redirect(target, code=302)
+        response.headers["Cache-Control"] = "no-store"
         return response
 
 

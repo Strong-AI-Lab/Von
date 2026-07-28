@@ -19,9 +19,9 @@ src_root = os.path.join(project_root_str, "src")
 if src_root not in sys.path:
     sys.path.insert(0, src_root)
 
-create_flask_app = importlib.import_module(
-    "src.backend.server.utils_flask"
-).create_flask_app
+_utils_flask = importlib.import_module("src.backend.server.utils_flask")
+create_flask_app = _utils_flask.create_flask_app
+build_browser_entry_url = _utils_flask.build_browser_entry_url
 get_expert_tabs_enabled = importlib.import_module(
     "src.backend.services.feature_flags"
 ).get_expert_tabs_enabled
@@ -464,7 +464,7 @@ def main():
         import requests
 
         def check_server_and_open():
-            url = f"http://{args.host}:{args.port}/von/"
+            url = build_browser_entry_url(args.host, args.port)
             for i in range(10):
                 try:
                     response = requests.get(url, timeout=1)
