@@ -112,6 +112,7 @@ const CONVERSATION_TELEMETRY_ACCESS_SCHEMA_VERSION = 'conversation_telemetry_acc
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
 const CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS = 4000;
+const TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION = 'turn_telemetry_mcp_access.v1';
 const TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'turn_telemetry_locator.v1';
 const TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION = 'turn_live_progress_locator.v1';
 const WORKFLOW_USE_EPISODES_LOCATOR_SCHEMA_VERSION = 'workflow_use_episodes_locator.v1';
@@ -29956,7 +29957,23 @@ async function copyActiveThinkingDiagnostics(button = null, requestOverride = nu
     if (!request) {
         return false;
     }
-    const payload = buildThinkingDiagnosticsLocatorPayload(request);
+    const requestId = (
+        typeof request.clientRequestId === 'string'
+            ? request.clientRequestId.trim()
+            : ''
+    ) || (
+        typeof request.latestProgress?.request_id === 'string'
+            ? request.latestProgress.request_id.trim()
+            : ''
+    );
+    const turnAccess = await fetchTurnTelemetryMcpAccess({
+        requestId,
+        sessionId: activeChatSessionId || request.sessionId || null,
+        includeLiveProgress: true
+    });
+    const payload = buildThinkingDiagnosticsLocatorPayload(request, {
+        mcpAccess: turnAccess?.mcp_access || null
+    });
     if (!payload) {
         showToast('No diagnostic reference is available yet.', 'info');
         return false;
@@ -32711,7 +32728,29 @@ async function buildLlmDebugClipboardJsonForTurn(turnId) {
         return null;
     }
 
-    const debugData = await hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDataRaw);
+    let debugData = await hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDataRaw);
+    const requestId = resolveConversationTelemetryRequestId(debugData);
+    const historyLocation = cloneConversationHistoryLocation(
+        debugData?.turn_execution_diagnostics?.history_location
+        || debugData?.history_location
+    );
+    const turnAccess = await fetchTurnTelemetryMcpAccess({
+        requestId,
+        sessionId: historyLocation?.session_id || activeChatSessionId || null,
+        historyIndex: Number.isInteger(historyLocation?.history_index)
+            ? historyLocation.history_index
+            : null,
+        includeLiveProgress: false
+    });
+    if (turnAccess?.mcp_access && typeof turnAccess.mcp_access === 'object') {
+        debugData = {
+            ...debugData,
+            telemetry_locator_mcp_access: turnAccess.mcp_access,
+            history_location: cloneConversationHistoryLocation(
+                turnAccess.history_location || historyLocation
+            )
+        };
+    }
     const metadata = buildLlmDebugMetadata(debugData);
     const workflowExecutionTelemetry = _getWorkflowExecutionTelemetry(debugData);
     const copyPayload = buildLlmDebugLocatorPayload({
@@ -33132,51 +33171,7 @@ function buildChatHistoryAccessArgs({ sessionId, historyIndex = undefined } = {}
     };
 }
 
-function buildConversationTelemetrySessionMcpAccess(
-    sessionId,
-    namespaceContext = buildConversationTelemetryNamespaceContext()
-) {
-    const cleanSessionId = typeof sessionId === 'string' && sessionId.trim()
-        ? sessionId.trim()
-        : null;
-    if (!cleanSessionId) {
-        return {};
-    }
-
-    return {
-        conversation_telemetry_get_locator: buildMcpToolAccess(
-            'conversation_telemetry_get_locator',
-            {
-                session_id: cleanSessionId,
-                namespace: namespaceContext.namespace || null,
-                user_concept_id: namespaceContext.user_id || null,
-                organisation_concept_id: namespaceContext.org_id || null
-            },
-            'Fetch the authoritative server-side conversation telemetry locator.'
-        ),
-        chat_history_get_segments: buildMcpToolAccess(
-            'chat_history_get_segments',
-            {
-                session_id: cleanSessionId,
-                namespace: namespaceContext.namespace || null,
-                user_concept_id: namespaceContext.user_id || null,
-                organisation_concept_id: namespaceContext.org_id || null,
-                include_debug: true
-            },
-            'Fetch the stored transcript segments and embedded debug payloads for this session.'
-        ),
-        turn_execution_list: buildMcpToolAccess(
-            'turn_execution_list',
-            {
-                session_id: cleanSessionId,
-                namespace: namespaceContext.namespace || null
-            },
-            'List turn-execution records for this conversation.'
-        )
-    };
-}
-
-function buildThinkingDiagnosticsLocatorPayload(request) {
+function buildThinkingDiagnosticsLocatorPayload(request, { mcpAccess = null } = {}) {
     if (!request || typeof request !== 'object') {
         return null;
     }
@@ -33190,6 +33185,23 @@ function buildThinkingDiagnosticsLocatorPayload(request) {
     if (!requestId) {
         return null;
     }
+    const executableMcpAccess = (
+        mcpAccess
+        && typeof mcpAccess === 'object'
+    )
+        ? Object.fromEntries(
+            Object.entries(mcpAccess).filter(([toolName, descriptor]) => (
+                [
+                    'turn_execution_get_live_progress',
+                    'turn_execution_get_diagnostics',
+                    'conversation_telemetry_get_locator',
+                    'chat_history_get_debug_entry'
+                ].includes(toolName)
+                && descriptor
+                && typeof descriptor === 'object'
+            ))
+        )
+        : {};
 
     return {
         schema_version: TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION,
@@ -33205,26 +33217,10 @@ function buildThinkingDiagnosticsLocatorPayload(request) {
                 ? Math.max(0, Math.round(Number(latestProgress.elapsed_ms)))
                 : null
         } : null,
-        mcp_access: {
-            turn_execution_get_live_progress: buildMcpToolAccess(
-                'turn_execution_get_live_progress',
-                {
-                    request_id: requestId,
-                    namespace: namespaceContext.namespace || null,
-                    user_concept_id: namespaceContext.user_id || null,
-                    window_session_id: getWindowSessionId()
-                },
-                'Fetch the bounded live progress snapshot for this active turn; pass section, limit, and offset only when explicit detail hydration is needed.'
-            ),
-            turn_execution_get_diagnostics: buildMcpToolAccess(
-                'turn_execution_get_diagnostics',
-                {
-                    request_id: requestId,
-                    namespace: namespaceContext.namespace || null
-                },
-                'Fetch the persisted post-turn diagnostics once the request has completed.'
-            )
-        }
+        mcp_access: executableMcpAccess,
+        retrieval_status: Object.keys(executableMcpAccess).length > 0
+            ? 'server_delegation_available'
+            : 'server_delegation_unavailable'
     };
 }
 
@@ -33411,7 +33407,7 @@ function buildLlmDebugLocatorDiagnosticSummary({ debugData, turnExecutionDiagnos
     );
 }
 
-function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExecutionTelemetry }) {
+function buildLlmDebugLocatorPayload({ turnId, debugData, metadata }) {
     if (!debugData || typeof debugData !== 'object') {
         return null;
     }
@@ -33431,14 +33427,29 @@ function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExec
         turnExecutionDiagnostics?.history_location || debugData.history_location
     );
     const sessionId = historyLocation?.session_id || activeChatSessionId || null;
-    const historyIndex = Number.isInteger(historyLocation?.history_index)
-        ? historyLocation.history_index
-        : null;
-
     const diagnosticSummary = buildLlmDebugLocatorDiagnosticSummary({
         debugData,
         turnExecutionDiagnostics
     });
+    const authoritativeMcpAccess = (
+        debugData.telemetry_locator_mcp_access
+        && typeof debugData.telemetry_locator_mcp_access === 'object'
+    )
+        ? debugData.telemetry_locator_mcp_access
+        : null;
+    const executableMcpAccess = authoritativeMcpAccess
+        ? Object.fromEntries(
+            Object.entries(authoritativeMcpAccess).filter(([toolName, descriptor]) => (
+                [
+                    'chat_history_get_debug_entry',
+                    'conversation_telemetry_get_locator',
+                    'turn_execution_get_diagnostics'
+                ].includes(toolName)
+                && descriptor
+                && typeof descriptor === 'object'
+            ))
+        )
+        : {};
 
     const payload = {
         schema_version: TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION,
@@ -33460,83 +33471,11 @@ function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExec
                 turnExecutionDiagnostics
             })
         ),
-        mcp_access: {}
+        mcp_access: executableMcpAccess,
+        retrieval_status: Object.keys(executableMcpAccess).length > 0
+            ? 'server_delegation_available'
+            : 'server_delegation_unavailable'
     };
-
-    if (requestId) {
-        payload.mcp_access.turn_execution_get_diagnostics = buildMcpToolAccess(
-            'turn_execution_get_diagnostics',
-            {
-                request_id: requestId,
-                namespace: namespaceContext.namespace || null
-            },
-            'Fetch the persisted turn-execution diagnostics for this turn.'
-        );
-    }
-    if (sessionId && historyIndex !== null) {
-        payload.mcp_access.chat_history_get_debug_entry = buildMcpToolAccess(
-            'chat_history_get_debug_entry',
-            buildChatHistoryAccessArgs({
-                sessionId,
-                historyIndex
-            }),
-            'Fetch the exact stored llm_debug_data entry for this turn.'
-        );
-    }
-    if (sessionId) {
-        payload.mcp_access.conversation_telemetry_get_locator = buildMcpToolAccess(
-            'conversation_telemetry_get_locator',
-            {
-                session_id: sessionId,
-                namespace: namespaceContext.namespace || null,
-                user_concept_id: namespaceContext.user_id || null,
-                organisation_concept_id: namespaceContext.org_id || null
-            },
-            'Fetch the compact conversation locator for the surrounding session.'
-        );
-    }
-    const workflowExecutionTraces = Array.isArray(workflowExecutionTelemetry?.traces)
-        ? workflowExecutionTelemetry.traces
-            .map((trace) => {
-                if (!trace || typeof trace !== 'object') {
-                    return null;
-                }
-                const executionId = typeof trace.execution_id === 'string'
-                    ? trace.execution_id.trim()
-                    : '';
-                const instanceId = typeof trace.instance_id === 'string'
-                    ? trace.instance_id.trim()
-                    : '';
-                if (!executionId && !instanceId) {
-                    return null;
-                }
-                const traceRole = workflowExecutionTelemetry.primaryTrace === trace
-                    ? 'selected_workflow'
-                    : 'auxiliary_workflow';
-                return {
-                    execution_id: executionId || null,
-                    instance_id: instanceId || null,
-                    workflow_id: typeof trace.workflow_id === 'string' ? trace.workflow_id : null,
-                    trace_role: traceRole,
-                    mcp_access: buildMcpToolAccess(
-                        'workflow_get_execution_trace',
-                        {
-                            execution_id: executionId || null,
-                            instance_id: instanceId || null
-                        },
-                        'Fetch the durable workflow execution trace referenced by this turn.'
-                    )
-                };
-            })
-            .filter(Boolean)
-        : [];
-    if (workflowExecutionTraces.length > 0) {
-        payload.mcp_access.workflow_execution_traces = workflowExecutionTraces;
-        const primaryTrace = workflowExecutionTraces.find((trace) => trace.trace_role === 'selected_workflow');
-        if (primaryTrace?.mcp_access) {
-            payload.mcp_access.workflow_get_execution_trace = primaryTrace.mcp_access;
-        }
-    }
 
     return payload;
 }
@@ -33607,6 +33546,50 @@ async function fetchConversationTelemetryLocatorPayload(sessionId) {
     }
 }
 
+async function fetchTurnTelemetryMcpAccess({
+    requestId,
+    sessionId = null,
+    historyIndex = null,
+    includeLiveProgress = true
+} = {}) {
+    const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+    if (!cleanRequestId || typeof fetch !== 'function') {
+        return null;
+    }
+
+    try {
+        const params = new URLSearchParams({
+            request_id: cleanRequestId,
+            include_live_progress: includeLiveProgress ? 'true' : 'false'
+        });
+        const cleanSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+        if (cleanSessionId) {
+            params.set('session_id', cleanSessionId);
+        }
+        if (Number.isInteger(historyIndex) && historyIndex >= 0) {
+            params.set('history_index', String(historyIndex));
+        }
+        const response = await fetchWithTimeout(
+            `/von/history/turn_telemetry_access?${params.toString()}`,
+            {
+                headers: buildChatFetchHeaders(),
+                timeoutMs: CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS
+            }
+        );
+        const body = await response.json();
+        if (!response.ok || !body || typeof body !== 'object') {
+            return null;
+        }
+        if (body.schema_version !== TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION) {
+            return null;
+        }
+        return body;
+    } catch (error) {
+        console.warn('[chatTab] Failed to fetch server turn telemetry delegation:', error);
+        return null;
+    }
+}
+
 function findConversationTelemetryLocatorTurn(payload, { turnId = null, requestId = null, historyLocation = null } = {}) {
     const turns = Array.isArray(payload?.turns) ? payload.turns : [];
     const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
@@ -33651,10 +33634,6 @@ async function hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDa
         debugData.turn_execution_diagnostics?.history_location || debugData.history_location
     );
     const requestId = resolveConversationTelemetryRequestId(debugData);
-    if (existingHistoryLocation && requestId) {
-        return debugData;
-    }
-
     const sessionId = (
         (typeof existingHistoryLocation?.session_id === 'string' && existingHistoryLocation.session_id.trim())
         || (typeof activeChatSessionId === 'string' ? activeChatSessionId.trim() : '')
@@ -33689,6 +33668,9 @@ async function hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDa
     }
     if (matchedRequestId && !resolveConversationTelemetryRequestId(merged)) {
         merged.request_id = matchedRequestId;
+    }
+    if (matchedTurn?.mcp_access && typeof matchedTurn.mcp_access === 'object') {
+        merged.telemetry_locator_mcp_access = matchedTurn.mcp_access;
     }
     if (debugData.turn_execution_diagnostics && typeof debugData.turn_execution_diagnostics === 'object') {
         merged.turn_execution_diagnostics = {
@@ -33758,29 +33740,9 @@ function buildConversationLlmTelemetryLocatorPayload() {
                 : null,
             history_location: historyLocation,
             request_id: requestId,
-            mcp_access: {
-                chat_history_get_debug_entry: buildMcpToolAccess(
-                    'chat_history_get_debug_entry',
-                    buildChatHistoryAccessArgs({
-                        sessionId: historyLocation?.session_id || activeChatSessionId || null,
-                        historyIndex: Number.isInteger(historyLocation?.history_index)
-                            ? historyLocation.history_index
-                            : undefined
-                    }),
-                    'Fetch the exact stored llm_debug_data for this turn.'
-                )
-            }
+            mcp_access: {},
+            retrieval_status: 'server_delegation_unavailable'
         };
-        if (requestId) {
-            turnPayload.mcp_access.turn_execution_get_diagnostics = buildMcpToolAccess(
-                'turn_execution_get_diagnostics',
-                {
-                    request_id: requestId,
-                    namespace: buildConversationTelemetryNamespaceContext().namespace || null
-                },
-                'Fetch the persisted turn-execution diagnostics for this turn.'
-            );
-        }
         if (unavailableLocatorFields.length > 0) {
             turnPayload.unavailable_locator_fields = unavailableLocatorFields;
         }
@@ -33805,7 +33767,8 @@ function buildConversationLlmTelemetryLocatorPayload() {
             turns_with_unavailable_locator_fields_count: turnsWithUnavailableLocatorFieldsCount,
             ordering: 'timestamp_then_turn_id'
         },
-        mcp_access: buildConversationTelemetrySessionMcpAccess(sessionId, namespaceContext),
+        mcp_access: {},
+        retrieval_status: 'server_delegation_unavailable',
         turns
     };
 }
@@ -33848,6 +33811,24 @@ function buildConversationTelemetryAccessPayload({ locatorPayload = null } = {})
             org_id: basePayload.namespace_context.org_id || null
         }
         : buildConversationTelemetryNamespaceContext();
+    const authoritativeMcpAccess = (
+        authoritativeLocator?.mcp_access
+        && typeof authoritativeLocator.mcp_access === 'object'
+    )
+        ? Object.fromEntries(
+            Object.entries(authoritativeLocator.mcp_access).filter(([toolName, descriptor]) => (
+                [
+                    'conversation_telemetry_get_locator',
+                    'chat_history_get_segments'
+                ].includes(toolName)
+                && descriptor
+                && typeof descriptor === 'object'
+            ))
+        )
+        : {};
+    const retrievalStatus = Object.keys(authoritativeMcpAccess).length > 0
+        ? 'server_delegation_available'
+        : 'server_delegation_unavailable';
 
     return {
         schema_version: CONVERSATION_TELEMETRY_ACCESS_SCHEMA_VERSION,
@@ -33888,20 +33869,25 @@ function buildConversationTelemetryAccessPayload({ locatorPayload = null } = {})
             locator_schema_version: authoritativeLocator?.schema_version || null,
             locator_generated_at_utc: authoritativeLocator?.generated_at_utc || null
         },
-        mcp_access: buildConversationTelemetrySessionMcpAccess(sessionId, namespaceContext),
+        mcp_access: authoritativeMcpAccess,
+        retrieval_status: retrievalStatus,
         agent_instructions: {
             summary: (
                 'This payload is an MCP access envelope for the conversation, not the '
                 + 'authoritative per-turn locator.'
             ),
-            steps: [
-                'Call conversation_telemetry_get_locator first to fetch the authoritative per-turn locator for this session.',
-                'Call chat_history_get_segments with include_debug=true to retrieve transcript segments and embedded llm_debug payloads.',
-                'Call turn_execution_list to inspect persisted turn-execution records and request_id coverage.'
-            ],
+            steps: retrievalStatus === 'server_delegation_available'
+                ? [
+                    'Call conversation_telemetry_get_locator first to fetch the authoritative per-turn locator for this session.',
+                    'Call chat_history_get_segments for the bounded transcript projection.',
+                    'Use each returned turn descriptor to fetch the exact bounded debug or diagnostics artefact.'
+                ]
+                : [
+                    'Copy the conversation info again after the server locator becomes available.'
+                ],
             notes: [
                 'Treat the server locator as authoritative when history_location or request_id matters.',
-                'Use the session_id and namespace_context in this payload to scope those MCP calls.'
+                'If retrieval_status is server_delegation_unavailable, no raw-ID fallback is authorised; copy again after the server locator is available.'
             ]
         }
     };

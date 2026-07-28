@@ -202,6 +202,12 @@
                             "null"
                         ]
                     },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
                     "include_legacy": {
                         "type": "boolean"
                     }
@@ -5754,18 +5760,40 @@
                     "request_id": {
                         "type": "string"
                     },
+                    "turn_telemetry_ref": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
                     "namespace": {
                         "type": [
                             "string",
                             "null"
                         ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "limit": {
+                        "type": "integer"
                     }
                 },
                 "required": [
                     "request_id"
                 ],
                 "additionalProperties": true,
-                "description": "Get one full turn diagnostics payload by request_id."
+                "description": "Get one exact turn diagnostics payload by request_id. External stdio callers use a server-issued turn_telemetry_ref; large payloads return canonical JSON pages controlled by offset/limit."
             }
         },
         {
@@ -5777,6 +5805,10 @@
                     "request_id": {
                         "type": "string"
                     },
+                    "turn_telemetry_ref": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
                     "namespace": {
                         "type": [
                             "string",
@@ -5784,6 +5816,18 @@
                         ]
                     },
                     "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
                         "type": [
                             "string",
                             "null"

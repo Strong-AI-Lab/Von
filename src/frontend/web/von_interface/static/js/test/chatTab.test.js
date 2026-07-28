@@ -6290,16 +6290,14 @@ describe('thinking card toggle accessibility', () => {
 
         retained.copyButton.click();
         await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(writeText).toHaveBeenCalledTimes(1);
         expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(expect.objectContaining({
             schema_version: 'turn_live_progress_locator.v1',
             request_id: expect.any(String),
-            mcp_access: expect.objectContaining({
-                turn_execution_get_live_progress: expect.objectContaining({
-                    tool_name: 'turn_execution_get_live_progress'
-                })
-            })
+            mcp_access: {},
+            retrieval_status: 'server_delegation_unavailable'
         }));
 
         retained.toggleButton.click();
@@ -7045,11 +7043,10 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
         expect(copiedPayload.schema_version).toBe('turn_live_progress_locator.v1');
         expect(copiedPayload.request_id).toBe('request-1458');
         expect(copiedPayload.thinking_card_mode).toBeUndefined();
-        expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
-            turn_execution_get_live_progress: expect.objectContaining({
-                tool_name: 'turn_execution_get_live_progress'
-            })
-        }));
+        expect(copiedPayload.mcp_access).toEqual({});
+        expect(copiedPayload.retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
         expect(copyBtn.textContent).toBe('✓ Copied');
         expect(copyBtn.classList.contains('copy-json-copied')).toBe(true);
         expect(copyBtn.classList.contains('success-feedback')).toBe(false);
@@ -9431,10 +9428,10 @@ describe('conversation LLM telemetry clipboard export', () => {
             },
             request_id: 'req-1684-a'
         });
-        expect(payload.turns[0].mcp_access).toEqual(expect.objectContaining({
-            chat_history_get_debug_entry: expect.any(Object),
-            turn_execution_get_diagnostics: expect.any(Object)
-        }));
+        expect(payload.turns[0].mcp_access).toEqual({});
+        expect(payload.turns[0].retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
         expect(payload.turns[1]).toMatchObject({
             sequence: 2,
             turn_id: 'assistant-1743760860000',
@@ -9784,7 +9781,11 @@ describe('conversation LLM telemetry clipboard export', () => {
         expect(copiedPayload.metadata.authoritative_locator_available).toBe(true);
         expect(copiedPayload.metadata.access_payload_source).toBe('authoritative_locator');
         expect(copiedPayload.turns).toBeUndefined();
-        expect(copiedPayload.agent_instructions.steps).toHaveLength(3);
+        expect(copiedPayload.mcp_access).toEqual({});
+        expect(copiedPayload.retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
+        expect(copiedPayload.agent_instructions.steps).toHaveLength(1);
         expect(copiedPayload).toEqual(expect.objectContaining({
             session_id: accessPayload.session_id,
             session_name: accessPayload.session_name,

@@ -3650,9 +3650,12 @@ def _build_turn_execution_mcp_access(
     namespace: str | None,
     history_owner_user_id: str | None,
     organisation_concept_id: str | None,
+    delegated_actor_user_id: str | None,
+    delegated_actor_namespace: str | None,
 ) -> dict[str, Any]:
     from ...services.conversation_scope_binding_service import (
         build_conversation_scope_binding,
+        build_turn_telemetry_binding,
     )
 
     def _tool_call_descriptor(
@@ -3674,28 +3677,49 @@ def _build_turn_execution_mcp_access(
     access: dict[str, Any] = {
         "turn_execution_get_diagnostics": _tool_call_descriptor(
             "turn_execution_get_diagnostics",
-            {"request_id": request_id, "namespace": namespace},
+            {
+                "request_id": request_id,
+                "turn_telemetry_ref": (
+                    build_turn_telemetry_binding(
+                        request_id=request_id,
+                        delegated_actor_user_id=delegated_actor_user_id,
+                        permitted_tool="turn_execution_get_diagnostics",
+                        chat_session_id=session_id,
+                        history_owner_user_id=history_owner_user_id,
+                        read_namespace=namespace,
+                        delegated_actor_namespace=delegated_actor_namespace,
+                        organisation_concept_id=organisation_concept_id,
+                    )
+                    if delegated_actor_user_id
+                    else None
+                ),
+                "namespace": namespace,
+                "user_concept_id": delegated_actor_user_id,
+                "organisation_concept_id": organisation_concept_id,
+            },
             purpose="Fetch the persisted full turn-execution diagnostics payload.",
-        ),
-        "turn_execution_get": _tool_call_descriptor(
-            "turn_execution_get",
-            {"request_id": request_id, "namespace": namespace},
-            purpose="Fetch the projected turn-execution record for this request.",
         ),
     }
 
-    if isinstance(session_id, str) and session_id.strip():
+    if (
+        isinstance(session_id, str)
+        and session_id.strip()
+        and delegated_actor_user_id
+    ):
         conversation_ref = build_conversation_scope_binding(
             chat_session_id=session_id,
             history_owner_user_id=history_owner_user_id,
             read_namespace=namespace,
             organisation_concept_id=organisation_concept_id,
+            delegated_actor_user_id=delegated_actor_user_id,
+            delegated_actor_namespace=delegated_actor_namespace,
         )
         access["conversation_telemetry_get_locator"] = _tool_call_descriptor(
             "conversation_telemetry_get_locator",
             {
                 "conversation_ref": conversation_ref,
                 "namespace": namespace,
+                "user_concept_id": delegated_actor_user_id,
                 "organisation_concept_id": organisation_concept_id,
             },
             purpose="Fetch the compact conversation locator for the surrounding chat session.",
@@ -3705,10 +3729,16 @@ def _build_turn_execution_mcp_access(
             {
                 "conversation_ref": conversation_ref,
                 "namespace": namespace,
-                "include_debug": True,
+                "user_concept_id": delegated_actor_user_id,
+                "include_debug": False,
+                "segment_size": 20,
+                "history_tail_limit": 100,
                 "organisation_concept_id": organisation_concept_id,
             },
-            purpose="Fetch the stored transcript segments and embedded debug payloads for this session.",
+            purpose=(
+                "Fetch a bounded transcript projection; use the exact debug-entry "
+                "descriptor for persisted debug payloads."
+            ),
         )
 
     return access
@@ -12347,6 +12377,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 namespace=user_namespace,
                 history_owner_user_id=history_user_id,
                 organisation_concept_id=org_concept_id,
+                delegated_actor_user_id=user_concept_id,
+                delegated_actor_namespace=user_namespace,
             )
         with turn_timing_recorder.span(
             stage_id="response_finalising",
@@ -13251,6 +13283,268 @@ def history_telemetry_locator():
             )
         print(f"Error retrieving history telemetry locator: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/turn_telemetry_access", methods=["GET"])
+def history_turn_telemetry_access():
+    """Issue fresh actor-bound MCP read delegations for one exact turn."""
+
+    from ...services.conversation_telemetry_locator_service import (
+        build_turn_telemetry_mcp_access_locator,
+    )
+    from ...services.turn_execution_diagnostics_service import (
+        get_turn_execution_diagnostics_payload,
+    )
+    from ...services.turn_execution_live_progress_service import (
+        get_turn_execution_live_progress_payload,
+    )
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+    user_concept_id = _normalise_concept_id(user_concept_id)
+    if not user_concept_id:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    request_id = _progress_str(request.args.get("request_id"))
+    if not request_id:
+        return jsonify({"error": "request_id required"}), 400
+    requested_session_id = _progress_str(
+        request.args.get("session_id") or session.get("session_id")
+    )
+    requested_history_index = request.args.get("history_index", type=int)
+
+    window_session_id = request.headers.get("X-Von-Window-Session")
+    effective = get_effective_context(
+        window_session_id, dict(session), user_concept_id
+    )
+    actor_namespace, organisation_concept_id = _resolve_history_request_scope_hints(
+        user_concept_id=user_concept_id,
+        effective_context=effective,
+    )
+
+    owner_user_id = user_concept_id
+    owner_namespace = actor_namespace
+    shared_invite: Mapping[str, Any] | None = None
+    if requested_session_id:
+        resolved_owner, resolved_invite = _resolve_shared_conversation_owner(
+            user_concept_id=user_concept_id,
+            session_id=requested_session_id,
+        )
+        if resolved_owner:
+            owner_user_id = resolved_owner
+            shared_invite = (
+                resolved_invite if isinstance(resolved_invite, Mapping) else None
+            )
+        elif not chat_history_service.has_chat_history_session(
+            user_concept_id,
+            requested_session_id,
+            namespace=actor_namespace,
+        ) and not chat_history_service.has_chat_history_session(
+            user_concept_id,
+            requested_session_id,
+            namespace=None,
+        ):
+            return jsonify({"error": "Not authorised for conversation"}), 403
+
+        shared_org_id = (
+            _normalise_concept_id(shared_invite.get("organisation_concept_id"))
+            if shared_invite
+            else None
+        )
+        organisation_concept_id = shared_org_id or organisation_concept_id
+        owner_namespace = (
+            _derive_namespace_for_user_org(
+                owner_user_id, organisation_concept_id
+            )
+            or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+        )
+
+    diagnostics: Mapping[str, Any] | None = None
+    if requested_session_id and requested_history_index is not None:
+        try:
+            compact_debug = chat_history_service.get_chat_history_debug_entry(
+                user_id=owner_user_id,
+                session_id=requested_session_id,
+                history_index=requested_history_index,
+                namespace=owner_namespace or actor_namespace,
+                include_legacy=True,
+                hydrate_blob_refs=False,
+            )
+        except Exception as exc:
+            current_app.logger.warning(
+                "Turn telemetry delegation exact history lookup failed: %s",
+                exc,
+            )
+            compact_debug = None
+        compact_request_id = (
+            _progress_str(compact_debug.get("request_id"))
+            if isinstance(compact_debug, Mapping)
+            else None
+        )
+        if compact_request_id and compact_request_id != request_id:
+            return jsonify({"error": "request_id does not belong to history_index"}), 403
+        if compact_request_id == request_id:
+            # The authenticated exact history location is sufficient to issue a
+            # read-only descriptor. Avoid hydrating the full diagnostics body
+            # merely to mint a short-lived locator for that same entry.
+            diagnostics = {
+                "success": True,
+                "request_id": request_id,
+                "chat_session_id": requested_session_id,
+                "history_location": {
+                    "session_id": requested_session_id,
+                    "history_index": requested_history_index,
+                },
+                "derived_user_concept_id": owner_user_id,
+                "derived_organisation_concept_id": organisation_concept_id,
+                "namespace": owner_namespace or actor_namespace,
+            }
+
+    if diagnostics is None:
+        try:
+            diagnostics = get_turn_execution_diagnostics_payload(
+                request_id=request_id,
+                namespace=owner_namespace or actor_namespace,
+                delegated_actor_user_id=user_concept_id,
+                delegated_actor_namespace=actor_namespace,
+                chat_session_id=requested_session_id,
+                history_index=requested_history_index,
+                history_owner_user_id=owner_user_id,
+                organisation_concept_id=organisation_concept_id,
+            )
+        except Exception as exc:
+            current_app.logger.warning(
+                "Turn telemetry delegation diagnostics lookup failed: %s",
+                exc,
+            )
+            diagnostics = None
+    diagnostics_session_id = (
+        _progress_str(diagnostics.get("chat_session_id"))
+        if isinstance(diagnostics, Mapping)
+        else None
+    )
+    diagnostics_owner_user_id = (
+        _normalise_concept_id(diagnostics.get("derived_user_concept_id"))
+        if isinstance(diagnostics, Mapping)
+        else None
+    )
+    diagnostics_namespace = (
+        _progress_str(diagnostics.get("namespace"))
+        if isinstance(diagnostics, Mapping)
+        else None
+    )
+    diagnostics_org_id = (
+        _normalise_concept_id(diagnostics.get("derived_organisation_concept_id"))
+        if isinstance(diagnostics, Mapping)
+        else None
+    )
+    diagnostics_history_location = (
+        diagnostics.get("history_location")
+        if isinstance(diagnostics, Mapping)
+        and isinstance(diagnostics.get("history_location"), Mapping)
+        else {}
+    )
+    diagnostics_history_index = diagnostics_history_location.get("history_index")
+    if not isinstance(diagnostics_history_index, int):
+        diagnostics_history_index = None
+
+    if (
+        requested_session_id
+        and diagnostics_session_id
+        and requested_session_id != diagnostics_session_id
+    ):
+        return jsonify({"error": "request_id does not belong to session_id"}), 403
+    if (
+        requested_history_index is not None
+        and diagnostics_history_index is not None
+        and requested_history_index != diagnostics_history_index
+    ):
+        return jsonify({"error": "request_id does not belong to history_index"}), 403
+
+    resolved_session_id = diagnostics_session_id or requested_session_id
+    resolved_history_index = (
+        diagnostics_history_index
+        if diagnostics_history_index is not None
+        else requested_history_index
+    )
+    if diagnostics_owner_user_id and diagnostics_owner_user_id != owner_user_id:
+        if not resolved_session_id:
+            return jsonify({"error": "Not authorised for turn"}), 403
+        resolved_owner, resolved_invite = _resolve_shared_conversation_owner(
+            user_concept_id=user_concept_id,
+            session_id=resolved_session_id,
+        )
+        if resolved_owner != diagnostics_owner_user_id:
+            return jsonify({"error": "Not authorised for turn"}), 403
+        owner_user_id = diagnostics_owner_user_id
+        if isinstance(resolved_invite, Mapping):
+            organisation_concept_id = (
+                _normalise_concept_id(
+                    resolved_invite.get("organisation_concept_id")
+                )
+                or organisation_concept_id
+            )
+    elif diagnostics_owner_user_id:
+        owner_user_id = diagnostics_owner_user_id
+
+    diagnostics_available = (
+        isinstance(diagnostics, Mapping) and diagnostics.get("success") is True
+    )
+    live_progress: Mapping[str, Any] | None = None
+    if not diagnostics_available:
+        live_progress = get_turn_execution_live_progress_payload(
+            request_id=request_id,
+            namespace=actor_namespace,
+            user_concept_id=user_concept_id,
+            window_session_id=window_session_id,
+        )
+        if not isinstance(live_progress, Mapping) and not diagnostics_available:
+            return jsonify({"error": "Turn telemetry not found"}), 404
+        if isinstance(live_progress, Mapping):
+            live_session_id = _progress_str(
+                live_progress.get("session_id")
+                or live_progress.get("chat_session_id")
+                or live_progress.get("conversation_session_id")
+            )
+            if (
+                requested_session_id
+                and live_session_id
+                and requested_session_id != live_session_id
+            ):
+                return (
+                    jsonify({"error": "request_id does not belong to session_id"}),
+                    403,
+                )
+            if not diagnostics_available:
+                resolved_session_id = live_session_id or requested_session_id
+                owner_user_id = user_concept_id
+                owner_namespace = actor_namespace
+
+    owner_namespace = (
+        diagnostics_namespace
+        or owner_namespace
+        or _derive_namespace_for_user_org(
+            owner_user_id, diagnostics_org_id or organisation_concept_id
+        )
+    )
+    organisation_concept_id = diagnostics_org_id or organisation_concept_id
+    locator = build_turn_telemetry_mcp_access_locator(
+        request_id=request_id,
+        delegated_actor_user_id=user_concept_id,
+        delegated_actor_namespace=actor_namespace,
+        history_owner_user_id=owner_user_id,
+        read_namespace=owner_namespace,
+        organisation_concept_id=organisation_concept_id,
+        chat_session_id=resolved_session_id,
+        history_index=resolved_history_index,
+        include_diagnostics=diagnostics_available,
+        include_live_progress=isinstance(live_progress, Mapping),
+    )
+    return jsonify(locator), 200
 
 
 @von_bp.route("/diagnostics/export", methods=["POST"])

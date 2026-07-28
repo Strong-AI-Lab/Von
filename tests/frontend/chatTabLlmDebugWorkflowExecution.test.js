@@ -109,7 +109,7 @@ describe('LLM debug popup workflow execution hook', () => {
         });
         global.fetch = jest.fn();
         const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
-        fetchWithTimeout.mockResolvedValue({
+        fetchWithTimeout.mockResolvedValueOnce({
             ok: true,
             json: async () => ({
                 schema_version: 'conversation_llm_telemetry_locator.v1',
@@ -124,6 +124,34 @@ describe('LLM debug popup workflow execution hook', () => {
                         }
                     }
                 ]
+            })
+        }).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                schema_version: 'turn_telemetry_mcp_access.v1',
+                history_location: {
+                    session_id: 'session-history-ref',
+                    history_index: 4
+                },
+                mcp_access: {
+                    chat_history_get_debug_entry: {
+                        tool_name: 'chat_history_get_debug_entry',
+                        arguments: {
+                            history_location_ref: {
+                                signature: 'signed-history-ref'
+                            }
+                        }
+                    },
+                    turn_execution_get_diagnostics: {
+                        tool_name: 'turn_execution_get_diagnostics',
+                        arguments: {
+                            request_id: 'req-history-ref',
+                            turn_telemetry_ref: {
+                                signature: 'signed-turn-ref'
+                            }
+                        }
+                    }
+                }
             })
         });
 
@@ -162,6 +190,13 @@ describe('LLM debug popup workflow execution hook', () => {
             chat_history_get_debug_entry: expect.any(Object),
             turn_execution_get_diagnostics: expect.any(Object)
         }));
+        expect(copiedPayload.retrieval_status).toBe(
+            'server_delegation_available'
+        );
+        const [turnAccessUrl] = fetchWithTimeout.mock.calls[1];
+        expect(
+            new URL(turnAccessUrl, 'https://example.test').pathname
+        ).toBe('/von/history/turn_telemetry_access');
         expect(copiedPayload.llm_debug_data).toBeUndefined();
         expect(copiedPayload.messages).toBeUndefined();
         expect(copiedPayload.response).toBeUndefined();
@@ -351,9 +386,10 @@ describe('LLM debug popup workflow execution hook', () => {
                 }
             }
         });
-        expect(payload.mcp_access).toEqual(expect.objectContaining({
-            turn_execution_get_diagnostics: expect.any(Object)
-        }));
+        expect(payload.mcp_access).toEqual({});
+        expect(payload.retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
         expect(payload.model).toBeUndefined();
         expect(payload.messages).toBeUndefined();
     });
@@ -462,22 +498,11 @@ describe('LLM debug popup workflow execution hook', () => {
         const popup = document.getElementById('chatLlmDebugPopup');
         const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
 
-        expect(payload.mcp_access.workflow_get_execution_trace).toEqual(expect.objectContaining({
-            tool_name: 'workflow_get_execution_trace',
-            arguments: expect.objectContaining({
-                execution_id: 'exec-selected'
-            })
-        }));
-        expect(payload.mcp_access.workflow_execution_traces).toEqual([
-            expect.objectContaining({
-                workflow_id: '#V#chat_narration_workflow',
-                trace_role: 'auxiliary_workflow'
-            }),
-            expect.objectContaining({
-                workflow_id: '#V#arxiv_paper_representation_workflow',
-                trace_role: 'selected_workflow'
-            })
-        ]);
+        expect(payload.mcp_access.workflow_get_execution_trace).toBeUndefined();
+        expect(payload.mcp_access.workflow_execution_traces).toBeUndefined();
+        expect(payload.retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
     });
 
     test('copy payload treats workflow-use episode instance as selected-workflow evidence', async () => {
@@ -513,23 +538,11 @@ describe('LLM debug popup workflow execution hook', () => {
         const popup = document.getElementById('chatLlmDebugPopup');
         const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
 
-        expect(payload.mcp_access.workflow_get_execution_trace).toEqual(expect.objectContaining({
-            tool_name: 'workflow_get_execution_trace',
-            arguments: expect.objectContaining({
-                instance_id: 'wf-instance-selected'
-            })
-        }));
-        expect(payload.mcp_access.workflow_execution_traces).toEqual([
-            expect.objectContaining({
-                workflow_id: '#V#chat_narration_workflow',
-                trace_role: 'auxiliary_workflow'
-            }),
-            expect.objectContaining({
-                workflow_id: '#V#arxiv_paper_representation_workflow',
-                instance_id: 'wf-instance-selected',
-                trace_role: 'selected_workflow'
-            })
-        ]);
+        expect(payload.mcp_access.workflow_get_execution_trace).toBeUndefined();
+        expect(payload.mcp_access.workflow_execution_traces).toBeUndefined();
+        expect(payload.retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
     });
 
     test('hydrates popup locator history_location from the server conversation locator when missing locally', async () => {
@@ -558,6 +571,33 @@ describe('LLM debug popup workflow execution hook', () => {
                         history_location: {
                             session_id: 'session-1718',
                             history_index: 17
+                        },
+                        mcp_access: {
+                            chat_history_get_debug_entry: {
+                                tool_name: 'chat_history_get_debug_entry',
+                                arguments: {
+                                    history_location_ref: {
+                                        signature: 'signed-debug-ref'
+                                    }
+                                }
+                            },
+                            conversation_telemetry_get_locator: {
+                                tool_name: 'conversation_telemetry_get_locator',
+                                arguments: {
+                                    conversation_ref: {
+                                        signature: 'signed-conversation-ref'
+                                    }
+                                }
+                            },
+                            turn_execution_get_diagnostics: {
+                                tool_name: 'turn_execution_get_diagnostics',
+                                arguments: {
+                                    request_id: 'req-1718',
+                                    turn_telemetry_ref: {
+                                        signature: 'signed-turn-ref'
+                                    }
+                                }
+                            }
                         }
                     }
                 ]
@@ -595,5 +635,8 @@ describe('LLM debug popup workflow execution hook', () => {
             conversation_telemetry_get_locator: expect.any(Object),
             turn_execution_get_diagnostics: expect.any(Object)
         }));
+        expect(payload.retrieval_status).toBe(
+            'server_delegation_available'
+        );
     });
 });

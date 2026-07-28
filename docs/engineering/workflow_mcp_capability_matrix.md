@@ -10,7 +10,7 @@ available. It prevents ambiguous "missing tool" behaviour across MCP surfaces.
 | Surface | Intended usage |
 | --- | --- |
 | `internal_mcp_gateway` | Canonical workflow management and introspection surface used by Von internals. |
-| `vontology_mcp_stdio_server` | Vontology concept/text tools for external IDE agents. Durable `workflow_*` tools are exposed directly; chat introspection tools remain internal-only. |
+| `vontology_mcp_stdio_server` | Vontology concept/text tools for external IDE agents. Durable `workflow_*` tools are exposed directly. Selected exact telemetry reads accept short-lived actor-bound delegations; other chat introspection remains internal-only. |
 | `vonrag_mcp_stdio_server` | Focused RAG/search tools only. |
 
 ## Tool Availability
@@ -37,6 +37,11 @@ available. It prevents ambiguous "missing tool" behaviour across MCP surfaces.
 | `workflow_delete_schedule` | Yes | Yes | No |
 | `workflow_trigger_schedule` | Yes | Yes | No |
 | `workflow_mcp_health_check` | Yes | Yes | No |
+| `conversation_telemetry_get_locator` | Yes | Yes (signed actor delegation or operator) | No |
+| `chat_history_get_segments` | Yes | Yes (signed actor delegation or operator) | No |
+| `chat_history_get_debug_entry` | Yes | Yes (signed actor delegation or operator) | No |
+| `turn_execution_get_diagnostics` | Yes | Yes (signed actor delegation or operator) | No |
+| `turn_execution_get_live_progress` | Yes | Yes (signed actor delegation or operator) | No |
 | `chat_get_prompt_context` | Yes | No | No |
 | `chat_introspect` | Yes | No | No |
 | `settings_get_public` | Yes | No | No |
@@ -45,6 +50,16 @@ available. It prevents ambiguous "missing tool" behaviour across MCP surfaces.
 
 - `vontology_mcp_stdio_server` exposes direct durable `workflow_*` calls and can
   also access workflow behaviour indirectly via `von_chat_run` (tool orchestration pathway).
+- Browser telemetry-copy surfaces issue short-lived references bound to the
+  authenticated actor, audience, exact tool, organisation/namespace, and exact
+  conversation, history entry, or request. The stdio server verifies those
+  claims and canonical ownership before returning a bounded read.
+- Raw session, history, request, user, organisation, or namespace fields are
+  locators only and do not grant telemetry authority. Tampered, expired,
+  cross-actor, cross-tool, or cross-target references fail closed.
+- The delegation does not grant global list, workflow trace, critic,
+  experiment, mutation, or control-plane authority. Those surfaces retain
+  their existing operator or global-admin requirements.
 - `vonrag_mcp_stdio_server` is intentionally limited to RAG/search tools.
 
 ## Diagnostics Contract
@@ -110,4 +125,3 @@ Suggested rollback sequence:
 2. Confirm diagnostics stream is healthy (`workflow_metadata_validation_events` present).
 3. If workflows still degrade, set `VON_WORKFLOW_METADATA_VALIDATION_MODE=off`.
 4. After remediation, restore to `enforce`.
-

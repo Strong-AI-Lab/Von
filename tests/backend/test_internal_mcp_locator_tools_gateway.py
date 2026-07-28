@@ -107,7 +107,7 @@ def test_chat_history_get_segments_gateway_accepts_bound_conversation_ref(
     _assert_schema_conformance(gateway, "chat_history_get_segments", payload)
 
 
-def test_chat_history_get_segments_gateway_accepts_emitted_von_conversation_ref(
+def test_chat_history_get_segments_gateway_rejects_emitted_von_conversation_ref_as_authority(
     monkeypatch,
 ) -> None:
     gateway = _build_gateway()
@@ -145,14 +145,8 @@ def test_chat_history_get_segments_gateway_accepts_emitted_von_conversation_ref(
         {"conversation_ref": _emitted_von_conversation_ref()},
     ).payload
 
-    assert payload.get("success") is True
-    assert payload.get("session_id") == "ff9be41d-28f8-4864-ab0b-8c201e3152d0"
-    assert payload.get("identifier_binding", {}).get("mode") == (
-        "public_conversation_ref"
-    )
-    assert payload.get("identifier_binding", {}).get("validation_status") == (
-        "normalised"
-    )
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "authenticated_actor_context_required"
     _assert_schema_conformance(gateway, "chat_history_get_segments", payload)
 
 

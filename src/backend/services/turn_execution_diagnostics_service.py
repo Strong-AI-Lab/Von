@@ -7,10 +7,15 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from .chat_history_service import get_chat_history_collection_service
+from .chat_history_service import (
+    ChatHistoryServiceError,
+    get_chat_history_collection_service,
+    get_chat_history_debug_entry,
+)
 from .conversation_scope_binding_service import (
     build_conversation_scope_binding,
     build_history_location_binding,
+    build_turn_telemetry_binding,
 )
 from .debug_payload_store import hydrate_debug_payload_blob_refs
 from .turn_decision_attribution_service import build_turn_decision_attribution
@@ -212,6 +217,58 @@ def _resolve_history_context(
         "target_message": target_message,
         "target_llm_debug": target_llm_debug,
         "prompt_text": prompt_text,
+    }
+
+
+def _resolve_exact_history_context(
+    *,
+    request_id: str,
+    namespace: str | None,
+    chat_session_id: str,
+    history_index: int,
+    history_owner_user_id: str,
+    organisation_concept_id: str | None,
+) -> dict[str, Any] | None:
+    """Resolve one signed history location without a request-id-wide scan."""
+
+    try:
+        llm_debug = get_chat_history_debug_entry(
+            user_id=history_owner_user_id,
+            session_id=chat_session_id,
+            history_index=history_index,
+            namespace=namespace,
+            include_legacy=True,
+            hydrate_blob_refs=True,
+        )
+    except ChatHistoryServiceError as exc:
+        raise TurnExecutionDiagnosticsServiceError(
+            "Could not query the exact delegated chat-history entry "
+            f"for request_id={request_id}: {exc}"
+        ) from exc
+
+    if not isinstance(llm_debug, Mapping):
+        return None
+    if _safe_str(llm_debug.get("request_id")) != request_id:
+        return None
+
+    hydrated = hydrate_debug_payload_blob_refs(llm_debug, fail_soft=True)
+    target_llm_debug = (
+        dict(hydrated.payload)
+        if isinstance(hydrated.payload, Mapping)
+        else dict(llm_debug)
+    )
+    return {
+        "user_id": history_owner_user_id,
+        "session_id": chat_session_id,
+        "namespace": namespace,
+        "org_id": organisation_concept_id,
+        "target_index": history_index,
+        "target_message": {
+            "role": "assistant",
+            "llm_debug_data": target_llm_debug,
+        },
+        "target_llm_debug": target_llm_debug,
+        "prompt_text": _extract_prompt_text_from_debug(target_llm_debug),
     }
 
 
@@ -437,38 +494,53 @@ def _build_turn_diagnostics_mcp_access(
     history_index: int | None,
     history_owner_user_id: str | None,
     organisation_concept_id: str | None,
+    delegated_actor_user_id: str | None,
+    delegated_actor_namespace: str | None,
     payload: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    delegated_actor = delegated_actor_user_id or history_owner_user_id
     access: dict[str, Any] = {
         "turn_execution_get_diagnostics": _build_tool_call_descriptor(
             "turn_execution_get_diagnostics",
             {
                 "request_id": request_id,
+                "turn_telemetry_ref": (
+                    build_turn_telemetry_binding(
+                        request_id=request_id,
+                        delegated_actor_user_id=delegated_actor,
+                        permitted_tool="turn_execution_get_diagnostics",
+                        chat_session_id=session_id,
+                        history_index=history_index,
+                        history_owner_user_id=history_owner_user_id,
+                        read_namespace=namespace,
+                        delegated_actor_namespace=delegated_actor_namespace,
+                        organisation_concept_id=organisation_concept_id,
+                    )
+                    if delegated_actor
+                    else None
+                ),
                 "namespace": namespace,
+                "user_concept_id": delegated_actor,
+                "organisation_concept_id": organisation_concept_id,
             },
             purpose="Fetch the persisted full turn-execution diagnostics payload.",
         ),
-        "turn_execution_get": _build_tool_call_descriptor(
-            "turn_execution_get",
-            {
-                "request_id": request_id,
-                "namespace": namespace,
-            },
-            purpose="Fetch the projected turn-execution record for this request.",
-        ),
     }
-    if session_id:
+    if session_id and delegated_actor:
         conversation_ref = build_conversation_scope_binding(
             chat_session_id=session_id,
             history_owner_user_id=history_owner_user_id,
             read_namespace=namespace,
             organisation_concept_id=organisation_concept_id,
+            delegated_actor_user_id=delegated_actor,
+            delegated_actor_namespace=delegated_actor_namespace,
         )
         access["conversation_telemetry_get_locator"] = _build_tool_call_descriptor(
             "conversation_telemetry_get_locator",
             {
                 "conversation_ref": conversation_ref,
                 "namespace": namespace,
+                "user_concept_id": delegated_actor,
                 "organisation_concept_id": organisation_concept_id,
             },
             purpose="Fetch the compact conversation locator for the surrounding chat session.",
@@ -478,12 +550,18 @@ def _build_turn_diagnostics_mcp_access(
             {
                 "conversation_ref": conversation_ref,
                 "namespace": namespace,
-                "include_debug": True,
+                "user_concept_id": delegated_actor,
+                "include_debug": False,
+                "segment_size": 20,
+                "history_tail_limit": 100,
                 "organisation_concept_id": organisation_concept_id,
             },
-            purpose="Fetch the stored transcript segments and embedded debug payloads for this session.",
+            purpose=(
+                "Fetch a bounded transcript projection; use the exact debug-entry "
+                "descriptor for persisted debug payloads."
+            ),
         )
-    if session_id and history_index is not None:
+    if session_id and history_index is not None and delegated_actor:
         access["chat_history_get_debug_entry"] = _build_tool_call_descriptor(
             "chat_history_get_debug_entry",
             {
@@ -493,27 +571,31 @@ def _build_turn_diagnostics_mcp_access(
                     history_owner_user_id=history_owner_user_id,
                     read_namespace=namespace,
                     organisation_concept_id=organisation_concept_id,
+                    delegated_actor_user_id=delegated_actor,
+                    delegated_actor_namespace=delegated_actor_namespace,
                 ),
                 "namespace": namespace,
+                "user_concept_id": delegated_actor,
                 "organisation_concept_id": organisation_concept_id,
             },
             purpose="Fetch the exact stored llm_debug_data entry for this assistant turn.",
         )
 
-    workflow_traces = _extract_workflow_execution_trace_refs(payload)
-    if workflow_traces:
-        access["workflow_execution_traces"] = workflow_traces
-        primary_trace = next(
-            (
-                trace
-                for trace in workflow_traces
-                if trace.get("trace_role") == "selected_workflow"
-            ),
-            workflow_traces[0],
-        )
-        primary_access = primary_trace.get("mcp_access")
-        if isinstance(primary_access, Mapping):
-            access["workflow_get_execution_trace"] = dict(primary_access)
+    if delegated_actor_user_id is None:
+        workflow_traces = _extract_workflow_execution_trace_refs(payload)
+        if workflow_traces:
+            access["workflow_execution_traces"] = workflow_traces
+            primary_trace = next(
+                (
+                    trace
+                    for trace in workflow_traces
+                    if trace.get("trace_role") == "selected_workflow"
+                ),
+                workflow_traces[0],
+            )
+            primary_access = primary_trace.get("mcp_access")
+            if isinstance(primary_access, Mapping):
+                access["workflow_get_execution_trace"] = dict(primary_access)
 
     return access
 
@@ -1533,15 +1615,39 @@ def get_turn_execution_diagnostics_payload(
     *,
     request_id: str,
     namespace: str | None = None,
+    delegated_actor_user_id: str | None = None,
+    delegated_actor_namespace: str | None = None,
+    chat_session_id: str | None = None,
+    history_index: int | None = None,
+    history_owner_user_id: str | None = None,
+    organisation_concept_id: str | None = None,
 ) -> dict[str, Any] | None:
     request_id_value = _safe_str(request_id)
     if not request_id_value:
         return None
 
-    history_context = _resolve_history_context(
-        request_id=request_id_value,
-        namespace=_safe_str(namespace),
-    )
+    exact_session_id = _safe_str(chat_session_id)
+    exact_owner_user_id = _safe_str(history_owner_user_id)
+    if (
+        exact_session_id
+        and exact_owner_user_id
+        and isinstance(history_index, int)
+        and not isinstance(history_index, bool)
+        and history_index >= 0
+    ):
+        history_context = _resolve_exact_history_context(
+            request_id=request_id_value,
+            namespace=_safe_str(namespace),
+            chat_session_id=exact_session_id,
+            history_index=history_index,
+            history_owner_user_id=exact_owner_user_id,
+            organisation_concept_id=_safe_str(organisation_concept_id),
+        )
+    else:
+        history_context = _resolve_history_context(
+            request_id=request_id_value,
+            namespace=_safe_str(namespace),
+        )
     turn_record = _load_turn_execution_record(
         request_id=request_id_value,
         namespace=_safe_str(namespace)
@@ -1677,6 +1783,8 @@ def get_turn_execution_diagnostics_payload(
         organisation_concept_id=_safe_str(
             payload.get("derived_organisation_concept_id")
         ),
+        delegated_actor_user_id=_safe_str(delegated_actor_user_id),
+        delegated_actor_namespace=_safe_str(delegated_actor_namespace),
         payload=payload,
     )
     payload["decision_attribution"] = build_turn_decision_attribution(

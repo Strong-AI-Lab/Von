@@ -324,7 +324,10 @@ def test_raw_stdio_rejects_global_workflow_control_plane_tools():
     assert all(payload["success"] is False for payload in payloads)
     assert {
         payload["error_code"] for payload in payloads
-    } == {"workflow_global_admin_authority_required"}
+    } == {
+        "authenticated_actor_context_required",
+        "workflow_global_admin_authority_required",
+    }
 
 
 def test_raw_stdio_sensitive_workflow_handlers_bind_untrusted_actor_source(monkeypatch):
