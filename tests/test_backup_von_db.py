@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import traceback
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,96 @@ def _touch(path: Path, *, age_seconds: int) -> None:
         (path / "dummy.txt").write_text("x" * 10, encoding="utf-8")
     ts = time.time() - age_seconds
     os.utime(path, (ts, ts))
+
+
+@pytest.mark.parametrize(
+    ("configured_timeout", "expected_timeout"),
+    [
+        (None, backup_von_db.DEFAULT_MONGODUMP_TIMEOUT_SECONDS),
+        ("90", 90),
+        ("0", backup_von_db.DEFAULT_MONGODUMP_TIMEOUT_SECONDS),
+        ("invalid", backup_von_db.DEFAULT_MONGODUMP_TIMEOUT_SECONDS),
+    ],
+)
+def test_mongodump_uses_bounded_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_timeout: str | None,
+    expected_timeout: int,
+) -> None:
+    if configured_timeout is None:
+        monkeypatch.delenv("VON_BACKUP_MONGODUMP_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv(
+            "VON_BACKUP_MONGODUMP_TIMEOUT_SECONDS",
+            configured_timeout,
+        )
+    observed: dict[str, object] = {}
+
+    def _fake_run(
+        command: list[str],
+        *,
+        check: bool,
+        timeout: int,
+    ) -> None:
+        observed.update(command=command, check=check, timeout=timeout)
+
+    monkeypatch.setattr(backup_von_db.subprocess, "run", _fake_run)
+
+    backup_von_db._run_mongodump(
+        mongo_uri="mongodb://example.invalid/",
+        db_name="von_db",
+        out_path=tmp_path,
+    )
+
+    assert observed["check"] is True
+    assert observed["timeout"] == expected_timeout
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_message"),
+    [
+        ("timeout", "exceeded the configured"),
+        ("nonzero", "failed with exit code 19"),
+    ],
+)
+def test_mongodump_failure_traceback_does_not_expose_uri_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+    expected_message: str,
+) -> None:
+    mongo_uri = "mongodb://backup-user:super-secret-password@example.invalid/von_db"
+
+    def _fake_run(
+        command: list[str],
+        *,
+        check: bool,
+        timeout: int,
+    ) -> None:
+        if failure_kind == "timeout":
+            raise backup_von_db.subprocess.TimeoutExpired(command, timeout)
+        raise backup_von_db.subprocess.CalledProcessError(19, command)
+
+    monkeypatch.setattr(backup_von_db.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError) as caught:
+        backup_von_db._run_mongodump(
+            mongo_uri=mongo_uri,
+            db_name="von_db",
+            out_path=tmp_path,
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            caught.type,
+            caught.value,
+            caught.tb,
+        )
+    )
+    assert expected_message in rendered
+    assert mongo_uri not in rendered
+    assert "super-secret-password" not in rendered
 
 
 def test_retention_deletes_old_backups(tmp_path: Path) -> None:

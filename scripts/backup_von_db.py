@@ -12,6 +12,7 @@ Optional features are driven by environment variables:
 - VON_BACKUP_COMPRESSION_ENABLED (truthy/falsey)
 - VON_BACKUP_ENCRYPTION_ENABLED (truthy/falsey)
 - VON_BACKUP_ENCRYPTION_KEY (Fernet key; required if encryption enabled)
+- VON_BACKUP_MONGODUMP_TIMEOUT_SECONDS (int; default 21600 / 6 hours)
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 BACKUP_SUCCESS_RECEIPT_SCHEMA_VERSION = "backup_success_receipt.v1"
 BACKUP_RECEIPT_SIDECAR_SUFFIX = ".backup_receipt.json"
+DEFAULT_MONGODUMP_TIMEOUT_SECONDS = 6 * 60 * 60
 
 
 def _env_truthy(value: str | None) -> bool:
@@ -375,7 +377,22 @@ def _run_mongodump(*, mongo_uri: str, db_name: str, out_path: Path) -> None:
         "--out",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True)
+    timeout_seconds = _env_int(
+        os.environ.get("VON_BACKUP_MONGODUMP_TIMEOUT_SECONDS"),
+        default=DEFAULT_MONGODUMP_TIMEOUT_SECONDS,
+    )
+    if timeout_seconds < 1:
+        timeout_seconds = DEFAULT_MONGODUMP_TIMEOUT_SECONDS
+    try:
+        subprocess.run(cmd, check=True, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"mongodump exceeded the configured {timeout_seconds}s timeout"
+        ) from None
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"mongodump failed with exit code {exc.returncode}"
+        ) from None
 
 
 def main(argv: list[str] | None = None) -> int:

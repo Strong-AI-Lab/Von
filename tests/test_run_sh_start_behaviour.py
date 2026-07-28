@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,736 @@ cd {shlex_quote(str(REPO_ROOT))}
 
 def shlex_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _prepare_backup_launcher(
+    tmp_path: Path,
+    *,
+    enable_daily_backup: bool,
+    backup_exit: int = 0,
+    backup_delay: float = 0.15,
+    artifact_size: int = 16,
+) -> dict[str, Path]:
+    launcher_root = tmp_path / "launcher"
+    launcher_root.mkdir()
+    run_sh = launcher_root / "run.sh"
+    shutil.copy2(REPO_ROOT / "run.sh", run_sh)
+
+    backup_script = launcher_root / "scripts" / "backup_von_db.py"
+    backup_script.parent.mkdir()
+    backup_script.write_text("# fake backup entrypoint\n", encoding="utf-8")
+
+    args_path = tmp_path / "backup_args.txt"
+    calls_path = tmp_path / "backup_calls.txt"
+    created_path = tmp_path / "created_by_backup.txt"
+    fake_pdm = launcher_root / ".venv" / "bin" / "pdm"
+    fake_pdm.parent.mkdir(parents=True)
+    fake_pdm.write_text(
+        f"""#!/usr/bin/env python3
+import datetime
+import json
+import sys
+import time
+from pathlib import Path
+
+args = sys.argv[1:]
+args_path = Path({str(args_path)!r})
+calls_path = Path({str(calls_path)!r})
+created_path = Path({str(created_path)!r})
+args_path.write_text("\\n".join(args) + "\\n", encoding="utf-8")
+with calls_path.open("a", encoding="utf-8") as handle:
+    handle.write("call\\n")
+created_path.write_text("created\\n", encoding="utf-8")
+time.sleep({backup_delay!r})
+
+if {backup_exit} == 0 and "--launcher-receipt-path" in args:
+    def option(name):
+        return args[args.index(name) + 1]
+
+    out_dir = Path(option("--out-dir"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    artifact = out_dir / "fake_auto_daily.zip"
+    artifact.write_bytes(b"x" * {artifact_size})
+    completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    payload = {{
+        "schema_version": "backup_success_receipt.v1",
+        "completed_at_utc": completed_at,
+        "db_name": "von_db",
+        "tag": "auto-daily",
+        "out_root": str(out_dir),
+        "backup_root": str(artifact),
+        "final_artifact_path": str(artifact),
+        "artifact_kind": "zip",
+        "compressed": True,
+        "encrypted": False,
+        "artifact_size_bytes": artifact.stat().st_size,
+        "collection_count": 1,
+    }}
+    receipt_text = json.dumps(payload, indent=2) + "\\n"
+    Path(option("--launcher-receipt-path")).write_text(
+        receipt_text, encoding="utf-8"
+    )
+    Path(option("--legacy-sentinel-path")).write_text(
+        completed_at + "\\n", encoding="utf-8"
+    )
+    artifact.with_name(artifact.name + ".backup_receipt.json").write_text(
+        receipt_text, encoding="utf-8"
+    )
+
+raise SystemExit({backup_exit})
+""",
+        encoding="utf-8",
+    )
+    fake_pdm.chmod(0o755)
+
+    backup_root = tmp_path / "external-backups"
+    (launcher_root / ".env").write_text(
+        "\n".join(
+            [
+                f"VON_ENABLE_DAILY_BACKUP={'1' if enable_daily_backup else '0'}",
+                "VON_ENABLE_BACKUP_ACTION=1",
+                "VON_DB_NAME=von_db",
+                f'VON_BACKUP_ROOT="{backup_root}"',
+                "VON_BACKUP_INTERVAL_HOURS=24",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "root": launcher_root,
+        "run_sh": run_sh,
+        "backup_script": backup_script,
+        "backup_root": backup_root,
+        "args": args_path,
+        "calls": calls_path,
+        "created": created_path,
+    }
+
+
+def _run_prepared_launcher(
+    prepared: dict[str, Path], action: str
+) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required for run.sh launcher-path tests")
+    return subprocess.run(
+        [bash, str(prepared["run_sh"]), action, "-NoBackupMigrate"],
+        cwd=prepared["root"],
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def _write_test_backup_receipt(
+    receipt_path: Path,
+    *,
+    artifact_path: Path,
+    completed_at: datetime,
+    tag: str = "auto-daily",
+    schema_version: str = "backup_success_receipt.v1",
+    db_name: str = "von_db",
+    out_root: Path | None = None,
+) -> None:
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": schema_version,
+        "completed_at_utc": completed_at.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "db_name": db_name,
+        "tag": tag,
+        "out_root": str(out_root or artifact_path.parent),
+        "backup_root": str(artifact_path),
+        "final_artifact_path": str(artifact_path),
+        "artifact_kind": "zip",
+        "compressed": True,
+        "encrypted": False,
+        "artifact_size_bytes": artifact_path.stat().st_size,
+        "collection_count": 1,
+    }
+    receipt_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _process_start_marker(pid: int) -> str:
+    return subprocess.check_output(
+        ["ps", "-o", "lstart=", "-p", str(pid)],
+        text=True,
+    ).strip()
+
+
+def _write_test_backup_lock(
+    prepared: dict[str, Path],
+    *,
+    owner_pid: int,
+    owner_start: str,
+    include_owner_metadata: bool = True,
+) -> Path:
+    lock_dir = prepared["root"] / ".run" / "daily_backup.lock"
+    lock_dir.mkdir(parents=True)
+    if include_owner_metadata:
+        (lock_dir / "owner").write_text("test-owner\n", encoding="utf-8")
+        (lock_dir / "launcher.pid").write_text(
+            f"{owner_pid}\n",
+            encoding="utf-8",
+        )
+        (lock_dir / "launcher.start").write_text(
+            owner_start + "\n",
+            encoding="utf-8",
+        )
+        (lock_dir / "baseline_success").write_text("\n", encoding="utf-8")
+    (lock_dir / "ready").write_text("", encoding="utf-8")
+    return lock_dir
+
+
+def _run_concurrent_scheduled_backups(
+    prepared: dict[str, Path],
+) -> tuple[tuple[int, str, str], tuple[int, str, str]]:
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required for run.sh launcher-path tests")
+    command = [
+        bash,
+        str(prepared["run_sh"]),
+        "scheduled-backup",
+        "-NoBackupMigrate",
+    ]
+    first = subprocess.Popen(
+        command,
+        cwd=prepared["root"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    ready_path = prepared["root"] / ".run" / "daily_backup.lock" / "ready"
+    deadline = time.monotonic() + 5
+    while (
+        time.monotonic() < deadline
+        and not ready_path.exists()
+        and first.poll() is None
+    ):
+        time.sleep(0.01)
+    assert ready_path.exists(), "first scheduled backup did not acquire its owner lock"
+    lock_dir = ready_path.parent
+    assert lock_dir.stat().st_mode & 0o777 == 0o700
+    for private_name in (
+        "owner",
+        "launcher.pid",
+        "launcher.start",
+        "baseline_success",
+        "ready",
+    ):
+        assert (lock_dir / private_name).stat().st_mode & 0o777 == 0o600
+
+    second = subprocess.Popen(
+        command,
+        cwd=prepared["root"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    first_out, first_err = first.communicate(timeout=20)
+    second_out, second_err = second.communicate(timeout=20)
+    return (
+        (first.returncode, first_out, first_err),
+        (second.returncode, second_out, second_err),
+    )
+
+
+def test_run_sh_loads_dotenv_before_backup_path_globals(tmp_path: Path) -> None:
+    launcher_root = tmp_path / "launcher"
+    launcher_root.mkdir()
+    run_sh = launcher_root / "run.sh"
+    shutil.copy2(REPO_ROOT / "run.sh", run_sh)
+    backup_root = tmp_path / "external-backups"
+    (launcher_root / ".env").write_text(
+        "\n".join(
+            [
+                f'VON_BACKUP_ROOT="{backup_root}"',
+                "VON_ALLOW_BACKUP_IN_REPO=1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required for run.sh launcher-path tests")
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            (
+                f". {shlex_quote(str(run_sh))} help -NoBackupMigrate >/dev/null\n"
+                "printf '%s\\n%s\\n' \"$BACKUP_ROOT\" \"$ALLOW_REPO_BACKUP_OUTPUT\""
+            ),
+        ],
+        cwd=launcher_root,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=True,
+    )
+
+    assert result.stdout.splitlines() == [str(backup_root), "1"]
+
+
+def test_run_sh_scheduled_backup_requires_explicit_host_opt_in(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=False)
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0
+    assert not prepared["args"].exists()
+    assert "automatic backups disabled" in result.stdout
+
+
+def test_run_sh_scheduled_backup_waits_and_passes_receipt_paths(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert prepared["created"].exists()
+    assert prepared["created"].stat().st_mode & 0o777 == 0o600
+    launcher_receipt = (
+        prepared["root"] / ".run" / "last_successful_backup_receipt.json"
+    )
+    artifact = prepared["backup_root"] / "fake_auto_daily.zip"
+    sidecar = artifact.with_name(artifact.name + ".backup_receipt.json")
+    assert launcher_receipt.stat().st_mode & 0o777 == 0o600
+    assert artifact.stat().st_mode & 0o777 == 0o600
+    assert sidecar.stat().st_mode & 0o777 == 0o600
+    assert prepared["args"].read_text(encoding="utf-8").splitlines() == [
+        "run",
+        "python",
+        str(prepared["backup_script"]),
+        "--apply",
+        "--out-dir",
+        str(prepared["backup_root"]),
+        "--tag",
+        "auto-daily",
+        "--launcher-receipt-path",
+        str(prepared["root"] / ".run" / "last_successful_backup_receipt.json"),
+        "--legacy-sentinel-path",
+        str(prepared["root"] / ".run" / "last_backup_utc.txt"),
+    ]
+
+
+def test_run_sh_scheduled_backup_returns_backup_failure(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(
+        tmp_path,
+        enable_daily_backup=True,
+        backup_exit=23,
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 23
+    assert prepared["created"].exists()
+    assert "[daily-backup] ERROR exit=23" in result.stdout
+
+
+def test_run_sh_concurrent_scheduled_backups_launch_one_dump(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(
+        tmp_path,
+        enable_daily_backup=True,
+        backup_delay=0.4,
+    )
+
+    first, second = _run_concurrent_scheduled_backups(prepared)
+
+    assert first[0] == 0, first[1] + first[2]
+    assert second[0] == 0, second[1] + second[2]
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+    assert "Waiting for existing scheduled backup" in second[1]
+    assert "validated success evidence" in second[1]
+
+
+def test_run_sh_concurrent_waiter_fails_without_new_success_evidence(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(
+        tmp_path,
+        enable_daily_backup=True,
+        backup_exit=23,
+        backup_delay=0.4,
+    )
+
+    first, second = _run_concurrent_scheduled_backups(prepared)
+
+    assert first[0] == 23, first[1] + first[2]
+    assert second[0] == 1, second[1] + second[2]
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+    assert "without newly validated success evidence" in second[1]
+
+
+def test_run_sh_rejects_advanced_receipt_with_empty_artifact(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(
+        tmp_path,
+        enable_daily_backup=True,
+        artifact_size=0,
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 1
+    assert "without newly validated success evidence" in result.stdout
+    assert "backup artefact is missing or empty" in result.stderr
+
+
+def test_run_sh_repairs_launcher_receipt_from_valid_auto_daily_sidecar(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    artifact = prepared["backup_root"] / "existing_auto_daily.zip"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"existing validated backup")
+    sidecar = artifact.with_name(artifact.name + ".backup_receipt.json")
+    completed_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    _write_test_backup_receipt(
+        sidecar,
+        artifact_path=artifact,
+        completed_at=completed_at,
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    launcher_receipt = (
+        prepared["root"] / ".run" / "last_successful_backup_receipt.json"
+    )
+    legacy_sentinel = prepared["root"] / ".run" / "last_backup_utc.txt"
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not prepared["calls"].exists()
+    assert json.loads(launcher_receipt.read_text(encoding="utf-8"))[
+        "final_artifact_path"
+    ] == str(artifact)
+    assert launcher_receipt.stat().st_mode & 0o777 == 0o600
+    assert legacy_sentinel.stat().st_mode & 0o777 == 0o600
+    assert "repairing from newest validated" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("receipt_overrides", "warning_fragment"),
+    [
+        ({"schema_version": "unknown.v1"}, "schema_version"),
+        ({"tag": "manual"}, "tag must be"),
+        ({"db_name": "other_db"}, "db_name must be"),
+    ],
+)
+def test_run_sh_ignores_untrusted_launcher_receipt_identity(
+    tmp_path: Path,
+    receipt_overrides: dict[str, str],
+    warning_fragment: str,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    artifact = prepared["backup_root"] / "untrusted.zip"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"not authoritative")
+    launcher_receipt = (
+        prepared["root"] / ".run" / "last_successful_backup_receipt.json"
+    )
+    _write_test_backup_receipt(
+        launcher_receipt,
+        artifact_path=artifact,
+        completed_at=datetime.now(timezone.utc),
+        **receipt_overrides,
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+    assert warning_fragment in result.stderr
+
+
+def test_run_sh_ignores_receipt_for_artifact_outside_backup_root(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    prepared["backup_root"].mkdir(parents=True)
+    outside_artifact = tmp_path / "outside.zip"
+    outside_artifact.write_bytes(b"outside configured root")
+    launcher_receipt = (
+        prepared["root"] / ".run" / "last_successful_backup_receipt.json"
+    )
+    _write_test_backup_receipt(
+        launcher_receipt,
+        artifact_path=outside_artifact,
+        out_root=prepared["backup_root"],
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+    assert "direct child of the configured backup root" in result.stderr
+
+
+def test_run_sh_ignores_receipt_that_names_backup_root_as_artifact(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    prepared["backup_root"].mkdir(parents=True)
+    (prepared["backup_root"] / "not-an-artifact.txt").write_text(
+        "not a backup artefact",
+        encoding="utf-8",
+    )
+    launcher_receipt = (
+        prepared["root"] / ".run" / "last_successful_backup_receipt.json"
+    )
+    _write_test_backup_receipt(
+        launcher_receipt,
+        artifact_path=prepared["backup_root"],
+        out_root=prepared["backup_root"],
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+    assert "direct child of the configured backup root" in result.stderr
+
+
+def test_run_sh_ignores_misnamed_artifact_sidecar(tmp_path: Path) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    artifact = prepared["backup_root"] / "existing.zip"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"existing backup")
+    misnamed_sidecar = prepared["backup_root"] / "different.backup_receipt.json"
+    _write_test_backup_receipt(
+        misnamed_sidecar,
+        artifact_path=artifact,
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+    assert "sidecar name does not match" in result.stderr
+
+
+def test_run_sh_future_receipt_cannot_suppress_backup(tmp_path: Path) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    artifact = prepared["backup_root"] / "future.zip"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"future dated backup")
+    launcher_receipt = (
+        prepared["root"] / ".run" / "last_successful_backup_receipt.json"
+    )
+    _write_test_backup_receipt(
+        launcher_receipt,
+        artifact_path=artifact,
+        completed_at=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+    assert "implausibly far in the future" in result.stderr
+
+
+def test_run_sh_uses_legacy_sentinel_only_without_valid_receipt(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    sentinel = prepared["root"] / ".run" / "last_backup_utc.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text(
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z") + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not prepared["calls"].exists()
+    assert "falling back to legacy" in result.stderr
+
+
+def test_run_sh_recovers_lock_missing_owner_metadata(tmp_path: Path) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    lock_dir = _write_test_backup_lock(
+        prepared,
+        owner_pid=os.getpid(),
+        owner_start="",
+        include_owner_metadata=False,
+    )
+
+    stale_result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert stale_result.returncode == 1
+    assert "no valid owner metadata" in stale_result.stdout
+    assert not lock_dir.exists()
+
+    retry_result = _run_prepared_launcher(prepared, "scheduled-backup")
+    assert retry_result.returncode == 0, retry_result.stdout + retry_result.stderr
+    assert prepared["calls"].read_text(encoding="utf-8").splitlines() == ["call"]
+
+
+def test_run_sh_rejects_reused_pid_with_different_process_start(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    lock_dir = _write_test_backup_lock(
+        prepared,
+        owner_pid=os.getpid(),
+        owner_start="not-the-current-process-start",
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 1
+    assert "without newly validated success evidence" in result.stdout
+    assert not lock_dir.exists()
+    assert not prepared["calls"].exists()
+
+
+def test_run_sh_bounds_wait_for_live_backup_owner(tmp_path: Path) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=True)
+    env_path = prepared["root"] / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8")
+        + "VON_BACKUP_WAIT_TIMEOUT_SECONDS=1\n",
+        encoding="utf-8",
+    )
+    lock_dir = _write_test_backup_lock(
+        prepared,
+        owner_pid=os.getpid(),
+        owner_start=_process_start_marker(os.getpid()),
+    )
+
+    result = _run_prepared_launcher(prepared, "scheduled-backup")
+
+    assert result.returncode == 1
+    assert "timed out after 1s" in result.stdout
+    assert lock_dir.exists()
+    assert not prepared["calls"].exists()
+    shutil.rmtree(lock_dir)
+
+
+def test_run_sh_manual_backup_uses_owner_only_umask(tmp_path: Path) -> None:
+    prepared = _prepare_backup_launcher(tmp_path, enable_daily_backup=False)
+
+    result = _run_prepared_launcher(prepared, "backup")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert prepared["created"].exists()
+    assert prepared["created"].stat().st_mode & 0o777 == 0o600
+
+
+def test_run_sh_background_backup_delegates_to_detached_public_action() -> None:
+    payload = _run_bash_probe(
+        r"""
+tmpdir="$(mktemp -d)"
+detach_args="$tmpdir/detach-args.txt"
+logs=()
+log() { logs+=("$*"); }
+python_cmd() { command -v python3; }
+resolve_daily_backup_success() { return 0; }
+launch_detached_process() {
+    printf '%s\n' "$*" > "$detach_args"
+    printf '4242'
+}
+
+VON_ENABLE_DAILY_BACKUP=1
+unset VON_DISABLE_DAILY_BACKUP
+RUN_DIR="$tmpdir/.run"
+BACKUP_ROOT="$tmpdir/backups"
+LOCAL_BACKUPS="$tmpdir/local"
+ALLOW_REPO_BACKUP_OUTPUT=0
+mkdir -p "$RUN_DIR"
+
+if run_daily_backup_if_due; then status=0; else status=$?; fi
+args="$(cat "$detach_args")"
+LOGS="$(printf '%s\n' "${logs[@]}")" ARGS="$args" python3 - <<PY
+import json
+import os
+print(json.dumps({
+    "status": $status,
+    "args": os.environ["ARGS"],
+    "logs": os.environ.get("LOGS", "").splitlines(),
+}))
+PY
+rm -rf "$tmpdir"
+"""
+    )
+
+    assert payload["status"] == 0
+    assert "run.sh scheduled-backup -NoBackupMigrate" in payload["args"]
+    assert any(
+        "Launched detached scheduled-backup PID=4242" in line
+        for line in payload["logs"]
+    )
+
+
+def test_run_sh_backup_actions_never_call_semantic_sync_helpers() -> None:
+    payload = _run_bash_probe(
+        r"""
+tmpdir="$(mktemp -d)"
+fake_pdm="$tmpdir/fake-pdm"
+cat > "$fake_pdm" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$fake_pdm"
+
+semantic_calls=()
+log() { :; }
+pdm_cmd() { printf '%s' "$fake_pdm"; }
+run_code_mention_scan() { semantic_calls+=("mention:$1"); }
+run_code_predicate_sync() { semantic_calls+=("predicate:$1"); }
+
+VON_ENABLE_BACKUP_ACTION=1
+BACKUP_OUT_DIR="$tmpdir/backups"
+BACKUP_ROOT="$BACKUP_OUT_DIR"
+LOCAL_BACKUPS="$tmpdir/local"
+BACKUP_TAG="test"
+ALLOW_REPO_BACKUP_OUTPUT=0
+AGENT_TEST_INSTANCE=1
+NO_BACKUP_MIGRATE=1
+
+BACKUP_DRY_RUN=1
+if run_backup; then dry_status=0; else dry_status=$?; fi
+BACKUP_DRY_RUN=0
+if run_backup; then apply_status=0; else apply_status=$?; fi
+
+python3 - <<PY
+import json
+print(json.dumps({
+    "dry_status": $dry_status,
+    "apply_status": $apply_status,
+    "semantic_calls": "$(printf '%s,' "${semantic_calls[@]}")",
+}))
+PY
+rm -rf "$tmpdir"
+"""
+    )
+
+    assert payload == {
+        "dry_status": 0,
+        "apply_status": 0,
+        "semantic_calls": "",
+    }
 
 
 def test_run_sh_agent_test_health_requires_marker_and_listener_pid() -> None:

@@ -131,6 +131,64 @@ if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
     fi
 fi
 
+load_env_from_dotenv() {
+    local env_path="$1"
+    if [ -z "$env_path" ] || [ ! -f "$env_path" ]; then
+        return 0
+    fi
+
+    local applied=0
+    local line=""
+    local trimmed=""
+    local key=""
+    local value=""
+    local first_char=""
+    local last_char=""
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Handle CRLF files safely.
+        line="${line%$'\r'}"
+
+        trimmed="$line"
+        trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+        if [ -z "$trimmed" ]; then
+            continue
+        fi
+        if [[ "$trimmed" == \#* ]]; then
+            continue
+        fi
+
+        if [[ "$trimmed" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+
+            if [ "${#value}" -ge 2 ]; then
+                first_char="${value:0:1}"
+                last_char="${value:${#value}-1:1}"
+                if [[ "$first_char" == '"' && "$last_char" == '"' ]] || [[ "$first_char" == "'" && "$last_char" == "'" ]]; then
+                    value="${value:1:${#value}-2}"
+                fi
+            fi
+
+            printf -v "$key" '%s' "$value"
+            export "$key"
+            applied=$((applied + 1))
+        fi
+    done < "$env_path"
+
+    if [ "$applied" -gt 0 ]; then
+        log "Loaded $applied .env override(s) from $env_path"
+    fi
+}
+
+# Backup path and policy globals below must see the same .env values as the
+# eventual backup process. Load them before resolving roots or migrating data.
+load_env_from_dotenv "${ROOT}/.env"
+
 PID_FILE="${RUN_DIR}/von_${PORT}.pid"
 CURRENT_LOG="${LOGS_DIR}/von_${PORT}_current.log"
 TS="$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%Y%m%d_%H%M%S)"
@@ -452,63 +510,6 @@ if [ "$ACTION" = "start" ] && [ "$BACKUP_FLAGS_SET" -eq 1 ]; then
     log "Start requested with backup flags; running backup action only."
     ACTION="backup"
 fi
-
-load_env_from_dotenv() {
-    local env_path="$1"
-    if [ -z "$env_path" ] || [ ! -f "$env_path" ]; then
-        return 0
-    fi
-
-    local applied=0
-    local line=""
-    local trimmed=""
-    local key=""
-    local value=""
-    local first_char=""
-    local last_char=""
-
-    while IFS= read -r line || [ -n "$line" ]; do
-        # Handle CRLF files safely.
-        line="${line%$'\r'}"
-
-        trimmed="$line"
-        trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-        if [ -z "$trimmed" ]; then
-            continue
-        fi
-        if [[ "$trimmed" == \#* ]]; then
-            continue
-        fi
-
-        if [[ "$trimmed" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
-            key="${BASH_REMATCH[1]}"
-            value="${BASH_REMATCH[2]}"
-
-            value="${value#"${value%%[![:space:]]*}"}"
-            value="${value%"${value##*[![:space:]]}"}"
-
-            if [ "${#value}" -ge 2 ]; then
-                first_char="${value:0:1}"
-                last_char="${value:${#value}-1:1}"
-                if [[ "$first_char" == '"' && "$last_char" == '"' ]] || [[ "$first_char" == "'" && "$last_char" == "'" ]]; then
-                    value="${value:1:${#value}-2}"
-                fi
-            fi
-
-            printf -v "$key" '%s' "$value"
-            export "$key"
-            applied=$((applied + 1))
-        fi
-    done < "$env_path"
-
-    if [ "$applied" -gt 0 ]; then
-        log "Loaded $applied .env override(s) from $env_path"
-    fi
-}
-
-# Load .env overrides without executing arbitrary shell content.
-load_env_from_dotenv "${ROOT}/.env"
 
 if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
     export VON_AGENT_TEST_INSTANCE=1
@@ -2128,10 +2129,512 @@ cron_due() {
     return 1
 }
 
-run_daily_backup_if_due() {
-    if is_truthy "${VON_DISABLE_DAILY_BACKUP:-}"; then
+resolve_daily_backup_success() {
+    local receipt_path="$1"
+    local sentinel_path="$2"
+    local backup_root="$3"
+    local expected_db_name="${VON_DB_NAME:-von_db}"
+    if [ -z "$expected_db_name" ]; then
+        expected_db_name="von_db"
+    fi
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        log "[daily-backup] ERROR: Python is unavailable for backup receipt validation."
+        return 1
+    fi
+
+    "$py" - "$receipt_path" "$sentinel_path" "$backup_root" "$expected_db_name" <<'PY'
+import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
+receipt_path = Path(sys.argv[1])
+sentinel_path = Path(sys.argv[2])
+backup_root = Path(sys.argv[3])
+expected_db_name = sys.argv[4]
+utc = datetime.timezone.utc
+epoch = datetime.datetime(1970, 1, 1, tzinfo=utc)
+max_future_skew = datetime.timedelta(minutes=5)
+receipt_schema = "backup_success_receipt.v1"
+expected_tag = "auto-daily"
+
+
+def warn(message):
+    print(f"[daily-backup] WARN: {message}", file=sys.stderr)
+
+
+try:
+    resolved_backup_root = backup_root.resolve(strict=True)
+except OSError as exc:
+    warn(f"configured backup root '{backup_root}' is unavailable: {exc}")
+    raise SystemExit(1)
+
+if not resolved_backup_root.is_dir():
+    warn(f"configured backup root '{resolved_backup_root}' is not a directory")
+    raise SystemExit(1)
+
+
+def parse_completed(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("missing completed_at_utc")
+    text = value.strip()
+    parsed = datetime.datetime.fromisoformat(
+        text[:-1] + "+00:00" if text.endswith("Z") else text
+    )
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=utc)
+    parsed = parsed.astimezone(utc)
+    if parsed < epoch:
+        raise ValueError("completed_at_utc predates the supported epoch")
+    if parsed > datetime.datetime.now(utc) + max_future_skew:
+        raise ValueError("completed_at_utc is implausibly far in the future")
+    return parsed
+
+
+def artifact_size(path):
+    try:
+        if path.is_file():
+            return path.stat().st_size
+        if path.is_dir():
+            for item in path.rglob("*"):
+                if item.is_file() and item.stat().st_size > 0:
+                    return 1
+    except OSError:
+        return 0
+    return 0
+
+
+def read_receipt(path, *, require_valid_artifact, require_sidecar_binding):
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("receipt payload is not an object")
+        if payload.get("schema_version") != receipt_schema:
+            raise ValueError("unsupported or missing schema_version")
+        if payload.get("tag") != expected_tag:
+            raise ValueError(f"tag must be {expected_tag!r}")
+        if payload.get("db_name") != expected_db_name:
+            raise ValueError(f"db_name must be {expected_db_name!r}")
+        completed = parse_completed(payload.get("completed_at_utc"))
+        out_root_text = payload.get("out_root")
+        if not isinstance(out_root_text, str) or not out_root_text.strip():
+            raise ValueError("missing out_root")
+        if Path(out_root_text).expanduser().resolve(strict=True) != resolved_backup_root:
+            raise ValueError("out_root does not match the configured backup root")
+        artifact_text = payload.get("final_artifact_path")
+        if not isinstance(artifact_text, str) or not artifact_text.strip():
+            raise ValueError("missing final_artifact_path")
+        artifact_path = Path(artifact_text).expanduser().resolve(strict=True)
+        if artifact_path.parent != resolved_backup_root:
+            raise ValueError(
+                "final_artifact_path must be a direct child of the configured backup root"
+            )
+        if require_valid_artifact and artifact_size(artifact_path) <= 0:
+            raise ValueError("backup artefact is missing or empty")
+        reported_size = payload.get("artifact_size_bytes")
+        if (
+            not isinstance(reported_size, int)
+            or isinstance(reported_size, bool)
+            or reported_size <= 0
+        ):
+            raise ValueError("artifact_size_bytes must be a positive integer")
+        collection_count = payload.get("collection_count")
+        if (
+            not isinstance(collection_count, int)
+            or isinstance(collection_count, bool)
+            or collection_count <= 0
+        ):
+            raise ValueError("collection_count must be a positive integer")
+        if require_sidecar_binding:
+            expected_sidecar = artifact_path.with_name(
+                artifact_path.name + ".backup_receipt.json"
+            )
+            if path.resolve(strict=True) != expected_sidecar.resolve(strict=False):
+                raise ValueError("sidecar name does not match final_artifact_path")
+        return {
+            "path": path,
+            "payload": payload,
+            "completed": completed,
+            "artifact_path": artifact_path,
+            "tag": str(payload.get("tag") or ""),
+        }
+    except Exception as exc:
+        warn(f"ignoring invalid backup receipt '{path}': {exc}")
+        return None
+
+
+def write_private_atomic(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+launcher = read_receipt(
+    receipt_path,
+    require_valid_artifact=True,
+    require_sidecar_binding=False,
+)
+newest = None
+if resolved_backup_root.is_dir():
+    for sidecar in resolved_backup_root.glob("*.backup_receipt.json"):
+        candidate = read_receipt(
+            sidecar,
+            require_valid_artifact=True,
+            require_sidecar_binding=True,
+        )
+        if candidate is None:
+            continue
+        if newest is None or candidate["completed"] > newest["completed"]:
+            newest = candidate
+
+source = ""
+selected = None
+if newest is not None and (
+    launcher is None or newest["completed"] > launcher["completed"]
+):
+    launcher_summary = (
+        str(launcher["completed"].isoformat()) if launcher is not None else "missing"
+    )
+    warn(
+        "authoritative launcher receipt is stale/missing "
+        f"({launcher_summary}); repairing from newest validated "
+        f"backup artefact receipt '{newest['path']}'"
+    )
+    payload_text = json.dumps(newest["payload"], indent=2, ensure_ascii=False) + "\n"
+    write_private_atomic(receipt_path, payload_text)
+    completed_text = (
+        newest["completed"].isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
+    write_private_atomic(sentinel_path, completed_text + "\n")
+    selected = newest
+    source = "artifact_receipt_repaired"
+elif launcher is not None:
+    selected = launcher
+    source = "launcher_receipt"
+
+if selected is None and sentinel_path.is_file():
+    try:
+        legacy_text = sentinel_path.read_text(encoding="utf-8").strip()
+        legacy_completed = parse_completed(legacy_text)
+        warn(
+            "falling back to legacy last_backup_utc.txt sentinel because "
+            "no valid structured backup receipt is available"
+        )
+        selected = {"completed": legacy_completed}
+        source = "legacy_sentinel"
+    except Exception as exc:
+        warn(f"ignoring invalid legacy backup sentinel '{sentinel_path}': {exc}")
+
+if selected is not None:
+    completed = selected["completed"]
+    canonical = completed.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    delta = completed - epoch
+    epoch_us = (
+        delta.days * 86400 * 1_000_000
+        + delta.seconds * 1_000_000
+        + delta.microseconds
+    )
+    print(f"{canonical}|{epoch_us}|{source}")
+PY
+}
+
+daily_backup_record_iso() {
+    local record="${1:-}"
+    if [ -n "$record" ]; then
+        printf '%s' "${record%%|*}"
+    fi
+}
+
+daily_backup_record_epoch_us() {
+    local record="${1:-}"
+    if [ -z "$record" ] || [ "${record#*|}" = "$record" ]; then
         return 0
     fi
+    local remainder="${record#*|}"
+    printf '%s' "${remainder%%|*}"
+}
+
+daily_backup_record_source() {
+    local record="${1:-}"
+    if [ -z "$record" ] || [ "${record#*|}" = "$record" ]; then
+        return 0
+    fi
+    local remainder="${record#*|}"
+    if [ "${remainder#*|}" = "$remainder" ]; then
+        return 0
+    fi
+    printf '%s' "${remainder#*|}"
+}
+
+daily_backup_success_advanced() {
+    local current_record="${1:-}"
+    local baseline_record="${2:-}"
+    local current_source
+    current_source="$(daily_backup_record_source "$current_record")"
+    if [ "$current_source" != "launcher_receipt" ] && [ "$current_source" != "artifact_receipt_repaired" ]; then
+        return 1
+    fi
+    local current_epoch
+    local baseline_epoch
+    current_epoch="$(daily_backup_record_epoch_us "$current_record")"
+    baseline_epoch="$(daily_backup_record_epoch_us "$baseline_record")"
+    if ! printf '%s' "$current_epoch" | grep -qE '^[0-9]+$'; then
+        return 1
+    fi
+    if [ -z "$baseline_epoch" ]; then
+        return 0
+    fi
+    printf '%s' "$baseline_epoch" | grep -qE '^[0-9]+$' || return 1
+    [ "$current_epoch" -gt "$baseline_epoch" ]
+}
+
+process_start_marker() {
+    local pid="$1"
+    local marker=""
+    marker="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
+    marker="${marker#"${marker%%[![:space:]]*}"}"
+    marker="${marker%"${marker##*[![:space:]]}"}"
+    printf '%s' "$marker"
+}
+
+cleanup_daily_backup_lock() {
+    local lock_dir="$1"
+    local owner_token="$2"
+    local owner_pid="$3"
+    local pid_file="${RUN_DIR}/daily_backup.pid"
+    local observed_token=""
+    observed_token="$(tr -d '\r\n' < "${lock_dir}/owner" 2>/dev/null || true)"
+    if [ -z "$observed_token" ] || [ "$observed_token" != "$owner_token" ]; then
+        return 0
+    fi
+    local observed_pid=""
+    observed_pid="$(tr -d '\r\n' < "$pid_file" 2>/dev/null || true)"
+    if [ "$observed_pid" = "$owner_pid" ]; then
+        rm -f "$pid_file" 2>/dev/null || true
+    fi
+    rm -f \
+        "${lock_dir}/baseline_success" \
+        "${lock_dir}/launcher.pid" \
+        "${lock_dir}/launcher.start" \
+        "${lock_dir}/owner" \
+        "${lock_dir}/ready" \
+        2>/dev/null || true
+    rmdir "$lock_dir" 2>/dev/null || true
+}
+
+acquire_daily_backup_lock() {
+    local lock_dir="$1"
+    local baseline_record="$2"
+    local owner_token="$3"
+    local pid_file="${RUN_DIR}/daily_backup.pid"
+    local owner_start=""
+    owner_start="$(process_start_marker "$$")"
+    if [ -z "$owner_start" ]; then
+        log "[daily-backup] ERROR: could not establish the backup owner's process identity."
+        return 1
+    fi
+    if ! (
+        umask 077
+        mkdir "$lock_dir" 2>/dev/null
+    ); then
+        return 1
+    fi
+    chmod 700 "$lock_dir" 2>/dev/null || true
+    if ! (
+        umask 077
+        printf '%s\n' "$owner_token" > "${lock_dir}/owner"
+        printf '%s\n' "$$" > "${lock_dir}/launcher.pid"
+        printf '%s\n' "$owner_start" > "${lock_dir}/launcher.start"
+        printf '%s\n' "$baseline_record" > "${lock_dir}/baseline_success"
+        printf '%s\n' "$$" > "$pid_file"
+        : > "${lock_dir}/ready"
+    ); then
+        cleanup_daily_backup_lock "$lock_dir" "$owner_token" "$$"
+        rm -f \
+            "${lock_dir}/baseline_success" \
+            "${lock_dir}/launcher.pid" \
+            "${lock_dir}/launcher.start" \
+            "${lock_dir}/owner" \
+            "${lock_dir}/ready" \
+            2>/dev/null || true
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+wait_for_existing_daily_backup() {
+    local lock_dir="$1"
+    local fallback_baseline="$2"
+    local receipt_path="$3"
+    local sentinel_path="$4"
+    local out_dir="$5"
+    local attempts=0
+    while [ "$attempts" -lt 100 ] && [ ! -f "${lock_dir}/ready" ]; do
+        [ -d "$lock_dir" ] || break
+        sleep 0.05
+        attempts=$((attempts + 1))
+    done
+
+    local owner_token=""
+    local owner_pid=""
+    local owner_start=""
+    local baseline_record=""
+    owner_token="$(tr -d '\r\n' < "${lock_dir}/owner" 2>/dev/null || true)"
+    owner_pid="$(tr -d '\r\n' < "${lock_dir}/launcher.pid" 2>/dev/null || true)"
+    owner_start="$(tr -d '\r\n' < "${lock_dir}/launcher.start" 2>/dev/null || true)"
+    baseline_record="$(tr -d '\r\n' < "${lock_dir}/baseline_success" 2>/dev/null || true)"
+    if [ -z "$baseline_record" ]; then
+        baseline_record="$fallback_baseline"
+    fi
+    if [ -z "$owner_token" ] || [ -z "$owner_start" ] || ! printf '%s' "$owner_pid" | grep -qE '^[0-9]+$'; then
+        if [ ! -d "$lock_dir" ]; then
+            local completed_after_disappearance=""
+            completed_after_disappearance="$(resolve_daily_backup_success "$receipt_path" "$sentinel_path" "$out_dir")" || return 1
+            if daily_backup_success_advanced "$completed_after_disappearance" "$baseline_record"; then
+                log "[daily-backup] Existing scheduled backup completed with validated success evidence."
+                return 0
+            fi
+        fi
+        if [ -n "$owner_token" ]; then
+            cleanup_daily_backup_lock "$lock_dir" "$owner_token" "$owner_pid"
+        else
+            local current_token=""
+            current_token="$(tr -d '\r\n' < "${lock_dir}/owner" 2>/dev/null || true)"
+            if [ -z "$current_token" ]; then
+                rm -f \
+                    "${lock_dir}/baseline_success" \
+                    "${lock_dir}/launcher.pid" \
+                    "${lock_dir}/launcher.start" \
+                    "${lock_dir}/owner" \
+                    "${lock_dir}/ready" \
+                    2>/dev/null || true
+                rmdir "$lock_dir" 2>/dev/null || true
+            fi
+        fi
+        log "[daily-backup] ERROR: existing backup lock has no valid owner metadata."
+        return 1
+    fi
+
+    local wait_timeout_seconds=21600
+    if printf '%s' "${VON_BACKUP_WAIT_TIMEOUT_SECONDS:-}" | grep -qE '^[0-9]+$' &&
+        [ "${VON_BACKUP_WAIT_TIMEOUT_SECONDS}" -ge 1 ]; then
+        wait_timeout_seconds="${VON_BACKUP_WAIT_TIMEOUT_SECONDS}"
+    fi
+    local wait_started_epoch
+    wait_started_epoch="$(date -u +%s)"
+    log "[daily-backup] Waiting for existing scheduled backup PID=$owner_pid."
+    while [ -d "$lock_dir" ]; do
+        local current_token=""
+        current_token="$(tr -d '\r\n' < "${lock_dir}/owner" 2>/dev/null || true)"
+        if [ "$current_token" != "$owner_token" ]; then
+            break
+        fi
+        local current_start=""
+        current_start="$(process_start_marker "$owner_pid")"
+        if [ -z "$current_start" ] || [ "$current_start" != "$owner_start" ]; then
+            break
+        fi
+        local wait_now_epoch
+        wait_now_epoch="$(date -u +%s)"
+        if [ $((wait_now_epoch - wait_started_epoch)) -ge "$wait_timeout_seconds" ]; then
+            log "[daily-backup] ERROR: timed out after ${wait_timeout_seconds}s waiting for existing scheduled backup PID=$owner_pid."
+            return 1
+        fi
+        sleep 0.2
+    done
+
+    local completed_record=""
+    completed_record="$(resolve_daily_backup_success "$receipt_path" "$sentinel_path" "$out_dir")" || return 1
+    if daily_backup_success_advanced "$completed_record" "$baseline_record"; then
+        cleanup_daily_backup_lock "$lock_dir" "$owner_token" "$owner_pid"
+        log "[daily-backup] Existing scheduled backup completed with validated success evidence."
+        return 0
+    fi
+    cleanup_daily_backup_lock "$lock_dir" "$owner_token" "$owner_pid"
+    log "[daily-backup] ERROR: existing scheduled backup ended without newly validated success evidence."
+    return 1
+}
+
+launch_daily_backup_detached() {
+    local detacher_py
+    detacher_py="$(python_cmd)"
+    local bash_exe
+    bash_exe="$(command -v bash 2>/dev/null || true)"
+    if [ -z "$detacher_py" ] || [ -z "$bash_exe" ]; then
+        log "[daily-backup] ERROR: cannot detach scheduled backup without Python and Bash."
+        return 1
+    fi
+    local stdout_log="${RUN_DIR}/daily_backup_launcher.log"
+    local stderr_log="${RUN_DIR}/daily_backup_launcher.err.log"
+    local detached_pid=""
+    detached_pid="$(
+        (
+            umask 077
+            launch_detached_process \
+                "$detacher_py" \
+                "$stdout_log" \
+                "$stderr_log" \
+                "$ROOT" \
+                "$bash_exe" \
+                "${ROOT}/run.sh" \
+                scheduled-backup \
+                -NoBackupMigrate
+        ) 2>>"$stderr_log" || true
+    )"
+    if ! printf '%s' "$detached_pid" | grep -qE '^[0-9]+$'; then
+        log "[daily-backup] ERROR: detached scheduled-backup launcher did not return a PID."
+        return 1
+    fi
+    chmod 600 "$stdout_log" "$stderr_log" 2>/dev/null || true
+    log "[daily-backup] Launched detached scheduled-backup PID=$detached_pid."
+    return 0
+}
+
+run_daily_backup_if_due() {
+    local mode="${1:-background}"
+    if ! is_truthy "${VON_ENABLE_DAILY_BACKUP:-}"; then
+        log "[daily-backup] Skip: automatic backups disabled. Set VON_ENABLE_DAILY_BACKUP=1 on a designated backup host to enable."
+        return 0
+    fi
+    if is_truthy "${VON_DISABLE_DAILY_BACKUP:-}"; then
+        log "[daily-backup] Skip: disabled via VON_DISABLE_DAILY_BACKUP."
+        return 0
+    fi
+
+    local backup_script="${ROOT}/scripts/backup_von_db.py"
+    if [ ! -f "$backup_script" ]; then
+        log "[daily-backup] ERROR: backup script missing: $backup_script"
+        return 1
+    fi
+    local out_dir
+    out_dir="$(resolve_backup_out_dir "$BACKUP_ROOT" "$LOCAL_BACKUPS" "daily-backup")"
+    if ! backup_output_path_allowed "$out_dir" "daily-backup" 1; then
+        log "[daily-backup] WARN: skipping scheduled backup until VON_BACKUP_ROOT points outside repo (or VON_ALLOW_BACKUP_IN_REPO=1)."
+        return 1
+    fi
+
+    local receipt="${RUN_DIR}/last_successful_backup_receipt.json"
+    local sentinel="${RUN_DIR}/last_backup_utc.txt"
+    local last_record=""
+    last_record="$(resolve_daily_backup_success "$receipt" "$sentinel" "$out_dir")" || return 1
+    local last
+    last="$(daily_backup_record_iso "$last_record")"
     local schedule="${VON_BACKUP_SCHEDULE:-}"
     if [ -n "$schedule" ]; then
         schedule="${schedule#\"}"
@@ -2143,11 +2646,6 @@ run_daily_backup_if_due() {
     fi
     if [ "$interval_hours" -lt 1 ]; then
         interval_hours=24
-    fi
-    local sentinel="${RUN_DIR}/last_backup_utc.txt"
-    local last=""
-    if [ -f "$sentinel" ]; then
-        last="$(tr -d '\r\n' < "$sentinel" 2>/dev/null || true)"
     fi
     local now
     now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -2166,16 +2664,15 @@ run_daily_backup_if_due() {
         fi
     fi
     if [ -z "$schedule" ]; then
-        if [ -n "$last" ]; then
-            local last_epoch
-            last_epoch="$(parse_iso_epoch "$last")"
-            if [ -n "$last_epoch" ]; then
-                local now_epoch
-                now_epoch="$(date -u +%s)"
-                local elapsed_hours=$(( (now_epoch - last_epoch) / 3600 ))
-                if [ "$elapsed_hours" -lt "$interval_hours" ]; then
-                    due=0
-                fi
+        local last_epoch_us
+        last_epoch_us="$(daily_backup_record_epoch_us "$last_record")"
+        if printf '%s' "$last_epoch_us" | grep -qE '^[0-9]+$'; then
+            local now_epoch
+            now_epoch="$(date -u +%s)"
+            local last_epoch=$((last_epoch_us / 1000000))
+            local elapsed_hours=$(( (now_epoch - last_epoch) / 3600 ))
+            if [ "$elapsed_hours" -lt "$interval_hours" ]; then
+                due=0
             fi
         fi
     fi
@@ -2183,47 +2680,57 @@ run_daily_backup_if_due() {
         return 0
     fi
 
-    local pid_file="${RUN_DIR}/daily_backup.pid"
-    if [ -f "$pid_file" ]; then
-        local pid
-        pid="$(tr -d '\r\n' < "$pid_file" 2>/dev/null || true)"
-        if [ -n "$pid" ] && process_exists "$pid"; then
-            return 0
-        fi
-        rm -f "$pid_file" 2>/dev/null || true
+    if [ "$mode" != "wait" ]; then
+        launch_daily_backup_detached
+        return $?
     fi
 
-    local backup_script="${ROOT}/scripts/backup_von_db.py"
-    if [ ! -f "$backup_script" ]; then
-        log "[daily-backup] WARN: backup script missing: $backup_script (skipping)"
-        return 0
+    local lock_dir="${RUN_DIR}/daily_backup.lock"
+    local owner_token="$$-${RANDOM}-${RANDOM}"
+    if ! acquire_daily_backup_lock "$lock_dir" "$last_record" "$owner_token"; then
+        wait_for_existing_daily_backup "$lock_dir" "$last_record" "$receipt" "$sentinel" "$out_dir"
+        return $?
     fi
+
+    trap 'cleanup_daily_backup_lock "$lock_dir" "$owner_token" "$$"' EXIT
+    log "[daily-backup] Running scheduled backup under owner lock (interval ${interval_hours}h)."
     local pdm
     pdm="$(pdm_cmd)"
-    local out_dir
-    out_dir="$(resolve_backup_out_dir "$BACKUP_ROOT" "$LOCAL_BACKUPS" "daily-backup")"
-    if ! backup_output_path_allowed "$out_dir" "daily-backup" 1; then
-        log "[daily-backup] WARN: skipping scheduled backup until VON_BACKUP_ROOT points outside repo (or VON_ALLOW_BACKUP_IN_REPO=1)."
-        return 0
-    fi
-    log "[daily-backup] Launching background backup (interval ${interval_hours}h)..."
-    (
-        set +e
+    local output_log="${RUN_DIR}/daily_backup_last_output.log"
+    local backup_exit=0
+    if (
         cd "$ROOT" || exit 1
+        umask 077
         export MONGO_ALLOW_LOCAL_FALLBACK=0
-        local output_log="${RUN_DIR}/daily_backup_last_output.log"
-        "$pdm" run python "$backup_script" --apply --out-dir "$out_dir" --tag auto-daily >> "$output_log" 2>&1
-        local exit_code=$?
-        if [ "$exit_code" -ne 0 ]; then
-            log "[daily-backup] ERROR exit=$exit_code"
-            exit 0
+        "$pdm" run python "$backup_script" \
+            --apply \
+            --out-dir "$out_dir" \
+            --tag auto-daily \
+            --launcher-receipt-path "$receipt" \
+            --legacy-sentinel-path "$sentinel" \
+            >> "$output_log" 2>&1
+    ); then
+        backup_exit=0
+    else
+        backup_exit=$?
+    fi
+
+    if [ "$backup_exit" -eq 0 ]; then
+        local completed_record=""
+        completed_record="$(resolve_daily_backup_success "$receipt" "$sentinel" "$out_dir")" || backup_exit=1
+        if [ "$backup_exit" -eq 0 ] && ! daily_backup_success_advanced "$completed_record" "$last_record"; then
+            log "[daily-backup] ERROR: backup command exited successfully without newly validated success evidence."
+            backup_exit=1
         fi
-        run_code_mention_scan "daily-backup"
-        run_code_predicate_sync "daily-backup"
-        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$sentinel" 2>/dev/null || true
-        log "[daily-backup] Completed."
-    ) &
-    printf '%s\n' "$!" > "$pid_file" 2>/dev/null || true
+    fi
+    if [ "$backup_exit" -eq 0 ]; then
+        log "[daily-backup] Completed with validated success evidence."
+    else
+        log "[daily-backup] ERROR exit=$backup_exit"
+    fi
+    cleanup_daily_backup_lock "$lock_dir" "$owner_token" "$$"
+    trap - EXIT
+    return "$backup_exit"
 }
 
 trigger_test_db_refresh() {
@@ -2840,16 +3347,28 @@ run_backup() {
         return 1
     fi
     log "[backup] Starting backup (mode=$mode tag=$BACKUP_TAG out=$out_dir)"
+    local backup_exit=0
     if [ "$BACKUP_DRY_RUN" -eq 1 ]; then
-        "$pdm" run python "$backup_script" --out-dir "$out_dir" --tag "$BACKUP_TAG"
+        if (
+            umask 077
+            "$pdm" run python "$backup_script" --out-dir "$out_dir" --tag "$BACKUP_TAG"
+        ); then
+            backup_exit=0
+        else
+            backup_exit=$?
+        fi
     else
-        "$pdm" run python "$backup_script" --apply --out-dir "$out_dir" --tag "$BACKUP_TAG"
+        if (
+            umask 077
+            "$pdm" run python "$backup_script" --apply --out-dir "$out_dir" --tag "$BACKUP_TAG"
+        ); then
+            backup_exit=0
+        else
+            backup_exit=$?
+        fi
     fi
-    local backup_exit=$?
     if [ "$backup_exit" -eq 0 ]; then
         log "[backup] OK"
-        run_code_mention_scan "manual-backup"
-        run_code_predicate_sync "manual-backup"
         if [ "$AGENT_TEST_INSTANCE" -eq 1 ]; then
             log "[backup-migrate] disabled via -AgentTest"
         elif [ "$NO_BACKUP_MIGRATE" -eq 0 ]; then
@@ -2979,7 +3498,7 @@ show_help() {
     cat <<'TXT'
 Von Launcher Help
     Usage: ./run.sh [action] [options]
-    Actions: start | foreground | stop | status | restart | logs | check | backup | restore-backup | autoupdate | rag-worker | help
+    Actions: start | foreground | stop | status | restart | logs | check | backup | scheduled-backup | restore-backup | autoupdate | rag-worker | help
     Options:
         -Port <int>            Server port (default 5001 on macOS, 5000 elsewhere; -AgentTest defaults to 5010)
         -AgentTest             Isolated coding-agent test instance mode
@@ -3014,6 +3533,7 @@ Von Launcher Help
 
     Backup safety environment variables:
         VON_ENABLE_BACKUP_ACTION=1
+        VON_ENABLE_DAILY_BACKUP=1
         VON_ENABLE_RESTORE_ACTION=1
         VON_ALLOW_BACKUP_IN_REPO=1
 
@@ -3028,6 +3548,7 @@ Von Launcher Help
         ./run.sh restart -AgentTest -HealthTimeoutSec 180
         ./run.sh logs -Tail 200 -Follow
         ./run.sh backup -BackupDryRun
+        ./run.sh scheduled-backup -NoBackupMigrate
         ./run.sh restore-backup -RestoreBackupPath /path/to/last_successful_backup_receipt.json
         ./run.sh autoupdate -UpdateIntervalMinutes 30 -UpdateBranch main
 TXT
@@ -3062,6 +3583,14 @@ case "$ACTION" in
         ;;
     backup)
         run_backup
+        ;;
+    scheduled-backup)
+        if run_daily_backup_if_due wait; then
+            exit 0
+        else
+            scheduled_backup_exit=$?
+            exit "$scheduled_backup_exit"
+        fi
         ;;
     restore-backup)
         run_restore_backup
