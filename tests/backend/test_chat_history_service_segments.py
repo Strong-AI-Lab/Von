@@ -401,6 +401,66 @@ def test_get_chat_history_debug_entry_hydrates_blob_refs(monkeypatch):
     assert debug == original_debug
 
 
+def test_get_chat_history_telemetry_locator_projection_keeps_debug_payloads_out(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    class _CompactProjectionCollection:
+        def __init__(self):
+            self.pipeline = None
+
+        def aggregate(self, pipeline):
+            self.pipeline = pipeline
+            return iter(
+                [
+                    {
+                        "user_id": "#V#u",
+                        "session_id": "s1",
+                        "session_name": "Compact locator",
+                        "namespace": "#V#u@org",
+                        "history": [
+                            {
+                                "role": "assistant",
+                                "timestamp": "2026-07-28T00:00:00Z",
+                                "llm_debug_data": {
+                                    "request_id": "req-compact-locator",
+                                    "turn_id": "turn-compact-locator",
+                                    "timestamp_utc": "2026-07-28T00:00:00Z",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    collection = _CompactProjectionCollection()
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: collection,
+    )
+
+    result = chat_history_service.get_chat_history_telemetry_locator_projection(
+        "#V#u",
+        "s1",
+        namespace="#V#u@org",
+    )
+
+    assert result is not None
+    assert result["history"][0]["llm_debug_data"] == {
+        "request_id": "req-compact-locator",
+        "turn_id": "turn-compact-locator",
+        "timestamp_utc": "2026-07-28T00:00:00Z",
+    }
+    assert collection.pipeline is not None
+    history_projection = collection.pipeline[-1]["$project"]["history"]
+    projected_debug = history_projection["$map"]["in"]["llm_debug_data"][
+        "$cond"
+    ][1]
+    assert set(projected_debug) == {"request_id", "turn_id", "timestamp_utc"}
+
+
 def test_get_chat_history_segments_keeps_debug_blob_refs_compact_by_default(
     monkeypatch,
 ):

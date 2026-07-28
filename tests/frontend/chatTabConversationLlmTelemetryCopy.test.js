@@ -4,6 +4,7 @@ const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTa
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
+    fetchWithTimeout: jest.fn(),
     getUserContext: jest.fn(),
     getWindowSessionId: jest.fn(() => 'test-window-session'),
     postJson: jest.fn(),
@@ -113,11 +114,10 @@ describe('chat conversation info copy control', () => {
             authoritative_locator_available: false,
             access_payload_source: 'local_context_summary'
         }));
-        expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
-            conversation_telemetry_get_locator: expect.any(Object),
-            chat_history_get_segments: expect.any(Object),
-            turn_execution_list: expect.any(Object)
-        }));
+        expect(copiedPayload.mcp_access).toEqual({});
+        expect(copiedPayload.retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
         expect(copiedPayload.turns).toBeUndefined();
         expect(copiedPayload.agent_instructions).toEqual(expect.objectContaining({
             summary: expect.any(String),
@@ -175,15 +175,64 @@ describe('chat conversation info copy control', () => {
             authoritative_locator_available: false,
             access_payload_source: 'local_context_summary'
         }));
-        expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
-            conversation_telemetry_get_locator: expect.any(Object),
-            chat_history_get_segments: expect.any(Object),
-            turn_execution_list: expect.any(Object)
-        }));
+        expect(copiedPayload.mcp_access).toEqual({});
+        expect(copiedPayload.retrieval_status).toBe(
+            'server_delegation_unavailable'
+        );
         expect(copiedPayload.turns).toBeUndefined();
         expect(showToast).toHaveBeenCalledWith(
             'Copied conversation info JSON (server locator unavailable; local summary only).',
             'info'
         );
+    });
+
+    test('copies only server-issued conversation read delegations', async () => {
+        const chatTab = require(chatTabModulePath);
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const button = document.getElementById('copyConversationInfoJsonBtn');
+        const signedAccess = {
+            conversation_telemetry_get_locator: {
+                tool_name: 'conversation_telemetry_get_locator',
+                arguments: {
+                    conversation_ref: { signature: 'signed-conversation-ref' }
+                }
+            },
+            chat_history_get_segments: {
+                tool_name: 'chat_history_get_segments',
+                arguments: {
+                    conversation_ref: { signature: 'signed-segments-ref' }
+                }
+            }
+        };
+
+        global.fetch = jest.fn();
+        fetchWithTimeout.mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                schema_version: 'conversation_llm_telemetry_locator.v1',
+                generated_at_utc: '2026-07-28T12:00:00Z',
+                session_id: 'session-signed',
+                session_name: 'Signed Session',
+                namespace_context: {},
+                metadata: { total_turns: 0 },
+                mcp_access: {
+                    ...signedAccess,
+                    turn_execution_list: {
+                        tool_name: 'turn_execution_list',
+                        arguments: {}
+                    }
+                },
+                turns: []
+            })
+        });
+        chatTab.__testOnly_setActiveChatSession('session-signed', 'Signed Session');
+
+        const copied = await chatTab.__testOnly_copyConversationInfoToClipboard(button);
+
+        expect(copied).toBe(true);
+        const payload = JSON.parse(navigator.clipboard.writeText.mock.calls[0][0]);
+        expect(payload.mcp_access).toEqual(signedAccess);
+        expect(payload.mcp_access.turn_execution_list).toBeUndefined();
+        expect(payload.retrieval_status).toBe('server_delegation_available');
     });
 });

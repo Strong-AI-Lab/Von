@@ -1428,6 +1428,123 @@ def _hydrate_chat_history_entries(history: Any) -> List[Dict[str, Any]]:
     return _normalise_chat_history_entries(history, hydrate_blob_refs=True)
 
 
+def get_chat_history_telemetry_locator_projection(
+    user_id: str,
+    session_id: str,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Return only session and per-entry fields needed to build telemetry locators."""
+
+    if not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_telemetry_locator_projection")
+
+    compact_history_projection = {
+        "$map": {
+            "input": {"$ifNull": ["$history", []]},
+            "as": "entry",
+            "in": {
+                "role": "$$entry.role",
+                "sender": "$$entry.sender",
+                "turn_id": "$$entry.turn_id",
+                "id": "$$entry.id",
+                "message_id": "$$entry.message_id",
+                "timestamp": "$$entry.timestamp",
+                "created_at": "$$entry.created_at",
+                "llm_debug_data": {
+                    "$cond": [
+                        {"$eq": [{"$type": "$$entry.llm_debug_data"}, "object"]},
+                        {
+                            "request_id": "$$entry.llm_debug_data.request_id",
+                            "turn_id": "$$entry.llm_debug_data.turn_id",
+                            "timestamp_utc": "$$entry.llm_debug_data.timestamp_utc",
+                        },
+                        None,
+                    ]
+                },
+            },
+        }
+    }
+    metadata_projection = {
+        "_id": 0,
+        "user_id": 1,
+        "session_id": 1,
+        "session_name": 1,
+        "namespace": 1,
+        "organisation_concept_id": 1,
+        "created_at": 1,
+        "updated_at": 1,
+        "history": compact_history_projection,
+    }
+
+    try:
+        doc = None
+        for query in _build_chat_history_session_read_queries(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        ):
+            if hasattr(chat_history_coll, "aggregate") and callable(
+                getattr(chat_history_coll, "aggregate")
+            ):
+                doc = next(
+                    _read_aggregate(
+                        chat_history_coll,
+                        [
+                            {"$match": query},
+                            {"$limit": 1},
+                            {"$project": metadata_projection},
+                        ],
+                        operation=(
+                            "get_chat_history_telemetry_locator_projection.aggregate"
+                        ),
+                    ),
+                    None,
+                )
+            else:
+                # Test doubles and older collection adapters may not expose aggregate.
+                doc = _read_find_one(
+                    chat_history_coll,
+                    query,
+                    {
+                        key: value
+                        for key, value in metadata_projection.items()
+                        if key != "history"
+                    }
+                    | {"history": 1},
+                    operation=(
+                        "get_chat_history_telemetry_locator_projection.find_fallback"
+                    ),
+                )
+            if doc is not None:
+                break
+        _record_chat_history_read_success()
+        return dict(doc) if isinstance(doc, dict) else None
+    except PyMongoError as exc:
+        _record_chat_history_read_failure(
+            "get_chat_history_telemetry_locator_projection",
+            exc,
+        )
+        logger.error(
+            "Error retrieving compact telemetry locator projection: %s",
+            exc,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not retrieve telemetry locator projection: {exc}"
+        ) from exc
+
+
 def get_chat_history_segments(
     user_id: str,
     session_id: str,

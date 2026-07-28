@@ -9,11 +9,13 @@ from . import chat_history_service
 from .conversation_scope_binding_service import (
     build_conversation_scope_binding,
     build_history_location_binding,
+    build_turn_telemetry_binding,
 )
 
 CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = (
     "conversation_llm_telemetry_locator.v1"
 )
+TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION = "turn_telemetry_mcp_access.v1"
 
 
 def _safe_str(value: Any) -> str | None:
@@ -103,6 +105,138 @@ def _build_namespace_context(
     }
 
 
+def build_turn_telemetry_mcp_access_locator(
+    *,
+    request_id: str,
+    delegated_actor_user_id: str,
+    delegated_actor_namespace: str | None,
+    history_owner_user_id: str,
+    read_namespace: str | None,
+    organisation_concept_id: str | None,
+    chat_session_id: str | None = None,
+    history_index: int | None = None,
+    include_diagnostics: bool = True,
+    include_live_progress: bool = True,
+) -> dict[str, Any]:
+    """Issue fresh exact-tool read delegations for one authenticated turn."""
+
+    request_id_value = _safe_str(request_id)
+    actor_user_id = _safe_str(delegated_actor_user_id)
+    owner_user_id = _safe_str(history_owner_user_id)
+    session_id_value = _safe_str(chat_session_id)
+    history_index_value = (
+        _safe_int(history_index) if history_index is not None else None
+    )
+    if not request_id_value:
+        raise ValueError("request_id is required")
+    if not actor_user_id:
+        raise ValueError("delegated_actor_user_id is required")
+    if not owner_user_id:
+        raise ValueError("history_owner_user_id is required")
+    if history_index_value is not None and history_index_value < 0:
+        raise ValueError("history_index must be a non-negative integer")
+
+    def turn_descriptor(tool_name: str, purpose: str) -> dict[str, Any]:
+        return _build_tool_call_descriptor(
+            tool_name,
+            {
+                "request_id": request_id_value,
+                "turn_telemetry_ref": build_turn_telemetry_binding(
+                    request_id=request_id_value,
+                    delegated_actor_user_id=actor_user_id,
+                    permitted_tool=tool_name,
+                    chat_session_id=session_id_value,
+                    history_index=history_index_value,
+                    history_owner_user_id=owner_user_id,
+                    read_namespace=read_namespace,
+                    delegated_actor_namespace=delegated_actor_namespace,
+                    organisation_concept_id=organisation_concept_id,
+                ),
+                "namespace": delegated_actor_namespace,
+                "user_concept_id": actor_user_id,
+                "organisation_concept_id": organisation_concept_id,
+            },
+            purpose=purpose,
+        )
+
+    mcp_access: dict[str, Any] = {}
+    if include_diagnostics:
+        mcp_access["turn_execution_get_diagnostics"] = turn_descriptor(
+            "turn_execution_get_diagnostics",
+            "Fetch the exact persisted diagnostics for this turn.",
+        )
+    if include_live_progress:
+        mcp_access["turn_execution_get_live_progress"] = turn_descriptor(
+            "turn_execution_get_live_progress",
+            (
+                "Fetch the bounded live progress snapshot; pass section, limit, "
+                "and offset only for explicit detail hydration."
+            ),
+        )
+    if session_id_value:
+        conversation_ref = build_conversation_scope_binding(
+            chat_session_id=session_id_value,
+            history_owner_user_id=owner_user_id,
+            read_namespace=read_namespace,
+            organisation_concept_id=organisation_concept_id,
+            delegated_actor_user_id=actor_user_id,
+            delegated_actor_namespace=delegated_actor_namespace,
+        )
+        mcp_access["conversation_telemetry_get_locator"] = (
+            _build_tool_call_descriptor(
+                "conversation_telemetry_get_locator",
+                {
+                    "conversation_ref": conversation_ref,
+                    "namespace": delegated_actor_namespace,
+                    "user_concept_id": actor_user_id,
+                    "organisation_concept_id": organisation_concept_id,
+                },
+                purpose="Fetch a fresh compact locator for the surrounding conversation.",
+            )
+        )
+    if session_id_value and history_index_value is not None:
+        mcp_access["chat_history_get_debug_entry"] = _build_tool_call_descriptor(
+            "chat_history_get_debug_entry",
+            {
+                "history_location_ref": build_history_location_binding(
+                    chat_session_id=session_id_value,
+                    history_index=history_index_value,
+                    history_owner_user_id=owner_user_id,
+                    read_namespace=read_namespace,
+                    organisation_concept_id=organisation_concept_id,
+                    delegated_actor_user_id=actor_user_id,
+                    delegated_actor_namespace=delegated_actor_namespace,
+                ),
+                "namespace": delegated_actor_namespace,
+                "user_concept_id": actor_user_id,
+                "organisation_concept_id": organisation_concept_id,
+            },
+            purpose="Fetch the exact bounded stored llm_debug_data for this turn.",
+        )
+
+    return {
+        "schema_version": TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION,
+        "generated_at_utc": _now_utc_iso(),
+        "request_id": request_id_value,
+        "chat_session_id": session_id_value,
+        "history_location": (
+            {
+                "session_id": session_id_value,
+                "history_index": history_index_value,
+            }
+            if session_id_value and history_index_value is not None
+            else None
+        ),
+        "namespace_context": _build_namespace_context(
+            namespace=delegated_actor_namespace,
+            user_id=actor_user_id,
+            organisation_concept_id=organisation_concept_id,
+        ),
+        "history_owner_user_id": owner_user_id,
+        "mcp_access": mcp_access,
+    }
+
+
 def build_conversation_llm_telemetry_locator(
     *,
     user_id: str,
@@ -122,16 +256,20 @@ def build_conversation_llm_telemetry_locator(
     if not user_id_value:
         raise chat_history_service.ChatHistoryServiceError("user_id is required.")
 
-    session_summary = chat_history_service.get_chat_history_session_summary(
-        user_id_value,
-        session_id_value,
-        namespace=namespace,
-        include_legacy=include_legacy,
-        summary_mode="light",
-    ) or {}
-    resolved_namespace = _safe_str(namespace) or _safe_str(session_summary.get("namespace"))
+    session_projection = (
+        chat_history_service.get_chat_history_telemetry_locator_projection(
+            user_id_value,
+            session_id_value,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        )
+        or {}
+    )
+    resolved_namespace = _safe_str(namespace) or _safe_str(
+        session_projection.get("namespace")
+    )
     resolved_org_id = _safe_str(organisation_concept_id) or _safe_str(
-        session_summary.get("organisation_concept_id")
+        session_projection.get("organisation_concept_id")
     )
     requested_user_id_value = _safe_str(requested_user_id) or user_id_value
     requested_namespace_value = (
@@ -142,6 +280,8 @@ def build_conversation_llm_telemetry_locator(
         history_owner_user_id=user_id_value,
         read_namespace=resolved_namespace,
         organisation_concept_id=resolved_org_id,
+        delegated_actor_user_id=requested_user_id_value,
+        delegated_actor_namespace=requested_namespace_value,
     )
 
     def _build_bound_conversation_args(*, include_debug: bool | None = None) -> dict[str, Any]:
@@ -155,12 +295,7 @@ def build_conversation_llm_telemetry_locator(
             arguments["include_debug"] = include_debug
         return arguments
 
-    history = chat_history_service.get_chat_history(
-        user_id_value,
-        session_id_value,
-        namespace=resolved_namespace,
-        include_legacy=include_legacy,
-    )
+    history = session_projection.get("history")
     if not isinstance(history, list):
         history = []
 
@@ -223,6 +358,8 @@ def build_conversation_llm_telemetry_locator(
                             history_owner_user_id=user_id_value,
                             read_namespace=resolved_namespace,
                             organisation_concept_id=resolved_org_id,
+                            delegated_actor_user_id=requested_user_id_value,
+                            delegated_actor_namespace=requested_namespace_value,
                         ),
                         "namespace": requested_namespace_value,
                         "user_concept_id": requested_user_id_value,
@@ -239,7 +376,20 @@ def build_conversation_llm_telemetry_locator(
                 "turn_execution_get_diagnostics",
                 {
                     "request_id": request_id,
-                    "namespace": resolved_namespace,
+                    "turn_telemetry_ref": build_turn_telemetry_binding(
+                        request_id=request_id,
+                        delegated_actor_user_id=requested_user_id_value,
+                        permitted_tool="turn_execution_get_diagnostics",
+                        chat_session_id=session_id_value,
+                        history_index=history_index,
+                        history_owner_user_id=user_id_value,
+                        read_namespace=resolved_namespace,
+                        delegated_actor_namespace=requested_namespace_value,
+                        organisation_concept_id=resolved_org_id,
+                    ),
+                    "namespace": requested_namespace_value,
+                    "user_concept_id": requested_user_id_value,
+                    "organisation_concept_id": resolved_org_id,
                 },
                 purpose=(
                     "Fetch the persisted full turn-execution diagnostics payload for this assistant turn."
@@ -280,7 +430,7 @@ def build_conversation_llm_telemetry_locator(
         "schema_version": CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION,
         "generated_at_utc": _now_utc_iso(),
         "session_id": session_id_value,
-        "session_name": _safe_str(session_summary.get("session_name")),
+        "session_name": _safe_str(session_projection.get("session_name")),
         "namespace_context": namespace_context,
         "metadata": metadata,
         "mcp_access": {
@@ -293,16 +443,15 @@ def build_conversation_llm_telemetry_locator(
             ),
             "chat_history_get_segments": _build_tool_call_descriptor(
                 "chat_history_get_segments",
-                _build_bound_conversation_args(include_debug=True),
-                purpose="Fetch the stored conversation transcript segments and embedded debug payloads.",
-            ),
-            "turn_execution_list": _build_tool_call_descriptor(
-                "turn_execution_list",
                 {
-                    "session_id": session_id_value,
-                    "namespace": resolved_namespace,
+                    **_build_bound_conversation_args(include_debug=False),
+                    "segment_size": 20,
+                    "history_tail_limit": 100,
                 },
-                purpose="List turn-execution projections for this conversation.",
+                purpose=(
+                    "Fetch a bounded transcript projection; use each turn's exact "
+                    "debug-entry descriptor for persisted debug payloads."
+                ),
             ),
         },
         "turns": turns,

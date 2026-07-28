@@ -4,6 +4,7 @@ const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTa
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
+    fetchWithTimeout: jest.fn(),
     getUserContext: jest.fn(),
     getWindowSessionId: jest.fn(() => 'test-window-session'),
     postJson: jest.fn(),
@@ -44,6 +45,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/toast.js', () =>
 describe('chat thinking diagnostics copy control', () => {
     beforeEach(() => {
         jest.resetModules();
+        global.fetch = undefined;
         document.body.innerHTML = `
             <button id="copyThinkingDiagnosticsButton"
                 data-thinking-role="copy"
@@ -58,7 +60,31 @@ describe('chat thinking diagnostics copy control', () => {
 
     test('copies a compact live progress locator instead of diagnostic histories', async () => {
         const chatTab = require(chatTabModulePath);
+        const { fetchWithTimeout } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const button = document.getElementById('copyThinkingDiagnosticsButton');
+        global.fetch = jest.fn();
+        fetchWithTimeout.mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                schema_version: 'turn_telemetry_mcp_access.v1',
+                mcp_access: {
+                    turn_execution_get_live_progress: {
+                        tool_name: 'turn_execution_get_live_progress',
+                        arguments: {
+                            request_id: 'req-thinking-copy-1',
+                            turn_telemetry_ref: { signature: 'signed-live-progress-ref' }
+                        }
+                    },
+                    turn_execution_get_diagnostics: {
+                        tool_name: 'turn_execution_get_diagnostics',
+                        arguments: {
+                            request_id: 'req-thinking-copy-1',
+                            turn_telemetry_ref: { signature: 'signed-diagnostics-ref' }
+                        }
+                    }
+                }
+            })
+        });
 
         chatTab.__testOnly_setActiveChatSession('session-thinking-copy', 'Diagnostics Session');
 
@@ -99,6 +125,11 @@ describe('chat thinking diagnostics copy control', () => {
             turn_execution_get_live_progress: expect.any(Object),
             turn_execution_get_diagnostics: expect.any(Object)
         }));
+        expect(payload.retrieval_status).toBe('server_delegation_available');
+        expect(fetchWithTimeout).toHaveBeenCalledWith(
+            expect.stringContaining('/von/history/turn_telemetry_access?'),
+            expect.any(Object)
+        );
 
         expect(payload.prompt_preview).toBeUndefined();
         expect(payload.activity_history).toBeUndefined();

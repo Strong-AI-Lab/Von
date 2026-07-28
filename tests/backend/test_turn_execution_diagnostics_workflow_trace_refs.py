@@ -229,6 +229,73 @@ def test_observational_diagnostics_do_not_synthesise_retired_workflow_identity(
     assert payload["phase_history"] == embedded_diagnostics["phase_history"]
 
 
+def test_exact_delegated_history_location_avoids_request_wide_history_scan(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def exact_debug_lookup(**kwargs):
+        captured.update(kwargs)
+        return {
+            "request_id": "req-exact-2609",
+            "prompt_text": "Inspect this exact turn.",
+            "turn_execution_diagnostics": {
+                "schema_version": "turn_execution_diagnostics.v1",
+                "request_id": "req-exact-2609",
+                "latest_progress": {
+                    "status": "completed",
+                    "phase": "completed",
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        diagnostics_service,
+        "get_chat_history_debug_entry",
+        exact_debug_lookup,
+    )
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_resolve_history_context",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("request-wide history lookup must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        diagnostics_service,
+        "_load_turn_execution_record",
+        lambda **_kwargs: None,
+    )
+
+    payload = get_turn_execution_diagnostics_payload(
+        request_id="req-exact-2609",
+        namespace="#V#actor_a@org",
+        delegated_actor_user_id="#V#actor_a",
+        delegated_actor_namespace="#V#actor_a@org",
+        chat_session_id="session-exact-2609",
+        history_index=7,
+        history_owner_user_id="#V#actor_a",
+        organisation_concept_id="#V#org",
+    )
+
+    assert payload is not None
+    assert payload["chat_session_id"] == "session-exact-2609"
+    assert payload["history_location"] == {
+        "session_id": "session-exact-2609",
+        "history_index": 7,
+    }
+    assert payload["derived_user_concept_id"] == "#V#actor_a"
+    assert payload["derived_organisation_concept_id"] == "#V#org"
+    assert captured == {
+        "user_id": "#V#actor_a",
+        "session_id": "session-exact-2609",
+        "history_index": 7,
+        "namespace": "#V#actor_a@org",
+        "include_legacy": True,
+        "hydrate_blob_refs": True,
+    }
+
+
 def test_legacy_diagnostics_still_reconstruct_historical_workflow_identity(
     monkeypatch,
 ) -> None:

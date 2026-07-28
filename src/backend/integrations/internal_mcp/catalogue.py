@@ -15378,19 +15378,121 @@ def _turn_execution_namespace_coverage_report(**kwargs):
     )
 
 
+def _bounded_delegated_telemetry_payload(
+    payload: Mapping[str, Any],
+    *,
+    arguments: Mapping[str, Any],
+    delegated: bool,
+    artifact_kind: str,
+    preserve_inline_below_limit: bool,
+) -> dict[str, Any]:
+    """Keep bearer-delegated stdio reads below the MCP text response guard."""
+
+    if not delegated:
+        return dict(payload)
+
+    import hashlib
+    import json
+
+    default_limit = 60_000
+    max_limit = 75_000
+    raw_offset = arguments.get("offset", 0)
+    raw_limit = arguments.get("limit", default_limit)
+    offset = raw_offset if isinstance(raw_offset, int) and not isinstance(raw_offset, bool) else 0
+    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else default_limit
+    offset = max(0, offset)
+    limit = min(max_limit, max(1, limit))
+    canonical_json = json.dumps(
+        dict(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    total_chars = len(canonical_json)
+    digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    end = min(total_chars, offset + limit)
+    page = {
+        "schema_version": "bounded_telemetry_json_page.v1",
+        "artifact_kind": artifact_kind,
+        "encoding": "canonical_json_ascii",
+        "sha256": digest,
+        "offset": offset,
+        "limit": limit,
+        "returned_chars": max(0, end - offset),
+        "total_chars": total_chars,
+        "has_more": end < total_chars,
+        "next_offset": end if end < total_chars else None,
+        "json_chunk": canonical_json[offset:end] if offset <= total_chars else "",
+    }
+    if (
+        preserve_inline_below_limit
+        and offset == 0
+        and total_chars <= limit
+    ):
+        return {
+            **dict(payload),
+            "bounded_read": {
+                key: value for key, value in page.items() if key != "json_chunk"
+            },
+        }
+    return {
+        "success": True,
+        "artifact_kind": artifact_kind,
+        "request_id": payload.get("request_id"),
+        "history_location": payload.get("history_location"),
+        "read_delegation": payload.get("read_delegation"),
+        "provenance": payload.get("provenance"),
+        "bounded_read": page,
+    }
+
+
 def _chat_history_get_segments(**kwargs):
-    if denial := _internal_mcp_actor_scoped_read_denial("chat history"):
-        return denial
+    authorisation = _authorise_internal_mcp_telemetry_read(
+        kwargs,
+        tool_name="chat_history_get_segments",
+        surface="chat history",
+        reference_argument="conversation_ref",
+        operator_control_plane=False,
+    )
+    if not authorisation.get("success"):
+        return authorisation
+    effective_kwargs = dict(authorisation["payload"])
+    if authorisation.get("delegated"):
+        effective_kwargs["include_debug"] = False
+        requested_segment_size = effective_kwargs.get("segment_size")
+        effective_kwargs["segment_size"] = min(
+            20,
+            (
+                requested_segment_size
+                if isinstance(requested_segment_size, int)
+                and not isinstance(requested_segment_size, bool)
+                and requested_segment_size > 0
+                else 20
+            ),
+        )
+        requested_tail_limit = effective_kwargs.get("history_tail_limit")
+        effective_kwargs["history_tail_limit"] = min(
+            100,
+            (
+                requested_tail_limit
+                if isinstance(requested_tail_limit, int)
+                and not isinstance(requested_tail_limit, bool)
+                and requested_tail_limit > 0
+                else 100
+            ),
+        )
     from ...services import chat_history_service
 
-    access = _resolve_chat_history_read_target(kwargs)
+    access = _resolve_chat_history_read_target(effective_kwargs)
     if not isinstance(access, dict) or not access.get("success", False):
         return access
 
-    include_debug = kwargs.get("include_debug", True)
+    include_debug = effective_kwargs.get("include_debug", True)
     if not isinstance(include_debug, bool):
         include_debug = bool(include_debug)
-    include_legacy = kwargs.get("include_legacy", access.get("include_legacy", True))
+    include_legacy = effective_kwargs.get(
+        "include_legacy", access.get("include_legacy", True)
+    )
     if not isinstance(include_legacy, bool):
         include_legacy = bool(include_legacy)
 
@@ -15401,9 +15503,9 @@ def _chat_history_get_segments(**kwargs):
             include_locations=True,
             namespace=_clean_optional_string(access.get("read_namespace")),
             include_legacy=include_legacy,
-            segment_size=kwargs.get("segment_size"),
+            segment_size=effective_kwargs.get("segment_size"),
             include_debug=include_debug,
-            history_tail_limit=kwargs.get("history_tail_limit"),
+            history_tail_limit=effective_kwargs.get("history_tail_limit"),
             return_meta=True,
         )
     except chat_history_service.ChatHistoryServiceError as exc:
@@ -15436,6 +15538,8 @@ def _chat_history_get_segments(**kwargs):
             meta.get("history_truncated") if isinstance(meta, Mapping) else False
         ),
     }
+    if authorisation.get("delegated"):
+        payload["read_delegation"] = authorisation.get("read_delegation")
     return _with_rag_provenance(
         payload=payload,
         item_kind="chat_history_segments",
@@ -15444,15 +15548,23 @@ def _chat_history_get_segments(**kwargs):
 
 
 def _chat_history_get_debug_entry(**kwargs):
-    if denial := _internal_mcp_actor_scoped_read_denial("chat history"):
-        return denial
+    authorisation = _authorise_internal_mcp_telemetry_read(
+        kwargs,
+        tool_name="chat_history_get_debug_entry",
+        surface="chat history",
+        reference_argument="history_location_ref",
+        operator_control_plane=False,
+    )
+    if not authorisation.get("success"):
+        return authorisation
+    effective_kwargs = dict(authorisation["payload"])
     from ...services import chat_history_service
 
-    access = _resolve_chat_history_read_target(kwargs)
+    access = _resolve_chat_history_read_target(effective_kwargs)
     if not isinstance(access, dict) or not access.get("success", False):
         return access
 
-    history_index = kwargs.get("history_index")
+    history_index = effective_kwargs.get("history_index")
     if not isinstance(history_index, int):
         history_index = access.get("history_index")
     if not isinstance(history_index, int) or history_index < 0:
@@ -15466,7 +15578,9 @@ def _chat_history_get_debug_entry(**kwargs):
             ],
         )
 
-    include_legacy = kwargs.get("include_legacy", access.get("include_legacy", True))
+    include_legacy = effective_kwargs.get(
+        "include_legacy", access.get("include_legacy", True)
+    )
     if not isinstance(include_legacy, bool):
         include_legacy = bool(include_legacy)
 
@@ -15519,21 +15633,38 @@ def _chat_history_get_debug_entry(**kwargs):
         "identifier_binding": access.get("identifier_binding"),
         "llm_debug_data": debug_data,
     }
-    return _with_rag_provenance(
+    if authorisation.get("delegated"):
+        payload["read_delegation"] = authorisation.get("read_delegation")
+    result = _with_rag_provenance(
         payload=payload,
         item_kind="chat_history_debug_entry",
         source_system="mongo.chat_history",
     )
+    return _bounded_delegated_telemetry_payload(
+        result,
+        arguments=effective_kwargs,
+        delegated=bool(authorisation.get("delegated")),
+        artifact_kind="chat_history_debug_entry",
+        preserve_inline_below_limit=True,
+    )
 
 
 def _conversation_telemetry_get_locator(**kwargs):
-    if denial := _internal_mcp_actor_scoped_read_denial("conversation telemetry"):
-        return denial
+    authorisation = _authorise_internal_mcp_telemetry_read(
+        kwargs,
+        tool_name="conversation_telemetry_get_locator",
+        surface="conversation telemetry",
+        reference_argument="conversation_ref",
+        operator_control_plane=False,
+    )
+    if not authorisation.get("success"):
+        return authorisation
+    effective_kwargs = dict(authorisation["payload"])
     from ...services.conversation_telemetry_locator_service import (
         build_conversation_llm_telemetry_locator,
     )
 
-    access = _resolve_chat_history_read_target(kwargs)
+    access = _resolve_chat_history_read_target(effective_kwargs)
     if not isinstance(access, dict) or not access.get("success", False):
         return access
 
@@ -15552,7 +15683,9 @@ def _conversation_telemetry_get_locator(**kwargs):
                 access.get("organisation_concept_id")
             ),
             include_legacy=bool(
-                kwargs.get("include_legacy", access.get("include_legacy", True))
+                effective_kwargs.get(
+                    "include_legacy", access.get("include_legacy", True)
+                )
             ),
         )
     except Exception as exc:
@@ -15569,6 +15702,8 @@ def _conversation_telemetry_get_locator(**kwargs):
     payload["requested_user_id"] = access.get("requested_user_id")
     payload["access_mode"] = access.get("access_mode")
     payload["identifier_binding"] = access.get("identifier_binding")
+    if authorisation.get("delegated"):
+        payload["read_delegation"] = authorisation.get("read_delegation")
     return _with_rag_provenance(
         payload=payload,
         item_kind="conversation_telemetry_locator",
@@ -15577,13 +15712,21 @@ def _conversation_telemetry_get_locator(**kwargs):
 
 
 def _turn_execution_get_live_progress(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
-        return denial
+    authorisation = _authorise_internal_mcp_telemetry_read(
+        kwargs,
+        tool_name="turn_execution_get_live_progress",
+        surface="turn telemetry",
+        reference_argument="turn_telemetry_ref",
+        operator_control_plane=True,
+    )
+    if not authorisation.get("success"):
+        return authorisation
+    effective_kwargs = dict(authorisation["payload"])
     from ...services.turn_execution_live_progress_service import (
         get_turn_execution_live_progress_payload,
     )
 
-    request_id = kwargs.get("request_id")
+    request_id = effective_kwargs.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
         return make_error_response(
             "missing_parameter",
@@ -15594,18 +15737,32 @@ def _turn_execution_get_live_progress(**kwargs):
 
     payload = get_turn_execution_live_progress_payload(
         request_id=request_id.strip(),
-        namespace=_clean_optional_string(kwargs.get("namespace")),
+        namespace=_clean_optional_string(effective_kwargs.get("namespace")),
         user_concept_id=_normalise_optional_concept_id(
-            kwargs.get("user_concept_id")
-            or kwargs.get("acting_user_concept_id")
-            or kwargs.get("actor_user_id")
+            effective_kwargs.get("user_concept_id")
+            or effective_kwargs.get("acting_user_concept_id")
+            or effective_kwargs.get("actor_user_id")
         ),
-        window_session_id=_clean_optional_string(kwargs.get("window_session_id")),
-        anonymous_session_id=_clean_optional_string(kwargs.get("anonymous_session_id")),
-        scope_key=_clean_optional_string(kwargs.get("scope_key")),
-        section=_clean_optional_string(kwargs.get("section")),
-        limit=kwargs.get("limit"),
-        offset=kwargs.get("offset"),
+        window_session_id=(
+            None
+            if authorisation.get("delegated")
+            else _clean_optional_string(effective_kwargs.get("window_session_id"))
+        ),
+        anonymous_session_id=(
+            None
+            if authorisation.get("delegated")
+            else _clean_optional_string(
+                effective_kwargs.get("anonymous_session_id")
+            )
+        ),
+        scope_key=(
+            None
+            if authorisation.get("delegated")
+            else _clean_optional_string(effective_kwargs.get("scope_key"))
+        ),
+        section=_clean_optional_string(effective_kwargs.get("section")),
+        limit=effective_kwargs.get("limit"),
+        offset=effective_kwargs.get("offset"),
     )
     if not isinstance(payload, dict):
         return make_error_response(
@@ -15617,6 +15774,83 @@ def _turn_execution_get_live_progress(**kwargs):
                 "Provide user_concept_id, namespace, or the window_session_id used by the browser",
             ],
         )
+    if authorisation.get("delegated"):
+        delegated_actor = _normalise_optional_concept_id(
+            effective_kwargs.get("user_concept_id")
+        )
+        expected_scope_key = (
+            f"user:{delegated_actor}" if delegated_actor else None
+        )
+        resolved_scope_key = _clean_optional_string(
+            payload.get("resolved_scope_key")
+        )
+        if expected_scope_key and resolved_scope_key != expected_scope_key:
+            return make_error_response(
+                "READ_DELEGATION_CANONICAL_TARGET_MISMATCH",
+                "Canonical live progress does not match the signed actor scope",
+                details={
+                    "field_mismatches": [
+                        {
+                            "field": "resolved_scope_key",
+                            "read_back": resolved_scope_key,
+                            "bound": expected_scope_key,
+                        }
+                    ],
+                    "identifier_binding": authorisation.get(
+                        "identifier_binding"
+                    ),
+                },
+            )
+        from ...services.conversation_scope_binding_service import (
+            build_turn_telemetry_binding,
+        )
+
+        payload["read_delegation"] = authorisation.get("read_delegation")
+        payload["mcp_access"] = {
+            "turn_execution_get_live_progress": {
+                "tool_name": "turn_execution_get_live_progress",
+                "arguments": {
+                    "request_id": request_id.strip(),
+                    "turn_telemetry_ref": build_turn_telemetry_binding(
+                        request_id=request_id.strip(),
+                        delegated_actor_user_id=str(
+                            effective_kwargs["user_concept_id"]
+                        ),
+                        permitted_tool="turn_execution_get_live_progress",
+                        chat_session_id=_clean_optional_string(
+                            effective_kwargs.get("session_id")
+                        ),
+                        history_owner_user_id=_normalise_optional_concept_id(
+                            effective_kwargs.get(
+                                "_delegated_history_owner_user_id"
+                            )
+                        ),
+                        read_namespace=_clean_optional_string(
+                            effective_kwargs.get("_delegated_read_namespace")
+                        ),
+                        delegated_actor_namespace=_clean_optional_string(
+                            effective_kwargs.get("namespace")
+                        ),
+                        organisation_concept_id=_normalise_optional_concept_id(
+                            effective_kwargs.get("organisation_concept_id")
+                        ),
+                    ),
+                    "namespace": _clean_optional_string(
+                        effective_kwargs.get("namespace")
+                    ),
+                    "user_concept_id": _normalise_optional_concept_id(
+                        effective_kwargs.get("user_concept_id")
+                    ),
+                    "organisation_concept_id": _normalise_optional_concept_id(
+                        effective_kwargs.get("organisation_concept_id")
+                    ),
+                },
+                "purpose": (
+                    "Fetch the bounded live progress snapshot; pass section, "
+                    "limit, and offset only for explicit detail hydration."
+                ),
+            }
+        }
     return _with_rag_provenance(
         payload=payload,
         item_kind="turn_live_progress",
@@ -15650,14 +15884,22 @@ def _turn_execution_get(**kwargs):
 
 
 def _turn_execution_get_diagnostics(**kwargs):
-    if denial := _internal_mcp_operator_control_plane_denial("turn telemetry"):
-        return denial
+    authorisation = _authorise_internal_mcp_telemetry_read(
+        kwargs,
+        tool_name="turn_execution_get_diagnostics",
+        surface="turn telemetry",
+        reference_argument="turn_telemetry_ref",
+        operator_control_plane=True,
+    )
+    if not authorisation.get("success"):
+        return authorisation
+    effective_kwargs = dict(authorisation["payload"])
     from ...services.turn_execution_diagnostics_service import (
         TurnExecutionDiagnosticsServiceError,
         get_turn_execution_diagnostics_payload,
     )
 
-    request_id = kwargs.get("request_id")
+    request_id = effective_kwargs.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
         return make_error_response(
             "missing_parameter",
@@ -15670,7 +15912,41 @@ def _turn_execution_get_diagnostics(**kwargs):
     try:
         payload = get_turn_execution_diagnostics_payload(
             request_id=request_id_value,
-            namespace=kwargs.get("namespace"),
+            namespace=(
+                effective_kwargs.get("_delegated_read_namespace")
+                if authorisation.get("delegated")
+                else effective_kwargs.get("namespace")
+            ),
+            delegated_actor_user_id=_normalise_optional_concept_id(
+                effective_kwargs.get("user_concept_id")
+            ),
+            delegated_actor_namespace=_clean_optional_string(
+                effective_kwargs.get("namespace")
+            ),
+            chat_session_id=(
+                _clean_optional_string(effective_kwargs.get("session_id"))
+                if authorisation.get("delegated")
+                else None
+            ),
+            history_index=(
+                effective_kwargs.get("history_index")
+                if authorisation.get("delegated")
+                else None
+            ),
+            history_owner_user_id=(
+                _normalise_optional_concept_id(
+                    effective_kwargs.get("_delegated_history_owner_user_id")
+                )
+                if authorisation.get("delegated")
+                else None
+            ),
+            organisation_concept_id=(
+                _normalise_optional_concept_id(
+                    effective_kwargs.get("organisation_concept_id")
+                )
+                if authorisation.get("delegated")
+                else None
+            ),
         )
     except TurnExecutionDiagnosticsServiceError as exc:
         return make_error_response(
@@ -15678,7 +15954,7 @@ def _turn_execution_get_diagnostics(**kwargs):
             str(exc),
             details={
                 "request_id": request_id_value,
-                "namespace": kwargs.get("namespace"),
+                "namespace": effective_kwargs.get("namespace"),
             },
         )
 
@@ -15688,10 +15964,62 @@ def _turn_execution_get_diagnostics(**kwargs):
             f"Turn execution diagnostics {request_id_value} not found",
             details={
                 "request_id": request_id_value,
-                "namespace": kwargs.get("namespace"),
+                "namespace": effective_kwargs.get("namespace"),
             },
             suggestions=["Check the request_id and namespace"],
         )
+
+    if authorisation.get("delegated"):
+        canonical_comparisons: tuple[tuple[str, Any, Any], ...] = (
+            ("request_id", payload.get("request_id"), request_id_value),
+            (
+                "chat_session_id",
+                _clean_optional_string(payload.get("chat_session_id")),
+                _clean_optional_string(effective_kwargs.get("session_id")),
+            ),
+            (
+                "history_owner_user_id",
+                _normalise_optional_concept_id(
+                    payload.get("derived_user_concept_id")
+                ),
+                _normalise_optional_concept_id(
+                    effective_kwargs.get("_delegated_history_owner_user_id")
+                ),
+            ),
+            (
+                "read_namespace",
+                _clean_optional_string(payload.get("namespace")),
+                _clean_optional_string(
+                    effective_kwargs.get("_delegated_read_namespace")
+                ),
+            ),
+            (
+                "organisation_concept_id",
+                _normalise_optional_concept_id(
+                    payload.get("derived_organisation_concept_id")
+                ),
+                _normalise_optional_concept_id(
+                    effective_kwargs.get("organisation_concept_id")
+                ),
+            ),
+        )
+        canonical_mismatches = [
+            {"field": field, "read_back": actual, "bound": expected}
+            for field, actual, expected in canonical_comparisons
+            if actual is not None and expected is not None and actual != expected
+        ]
+        if canonical_mismatches:
+            return make_error_response(
+                "READ_DELEGATION_CANONICAL_TARGET_MISMATCH",
+                "Canonical turn diagnostics do not match the signed delegation target",
+                details={
+                    "field_mismatches": canonical_mismatches,
+                    "identifier_binding": authorisation.get(
+                        "identifier_binding"
+                    ),
+                },
+            )
+        payload["read_delegation"] = authorisation.get("read_delegation")
 
     payload["item_kind"] = "turn_execution_diagnostics"
     payload["source_system"] = (
@@ -15699,10 +16027,17 @@ def _turn_execution_get_diagnostics(**kwargs):
         if payload.get("diagnostics_source") == "mongo.turn_execution_records"
         else "mongo.chat_history"
     )
-    return _with_rag_provenance(
+    result = _with_rag_provenance(
         payload=payload,
         item_kind="turn_execution_diagnostics_item",
         source_system=str(payload["source_system"]),
+    )
+    return _bounded_delegated_telemetry_payload(
+        result,
+        arguments=effective_kwargs,
+        delegated=bool(authorisation.get("delegated")),
+        artifact_kind="turn_execution_diagnostics",
+        preserve_inline_below_limit=True,
     )
 
 
@@ -18478,6 +18813,200 @@ def _internal_mcp_actor_scoped_read_denial(
             "actor or trusted operator route."
         ),
     )
+
+
+def _authorise_internal_mcp_telemetry_read(
+    payload: Mapping[str, Any],
+    *,
+    tool_name: str,
+    surface: str,
+    reference_argument: str,
+    operator_control_plane: bool,
+) -> dict[str, Any]:
+    """Resolve a narrow signed stdio read delegation without actor elevation."""
+
+    ordinary_denial = (
+        _internal_mcp_operator_control_plane_denial(surface)
+        if operator_control_plane
+        else _internal_mcp_actor_scoped_read_denial(surface)
+    )
+    if ordinary_denial is None:
+        return {
+            "success": True,
+            "payload": dict(payload),
+            "delegated": False,
+            "read_delegation": None,
+        }
+
+    reference = payload.get(reference_argument)
+    if not isinstance(reference, Mapping):
+        return ordinary_denial
+    if (
+        reference_argument == "conversation_ref"
+        and reference.get("kind") == "von_conversation_ref"
+    ):
+        # Public locator wrappers are convenient identifiers, not proof of
+        # actor authority. Preserve the ordinary actor-provenance denial
+        # instead of treating an unsigned wrapper as a malformed signature.
+        return ordinary_denial
+
+    from ...services.conversation_scope_binding_service import (
+        TELEMETRY_READ_DELEGATION_AUDIENCE,
+        verify_conversation_scope_binding,
+        verify_history_location_binding,
+        verify_turn_telemetry_binding,
+    )
+
+    claimed_actor = _normalise_optional_concept_id(payload.get("user_concept_id"))
+    if reference_argument == "conversation_ref":
+        verified = verify_conversation_scope_binding(
+            reference,
+            require_read_delegation=True,
+            expected_audience=TELEMETRY_READ_DELEGATION_AUDIENCE,
+            expected_tool=tool_name,
+            expected_actor_user_id=claimed_actor,
+        )
+    elif reference_argument == "history_location_ref":
+        verified = verify_history_location_binding(
+            reference,
+            require_read_delegation=True,
+            expected_audience=TELEMETRY_READ_DELEGATION_AUDIENCE,
+            expected_tool=tool_name,
+            expected_actor_user_id=claimed_actor,
+        )
+    elif reference_argument == "turn_telemetry_ref":
+        verified = verify_turn_telemetry_binding(
+            reference,
+            expected_audience=TELEMETRY_READ_DELEGATION_AUDIENCE,
+            expected_tool=tool_name,
+            expected_actor_user_id=claimed_actor,
+        )
+    else:
+        return make_error_response(
+            "READ_DELEGATION_REFERENCE_UNSUPPORTED",
+            "Unsupported telemetry read delegation reference",
+            details={"reference_argument": reference_argument},
+        )
+
+    if not verified.get("success"):
+        return make_error_response(
+            str(verified.get("error_code") or "INVALID_CONTEXT_BINDING"),
+            str(verified.get("error_message") or "Telemetry read delegation is invalid"),
+            details={
+                "identifier_binding": dict(
+                    verified.get("identifier_binding") or {}
+                )
+            },
+        )
+
+    effective = dict(payload)
+    actor_user_id = _normalise_optional_concept_id(
+        verified.get("delegated_actor_user_id")
+    )
+    actor_namespace = _clean_optional_string(
+        verified.get("delegated_actor_namespace")
+    )
+    organisation_concept_id = _normalise_optional_concept_id(
+        verified.get("organisation_concept_id")
+    )
+    bound_session_id = _clean_optional_string(verified.get("chat_session_id"))
+    bound_request_id = _clean_optional_string(verified.get("request_id"))
+    bound_history_index = verified.get("history_index")
+
+    comparisons: tuple[tuple[str, Any, Any], ...] = (
+        ("user_concept_id", claimed_actor, actor_user_id),
+        (
+            "namespace",
+            _clean_optional_string(payload.get("namespace")),
+            actor_namespace,
+        ),
+        (
+            "organisation_concept_id",
+            _normalise_optional_concept_id(
+                payload.get("organisation_concept_id")
+            ),
+            organisation_concept_id,
+        ),
+        (
+            "session_id",
+            _clean_optional_string(
+                payload.get("session_id")
+                or payload.get("conversation_session_id")
+            ),
+            bound_session_id,
+        ),
+        (
+            "request_id",
+            _clean_optional_string(payload.get("request_id")),
+            bound_request_id,
+        ),
+        (
+            "history_index",
+            (
+                payload.get("history_index")
+                if isinstance(payload.get("history_index"), int)
+                else None
+            ),
+            (
+                bound_history_index
+                if isinstance(bound_history_index, int)
+                else None
+            ),
+        ),
+    )
+    mismatches = [
+        {
+            "field": field,
+            "provided": provided,
+            "bound": bound,
+        }
+        for field, provided, bound in comparisons
+        if provided is not None and bound is not None and provided != bound
+    ]
+    if mismatches:
+        identifier_binding = dict(verified.get("identifier_binding") or {})
+        identifier_binding["read_delegation_validation_status"] = "target_mismatch"
+        return make_error_response(
+            "INVALID_CONTEXT_BINDING",
+            "Telemetry read arguments do not match the signed delegation target",
+            details={
+                "reason_code": "READ_DELEGATION_TARGET_MISMATCH",
+                "field_mismatches": mismatches,
+                "identifier_binding": identifier_binding,
+            },
+        )
+
+    if actor_user_id:
+        effective["user_concept_id"] = actor_user_id
+    if actor_namespace:
+        effective["namespace"] = actor_namespace
+    if organisation_concept_id:
+        effective["organisation_concept_id"] = organisation_concept_id
+    if bound_session_id:
+        effective["session_id"] = bound_session_id
+    if bound_request_id:
+        effective["request_id"] = bound_request_id
+    if isinstance(bound_history_index, int):
+        effective["history_index"] = bound_history_index
+    effective["_verified_read_delegation"] = dict(
+        verified.get("read_delegation") or {}
+    )
+    effective["_verified_identifier_binding"] = dict(
+        verified.get("identifier_binding") or {}
+    )
+    effective["_delegated_history_owner_user_id"] = _normalise_optional_concept_id(
+        verified.get("history_owner_user_id")
+    )
+    effective["_delegated_read_namespace"] = _clean_optional_string(
+        verified.get("read_namespace")
+    )
+    return {
+        "success": True,
+        "payload": effective,
+        "delegated": True,
+        "read_delegation": effective["_verified_read_delegation"],
+        "identifier_binding": effective["_verified_identifier_binding"],
+    }
 
 
 def _workflow_actor_scope_error_response(exc: Exception) -> dict[str, Any]:
@@ -30593,6 +31122,9 @@ def _resolve_chat_history_read_target(
             bound_org = _normalise_optional_concept_id(
                 bound_conversation_context.get("organisation_concept_id")
             )
+            bound_read_namespace = _clean_optional_string(
+                bound_conversation_context.get("read_namespace")
+            )
             if bound_owner and bound_owner != owner_user_id:
                 return _binding_error_result(
                     message=(
@@ -30622,6 +31154,23 @@ def _resolve_chat_history_read_target(
                         "resolved_organisation_concept_id": _normalise_optional_concept_id(
                             effective_org
                         ),
+                        "chat_session_id": session_id,
+                    },
+                )
+            if (
+                bound_read_namespace
+                and owner_namespace
+                and bound_read_namespace != owner_namespace
+            ):
+                return _binding_error_result(
+                    message=(
+                        "Bound conversation reference namespace does not match "
+                        "the resolved authorised read namespace"
+                    ),
+                    identifier_binding_payload=identifier_binding,
+                    details={
+                        "bound_read_namespace": bound_read_namespace,
+                        "resolved_read_namespace": owner_namespace,
                         "chat_session_id": session_id,
                     },
                 )
@@ -30693,6 +31242,9 @@ def _resolve_chat_history_read_target(
         bound_org = _normalise_optional_concept_id(
             bound_conversation_context.get("organisation_concept_id")
         )
+        bound_read_namespace = _clean_optional_string(
+            bound_conversation_context.get("read_namespace")
+        )
         if bound_owner and bound_owner != read_user_id:
             return _binding_error_result(
                 message=(
@@ -30722,6 +31274,23 @@ def _resolve_chat_history_read_target(
                     "resolved_organisation_concept_id": _normalise_optional_concept_id(
                         organisation_concept_id
                     ),
+                    "chat_session_id": session_id,
+                },
+            )
+        if (
+            bound_read_namespace
+            and read_namespace
+            and bound_read_namespace != read_namespace
+        ):
+            return _binding_error_result(
+                message=(
+                    "Bound conversation reference namespace does not match "
+                    "the resolved authorised read namespace"
+                ),
+                identifier_binding_payload=identifier_binding,
+                details={
+                    "bound_read_namespace": bound_read_namespace,
+                    "resolved_read_namespace": read_namespace,
                     "chat_session_id": session_id,
                 },
             )
@@ -34280,6 +34849,8 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
                     "user_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
                     "include_legacy": (bool,),
+                    "offset": (int,),
+                    "limit": (int,),
                 },
                 allow_unknown=True,
                 description=(
@@ -34327,8 +34898,11 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             input_schema=Schema(
                 required={"request_id": str},
                 optional={
+                    "turn_telemetry_ref": (dict,),
                     "namespace": (str, type(None)),
                     "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "session_id": (str, type(None)),
                     "window_session_id": (str, type(None)),
                     "anonymous_session_id": (str, type(None)),
                     "scope_key": (str, type(None)),
@@ -35133,10 +35707,19 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> List[
             input_schema=Schema(
                 required={"request_id": str},
                 optional={
+                    "turn_telemetry_ref": (dict,),
                     "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "offset": (int,),
+                    "limit": (int,),
                 },
                 allow_unknown=True,
-                description="Get one full turn diagnostics payload by request_id.",
+                description=(
+                    "Get one exact turn diagnostics payload by request_id. External "
+                    "stdio callers use a server-issued turn_telemetry_ref; large "
+                    "payloads return canonical JSON pages controlled by offset/limit."
+                ),
             ),
             output_schema=None,
             category="read",
