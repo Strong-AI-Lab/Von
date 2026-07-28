@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -368,31 +369,40 @@ def _upload_backup_to_blob(
 
 
 def _run_mongodump(*, mongo_uri: str, db_name: str, out_path: Path) -> None:
-    cmd = [
-        "mongodump",
-        "--uri",
-        mongo_uri,
-        "--db",
-        db_name,
-        "--out",
-        str(out_path),
-    ]
     timeout_seconds = _env_int(
         os.environ.get("VON_BACKUP_MONGODUMP_TIMEOUT_SECONDS"),
         default=DEFAULT_MONGODUMP_TIMEOUT_SECONDS,
     )
     if timeout_seconds < 1:
         timeout_seconds = DEFAULT_MONGODUMP_TIMEOUT_SECONDS
-    try:
-        subprocess.run(cmd, check=True, timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"mongodump exceeded the configured {timeout_seconds}s timeout"
-        ) from None
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            f"mongodump failed with exit code {exc.returncode}"
-        ) from None
+    with tempfile.TemporaryDirectory(prefix="von-mongodump-") as config_dir:
+        config_root = Path(config_dir)
+        os.chmod(config_root, 0o700)
+        config_path = config_root / "config.yml"
+        config_path.write_text(
+            f"uri: {json.dumps(mongo_uri)}\n",
+            encoding="utf-8",
+        )
+        os.chmod(config_path, 0o600)
+        cmd = [
+            "mongodump",
+            "--config",
+            str(config_path),
+            "--db",
+            db_name,
+            "--out",
+            str(out_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"mongodump exceeded the configured {timeout_seconds}s timeout"
+            ) from None
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"mongodump failed with exit code {exc.returncode}"
+            ) from None
 
 
 def main(argv: list[str] | None = None) -> int:

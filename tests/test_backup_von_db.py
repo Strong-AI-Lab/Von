@@ -53,7 +53,15 @@ def test_mongodump_uses_bounded_timeout(
         check: bool,
         timeout: int,
     ) -> None:
-        observed.update(command=command, check=check, timeout=timeout)
+        config_path = Path(command[command.index("--config") + 1])
+        observed.update(
+            command=command,
+            check=check,
+            timeout=timeout,
+            config_path=config_path,
+            config_mode=config_path.stat().st_mode & 0o777,
+            config_text=config_path.read_text(encoding="utf-8"),
+        )
 
     monkeypatch.setattr(backup_von_db.subprocess, "run", _fake_run)
 
@@ -65,6 +73,11 @@ def test_mongodump_uses_bounded_timeout(
 
     assert observed["check"] is True
     assert observed["timeout"] == expected_timeout
+    assert "--uri" not in observed["command"]
+    assert "mongodb://example.invalid/" not in observed["command"]
+    assert observed["config_mode"] == 0o600
+    assert "mongodb://example.invalid/" in observed["config_text"]
+    assert not Path(observed["config_path"]).exists()
 
 
 @pytest.mark.parametrize(
@@ -81,6 +94,7 @@ def test_mongodump_failure_traceback_does_not_expose_uri_credentials(
     expected_message: str,
 ) -> None:
     mongo_uri = "mongodb://backup-user:super-secret-password@example.invalid/von_db"
+    observed_config_paths: list[Path] = []
 
     def _fake_run(
         command: list[str],
@@ -88,6 +102,12 @@ def test_mongodump_failure_traceback_does_not_expose_uri_credentials(
         check: bool,
         timeout: int,
     ) -> None:
+        assert "--uri" not in command
+        assert mongo_uri not in command
+        config_path = Path(command[command.index("--config") + 1])
+        observed_config_paths.append(config_path)
+        assert config_path.stat().st_mode & 0o777 == 0o600
+        assert mongo_uri in config_path.read_text(encoding="utf-8")
         if failure_kind == "timeout":
             raise backup_von_db.subprocess.TimeoutExpired(command, timeout)
         raise backup_von_db.subprocess.CalledProcessError(19, command)
@@ -111,6 +131,8 @@ def test_mongodump_failure_traceback_does_not_expose_uri_credentials(
     assert expected_message in rendered
     assert mongo_uri not in rendered
     assert "super-secret-password" not in rendered
+    assert observed_config_paths
+    assert not observed_config_paths[0].exists()
 
 
 def test_retention_deletes_old_backups(tmp_path: Path) -> None:
