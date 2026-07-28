@@ -524,6 +524,119 @@ def _normalise_tool_history(tool_history: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _summarise_tool_invocation_history(
+    tool_invocations: Any,
+) -> list[dict[str, Any]]:
+    """Build a bounded diagnostic history from ordinary-turn invocations."""
+
+    if not isinstance(tool_invocations, list):
+        return []
+    summary: list[dict[str, Any]] = []
+    for raw_entry in tool_invocations:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        tool_name = (
+            _safe_str(raw_entry.get("tool"))
+            or _safe_str(raw_entry.get("tool_name"))
+            or _safe_str(raw_entry.get("method"))
+        )
+        if not tool_name:
+            continue
+        entry: dict[str, Any] = {"tool": tool_name}
+        for key in (
+            "status",
+            "call_id",
+            "effect_id",
+            "effect_status",
+            "error_code",
+            "execution_id",
+            "capability_kind",
+            "execution_method",
+            "represented_workflow_id",
+            "workflow_id",
+            "instance_id",
+            "durable_submission_status",
+            "mutation_outcome",
+            "outcome_finality",
+            "final_status",
+            "result_summary",
+        ):
+            value = raw_entry.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value.strip()
+        if isinstance(raw_entry.get("changed"), bool):
+            entry["changed"] = raw_entry.get("changed")
+        transport = raw_entry.get("transport")
+        if isinstance(transport, Mapping):
+            entry["transport"] = {
+                key: transport.get(key)
+                for key in (
+                    "schema_version",
+                    "execution_id",
+                    "outcome",
+                    "duration_ms",
+                    "timeout_sec",
+                    "advisory_timeout_sec",
+                    "queue_duration_ms",
+                    "handler_duration_ms",
+                    "handler_elapsed_ms",
+                    "timeout_phase",
+                    "late_result_policy",
+                )
+                if key in transport
+            }
+            if "execution_id" not in entry:
+                execution_id = _safe_str(transport.get("execution_id"))
+                if execution_id:
+                    entry["execution_id"] = execution_id
+        evidence = raw_entry.get("evidence")
+        if isinstance(evidence, Mapping):
+            for key in (
+                "effect_status",
+                "error_code",
+                "instance_id",
+                "workflow_id",
+                "durable_submission_status",
+                "mutation_outcome",
+                "outcome_finality",
+                "final_status",
+            ):
+                if key in entry:
+                    continue
+                value = evidence.get(key)
+                if isinstance(value, str) and value.strip():
+                    entry[key] = value.strip()
+        summary.append(entry)
+    return summary
+
+
+def _fallback_tool_invocation_history(
+    *,
+    execution: Mapping[str, Any] | None,
+    turn_record: Mapping[str, Any] | None,
+    llm_debug: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    candidates = (
+        execution.get("tool_invocations")
+        if isinstance(execution, Mapping)
+        else None,
+        turn_record.get("tool_invocations")
+        if isinstance(turn_record, Mapping)
+        else None,
+        llm_debug.get("tool_invocations")
+        if isinstance(llm_debug, Mapping)
+        else None,
+        llm_debug.get("invocations")
+        if isinstance(llm_debug, Mapping)
+        else None,
+    )
+    for candidate in candidates:
+        summary = _summarise_tool_invocation_history(candidate)
+        if summary:
+            return summary
+    return []
+
+
 def _derive_tool_counts(tool_history: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     total = 0
     success = 0
@@ -534,7 +647,7 @@ def _derive_tool_counts(tool_history: Sequence[Mapping[str, Any]]) -> dict[str, 
             continue
         total += 1
         status = (_safe_str(entry.get("status")) or "").lower()
-        if status in {"completed", "complete", "success", "succeeded"}:
+        if status in {"ok", "completed", "complete", "success", "succeeded"}:
             success += 1
             ended += 1
         elif status in {
@@ -544,6 +657,11 @@ def _derive_tool_counts(tool_history: Sequence[Mapping[str, Any]]) -> dict[str, 
             "blocked",
             "cancelled",
             "canceled",
+            "partial",
+            "indeterminate",
+            "not_started",
+            "timeout",
+            "timed_out",
         }:
             failure += 1
             ended += 1
@@ -1087,8 +1205,10 @@ def _build_fallback_turn_execution_diagnostics(
         )
     )
 
-    tool_history = _normalise_tool_history(
-        execution.get("tool_invocations") if execution else None
+    tool_history = _fallback_tool_invocation_history(
+        execution=execution,
+        turn_record=turn_record,
+        llm_debug=llm_debug_mapping,
     )
     tool_counts = _derive_tool_counts(tool_history)
 
@@ -1344,16 +1464,19 @@ def _normalise_embedded_diagnostics_payload(
         )
 
     tool_history = _normalise_tool_history(payload.get("tool_history"))
-    tool_invocations = execution.get("tool_invocations") if execution else None
-    if not tool_history and isinstance(tool_invocations, list):
-        tool_history = _normalise_tool_history(tool_invocations)
-        payload["tool_history"] = tool_history
-    else:
-        payload["tool_history"] = tool_history
+    hydrated_tool_history = False
+    if not tool_history:
+        tool_history = _fallback_tool_invocation_history(
+            execution=execution,
+            turn_record=turn_record,
+            llm_debug=llm_debug_mapping,
+        )
+        hydrated_tool_history = bool(tool_history)
+    payload["tool_history"] = tool_history
 
     tool_counts = _derive_tool_counts(tool_history)
     for key, value in tool_counts.items():
-        if not isinstance(payload.get(key), int):
+        if hydrated_tool_history or not isinstance(payload.get(key), int):
             payload[key] = value
 
     _attach_minimal_turn_timing_trace(

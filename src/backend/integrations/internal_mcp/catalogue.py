@@ -11437,6 +11437,61 @@ def _summarise_turn_execution_tool_invocations(
             entry["tool"] = tool_name
         if status_text is not None:
             entry["status"] = status_text
+        for field_name in (
+            "call_id",
+            "execution_id",
+            "effect_id",
+            "effect_status",
+            "error_code",
+            "mutation_outcome",
+            "outcome_finality",
+            "capability_kind",
+            "execution_method",
+            "represented_workflow_id",
+            "workflow_id",
+            "instance_id",
+            "durable_submission_status",
+            "final_status",
+        ):
+            value = raw_entry.get(field_name)
+            if isinstance(value, str) and value.strip():
+                entry[field_name] = value.strip()
+        evidence = raw_entry.get("evidence")
+        if isinstance(evidence, Mapping):
+            evidence_provenance = (
+                evidence.get("provenance")
+                if isinstance(evidence.get("provenance"), Mapping)
+                else {}
+            )
+            for field_name in (
+                "execution_id",
+                "effect_id",
+                "effect_status",
+                "error_code",
+                "mutation_outcome",
+                "outcome_finality",
+                "workflow_id",
+                "instance_id",
+                "durable_submission_status",
+                "final_status",
+            ):
+                if field_name in entry:
+                    continue
+                value = evidence.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    entry[field_name] = value.strip()
+            for field_name in (
+                "capability_kind",
+                "execution_method",
+                "represented_workflow_id",
+            ):
+                if field_name in entry:
+                    continue
+                value = evidence_provenance.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    entry[field_name] = value.strip()
+        if isinstance(raw_entry.get("changed"), bool):
+            entry["changed"] = raw_entry.get("changed")
         summary.append(entry)
         if len(summary) >= max_items:
             break
@@ -11634,6 +11689,10 @@ def _extract_turn_execution_tool_invocation_summary(
     existing_summary = item.get("tool_invocation_summary")
     if isinstance(existing_summary, list):
         return _summarise_turn_execution_tool_invocations(existing_summary)
+
+    direct_invocations = item.get("tool_invocations")
+    if isinstance(direct_invocations, list):
+        return _summarise_turn_execution_tool_invocations(direct_invocations)
 
     execution_raw = item.get("execution")
     execution = execution_raw if isinstance(execution_raw, Mapping) else {}
@@ -23200,7 +23259,13 @@ def _rag_get_item(**kwargs):
         execution_summary: Mapping[str, Any] = (
             execution_summary_raw if isinstance(execution_summary_raw, Mapping) else {}
         )
-        tool_invocations = execution_payload.get("tool_invocations")
+        direct_tool_invocations = doc.get("tool_invocations")
+        tool_invocations = (
+            direct_tool_invocations
+            if isinstance(direct_tool_invocations, list)
+            and direct_tool_invocations
+            else execution_payload.get("tool_invocations")
+        )
         discovery_payload_raw = workflow_routing_diagnostics.get("discovery")
         discovery_payload: Mapping[str, Any] = (
             discovery_payload_raw if isinstance(discovery_payload_raw, Mapping) else {}
