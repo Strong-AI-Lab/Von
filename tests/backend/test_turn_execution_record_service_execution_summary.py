@@ -250,6 +250,43 @@ def test_partial_and_indeterminate_effects_remain_unsafe(
     ]
 
 
+def test_partial_represented_workflow_preserves_durable_identity_in_projection() -> None:
+    record = _build_effect_projection_record(
+        "req-partial-represented-workflow",
+        [
+            {
+                "tool": "represented_workflow_turn_test",
+                "status": "error",
+                "capability_kind": "represented_workflow",
+                "execution_method": "workflow_execute",
+                "represented_workflow_id": "#V#represented_test_workflow",
+                "workflow_id": "#V#represented_test_workflow",
+                "instance_id": "workflow-instance-durable-1",
+                "durable_submission_status": "created",
+                "effect_id": "effect_represented_partial",
+                "effect_status": "partial",
+                "changed": True,
+                "mutation_outcome": "partial",
+                "outcome_finality": "terminal_for_turn",
+                "error_code": "tool_timeout_after_durable_submission",
+            }
+        ],
+    )
+
+    serialised = record["execution"]["tool_invocations"][0]
+    assert serialised["status"] == "partial"
+    assert serialised["capability_kind"] == "represented_workflow"
+    assert serialised["execution_method"] == "workflow_execute"
+    assert serialised["represented_workflow_id"] == (
+        "#V#represented_test_workflow"
+    )
+    assert serialised["workflow_id"] == "#V#represented_test_workflow"
+    assert serialised["instance_id"] == "workflow-instance-durable-1"
+    assert serialised["durable_submission_status"] == "created"
+    assert record["execution"]["summary"]["invocation_count"] == 1
+    assert record["completion_gate"]["safe_to_claim_completion"] is False
+
+
 def test_successful_effect_with_canonical_readback_remains_completable() -> None:
     record = _build_effect_projection_record(
         "req-successful-effect-readback",

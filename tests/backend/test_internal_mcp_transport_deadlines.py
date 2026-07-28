@@ -21,6 +21,7 @@ from src.backend.integrations.internal_mcp.transport import (
     InternalMCPTransport,
     get_internal_mcp_execution_scope,
     internal_mcp_cancellation_requested,
+    record_internal_mcp_effect_receipt,
     raise_if_internal_mcp_cancelled,
 )
 
@@ -833,6 +834,55 @@ def test_write_timeout_is_explicitly_indeterminate_and_not_retryable() -> None:
     assert result.payload["mutation_outcome"] == "unknown"
     assert result.payload["recovery_affordances"] == [
         {"action_type": "inspect_operation_state_before_retry"}
+    ]
+
+
+def test_write_timeout_preserves_intermediate_durable_effect_receipt() -> None:
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.03,
+        write_advisory_timeout_sec=0.01,
+    )
+
+    def _handler():
+        assert record_internal_mcp_effect_receipt(
+            {
+                "schema_version": "workflow_durable_submission_receipt.v1",
+                "workflow_id": "#V#test_workflow",
+                "instance_id": "instance-durable-1",
+                "created_new": True,
+                "durable_submission_status": "submitted",
+                "secret": "must-not-be-projected",
+            }
+        )
+        time.sleep(0.1)
+
+    gateway = _gateway_for(
+        method_name="synthetic_durable_slow_write",
+        handler=_handler,
+        transport=transport,
+        category="write",
+    )
+
+    result = gateway.invoke("synthetic_durable_slow_write", {})
+
+    assert result.outcome == "timed_out"
+    assert result.payload["error_code"] == "tool_timeout_after_durable_submission"
+    assert result.payload["effect_status"] == "partial"
+    assert result.payload["mutation_outcome"] == "partial"
+    assert result.payload["changed"] is True
+    assert result.payload["workflow_id"] == "#V#test_workflow"
+    assert result.payload["instance_id"] == "instance-durable-1"
+    assert result.payload["durable_submission_status"] == "submitted"
+    assert result.payload["durable_effect_receipt"]["instance_id"] == (
+        "instance-durable-1"
+    )
+    assert "secret" not in result.payload["durable_effect_receipt"]
+    assert result.payload["recovery_affordances"] == [
+        {
+            "action_type": "inspect_workflow_instance",
+            "capability": "workflow_get_instance",
+            "arguments": {"instance_id": "instance-durable-1"},
+        }
     ]
 
 

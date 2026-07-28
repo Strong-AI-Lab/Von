@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -82,6 +83,7 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
             )
             status = "created" if created_new else "reused"
         else:
+            created_new = True
             instance_id = manager.create_instance(
                 workflow_id,
                 user_id=user_id,
@@ -109,6 +111,7 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
                 "preflight": {"errors": []},
                 "postflight": {"errors": []},
             },
+            created_new=created_new,
         )
 
     monkeypatch.setattr(
@@ -1801,6 +1804,62 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
     assert boolean_fields["include_step_result_envelopes"]["raw_type"] == "str"
     assert boolean_fields["include_trace"]["normalised"] is True
     assert boolean_fields["include_trace"]["raw_type"] == "int"
+
+
+def test_workflow_execute_outer_timeout_preserves_durable_instance_receipt(
+    monkeypatch,
+):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+
+    def _slow_await(*_args, **_kwargs):
+        time.sleep(0.1)
+        return SimpleNamespace(
+            instance=None,
+            poll_count=1,
+            timed_out=True,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.execution_observability."
+        "await_workflow_terminal_state",
+        _slow_await,
+    )
+    gateway = _build_gateway()
+
+    result = gateway.invoke(
+        "workflow_execute",
+        {
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+            "inputs": {"fixture_id": "fixture-timeout"},
+            "await_terminal": True,
+            "timeout_seconds": 5,
+            "poll_interval_seconds": 0,
+        },
+        deadline_monotonic=time.monotonic() + 0.03,
+    )
+
+    assert result.outcome == "timed_out"
+    assert result.payload["error_code"] == (
+        "tool_timeout_after_durable_submission"
+    )
+    assert result.payload["effect_status"] == "partial"
+    assert result.payload["mutation_outcome"] == "partial"
+    assert result.payload["changed"] is True
+    assert result.payload["workflow_id"] == (
+        "#V#meeting_invitation_testing_workflow"
+    )
+    assert result.payload["instance_id"] in manager.instances
+    assert result.payload["durable_effect_receipt"]["instance_id"] == (
+        result.payload["instance_id"]
+    )
 
 
 def test_workflow_execute_forwards_exact_required_worker_build(monkeypatch):

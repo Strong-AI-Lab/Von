@@ -77,6 +77,95 @@ def test_workflow_authority_report_classifies_missing_and_untyped(monkeypatch):
     assert "#V#wf_untyped" in report["missing_required_type_by_workflow_id"]
 
 
+def test_workflow_child_visibility_requires_parent_audience_coverage() -> None:
+    global_parent = {"relationships": {}}
+    user_parent = {
+        "relationships": {"#V#specific_to_user": ["#V#researcher"]}
+    }
+    org_parent = {
+        "relationships": {
+            "#V#specific_to_organisation": ["#V#research_lab"]
+        }
+    }
+    global_child = {"relationships": {}}
+    researcher_child = {
+        "relationships": {"#V#specific_to_user": ["#V#researcher"]}
+    }
+    other_researcher_child = {
+        "relationships": {"#V#specific_to_user": ["#V#other_researcher"]}
+    }
+    lab_child = {
+        "relationships": {
+            "#V#specific_to_organisation": ["#V#research_lab"]
+        }
+    }
+
+    assert authority_service.workflow_child_visibility_covers_parent(
+        global_parent, global_child
+    )
+    assert not authority_service.workflow_child_visibility_covers_parent(
+        global_parent, researcher_child
+    )
+    assert authority_service.workflow_child_visibility_covers_parent(
+        user_parent, global_child
+    )
+    assert authority_service.workflow_child_visibility_covers_parent(
+        user_parent, researcher_child
+    )
+    assert not authority_service.workflow_child_visibility_covers_parent(
+        user_parent, other_researcher_child
+    )
+    assert authority_service.workflow_child_visibility_covers_parent(
+        org_parent, lab_child
+    )
+
+
+def test_new_workflow_child_inherits_exact_parent_visibility(monkeypatch) -> None:
+    updates: list[tuple[str, dict[str, Any]]] = []
+    workflow_doc = {
+        "concept_id": "#V#workflow",
+        "relationships": {
+            "#V#specific_to_user": ["#V#author"],
+            "#V#specific_to_organisation": ["#V#lab"],
+            "#V#hasStep": ["#V#step"],
+        },
+    }
+    child_doc = {
+        "concept_id": "#V#step",
+        "relationships": {
+            "#V#specific_to_user": ["#V#author"],
+            "#V#is_an_instance_of": ["#V#workflow_step"],
+        },
+    }
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "update_concept",
+        lambda concept_id, payload, **_kwargs: updates.append(
+            (concept_id, payload)
+        ),
+    )
+
+    updated, error = authority_service._inherit_workflow_visibility_for_new_child(
+        workflow_doc=workflow_doc,
+        child_concept_id="#V#step",
+        child_doc=child_doc,
+    )
+
+    assert error is None
+    assert updated is not None
+    assert updated["relationships"]["#V#specific_to_user"] == ["#V#author"]
+    assert updated["relationships"]["#V#specific_to_organisation"] == ["#V#lab"]
+    assert updated["relationships"]["#V#is_an_instance_of"] == [
+        "#V#workflow_step"
+    ]
+    assert updates == [
+        (
+            "#V#step",
+            {"relationships": updated["relationships"]},
+        )
+    ]
+
+
 def test_workflow_authority_report_accepts_required_type_via_subtype(monkeypatch):
     registry = _DummyRegistry(workflow_ids=["#V#wf_durable"])
 

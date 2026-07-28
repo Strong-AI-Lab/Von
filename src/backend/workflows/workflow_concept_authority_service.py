@@ -25,6 +25,12 @@ from ..services.text_value_service import (
     upsert_singleton_text_relation,
     upsert_text_for_concept,
 )
+from ..security.visibility_predicates import (
+    get_specific_to_org_values,
+    get_specific_to_user_values,
+    set_specific_to_org_values,
+    set_specific_to_user_values,
+)
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -2736,6 +2742,79 @@ def _normalise_relationships(concept_doc: Dict[str, Any] | None) -> Dict[str, An
     return dict(relationships)
 
 
+def workflow_child_visibility_covers_parent(
+    parent_concept: Mapping[str, Any] | None,
+    child_concept: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether every actor who can see the parent can see the child.
+
+    Visibility predicates are an OR across user and organisation scopes. The
+    conservative syntactic coverage check avoids guessing organisation
+    membership: each explicit parent audience must also appear in the
+    corresponding child audience. An unrestricted child covers any parent;
+    an unrestricted parent requires an unrestricted child.
+    """
+
+    parent_relationships = (
+        parent_concept.get("relationships")
+        if isinstance(parent_concept, Mapping)
+        else {}
+    )
+    child_relationships = (
+        child_concept.get("relationships")
+        if isinstance(child_concept, Mapping)
+        else {}
+    )
+    parent_users = set(get_specific_to_user_values(parent_relationships))
+    parent_orgs = set(get_specific_to_org_values(parent_relationships))
+    child_users = set(get_specific_to_user_values(child_relationships))
+    child_orgs = set(get_specific_to_org_values(child_relationships))
+    if not child_users and not child_orgs:
+        return True
+    if not parent_users and not parent_orgs:
+        return False
+    return parent_users.issubset(child_users) and parent_orgs.issubset(child_orgs)
+
+
+def _inherit_workflow_visibility_for_new_child(
+    *,
+    workflow_doc: Mapping[str, Any],
+    child_concept_id: str,
+    child_doc: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Copy the containing workflow's exact visibility to a newly made child."""
+
+    loaded_child = dict(child_doc) if isinstance(child_doc, Mapping) else None
+    if loaded_child is None:
+        loaded_child, load_error = _load_concept(child_concept_id)
+        if load_error:
+            return None, f"visibility_lookup_failed:{load_error}"
+    if loaded_child is None:
+        return None, "visibility_child_missing"
+
+    workflow_relationships = _normalise_relationships(dict(workflow_doc))
+    child_relationships = _normalise_relationships(loaded_child)
+    inherited_relationships = set_specific_to_user_values(
+        child_relationships,
+        get_specific_to_user_values(workflow_relationships),
+    )
+    inherited_relationships = set_specific_to_org_values(
+        inherited_relationships,
+        get_specific_to_org_values(workflow_relationships),
+    )
+    if inherited_relationships != child_relationships:
+        try:
+            concept_service.update_concept(
+                child_concept_id,
+                {"relationships": inherited_relationships},
+                defer_side_effects=True,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            return None, f"visibility_update_failed:{exc}"
+        loaded_child["relationships"] = inherited_relationships
+    return loaded_child, None
+
+
 def _strip_relationship_aliases(
     relationships: Dict[str, Any],
     *,
@@ -3478,6 +3557,20 @@ def publish_canonical_chat_workflow_graphs(
                     step_update_failed = True
                     break
                 if step_created:
+                    step_doc, visibility_error = (
+                        _inherit_workflow_visibility_for_new_child(
+                            workflow_doc=workflow_doc,
+                            child_concept_id=step_concept_id,
+                            child_doc=step_doc,
+                        )
+                    )
+                    if visibility_error:
+                        errors_by_workflow_id[workflow_id] = (
+                            "step_visibility_inheritance_failed:"
+                            f"{step_concept_id}:{visibility_error}"
+                        )
+                        step_update_failed = True
+                        break
                     created_step_ids.append(step_concept_id)
 
             step_relationships = _strip_relationship_aliases(
@@ -3711,6 +3804,19 @@ def publish_canonical_chat_workflow_graphs(
                         step_update_failed = True
                         break
                     if created_mapping:
+                        _mapping_doc, visibility_error = (
+                            _inherit_workflow_visibility_for_new_child(
+                                workflow_doc=workflow_doc,
+                                child_concept_id=mapping_spec.concept_id,
+                            )
+                        )
+                        if visibility_error:
+                            errors_by_workflow_id[workflow_id] = (
+                                "context_mapping_visibility_inheritance_failed:"
+                                f"{mapping_spec.concept_id}:{visibility_error}"
+                            )
+                            step_update_failed = True
+                            break
                         created_mapping_concept_ids.append(mapping_spec.concept_id)
                 if step_update_failed:
                     break
@@ -3750,6 +3856,19 @@ def publish_canonical_chat_workflow_graphs(
                         step_update_failed = True
                         break
                     if created_mapping:
+                        _mapping_doc, visibility_error = (
+                            _inherit_workflow_visibility_for_new_child(
+                                workflow_doc=workflow_doc,
+                                child_concept_id=mapping_concept_id,
+                            )
+                        )
+                        if visibility_error:
+                            errors_by_workflow_id[workflow_id] = (
+                                "mapping_visibility_inheritance_failed:"
+                                f"{mapping_concept_id}:{visibility_error}"
+                            )
+                            step_update_failed = True
+                            break
                         created_mapping_concept_ids.append(mapping_concept_id)
                 if step_update_failed:
                     break

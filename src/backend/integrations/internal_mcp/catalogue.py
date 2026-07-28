@@ -18538,6 +18538,7 @@ def _workflow_create_instance(**kwargs):
 
 def _workflow_execute(**kwargs):
     """Launch a durable workflow instance and optionally await a terminal result."""
+    from .transport import record_internal_mcp_effect_receipt
     from ...workflows.durable import WorkflowInstanceManager
     from ...workflows.durable.execution_observability import (
         await_workflow_terminal_state,
@@ -18685,6 +18686,25 @@ def _workflow_execute(**kwargs):
             else None
         )
         if instance_id:
+            record_internal_mcp_effect_receipt(
+                {
+                    "schema_version": "workflow_durable_submission_receipt.v1",
+                    "success": bool(submission.success),
+                    "status": "submitted",
+                    "effect_status": "partial",
+                    "changed": (
+                        submission.created_new
+                        if isinstance(submission.created_new, bool)
+                        else None
+                    ),
+                    "workflow_id": workflow_id.strip(),
+                    "instance_id": instance_id,
+                    "created_new": submission.created_new,
+                    "durable_submission_status": submission.status,
+                    "mutation_outcome": "partial",
+                    "outcome_finality": "pending_durable_observation",
+                }
+            )
             if await_terminal:
                 wait_result = await_workflow_terminal_state(
                     manager,

@@ -602,9 +602,31 @@ def normalise_workflow_effect_receipt(
     status_key = (final_status or "").lower()
     timed_out = bool(receipt.get("timed_out"))
     created_new = receipt.get("created_new")
-    changed = bool(instance_id and created_new is not False)
+    incoming_mutation_outcome = (
+        _normalise_non_empty_text(receipt.get("mutation_outcome")) or ""
+    ).lower()
+    incoming_error_code = (
+        _normalise_non_empty_text(receipt.get("error_code")) or ""
+    ).lower()
+    explicit_not_started = bool(
+        status_key == "not_started"
+        or incoming_mutation_outcome == "not_started"
+    )
+    explicit_indeterminate = bool(
+        incoming_mutation_outcome == "unknown"
+        or incoming_error_code == "tool_timeout_outcome_unknown"
+    )
+    changed: bool | None = (
+        created_new if instance_id is not None and isinstance(created_new, bool) else None
+    )
 
-    if receipt.get("success") is False and instance_id is None:
+    if instance_id is None and explicit_not_started:
+        effect_status = "not_started"
+        changed = False
+    elif instance_id is None and explicit_indeterminate:
+        effect_status = "indeterminate"
+        changed = None
+    elif receipt.get("success") is False and instance_id is None:
         effect_status = "failed"
         changed = False
     elif status_key in _TERMINAL_SUCCESS_STATUSES and not timed_out:
@@ -633,7 +655,15 @@ def normalise_workflow_effect_receipt(
             "mutation_outcome": (
                 "completed"
                 if effect_status == "succeeded"
-                else ("partial" if changed else "not_started")
+                else (
+                    "partial"
+                    if instance_id is not None
+                    else (
+                        "unknown"
+                        if effect_status == "indeterminate"
+                        else "not_started"
+                    )
+                )
             ),
             "outcome_finality": "terminal_for_turn",
         }
@@ -651,7 +681,11 @@ def normalise_workflow_effect_receipt(
         else:
             recovery_affordances.append(
                 {
-                    "action_type": "inspect_launch_failure_before_retry",
+                    "action_type": (
+                        "inspect_operation_state_before_retry"
+                        if effect_status == "indeterminate"
+                        else "inspect_launch_failure_before_retry"
+                    ),
                     "workflow_id": capability.workflow_id,
                 }
             )

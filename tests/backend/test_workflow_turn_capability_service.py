@@ -225,6 +225,27 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
         },
         capability=capability,
     )
+    indeterminate = normalise_workflow_effect_receipt(
+        {
+            "success": False,
+            "status": "timed_out",
+            "error_code": "tool_timeout_outcome_unknown",
+            "mutation_outcome": "unknown",
+        },
+        capability=capability,
+    )
+    durable_timeout = normalise_workflow_effect_receipt(
+        {
+            "success": False,
+            "status": "timed_out",
+            "error_code": "tool_timeout_after_durable_submission",
+            "mutation_outcome": "partial",
+            "instance_id": "instance-4",
+            "created_new": False,
+            "workflow_id": "#V#test_workflow",
+        },
+        capability=capability,
+    )
 
     assert completed["effect_status"] == "succeeded"
     assert completed["changed"] is True
@@ -241,3 +262,15 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
     assert no_start["effect_status"] == "failed"
     assert no_start["changed"] is False
     assert no_start["mutation_outcome"] == "not_started"
+    assert indeterminate["effect_status"] == "indeterminate"
+    assert indeterminate["changed"] is None
+    assert indeterminate["mutation_outcome"] == "unknown"
+    assert indeterminate["recovery_affordances"][-1]["action_type"] == (
+        "inspect_operation_state_before_retry"
+    )
+    assert durable_timeout["effect_status"] == "partial"
+    assert durable_timeout["changed"] is False
+    assert durable_timeout["mutation_outcome"] == "partial"
+    assert durable_timeout["recovery_affordances"][0]["arguments"] == {
+        "instance_id": "instance-4"
+    }

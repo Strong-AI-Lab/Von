@@ -348,6 +348,9 @@ def _workflow_gateway(handler: Any) -> InternalMCPGateway:
                     "poll_interval_seconds": (int, float),
                     "include_step_result_envelopes": bool,
                     "include_trace": bool,
+                    "source_event_type": str,
+                    "source_event_id": str,
+                    "event_idempotency_key": str,
                 },
                 allow_unknown=False,
             ),
@@ -4418,6 +4421,11 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert seen_arguments["inputs"]["user_concept_id"] == "#V#real_user"
     assert seen_arguments["inputs"]["record_id"] == "#V#record"
     assert seen_arguments["inputs"]["authorised_record"] == "#V#request_record"
+    assert seen_arguments["source_event_type"] == "conversation_turn"
+    assert seen_arguments["source_event_id"] == "turn-represented-workflow"
+    assert seen_arguments["event_idempotency_key"].startswith(
+        "conversation_turn_workflow:"
+    )
     invocation = next(
         item
         for item in result.tool_invocations
@@ -4431,7 +4439,130 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     )
     assert invocation["effect_status"] == "succeeded"
     assert invocation["changed"] is True
+    assert invocation["instance_id"] == "workflow-instance-1"
+    assert invocation["workflow_id"] == "#V#represented_test_workflow"
     assert result.response_text == "The represented work product was completed."
+
+
+def test_represented_workflow_retry_reuses_same_turn_idempotency_key(
+    monkeypatch,
+) -> None:
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_retry_test",
+        workflow_id="#V#represented_retry_workflow",
+        display_name="Represented retry workflow",
+        description="Produce one durable work product.",
+        relevance_score=0.95,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "inputs": {
+                    "type": "object",
+                    "properties": {"record_id": {"type": "string"}},
+                }
+            },
+            "additionalProperties": False,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+    idempotency_keys: list[str] = []
+
+    def _execute_workflow(**kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["event_idempotency_key"])
+        idempotency_keys.append(key)
+        return {
+            "success": True,
+            "instance_id": "workflow-instance-reused",
+            "created_new": len(idempotency_keys) == 1,
+            "final_status": "running",
+            "timed_out": True,
+        }
+
+    repeated_call = {
+        "name": workflow_capability.name,
+        "arguments": {"inputs": {"record_id": "#V#record"}},
+    }
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-retry-workflow",
+                    payload={"query": "produce the durable work product"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-retry-workflow-1",
+                    payload=repeated_call,
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-retry-workflow-2",
+                    payload=repeated_call,
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="The durable workflow is still running.",
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_workflow_gateway(_execute_workflow),
+        prompt="Produce the durable work product.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        turn_id="turn-represented-workflow-retry",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(idempotency_keys) == 2
+    assert idempotency_keys[0] == idempotency_keys[1]
+    workflow_invocations = [
+        invocation
+        for invocation in result.tool_invocations
+        if invocation.get("tool") == workflow_capability.name
+    ]
+    assert [item["instance_id"] for item in workflow_invocations] == [
+        "workflow-instance-reused",
+        "workflow-instance-reused",
+    ]
+    assert [item["changed"] for item in workflow_invocations] == [True, False]
+    assert [item["effect_status"] for item in workflow_invocations] == [
+        "partial",
+        "partial",
+    ]
 
 
 def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(

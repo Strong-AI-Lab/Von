@@ -24,6 +24,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 from src.backend.security.access_control import override_current_actor  # noqa: E402
+from src.backend.security.visibility_predicates import (  # noqa: E402
+    get_specific_to_org_values,
+    get_specific_to_user_values,
+    set_specific_to_org_values,
+    set_specific_to_user_values,
+)
+from src.backend.services import concept_service  # noqa: E402
+from src.backend.services.concept_service import (  # noqa: E402
+    _find_raw_concept_by_exact_concept_id,
+)
 from src.backend.workflows.vontology_loader import (  # noqa: E402
     load_workflow_definition_from_vontology,
 )
@@ -37,6 +47,9 @@ from src.backend.workflows.workflow_studio_service import (  # noqa: E402
     apply_workflow_authoring_spec,
     preview_workflow_authoring_spec,
 )
+from src.backend.workflows.workflow_concept_authority_service import (  # noqa: E402
+    workflow_child_visibility_covers_parent,
+)
 
 
 WORKFLOW_ID = "#V#scholarly_article_metadata_representation_workflow"
@@ -45,6 +58,7 @@ ATTACH_STATE_SUFFIX = "_attach_metadata"
 ENSURE_STATE_SUFFIX = "_ensure_arxiv_paper_concept"
 ENSURE_ACTION_ID = "scholarly_paper.ensure_paper_concept"
 DEFAULT_ACTOR_USER_ID = "#V#zhan_von_witbrock"
+DEFAULT_VERIFICATION_ACTOR_USER_ID = "#V#michael_witbrock"
 DEFAULT_ACTOR_ORGANISATION_ID = "#V#university_of_auckland_strong_ai_lab"
 
 
@@ -211,8 +225,98 @@ def _definition_identity(definition: Any) -> dict[str, Any]:
     )
 
 
+def _ensure_visibility_child_ids(authoring_spec: Mapping[str, Any]) -> tuple[str, ...]:
+    raw_steps = authoring_spec.get("steps")
+    steps = (
+        [dict(step) for step in raw_steps if isinstance(step, Mapping)]
+        if isinstance(raw_steps, list)
+        else []
+    )
+    ensure_step = _step_with_suffix(steps, ENSURE_STATE_SUFFIX)
+    child_ids = [
+        _clean_text(ensure_step.get("concept_id"))
+        or _clean_text(ensure_step.get("state_id"))
+    ]
+    raw_mappings = ensure_step.get("tool_output_context_mappings")
+    if isinstance(raw_mappings, list):
+        child_ids.extend(
+            _clean_text(mapping.get("mapping_concept_id"))
+            for mapping in raw_mappings
+            if isinstance(mapping, Mapping)
+        )
+    return tuple(dict.fromkeys(child_id for child_id in child_ids if child_id))
+
+
+def repair_ensure_arxiv_visibility_closure(
+    authoring_spec: Mapping[str, Any],
+    *,
+    apply: bool,
+) -> dict[str, Any]:
+    """Align the incident's three child artefacts with the root audience."""
+
+    workflow_doc = _find_raw_concept_by_exact_concept_id(WORKFLOW_ID)
+    if not isinstance(workflow_doc, Mapping):
+        raise ValueError(f"workflow_not_found:{WORKFLOW_ID}")
+    workflow_relationships = (
+        dict(workflow_doc.get("relationships") or {})
+        if isinstance(workflow_doc.get("relationships"), Mapping)
+        else {}
+    )
+    parent_users = get_specific_to_user_values(workflow_relationships)
+    parent_orgs = get_specific_to_org_values(workflow_relationships)
+    repaired_ids: list[str] = []
+    already_covered_ids: list[str] = []
+    for child_id in _ensure_visibility_child_ids(authoring_spec):
+        child_doc = _find_raw_concept_by_exact_concept_id(child_id)
+        if not isinstance(child_doc, Mapping):
+            raise ValueError(f"workflow_child_not_found:{child_id}")
+        if workflow_child_visibility_covers_parent(workflow_doc, child_doc):
+            already_covered_ids.append(child_id)
+            continue
+        if apply:
+            child_relationships = (
+                dict(child_doc.get("relationships") or {})
+                if isinstance(child_doc.get("relationships"), Mapping)
+                else {}
+            )
+            updated_relationships = set_specific_to_user_values(
+                child_relationships,
+                parent_users,
+            )
+            updated_relationships = set_specific_to_org_values(
+                updated_relationships,
+                parent_orgs,
+            )
+            concept_service.update_concept(
+                child_id,
+                {"relationships": updated_relationships},
+                defer_side_effects=True,
+            )
+            readback = _find_raw_concept_by_exact_concept_id(child_id)
+            if not workflow_child_visibility_covers_parent(workflow_doc, readback):
+                raise ValueError(
+                    f"workflow_child_visibility_repair_readback_failed:{child_id}"
+                )
+        repaired_ids.append(child_id)
+    return {
+        "schema_version": "workflow_visibility_closure_repair.v1",
+        "apply": apply,
+        "parent_user_scope": parent_users,
+        "parent_organisation_scope": parent_orgs,
+        "repair_required_ids": repaired_ids,
+        "already_covered_ids": already_covered_ids,
+        "closure_verified": bool(
+            apply or not repaired_ids
+        ),
+    }
+
+
 def run_migration(
-    *, apply: bool, actor_user_id: str, actor_organisation_id: str
+    *,
+    apply: bool,
+    actor_user_id: str,
+    actor_organisation_id: str,
+    verification_actor_user_id: str = DEFAULT_VERIFICATION_ACTOR_USER_ID,
 ) -> dict[str, Any]:
     with override_current_actor(
         user_concept_id=actor_user_id,
@@ -225,6 +329,10 @@ def run_migration(
         before_spec = serialise_workflow_definition_to_authoring_spec(before)
         candidate_spec, changed = (
             rewrite_metadata_workflow_for_canonical_arxiv_identity(before_spec)
+        )
+        visibility_repair = repair_ensure_arxiv_visibility_closure(
+            candidate_spec,
+            apply=False,
         )
         base_hash = _clean_text(before_identity.get("definition_hash"))
         preview = preview_workflow_authoring_spec(
@@ -249,9 +357,16 @@ def run_migration(
             "contract_errors": validation.get("errors") or [],
             "contract_warnings": validation.get("warnings") or [],
             "diff_summary": (preview.get("preview") or {}).get("diff_summary"),
+            "visibility_repair": visibility_repair,
         }
         if not apply:
             return result
+        if not bool(validation.get("valid")):
+            raise ValueError("workflow_authoring_preview_invalid")
+        result["visibility_repair"] = repair_ensure_arxiv_visibility_closure(
+            candidate_spec,
+            apply=True,
+        )
 
         apply_result = apply_workflow_authoring_spec(
             WORKFLOW_ID,
@@ -283,6 +398,22 @@ def run_migration(
             "definition_hash"
         )
         result["canonical_readback_verified"] = True
+        with override_current_actor(
+            user_concept_id=verification_actor_user_id,
+            organisation_concept_id=actor_organisation_id,
+        ):
+            verification_actor_definition = (
+                load_workflow_definition_from_vontology(WORKFLOW_ID)
+            )
+        if verification_actor_definition is None:
+            raise ValueError("workflow_missing_for_verification_actor")
+        if set(verification_actor_definition.states) != set(after.states):
+            raise ValueError(
+                "workflow_cross_actor_graph_closure_readback_mismatch"
+            )
+        result["cross_actor_graph_closure_verified"] = True
+        result["verification_actor_user_id"] = verification_actor_user_id
+        result["verified_state_count"] = len(after.states)
         return result
 
 
@@ -298,6 +429,10 @@ def main() -> None:
         "--actor-organisation-id",
         default=DEFAULT_ACTOR_ORGANISATION_ID,
     )
+    parser.add_argument(
+        "--verification-actor-user-id",
+        default=DEFAULT_VERIFICATION_ACTOR_USER_ID,
+    )
     args = parser.parse_args()
     print(
         json.dumps(
@@ -305,6 +440,9 @@ def main() -> None:
                 apply=bool(args.apply),
                 actor_user_id=str(args.actor_user_id).strip(),
                 actor_organisation_id=str(args.actor_organisation_id).strip(),
+                verification_actor_user_id=str(
+                    args.verification_actor_user_id
+                ).strip(),
             ),
             indent=2,
             sort_keys=True,

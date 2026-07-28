@@ -78,6 +78,20 @@ _LATE_COMPLETION_RECEIPT_FIELDS = (
     "mutation_outcome",
     "partial_failures",
 )
+_INTERMEDIATE_EFFECT_RECEIPT_FIELDS = (
+    "schema_version",
+    "success",
+    "status",
+    "effect_status",
+    "changed",
+    "workflow_id",
+    "instance_id",
+    "created_new",
+    "durable_submission_status",
+    "final_status",
+    "mutation_outcome",
+    "outcome_finality",
+)
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -156,6 +170,7 @@ class InternalMCPExecutionScope:
     method_name: str
     deadline_monotonic: float
     cancellation_event: threading.Event
+    effect_receipt_recorder: Callable[[Mapping[str, Any]], None] | None = None
 
     @property
     def cancellation_requested(self) -> bool:
@@ -253,6 +268,21 @@ def raise_if_internal_mcp_cancelled() -> None:
         )
 
 
+def record_internal_mcp_effect_receipt(receipt: Mapping[str, Any]) -> bool:
+    """Record bounded durable effect identity before a handler returns.
+
+    This is intentionally an observation channel, not a way to extend the
+    handler deadline or rewrite a terminal turn result. Only handlers running
+    inside the internal MCP transport can publish a receipt.
+    """
+
+    scope = get_internal_mcp_execution_scope()
+    if scope is None or scope.effect_receipt_recorder is None:
+        return False
+    scope.effect_receipt_recorder(receipt)
+    return True
+
+
 @dataclass(frozen=True)
 class TransportResult:
     """Container for a terminal turn result and truthful transport timing."""
@@ -329,6 +359,21 @@ class _HandlerTask:
     admission_denied_before_start: bool = False
     admission_remaining_window_sec: float | None = None
     late_completion_recorded: bool = False
+    effect_receipt: dict[str, Any] | None = None
+
+    def record_effect_receipt(self, receipt: Mapping[str, Any]) -> None:
+        bounded: dict[str, Any] = {}
+        for key in _INTERMEDIATE_EFFECT_RECEIPT_FIELDS:
+            if key not in receipt:
+                continue
+            value, truncated = _bounded_late_completion_value(receipt.get(key))
+            if truncated:
+                continue
+            bounded[key] = value
+        if not bounded:
+            return
+        with self.lock:
+            self.effect_receipt = bounded
 
     def _invoke(self) -> Any:
         scope = InternalMCPExecutionScope(
@@ -336,6 +381,7 @@ class _HandlerTask:
             method_name=self.method_name,
             deadline_monotonic=self.deadline_monotonic,
             cancellation_event=self.cancellation_event,
+            effect_receipt_recorder=self.record_effect_receipt,
         )
         token = _ACTIVE_EXECUTION_SCOPE.set(scope)
         try:
@@ -747,6 +793,7 @@ class InternalMCPTransport:
         queue_duration_ms: float,
         handler_elapsed_ms: float | None,
         late_result_policy: str = "discard_from_turn",
+        effect_receipt: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
         is_write = str(category or "").strip().lower() == "write"
         outcome_unknown = is_write and timeout_phase == "handler"
@@ -776,7 +823,41 @@ class InternalMCPTransport:
             "outcome_finality": "terminal_for_turn",
             "late_result_policy": late_result_policy,
         }
-        if outcome_unknown:
+        durable_instance_id = (
+            str((effect_receipt or {}).get("instance_id") or "").strip()
+            if isinstance(effect_receipt, Mapping)
+            else ""
+        )
+        if outcome_unknown and durable_instance_id:
+            bounded_receipt = dict(effect_receipt or {})
+            payload.update(
+                {
+                    "error_code": "tool_timeout_after_durable_submission",
+                    "retryable": False,
+                    "effect_status": "partial",
+                    "mutation_outcome": "partial",
+                    "changed": (
+                        bounded_receipt.get("created_new")
+                        if isinstance(bounded_receipt.get("created_new"), bool)
+                        else None
+                    ),
+                    "workflow_id": bounded_receipt.get("workflow_id"),
+                    "instance_id": durable_instance_id,
+                    "created_new": bounded_receipt.get("created_new"),
+                    "durable_submission_status": bounded_receipt.get(
+                        "durable_submission_status"
+                    ),
+                    "durable_effect_receipt": bounded_receipt,
+                }
+            )
+            payload["recovery_affordances"] = [
+                {
+                    "action_type": "inspect_workflow_instance",
+                    "capability": "workflow_get_instance",
+                    "arguments": {"instance_id": durable_instance_id},
+                }
+            ]
+        elif outcome_unknown:
             payload["mutation_outcome"] = "unknown"
             payload["recovery_affordances"] = [
                 {"action_type": "inspect_operation_state_before_retry"}
@@ -1086,6 +1167,11 @@ class InternalMCPTransport:
             admission_remaining_window_sec = (
                 task.admission_remaining_window_sec
             )
+            effect_receipt = (
+                dict(task.effect_receipt)
+                if isinstance(task.effect_receipt, Mapping)
+                else None
+            )
 
         queue_ms, handler_ms, handler_elapsed_ms = self._timing_snapshot(
             task,
@@ -1172,6 +1258,7 @@ class InternalMCPTransport:
                 queue_duration_ms=queue_ms,
                 handler_elapsed_ms=handler_elapsed_ms,
                 late_result_policy=late_result_policy,
+                effect_receipt=effect_receipt,
             )
             return TransportResult(
                 payload=timeout_payload,
