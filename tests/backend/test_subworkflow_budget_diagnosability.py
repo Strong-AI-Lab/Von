@@ -149,6 +149,19 @@ def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
             prompt_text="Show me the last 5 email messages",
             llm_debug_info={
                 "aux_llm_calls": [{"type": "workflow_continuation_decision"}],
+                "tool_invocations": [
+                    {
+                        "tool": "represented_workflow_test",
+                        "status": "error",
+                        "error_code": "tool_timeout_after_durable_submission",
+                        "effect_status": "partial",
+                        "mutation_outcome": "partial",
+                        "capability_kind": "represented_workflow",
+                        "execution_method": "workflow_execute",
+                        "workflow_id": "#V#paper_workflow",
+                        "instance_id": "instance-timeout-1",
+                    }
+                ],
             },
             progress_snapshot={"phase": "recovery_decision"},
         )
@@ -172,6 +185,16 @@ def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
     ]
     assert ledger_projection["receipt"]["cause_code"] == (
         "represented_critic_receipt_missing"
+    )
+    invocation = record["execution"]["tool_invocations"][0]
+    assert invocation["tool"] == "represented_workflow_test"
+    assert invocation["status"] == "partial"
+    assert invocation["error_code"] == (
+        "tool_timeout_after_durable_submission"
+    )
+    assert invocation["instance_id"] == "instance-timeout-1"
+    assert record["workflow_selection"]["selected_workflow_id"] == (
+        "#V#paper_workflow"
     )
 
 

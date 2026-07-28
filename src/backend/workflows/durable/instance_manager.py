@@ -2064,6 +2064,55 @@ class WorkflowInstanceManager:
                 exc,
             )
 
+    @staticmethod
+    def _reconcile_conversation_turn_terminal_effect(
+        instance: WorkflowInstance,
+    ) -> None:
+        """Best-effort canonical read-back for a timed-out ordinary turn."""
+
+        if (
+            instance.source_event_type != "conversation_turn"
+            or not instance.source_event_id
+        ):
+            return
+        try:
+            from ...services.turn_execution_record_service import (
+                reconcile_durable_workflow_terminal_effect,
+            )
+
+            outcome = reconcile_durable_workflow_terminal_effect(
+                request_id=instance.source_event_id,
+                instance_id=instance.instance_id,
+                workflow_id=instance.workflow_id,
+                terminal_status=instance.status,
+                final_state=instance.current_state,
+                completed_at=instance.completed_at,
+                error=instance.error,
+                error_step=instance.error_step,
+                execution_trace_id=instance.execution_trace_id,
+                user_id=instance.user_id,
+                namespace=instance.namespace,
+                org_id=instance.org_id,
+            )
+            reason = str(outcome.get("reason") or "")
+            if not bool(outcome.get("updated") or outcome.get("duplicate")) and reason not in {
+                "turn_execution_record_not_found",
+                "effect_observation_journal_not_found",
+                "durable_submission_receipt_not_found",
+            }:
+                logger.warning(
+                    "[durable_workflow] Turn-effect terminal reconciliation "
+                    "not acknowledged for %s: %s",
+                    instance.instance_id,
+                    outcome,
+                )
+        except Exception:
+            logger.exception(
+                "[durable_workflow] Turn-effect terminal reconciliation failed "
+                "for %s",
+                instance.instance_id,
+            )
+
     def mark_completed(
         self,
         instance_id: str,
@@ -2149,6 +2198,7 @@ class WorkflowInstanceManager:
                 ),
             )
             self._broadcast_instance(completed_instance)
+            self._reconcile_conversation_turn_terminal_effect(completed_instance)
             self._emit_episode_evaluation_terminal_event(
                 instance=completed_instance,
                 terminal_status=WorkflowInstanceStatus.COMPLETED.value,
@@ -2282,6 +2332,7 @@ class WorkflowInstanceManager:
                 ),
             )
             self._broadcast_instance(failed_instance)
+            self._reconcile_conversation_turn_terminal_effect(failed_instance)
             self._emit_episode_evaluation_terminal_event(
                 instance=failed_instance,
                 terminal_status=WorkflowInstanceStatus.FAILED.value,
@@ -2347,6 +2398,7 @@ class WorkflowInstanceManager:
                 progress_updated_at=now,
             )
             self._broadcast_instance(cancelled_instance)
+            self._reconcile_conversation_turn_terminal_effect(cancelled_instance)
             self._emit_episode_evaluation_terminal_event(
                 instance=cancelled_instance,
                 terminal_status=WorkflowInstanceStatus.CANCELLED.value,

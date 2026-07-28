@@ -600,6 +600,48 @@ class TestWorkflowInstanceManager:
         assert launches[0]["final_state"] == "end_state"
         assert launches[0]["instance"].instance_id == instance_id
 
+    def test_mark_completed_reconciles_conversation_turn_effect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manager = WorkflowInstanceManager()
+        reconciliations: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            "src.backend.services.turn_execution_record_service.reconcile_durable_workflow_terminal_effect",
+            lambda **kwargs: (
+                reconciliations.append(dict(kwargs))
+                or {"updated": True}
+            ),
+        )
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="#V#user",
+            org_id="#V#org",
+            namespace="#V#user@org",
+            source_event_type="conversation_turn",
+            source_event_id="request-durable-terminal",
+        )
+
+        success = manager.mark_completed(
+            instance_id,
+            outputs={"result": "done"},
+            final_state="#V#completed_state",
+            execution_trace_id="trace-durable-terminal",
+        )
+
+        assert success is True
+        assert len(reconciliations) == 1
+        reconciliation = reconciliations[0]
+        assert reconciliation["request_id"] == "request-durable-terminal"
+        assert reconciliation["instance_id"] == instance_id
+        assert reconciliation["workflow_id"] == "#V#test_workflow"
+        assert reconciliation["terminal_status"] == WorkflowInstanceStatus.COMPLETED
+        assert reconciliation["final_state"] == "#V#completed_state"
+        assert reconciliation["execution_trace_id"] == "trace-durable-terminal"
+        assert reconciliation["user_id"] == "#V#user"
+        assert reconciliation["namespace"] == "#V#user@org"
+        assert reconciliation["org_id"] == "#V#org"
+
     def test_mark_failed_updates_status(self) -> None:
         """mark_failed() should set status to FAILED with error."""
         manager = WorkflowInstanceManager()

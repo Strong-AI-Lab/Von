@@ -1802,6 +1802,177 @@ def test_turn_execution_get_diagnostics_reconstructs_from_projection(monkeypatch
     )
 
 
+def test_turn_execution_get_prefers_identity_bearing_top_level_invocations(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    turn_docs = [
+        {
+            "request_id": "req-durable-identities",
+            "session_id": "chat-durable-identities",
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "tool_invocations": [
+                {
+                    "tool": "represented_workflow_test",
+                    "status": "error",
+                    "call_id": "call-durable-identities",
+                    "execution_id": "mcp-durable-identities",
+                    "effect_id": "effect-durable-identities",
+                    "effect_status": "partial",
+                    "error_code": "tool_timeout_after_durable_submission",
+                    "workflow_id": "#V#paper_workflow",
+                    "evidence": {
+                        "instance_id": "instance-durable-identities",
+                        "durable_submission_status": "pending",
+                        "provenance": {
+                            "capability_kind": "represented_workflow",
+                            "execution_method": "workflow_execute",
+                            "represented_workflow_id": "#V#paper_workflow",
+                        },
+                    },
+                }
+            ],
+            "execution": {
+                "tool_invocations": [
+                    {
+                        "tool": "represented_workflow_test",
+                        "status": "timeout",
+                    }
+                ]
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": _TurnExecutionCollection(turn_docs)}),
+    )
+
+    result = cat._turn_execution_get(
+        namespace="#V#user@org",
+        request_id="req-durable-identities",
+    )
+
+    assert result["success"] is True
+    assert result["tool_invocation_summary"] == [
+        {
+            "tool": "represented_workflow_test",
+            "status": "error",
+            "call_id": "call-durable-identities",
+            "execution_id": "mcp-durable-identities",
+            "effect_id": "effect-durable-identities",
+            "effect_status": "partial",
+            "error_code": "tool_timeout_after_durable_submission",
+            "capability_kind": "represented_workflow",
+            "execution_method": "workflow_execute",
+            "represented_workflow_id": "#V#paper_workflow",
+            "workflow_id": "#V#paper_workflow",
+            "instance_id": "instance-durable-identities",
+            "durable_submission_status": "pending",
+        }
+    ]
+
+
+def test_turn_execution_get_diagnostics_hydrates_empty_progress_tool_history(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    chat_docs = [
+        {
+            "user_id": "#V#user",
+            "session_id": "chat-receipt-1",
+            "namespace": "#V#user@org",
+            "organisation_concept_id": "#V#org",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "Inspect the durable workflow instance before retrying.",
+                    "llm_debug_data": {
+                        "request_id": "req-receipt-1",
+                        "tool_invocations": [
+                            {
+                                "tool": "turn_capabilities",
+                                "status": "ok",
+                                "call_id": "call-capabilities",
+                            },
+                            {
+                                "tool": "represented_workflow_test",
+                                "status": "error",
+                                "call_id": "call-workflow",
+                                "effect_id": "effect-workflow",
+                                "effect_status": "partial",
+                                "error_code": (
+                                    "tool_timeout_after_durable_submission"
+                                ),
+                                "execution_id": "mcp-workflow",
+                                "workflow_id": "#V#paper_workflow",
+                                "instance_id": "instance-workflow",
+                                "transport": {
+                                    "outcome": "timed_out",
+                                    "timeout_phase": "handler",
+                                },
+                            },
+                            {
+                                "tool": "turn_read_evidence",
+                                "status": "ok",
+                                "call_id": "call-read",
+                            },
+                        ],
+                        "turn_execution_diagnostics": {
+                            "request_id": "req-receipt-1",
+                            "generated_at_utc": "2026-07-28T15:02:31Z",
+                            "tool_history": [],
+                            "tool_call_count": 0,
+                            "tool_call_start_count": 0,
+                            "tool_call_end_count": 0,
+                            "tool_success_count": 0,
+                            "tool_failure_count": 0,
+                            "tool_pending_count": 0,
+                            "progress_events": [],
+                            "activity_history": [],
+                            "phase_history": [],
+                            "stage_diagnostics": [],
+                        },
+                    },
+                }
+            ],
+        }
+    ]
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_chat_history_collection_service",
+        lambda read_only=True: _DiagnosticsChatHistoryCollection(chat_docs),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_records_collection",
+        lambda: None,
+    )
+
+    result = cat._turn_execution_get_diagnostics(
+        namespace="#V#user@org",
+        request_id="req-receipt-1",
+    )
+
+    assert result["success"] is True
+    assert result["tool_call_count"] == 3
+    assert result["tool_call_start_count"] == 3
+    assert result["tool_call_end_count"] == 3
+    assert result["tool_success_count"] == 2
+    assert result["tool_failure_count"] == 1
+    workflow_call = result["tool_history"][1]
+    assert workflow_call["tool"] == "represented_workflow_test"
+    assert workflow_call["effect_status"] == "partial"
+    assert workflow_call["error_code"] == (
+        "tool_timeout_after_durable_submission"
+    )
+    assert workflow_call["execution_id"] == "mcp-workflow"
+    assert workflow_call["workflow_id"] == "#V#paper_workflow"
+    assert workflow_call["instance_id"] == "instance-workflow"
+    assert "effective_arguments" not in workflow_call
+
+
 def test_turn_execution_list_filters_by_session_id(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

@@ -14,7 +14,9 @@ from src.backend.services.turn_execution_record_service import (
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
     get_turn_execution_record_projection,
+    infer_turn_execution_workflow_routing_from_debug,
     project_final_answer_tool_evidence,
+    reconcile_durable_workflow_terminal_effect,
     record_effect_observation_phase,
     upsert_turn_execution_record_projection,
     _classify_tool_invocation_status,
@@ -75,6 +77,33 @@ def test_tool_receipt_targets_require_explicit_generic_target_fields() -> None:
         )
         == []
     )
+
+
+def test_workflow_routing_reconstruction_prefers_represented_invocation() -> None:
+    routing = infer_turn_execution_workflow_routing_from_debug(
+        llm_debug={
+            "tool_invocations": [
+                {
+                    "tool": "represented_workflow_abc123",
+                    "status": "error",
+                    "evidence": {
+                        "workflow_id": "#V#paper_workflow",
+                        "provenance": {
+                            "capability_kind": "represented_workflow",
+                            "execution_method": "workflow_execute",
+                            "represented_workflow_id": "#V#paper_workflow",
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    assert routing == {
+        "workflow_id": "#V#paper_workflow",
+        "verdict": "represented_workflow_execution",
+        "source": "synthesised_from_tool_invocation",
+    }
 
 
 def _build_effect_projection_record(
@@ -1029,6 +1058,117 @@ def test_effect_observation_journal_is_actor_scoped_idempotent_and_survives_upse
         preserved["effect_observation_journal"]["effect_abc123"]
         == journal
     )
+
+
+def test_durable_workflow_terminal_reconciles_timed_out_turn_effect(
+    monkeypatch,
+) -> None:
+    import mongomock
+    import src.backend.services.turn_execution_record_service as record_service
+
+    collection = mongomock.MongoClient().von_test.turn_execution_records
+    collection.create_index("request_id", unique=True)
+    monkeypatch.setattr(
+        record_service,
+        "get_turn_execution_records_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        record_service,
+        "_turn_execution_mongo_comment",
+        lambda *_args, **_kwargs: None,
+    )
+    scope = {
+        "user_id": "#V#user",
+        "namespace": "#V#user@org",
+        "org_id": "#V#org",
+    }
+    record_effect_observation_phase(
+        request_id="req-durable-late",
+        effect_id="effect_durable_late",
+        phase="dispatch_intent",
+        observation={
+            "call_id": "call-durable-late",
+            "capability_name": "represented_workflow_test",
+            "dispatch_state": "intent_recorded",
+        },
+        **scope,
+    )
+    record_effect_observation_phase(
+        request_id="req-durable-late",
+        effect_id="effect_durable_late",
+        phase="turn_terminal",
+        observation={
+            "call_id": "call-durable-late",
+            "capability_name": "represented_workflow_test",
+            "effect_status": "partial",
+            "changed": True,
+            "transport": {
+                "execution_id": "mcp-durable-late",
+                "outcome": "timed_out",
+                "late_result_policy": "observe_out_of_band",
+            },
+            "receipt": {
+                "success": False,
+                "error_code": "tool_timeout_after_durable_submission",
+                "effect_status": "partial",
+                "mutation_outcome": "partial",
+                "changed": True,
+                "workflow_id": "#V#durable_workflow",
+                "instance_id": "instance-durable-late",
+                "execution_id": "mcp-durable-late",
+            },
+        },
+        **scope,
+    )
+
+    outcome = reconcile_durable_workflow_terminal_effect(
+        request_id="req-durable-late",
+        instance_id="instance-durable-late",
+        workflow_id="#V#durable_workflow",
+        terminal_status="completed",
+        final_state="#V#completed_state",
+        completed_at="2026-07-28T15:03:45Z",
+        execution_trace_id="trace-durable-late",
+        **scope,
+    )
+    duplicate = reconcile_durable_workflow_terminal_effect(
+        request_id="req-durable-late",
+        instance_id="instance-durable-late",
+        workflow_id="#V#durable_workflow",
+        terminal_status="completed",
+        final_state="#V#completed_state",
+        completed_at="2026-07-28T15:03:45Z",
+        execution_trace_id="trace-durable-late",
+        **scope,
+    )
+
+    assert outcome["updated"] is True
+    assert outcome["effect_status"] == "succeeded"
+    assert duplicate["updated"] is False
+    assert duplicate["duplicate"] is True
+    stored = collection.find_one({"request_id": "req-durable-late"})
+    late_terminal = stored["effect_observation_journal"][
+        "effect_durable_late"
+    ]["late_terminal"]
+    assert late_terminal["outcome"] == "late_success"
+    assert late_terminal["effect_status"] == "succeeded"
+    assert late_terminal["changed"] is True
+    assert late_terminal["payload"] == {
+        "schema_version": "durable_workflow_terminal_receipt.v1",
+        "success": True,
+        "status": "completed",
+        "effect_status": "succeeded",
+        "changed": True,
+        "mutation_outcome": "succeeded",
+        "outcome_finality": "canonical_durable_terminal",
+        "workflow_id": "#V#durable_workflow",
+        "instance_id": "instance-durable-late",
+        "final_status": "completed",
+        "final_state": "#V#completed_state",
+        "completed_at": "2026-07-28T15:03:45Z",
+        "execution_trace_id": "trace-durable-late",
+    }
 
 
 def test_effect_observation_journal_refuses_cross_actor_request_collision(

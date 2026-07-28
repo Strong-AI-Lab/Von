@@ -11146,8 +11146,16 @@ def persist_failed_turn_execution_record(
             response_text=None,
             interaction_timestamp_utc=debug.get("interaction_timestamp_utc"),
             workflow_discovery=_debug_mapping("workflow_discovery"),
-            workflow_routing=_debug_mapping("workflow_routing"),
-            tool_invocations=_debug_list("invocations"),
+            workflow_routing=(
+                _debug_mapping("workflow_routing")
+                or infer_turn_execution_workflow_routing_from_debug(
+                    llm_debug=debug
+                )
+            ),
+            tool_invocations=(
+                _debug_list("tool_invocations")
+                or _debug_list("invocations")
+            ),
             turn_execution_diagnostics=_debug_mapping("turn_execution_diagnostics"),
             aux_llm_calls=_debug_list("aux_llm_calls"),
             llm_calls=_debug_list("llm_calls"),
@@ -11598,6 +11606,256 @@ def record_effect_observation_phase(
             "effect_id": clean_effect_id,
             "phase": clean_phase,
         }
+
+
+def reconcile_durable_workflow_terminal_effect(
+    *,
+    request_id: Any,
+    instance_id: Any,
+    workflow_id: Any,
+    terminal_status: Any,
+    final_state: Any = None,
+    completed_at: Any = None,
+    error: Any = None,
+    error_step: Any = None,
+    execution_trace_id: Any = None,
+    user_id: Any = None,
+    namespace: Any = None,
+    org_id: Any = None,
+) -> dict[str, Any]:
+    """Reconcile one canonical durable terminal state with its timed-out turn.
+
+    A represented workflow may be durably submitted before the ordinary-turn
+    transport reaches its hard deadline.  The immutable turn receipt must stay
+    partial at that decision boundary, while the actor-scoped effect journal
+    later records the canonical workflow terminal state.  This function only
+    observes and records that state; it never executes or retries the workflow.
+    """
+
+    clean_request_id = _safe_str(request_id)
+    clean_instance_id = _safe_str(instance_id)
+    clean_workflow_id = _safe_str(workflow_id)
+    raw_terminal_status = getattr(terminal_status, "value", terminal_status)
+    clean_terminal_status = (_safe_str(raw_terminal_status) or "").lower()
+    if not clean_request_id:
+        return {"updated": False, "reason": "missing_request_id"}
+    if not clean_instance_id:
+        return {
+            "updated": False,
+            "reason": "missing_instance_id",
+            "request_id": clean_request_id,
+        }
+    if not clean_workflow_id:
+        return {
+            "updated": False,
+            "reason": "missing_workflow_id",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+    if clean_terminal_status not in {"completed", "failed", "cancelled"}:
+        return {
+            "updated": False,
+            "reason": "workflow_not_terminal",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+
+    actor_scope: dict[str, str] = {}
+    for field_name, raw_value in (
+        ("namespace", namespace),
+        ("user_id", user_id),
+        ("org_id", org_id),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            actor_scope[field_name] = clean_value
+    if not actor_scope:
+        return {
+            "updated": False,
+            "reason": "missing_actor_scope",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+
+    coll = get_turn_execution_records_collection()
+    if coll is None:
+        return {
+            "updated": False,
+            "reason": "collection_unavailable",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+    try:
+        record = _turn_execution_find_one(
+            coll,
+            {"request_id": clean_request_id, **actor_scope},
+            projection={
+                "_id": 0,
+                "effect_observation_journal": 1,
+            },
+            operation="reconcile_durable_workflow_terminal_effect.find_record",
+            detail=clean_instance_id,
+        )
+    except PyMongoError as exc:
+        logger.warning(
+            "Failed to load effect journal for durable terminal reconciliation "
+            "request_id=%s instance_id=%s: %s",
+            clean_request_id,
+            clean_instance_id,
+            exc,
+        )
+        return {
+            "updated": False,
+            "reason": "mongo_error",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+    if not isinstance(record, Mapping):
+        return {
+            "updated": False,
+            "reason": "turn_execution_record_not_found",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+
+    journal = record.get("effect_observation_journal")
+    if not isinstance(journal, Mapping):
+        return {
+            "updated": False,
+            "reason": "effect_observation_journal_not_found",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+
+    matched_effect_id: str | None = None
+    matched_entry: Mapping[str, Any] | None = None
+    matched_turn_terminal: Mapping[str, Any] | None = None
+    matched_receipt: Mapping[str, Any] | None = None
+    for raw_effect_id, raw_entry in journal.items():
+        if not isinstance(raw_effect_id, str) or not isinstance(raw_entry, Mapping):
+            continue
+        turn_terminal = raw_entry.get("turn_terminal")
+        if not isinstance(turn_terminal, Mapping):
+            continue
+        receipt = turn_terminal.get("receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        if _safe_str(receipt.get("instance_id")) != clean_instance_id:
+            continue
+        receipt_workflow_id = _safe_str(receipt.get("workflow_id"))
+        if receipt_workflow_id and receipt_workflow_id != clean_workflow_id:
+            continue
+        matched_effect_id = raw_effect_id
+        matched_entry = raw_entry
+        matched_turn_terminal = turn_terminal
+        matched_receipt = receipt
+        break
+
+    if (
+        matched_effect_id is None
+        or matched_entry is None
+        or matched_turn_terminal is None
+        or matched_receipt is None
+    ):
+        return {
+            "updated": False,
+            "reason": "durable_submission_receipt_not_found",
+            "request_id": clean_request_id,
+            "instance_id": clean_instance_id,
+        }
+
+    identity = (
+        matched_entry.get("identity")
+        if isinstance(matched_entry.get("identity"), Mapping)
+        else {}
+    )
+    transport = (
+        matched_turn_terminal.get("transport")
+        if isinstance(matched_turn_terminal.get("transport"), Mapping)
+        else {}
+    )
+    execution_id = (
+        _safe_str(matched_receipt.get("execution_id"))
+        or _safe_str(transport.get("execution_id"))
+    )
+    changed = (
+        matched_receipt.get("changed")
+        if isinstance(matched_receipt.get("changed"), bool)
+        else None
+    )
+    completed = clean_terminal_status == "completed"
+    effect_status = (
+        "succeeded"
+        if completed
+        else ("partial" if changed is True else "failed")
+    )
+    mutation_outcome = (
+        "succeeded"
+        if completed
+        else ("partial" if changed is True else "failed")
+    )
+    completed_at_value = (
+        _iso_utc(completed_at)
+        if isinstance(completed_at, datetime)
+        else _safe_str(completed_at)
+    )
+    canonical_receipt = {
+        "schema_version": "durable_workflow_terminal_receipt.v1",
+        "success": completed,
+        "status": clean_terminal_status,
+        "effect_status": effect_status,
+        "changed": changed,
+        "mutation_outcome": mutation_outcome,
+        "outcome_finality": "canonical_durable_terminal",
+        "workflow_id": clean_workflow_id,
+        "instance_id": clean_instance_id,
+        "final_status": clean_terminal_status,
+        "final_state": _safe_str(final_state),
+        "completed_at": completed_at_value,
+        "error": _safe_str(error),
+        "error_step": _safe_str(error_step),
+        "execution_trace_id": _safe_str(execution_trace_id),
+    }
+    canonical_receipt = {
+        key: value for key, value in canonical_receipt.items() if value is not None
+    }
+    observation = {
+        "schema_version": "durable_workflow_terminal_observation.v1",
+        "call_id": _safe_str(identity.get("call_id"))
+        or _safe_str(matched_turn_terminal.get("call_id")),
+        "capability_name": _safe_str(identity.get("capability_name"))
+        or _safe_str(matched_turn_terminal.get("capability_name")),
+        "execution_id": execution_id,
+        "method_name": "workflow_execute",
+        "outcome": "late_success",
+        "observed_at_utc": _iso_utc(_now_utc()),
+        "output_schema_validation": "canonical_durable_instance",
+        "output_schema_valid": True,
+        "payload_truncated": False,
+        "effect_status": effect_status,
+        "changed": changed,
+        "payload": canonical_receipt,
+    }
+    observation = {
+        key: value for key, value in observation.items() if value is not None
+    }
+    outcome = record_effect_observation_phase(
+        request_id=clean_request_id,
+        effect_id=matched_effect_id,
+        phase="late_terminal",
+        observation=observation,
+        user_id=user_id,
+        namespace=namespace,
+        org_id=org_id,
+    )
+    return {
+        **outcome,
+        "instance_id": clean_instance_id,
+        "workflow_id": clean_workflow_id,
+        "terminal_status": clean_terminal_status,
+        "effect_status": effect_status,
+        "execution_id": execution_id,
+    }
 
 
 def append_late_effect_observation(
@@ -12577,6 +12835,42 @@ def infer_turn_execution_workflow_routing_from_debug(
         for raw_invocation in tool_invocations:
             if not isinstance(raw_invocation, Mapping):
                 continue
+            evidence = (
+                raw_invocation.get("evidence")
+                if isinstance(raw_invocation.get("evidence"), Mapping)
+                else {}
+            )
+            provenance = (
+                evidence.get("provenance")
+                if isinstance(evidence.get("provenance"), Mapping)
+                else {}
+            )
+            capability_kind = (
+                _safe_str(raw_invocation.get("capability_kind"))
+                or _safe_str(provenance.get("capability_kind"))
+            )
+            execution_method = (
+                _safe_str(raw_invocation.get("execution_method"))
+                or _safe_str(provenance.get("execution_method"))
+            )
+            represented_workflow_id = (
+                _safe_str(raw_invocation.get("represented_workflow_id"))
+                or _safe_str(raw_invocation.get("workflow_id"))
+                or _safe_str(evidence.get("workflow_id"))
+                or _safe_str(provenance.get("represented_workflow_id"))
+            )
+            if represented_workflow_id and (
+                capability_kind == "represented_workflow"
+                or execution_method == "workflow_execute"
+                or str(raw_invocation.get("tool") or "").startswith(
+                    "represented_workflow_"
+                )
+            ):
+                return {
+                    "workflow_id": represented_workflow_id,
+                    "verdict": "represented_workflow_execution",
+                    "source": "synthesised_from_tool_invocation",
+                }
             if _is_write_tool(_safe_str(raw_invocation.get("name"))):
                 has_write_tools = True
                 break
