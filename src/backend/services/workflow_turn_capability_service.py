@@ -17,6 +17,9 @@ from src.backend.security.access_control import override_current_actor
 WORKFLOW_TURN_CAPABILITY_SCHEMA_VERSION = "workflow_turn_capability.v1"
 WORKFLOW_TURN_DISCOVERY_SCHEMA_VERSION = "workflow_turn_capability_discovery.v1"
 WORKFLOW_TURN_RECEIPT_SCHEMA_VERSION = "workflow_turn_effect_receipt.v1"
+CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION = "capability_plan_profile.v1"
+CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION = "capability_effect_profile.v1"
+CAPABILITY_COST_PROFILE_SCHEMA_VERSION = "capability_cost_profile.v1"
 
 _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS = frozenset(
     {
@@ -86,17 +89,122 @@ def _bounded_mapping_sequence(
         (str, bytes, bytearray),
     ):
         return []
-    return [
-        dict(item)
-        for item in list(value)[:limit]
-        if isinstance(item, Mapping)
+    return [dict(item) for item in list(value)[:limit] if isinstance(item, Mapping)]
+
+
+def _bounded_text_tuple(value: Any, *, limit: int = 40) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return ()
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = _normalise_non_empty_text(item)
+        if text is None or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return tuple(result)
+
+
+def _coerce_optional_non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _workflow_plan_metadata(
+    raw_match: Mapping[str, Any],
+    *,
+    registered_capability_categories: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    """Project declared workflow shape without inventing semantic policy."""
+
+    routing_index_metadata = raw_match.get("routing_index_metadata")
+    index_metadata = (
+        dict(routing_index_metadata)
+        if isinstance(routing_index_metadata, Mapping)
+        else {}
+    )
+    routing_profile_value = raw_match.get("routing_profile")
+    routing_profile = (
+        dict(routing_profile_value)
+        if isinstance(routing_profile_value, Mapping)
+        else {}
+    )
+    visible_categories = {
+        str(name).strip(): str(category).strip().lower()
+        for name, category in (registered_capability_categories or {}).items()
+        if str(name).strip() and str(category).strip()
+    }
+    declared_components = _bounded_text_tuple(
+        index_metadata.get("required_tools"),
+    )
+    visible_components = tuple(
+        name for name in declared_components if name in visible_categories
+    )
+    compact_executability = index_metadata.get("compact_executability")
+    declared_step_count = (
+        _coerce_optional_non_negative_int(compact_executability.get("step_count"))
+        if isinstance(compact_executability, Mapping)
+        else None
+    )
+    direct_equivalents = tuple(
+        name
+        for name in _bounded_text_tuple(
+            routing_profile.get("direct_equivalent_capability_names"),
+            limit=12,
+        )
+        if name in visible_categories
+    )
+
+    component_categories = [
+        visible_categories[name]
+        for name in visible_components
+        if name in visible_categories
     ]
+    unresolved_component_count = max(
+        0,
+        len(declared_components) - len(visible_components),
+    )
+    if any(category == "write" for category in component_categories):
+        semantic_effect: bool | None = True
+        semantic_effect_source = "declared_registered_write_component"
+    elif (
+        declared_components
+        and unresolved_component_count == 0
+        and component_categories
+        and all(category == "read" for category in component_categories)
+    ):
+        semantic_effect = False
+        semantic_effect_source = "declared_registered_read_components"
+    else:
+        semantic_effect = None
+        semantic_effect_source = "insufficient_declared_component_evidence"
+
+    return {
+        "component_capability_names": visible_components,
+        "declared_component_count": len(declared_components),
+        "unresolved_component_count": unresolved_component_count,
+        "declared_step_count": declared_step_count,
+        "direct_equivalent_capability_names": direct_equivalents,
+        "semantic_effect": semantic_effect,
+        "semantic_effect_source": semantic_effect_source,
+    }
 
 
 def _turn_capability_name(*, turn_id: str, workflow_id: str) -> str:
-    digest = hashlib.sha256(
-        f"{turn_id}\0{workflow_id}".encode("utf-8")
-    ).hexdigest()[:20]
+    digest = hashlib.sha256(f"{turn_id}\0{workflow_id}".encode("utf-8")).hexdigest()[
+        :20
+    ]
     return f"represented_workflow_{digest}"
 
 
@@ -230,8 +338,45 @@ class WorkflowTurnCapability:
     input_schema: Mapping[str, Any]
     launch_input_contract_source: str | None = None
     discovery_metadata: Mapping[str, Any] = field(default_factory=dict)
+    component_capability_names: tuple[str, ...] = ()
+    declared_component_count: int = 0
+    unresolved_component_count: int = 0
+    declared_step_count: int | None = None
+    direct_equivalent_capability_names: tuple[str, ...] = ()
+    semantic_effect: bool | None = None
+    semantic_effect_source: str = "insufficient_declared_component_evidence"
 
     def to_catalogue_entry(self) -> dict[str, Any]:
+        effect_profile = {
+            "schema_version": CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION,
+            "semantic_effect": self.semantic_effect,
+            "semantic_effect_source": self.semantic_effect_source,
+            "operational_state_effect": True,
+            "operational_state_effect_reason": (
+                "workflow invocation creates or advances a durable instance"
+            ),
+        }
+        cost_profile: dict[str, Any] = {
+            "schema_version": CAPABILITY_COST_PROFILE_SCHEMA_VERSION,
+            "basis": "declared_plan_structure",
+            "durable_runtime": True,
+            "declared_component_count": int(self.declared_component_count),
+            "visible_component_count": len(self.component_capability_names),
+            "unresolved_component_count": int(self.unresolved_component_count),
+            "minimum_runtime_window_seconds": 5.0,
+        }
+        if self.declared_step_count is not None:
+            cost_profile["declared_step_count"] = int(self.declared_step_count)
+        plan_profile = {
+            "schema_version": CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION,
+            "shape": "represented_workflow",
+            "component_capability_names": list(self.component_capability_names),
+            "direct_equivalent_capability_names": list(
+                self.direct_equivalent_capability_names
+            ),
+            "effect_profile": effect_profile,
+            "cost_profile": cost_profile,
+        }
         return {
             "schema_version": WORKFLOW_TURN_CAPABILITY_SCHEMA_VERSION,
             "name": self.name,
@@ -241,7 +386,9 @@ class WorkflowTurnCapability:
             "description": self.description,
             "input_schema": dict(self.input_schema),
             "query_match": True,
-            "semantic_effect": True,
+            "semantic_effect": self.semantic_effect,
+            "effect_profile": effect_profile,
+            "plan_profile": plan_profile,
             "minimum_effect_window_seconds": 5.0,
             "server_bound_arguments": [
                 "workflow_id",
@@ -265,6 +412,7 @@ def discover_turn_workflow_capabilities(
     turn_id: str,
     max_results: int = 5,
     timeout_seconds: float = 5.0,
+    registered_capability_categories: Mapping[str, str] | None = None,
 ) -> tuple[list[WorkflowTurnCapability], dict[str, Any]]:
     """Return bounded actor-accessible workflow affordances for a model query."""
 
@@ -339,6 +487,10 @@ def discover_turn_workflow_capabilities(
                 )
             routing_profile = raw_match.get("routing_profile")
             routing_index_metadata = raw_match.get("routing_index_metadata")
+            plan_metadata = _workflow_plan_metadata(
+                raw_match,
+                registered_capability_categories=(registered_capability_categories),
+            )
             capabilities.append(
                 WorkflowTurnCapability(
                     name=_turn_capability_name(
@@ -379,9 +531,12 @@ def discover_turn_workflow_capabilities(
                                 key: routing_index_metadata.get(key)
                                 for key in (
                                     "authority_source",
+                                    "compact_executability",
                                     "description_source",
                                     "publication_lifecycle",
+                                    "required_tools_source",
                                     "routing_profile_source",
+                                    "workflow_action_ids_source",
                                 )
                                 if key in routing_index_metadata
                             }
@@ -389,6 +544,21 @@ def discover_turn_workflow_capabilities(
                             else None
                         ),
                     },
+                    component_capability_names=tuple(
+                        plan_metadata["component_capability_names"]
+                    ),
+                    declared_component_count=int(
+                        plan_metadata["declared_component_count"]
+                    ),
+                    unresolved_component_count=int(
+                        plan_metadata["unresolved_component_count"]
+                    ),
+                    declared_step_count=plan_metadata["declared_step_count"],
+                    direct_equivalent_capability_names=tuple(
+                        plan_metadata["direct_equivalent_capability_names"]
+                    ),
+                    semantic_effect=plan_metadata["semantic_effect"],
+                    semantic_effect_source=str(plan_metadata["semantic_effect_source"]),
                 )
             )
 

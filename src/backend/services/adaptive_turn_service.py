@@ -66,6 +66,11 @@ _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
 _CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_capabilities.v1"
+_CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION = "capability_plan_profile.v1"
+_CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION = "capability_effect_profile.v1"
+_CAPABILITY_COST_PROFILE_SCHEMA_VERSION = "capability_cost_profile.v1"
+_CAPABILITY_SELECTION_POLICY_SCHEMA_VERSION = "capability_selection_policy.v1"
+_CAPABILITY_SELECTION_TRACE_SCHEMA_VERSION = "capability_selection_trace.v1"
 _CONVERSATION_SITUATION_START_TAG = "<von_conversation_situation>"
 _CONVERSATION_SITUATION_END_TAG = "</von_conversation_situation>"
 _CONVERSATION_SITUATION_PROTOCOL_RE = re.compile(
@@ -282,6 +287,79 @@ def _compact_evidence_index(
     return compacted
 
 
+def _compact_capability_selection_profiles(
+    capability: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Retain decision-bearing plan facts without repeating catalogue policy."""
+
+    compact: dict[str, Any] = {}
+    effect_profile = capability.get("effect_profile")
+    if isinstance(effect_profile, Mapping):
+        compact["effect_profile"] = {
+            key: effect_profile.get(key)
+            for key in (
+                "schema_version",
+                "semantic_effect",
+                "semantic_effect_source",
+                "operational_state_effect",
+                "operational_state_effect_reason",
+            )
+            if key in effect_profile
+        }
+
+    plan_profile = capability.get("plan_profile")
+    if isinstance(plan_profile, Mapping):
+        compact_plan = {
+            key: plan_profile.get(key)
+            for key in (
+                "schema_version",
+                "shape",
+                "evidence_surface_families",
+            )
+            if key in plan_profile
+        }
+        if plan_profile.get("shape") == "represented_workflow":
+            for key in (
+                "component_capability_names",
+                "direct_equivalent_capability_names",
+            ):
+                if key in plan_profile:
+                    compact_plan[key] = plan_profile.get(key)
+        cost_profile = plan_profile.get("cost_profile")
+        if isinstance(cost_profile, Mapping):
+            compact_plan["cost_profile"] = dict(cost_profile)
+        compact["plan_profile"] = compact_plan
+
+    selection = capability.get("selection")
+    if isinstance(selection, Mapping):
+        compact_selection = {
+            key: selection.get(key)
+            for key in (
+                "frontier_status",
+                "dominated_by",
+                "dominance_reason",
+            )
+            if key in selection
+        }
+        adequacy_evidence = selection.get("adequacy_evidence")
+        if isinstance(adequacy_evidence, Sequence) and not isinstance(
+            adequacy_evidence,
+            (str, bytes, bytearray),
+        ):
+            adequacy_sources = list(
+                dict.fromkeys(
+                    str(item.get("source") or "").strip()
+                    for item in adequacy_evidence
+                    if isinstance(item, Mapping)
+                    and str(item.get("source") or "").strip()
+                )
+            )
+            if adequacy_sources:
+                compact_selection["adequacy_sources"] = adequacy_sources
+        compact["selection"] = compact_selection
+    return compact
+
+
 def _capability_schema_reference(
     capability: Mapping[str, Any],
     *,
@@ -294,6 +372,7 @@ def _capability_schema_reference(
         (
             "name",
             "description",
+            "planner_hint",
             "query_match",
             "server_bound_arguments",
             "semantic_effect",
@@ -310,6 +389,7 @@ def _capability_schema_reference(
         )
     )
     compact = {key: capability.get(key) for key in projected_keys if key in capability}
+    compact.update(_compact_capability_selection_profiles(capability))
     name = str(capability.get("name") or "").strip()
     if not include_metadata:
         compact["capability_metadata_omitted_for_model_context"] = True
@@ -351,6 +431,7 @@ def _capability_schema_focused_projection(
         )
         if key in capability
     }
+    projected.update(_compact_capability_selection_profiles(capability))
     projected["capability_metadata_omitted_for_model_context"] = True
     return projected
 
@@ -392,7 +473,11 @@ def _bounded_capability_catalogue_output(
             "total",
             "delegated_total",
             "matched_total",
+            "frontier_total",
+            "dominated_total",
             "ranking",
+            "selection_policy",
+            "dominated_capabilities",
             "catalogue_scope",
             "offset",
         )
@@ -491,6 +576,12 @@ def _bounded_capability_catalogue_output(
             schema_reference_count += 1
             bounded = compact_candidate
             continue
+
+        # Prefer another page over erasing decision-bearing metadata from an
+        # otherwise bounded capability. Minimal and name-only references are
+        # reserved for a capability that cannot fit by itself.
+        if included:
+            break
 
         minimal = _capability_schema_reference(
             capability,
@@ -1242,6 +1333,17 @@ def _scope_message(
         "without interpreting the user's intent; a natural-language query also "
         "retrieves actor-accessible executable represented workflows as bound "
         "capabilities.\n"
+        "- Treat a direct call, a small composition, and a represented workflow "
+        "as capability plans in one decision space. Choose the least costly plan "
+        "only after judging that it can produce the material work product and "
+        "evidence; representedness is not a quality score.\n"
+        "- Use each candidate's plan, effect, cost, and adequacy evidence. A "
+        "workflow is warranted when it adds needed composition, verification, "
+        "durability, governance, or recovery; otherwise prefer an adequate "
+        "observable and recoverable direct path.\n"
+        "- A matched workflow may expose visible component capabilities as "
+        "simpler alternatives. Their presence does not prove equivalence: inspect "
+        "the request and escalate when a direct result leaves a material gap.\n"
         f"- {_INVOKE_TOOL_NAME} invokes any named delegated capability.\n"
         f"- {_EVIDENCE_INDEX_TOOL_NAME} pages every evidence handle recorded "
         "for this turn.\n"
@@ -1442,6 +1544,80 @@ def ordinary_turn_capability_delegation(
     return _registered_capability_names(gateway, requested)
 
 
+def _registered_capability_plan_profile(
+    gateway: InternalMCPGateway,
+    *,
+    name: str,
+    definition: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    semantic_effect = bool(
+        definition.category == "write" and definition.ordinary_turn_effect
+    )
+    effect_profile = {
+        "schema_version": _CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION,
+        "semantic_effect": semantic_effect,
+        "semantic_effect_source": "registered_method_definition",
+        "operational_state_effect": semantic_effect,
+    }
+    cost_profile: dict[str, Any] = {
+        "schema_version": _CAPABILITY_COST_PROFILE_SCHEMA_VERSION,
+        "basis": "declared_execution_shape",
+        "durable_runtime": False,
+        "declared_step_count": 1,
+        "declared_component_count": 1,
+    }
+    configured_timeout = gateway.get_method_timeout_sec(name)
+    if configured_timeout is not None:
+        cost_profile["maximum_handler_window_seconds"] = float(configured_timeout)
+    minimum_effect_window = (
+        gateway.get_method_effect_admission_window_sec(name)
+        if semantic_effect
+        else None
+    )
+    if minimum_effect_window is not None:
+        cost_profile["minimum_runtime_window_seconds"] = float(minimum_effect_window)
+    plan_profile = {
+        "schema_version": _CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION,
+        "shape": "single_capability",
+        "component_capability_names": [name],
+        "direct_equivalent_capability_names": [],
+        "effect_profile": effect_profile,
+        "cost_profile": cost_profile,
+    }
+    return plan_profile, effect_profile
+
+
+def _interleave_capability_frontier(
+    direct_candidates: Sequence[dict[str, Any]],
+    workflow_candidates: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep both adequate plan shapes visible without choosing semantics."""
+
+    result: list[dict[str, Any]] = []
+    direct_index = 0
+    workflow_index = 0
+    while direct_index < len(direct_candidates) or workflow_index < len(
+        workflow_candidates
+    ):
+        if direct_index < len(direct_candidates):
+            result.append(direct_candidates[direct_index])
+            direct_index += 1
+        if workflow_index < len(workflow_candidates):
+            result.append(workflow_candidates[workflow_index])
+            workflow_index += 1
+    return result
+
+
+def _strip_capability_ranking_metadata(
+    capability: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in capability.items()
+        if not str(key).startswith("_ranking_")
+    }
+
+
 def _capability_catalogue(
     gateway: InternalMCPGateway,
     delegated_names: Sequence[str],
@@ -1474,8 +1650,8 @@ def _capability_catalogue(
     query_tokens = {
         token for token in re.findall(r"[a-z0-9_]+", query) if len(token) > 1
     }
-    ranked: list[tuple[int, str, dict[str, Any]]] = []
-    matched_total = 0
+    registered_candidates: list[dict[str, Any]] = []
+    registered_by_name: dict[str, dict[str, Any]] = {}
     registered_delegated_total = 0
     for name in delegated_names:
         definition = gateway.get_method_definition(name)
@@ -1488,6 +1664,7 @@ def _capability_catalogue(
             or f"Use {name}."
         )
         description = fallback_description
+        planner_hint: str | None = None
         surface_metadata: Any = None
         try:
             # These fields already govern planner/provenance displays elsewhere.
@@ -1496,6 +1673,7 @@ def _capability_catalogue(
             from src.backend.services.tool_metadata_service import (
                 get_tool_description,
                 get_tool_dispatch_surface_metadata,
+                get_tool_planner_hint,
             )
 
             description = (
@@ -1505,6 +1683,7 @@ def _capability_catalogue(
                 )
                 or fallback_description
             )
+            planner_hint = get_tool_planner_hint(name)
             surface_metadata = get_tool_dispatch_surface_metadata(name)
         except Exception:  # noqa: BLE001
             # Represented metadata improves discovery but is not a new
@@ -1522,19 +1701,34 @@ def _capability_catalogue(
             )
             if str(value or "").strip()
         )
-        searchable = (
-            f"{name_key.replace('_', ' ')} {description.lower()} "
-            f"{positive_surface_terms}"
+        routing_searchable = (
+            f"{name_key.replace('_', ' ')} "
+            f"{str(planner_hint or '').lower()} {positive_surface_terms}"
         )
+        searchable = f"{routing_searchable} {description.lower()}"
         if query_tokens:
-            matched = sum(1 for token in query_tokens if token in searchable)
-            score = matched * 10 + (20 if query in searchable else 0)
-            query_match = matched > 0
+            searchable_tokens = set(re.findall(r"[a-z0-9_]+", searchable))
+            routing_searchable_tokens = set(
+                re.findall(r"[a-z0-9_]+", routing_searchable)
+            )
+            description_searchable_tokens = set(
+                re.findall(r"[a-z0-9_]+", description.lower())
+            )
+            literal_match_count = sum(
+                1 for token in query_tokens if token in searchable_tokens
+            )
+            routing_match_tokens = sorted(query_tokens & routing_searchable_tokens)
+            description_literal_match_count = sum(
+                1 for token in query_tokens if token in description_searchable_tokens
+            )
+            literal_phrase_match = bool(query and query in searchable)
+            query_match = False
         else:
-            score = 0
+            literal_match_count = 0
+            routing_match_tokens = []
+            description_literal_match_count = 0
+            literal_phrase_match = False
             query_match = True
-        if query_match:
-            matched_total += 1
 
         server_bound_arguments = sorted(
             {
@@ -1548,16 +1742,52 @@ def _capability_catalogue(
                 if str(argument_name).strip()
             }
         )
+        plan_profile, effect_profile = _registered_capability_plan_profile(
+            gateway,
+            name=name,
+            definition=definition,
+        )
+        adequacy_evidence: list[dict[str, Any]] = []
+        if literal_phrase_match:
+            adequacy_evidence.append({"source": "literal_query_phrase"})
+        if literal_match_count:
+            adequacy_evidence.append(
+                {
+                    "source": "literal_query_terms",
+                    "matched_term_count": literal_match_count,
+                    "routing_term_count": len(routing_match_tokens),
+                    "description_term_count": description_literal_match_count,
+                }
+            )
+        if not query_tokens:
+            adequacy_evidence.append({"source": "unfiltered_catalogue_request"})
         capability = {
             "name": name,
             "kind": "registered_tool",
             "description": description,
+            **({"planner_hint": planner_hint} if planner_hint else {}),
             "input_schema": _model_visible_input_schema(definition),
             "query_match": query_match,
             "server_bound_arguments": server_bound_arguments,
+            "semantic_effect": bool(effect_profile["semantic_effect"]),
+            "effect_profile": effect_profile,
+            "plan_profile": plan_profile,
+            "selection": {
+                "frontier_status": (
+                    "candidate" if query_match else "outside_query_frontier"
+                ),
+                "adequacy_evidence": adequacy_evidence,
+                "semantic_adequacy_owner": "adaptive_model",
+            },
+            "_ranking_literal_match_count": literal_match_count,
+            "_ranking_literal_phrase_match": literal_phrase_match,
+            "_ranking_component_match_count": 0,
+            "_ranking_routing_match_tokens": routing_match_tokens,
+            "_ranking_description_literal_match_count": (
+                description_literal_match_count
+            ),
         }
-        if definition.ordinary_turn_effect:
-            capability["semantic_effect"] = True
+        if bool(effect_profile["semantic_effect"]):
             minimum_effect_window = gateway.get_method_effect_admission_window_sec(name)
             if minimum_effect_window is not None:
                 capability["minimum_effect_window_seconds"] = float(
@@ -1573,13 +1803,67 @@ def _capability_catalogue(
                     "external_surface": bool(surface_metadata.external_surface),
                 }
             )
-        ranked.append(
-            (
-                -score,
-                name_key,
-                capability,
-            )
+            plan_profile["evidence_surface_families"] = [
+                surface_metadata.evidence_surface_family
+            ]
+        registered_candidates.append(capability)
+        registered_by_name[name_key] = capability
+
+    # Treat lexical overlap as routing evidence only when it distinguishes a
+    # bounded portion of the delegated catalogue. This corpus-relative rule
+    # avoids language-specific stopword lists while preventing generic verbs
+    # and connective words from flooding the active frontier.
+    routing_term_frequency: dict[str, int] = {}
+    for candidate in registered_candidates:
+        for token in set(candidate.get("_ranking_routing_match_tokens") or []):
+            routing_term_frequency[token] = routing_term_frequency.get(token, 0) + 1
+    maximum_informative_frequency = max(
+        3,
+        int(len(registered_candidates) * 0.05),
+    )
+    for candidate in registered_candidates:
+        routing_match_tokens = list(
+            candidate.get("_ranking_routing_match_tokens") or []
         )
+        informative_routing_tokens = [
+            token
+            for token in routing_match_tokens
+            if routing_term_frequency.get(token, 0) <= maximum_informative_frequency
+        ]
+        description_literal_match_count = int(
+            candidate.get("_ranking_description_literal_match_count") or 0
+        )
+        query_match = bool(
+            not query_tokens
+            or candidate.get("_ranking_literal_phrase_match")
+            or informative_routing_tokens
+            or description_literal_match_count >= 2
+        )
+        candidate["query_match"] = query_match
+        candidate["_ranking_literal_match_count"] = (
+            len(informative_routing_tokens) + description_literal_match_count
+        )
+        candidate_selection = dict(candidate.get("selection") or {})
+        candidate_selection["frontier_status"] = (
+            "candidate" if query_match else "outside_query_frontier"
+        )
+        adequacy_evidence = list(candidate_selection.get("adequacy_evidence") or [])
+        for evidence in adequacy_evidence:
+            if (
+                isinstance(evidence, dict)
+                and evidence.get("source") == "literal_query_terms"
+            ):
+                evidence["informative_routing_term_count"] = len(
+                    informative_routing_tokens
+                )
+                evidence["common_routing_term_count"] = max(
+                    0,
+                    len(routing_match_tokens) - len(informative_routing_tokens),
+                )
+        candidate_selection["adequacy_evidence"] = adequacy_evidence
+        candidate["selection"] = candidate_selection
+
+    workflow_candidates: list[dict[str, Any]] = []
     represented_workflow_total = 0
     for workflow_capability in workflow_capabilities:
         to_catalogue_entry = getattr(
@@ -1608,39 +1892,302 @@ def _capability_catalogue(
             f"{description.lower()}"
         )
         if query_tokens:
-            literal_matches = sum(1 for token in query_tokens if token in searchable)
+            searchable_tokens = set(re.findall(r"[a-z0-9_]+", searchable))
+            literal_matches = sum(
+                1 for token in query_tokens if token in searchable_tokens
+            )
+            literal_phrase_match = bool(query and query in searchable)
             query_match = bool(
                 literal_matches or float(capability.get("relevance_score") or 0.0) > 0.0
             )
-            semantic_score = int(
-                max(
-                    0.0,
-                    min(
-                        1.0,
-                        float(capability.get("relevance_score") or 0.0),
-                    ),
-                )
-                * 1000
-            )
-            score = semantic_score + (literal_matches * 10)
         else:
             query_match = True
-            score = int(
-                max(
-                    0.0,
-                    min(
-                        1.0,
-                        float(capability.get("relevance_score") or 0.0),
-                    ),
-                )
-                * 1000
-            )
+            literal_matches = 0
+            literal_phrase_match = False
         capability["query_match"] = query_match
-        if query_match:
-            matched_total += 1
-        ranked.append((-score, name_key, capability))
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    selected = [item[2] for item in ranked]
+        workflow_selection = capability.get("selection")
+        selection = (
+            dict(workflow_selection) if isinstance(workflow_selection, Mapping) else {}
+        )
+        adequacy_evidence: list[dict[str, Any]] = []
+        if literal_phrase_match:
+            adequacy_evidence.append({"source": "literal_query_phrase"})
+        if literal_matches:
+            adequacy_evidence.append(
+                {
+                    "source": "literal_query_terms",
+                    "matched_term_count": literal_matches,
+                }
+            )
+        relevance_score = max(
+            0.0,
+            min(
+                1.0,
+                float(capability.get("relevance_score") or 0.0),
+            ),
+        )
+        if relevance_score > 0.0:
+            adequacy_evidence.append(
+                {
+                    "source": "represented_workflow_semantic_relevance",
+                    "relevance_score": round(relevance_score, 4),
+                }
+            )
+        if not query_tokens:
+            adequacy_evidence.append({"source": "unfiltered_catalogue_request"})
+        selection.update(
+            {
+                "frontier_status": (
+                    "candidate" if query_match else "outside_query_frontier"
+                ),
+                "adequacy_evidence": adequacy_evidence,
+                "semantic_adequacy_owner": "adaptive_model",
+            }
+        )
+        capability["selection"] = selection
+        capability["_ranking_literal_match_count"] = literal_matches
+        capability["_ranking_literal_phrase_match"] = literal_phrase_match
+        capability["_ranking_semantic_relevance"] = relevance_score
+
+        plan_profile_value = capability.get("plan_profile")
+        plan_profile = (
+            dict(plan_profile_value) if isinstance(plan_profile_value, Mapping) else {}
+        )
+        raw_component_names = plan_profile.get("component_capability_names")
+        component_names = (
+            [
+                str(item).strip()
+                for item in raw_component_names
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if isinstance(raw_component_names, Sequence)
+            and not isinstance(raw_component_names, (str, bytes, bytearray))
+            else []
+        )
+        component_surfaces = sorted(
+            {
+                str(
+                    registered_by_name[name.lower()].get("evidence_surface_family")
+                    or ""
+                ).strip()
+                for name in component_names
+                if name.lower() in registered_by_name
+                and str(
+                    registered_by_name[name.lower()].get("evidence_surface_family")
+                    or ""
+                ).strip()
+            }
+        )
+        if component_surfaces:
+            plan_profile["evidence_surface_families"] = component_surfaces
+        capability["plan_profile"] = plan_profile
+        workflow_candidates.append(capability)
+
+    # A matched workflow's declared visible components are plausible simpler
+    # plans, not proven equivalents. Keep them on the same frontier and let the
+    # adaptive model judge whether one component or a small composition is
+    # adequate for the actual work product.
+    for workflow in workflow_candidates:
+        if workflow.get("query_match") is not True:
+            continue
+        plan_profile = workflow.get("plan_profile")
+        component_names = (
+            plan_profile.get("component_capability_names")
+            if isinstance(plan_profile, Mapping)
+            else None
+        )
+        if not isinstance(component_names, Sequence) or isinstance(
+            component_names,
+            (str, bytes, bytearray),
+        ):
+            continue
+        for component_name in component_names:
+            component = registered_by_name.get(str(component_name).strip().lower())
+            if component is None:
+                continue
+            component["query_match"] = True
+            component["_ranking_component_match_count"] = (
+                int(component.get("_ranking_component_match_count") or 0) + 1
+            )
+            component_selection = component.get("selection")
+            selection = (
+                dict(component_selection)
+                if isinstance(component_selection, Mapping)
+                else {}
+            )
+            adequacy_evidence = list(selection.get("adequacy_evidence") or [])
+            adequacy_evidence.append(
+                {
+                    "source": "declared_component_of_matched_workflow",
+                    "workflow_id": workflow.get("workflow_id"),
+                }
+            )
+            selection.update(
+                {
+                    "frontier_status": "candidate",
+                    "adequacy_evidence": adequacy_evidence,
+                    "semantic_adequacy_owner": "adaptive_model",
+                }
+            )
+            component["selection"] = selection
+
+    dominated_capabilities: list[dict[str, Any]] = []
+    dominated_names: set[str] = set()
+    if not exact_names:
+        for workflow in workflow_candidates:
+            if workflow.get("query_match") is not True:
+                continue
+            plan_profile = workflow.get("plan_profile")
+            direct_equivalents = (
+                plan_profile.get("direct_equivalent_capability_names")
+                if isinstance(plan_profile, Mapping)
+                else None
+            )
+            if not isinstance(direct_equivalents, Sequence) or isinstance(
+                direct_equivalents,
+                (str, bytes, bytearray),
+            ):
+                continue
+            for equivalent_name in direct_equivalents:
+                direct = registered_by_name.get(str(equivalent_name).strip().lower())
+                if direct is None:
+                    continue
+                # The represented declaration supplies outcome equivalence.
+                # Mechanical pruning is still conservative: both plans must be
+                # known read-only, leaving only orchestration cost different.
+                if (
+                    direct.get("semantic_effect") is not False
+                    or workflow.get("semantic_effect") is not False
+                ):
+                    continue
+                workflow_name = str(workflow.get("name") or "").strip()
+                if not workflow_name:
+                    continue
+                direct["query_match"] = True
+                direct_selection = dict(direct.get("selection") or {})
+                direct_adequacy_evidence = list(
+                    direct_selection.get("adequacy_evidence") or []
+                )
+                direct_adequacy_evidence.append(
+                    {
+                        "source": "represented_declared_direct_equivalence",
+                        "workflow_id": workflow.get("workflow_id"),
+                    }
+                )
+                direct_selection.update(
+                    {
+                        "frontier_status": "candidate",
+                        "adequacy_evidence": direct_adequacy_evidence,
+                        "semantic_adequacy_owner": "adaptive_model",
+                    }
+                )
+                direct["selection"] = direct_selection
+                dominated_names.add(workflow_name.lower())
+                workflow_selection = dict(workflow.get("selection") or {})
+                workflow_selection.update(
+                    {
+                        "frontier_status": "declared_dominated",
+                        "dominated_by": str(direct.get("name") or ""),
+                        "dominance_reason": (
+                            "declared_direct_equivalence_with_lower_declared_"
+                            "orchestration_cost"
+                        ),
+                    }
+                )
+                workflow["selection"] = workflow_selection
+                dominated_capabilities.append(
+                    {
+                        "name": workflow_name,
+                        "dominated_by": str(direct.get("name") or ""),
+                        "reason": workflow_selection["dominance_reason"],
+                        "equivalence_source": ("represented_workflow_routing_profile"),
+                    }
+                )
+                break
+
+    def direct_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (
+            -int(bool(item.get("_ranking_literal_phrase_match"))),
+            -int(item.get("_ranking_component_match_count") or 0),
+            -int(item.get("_ranking_literal_match_count") or 0),
+            str(item.get("name") or "").lower(),
+        )
+
+    def workflow_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (
+            -int(bool(item.get("_ranking_literal_phrase_match"))),
+            -float(item.get("_ranking_semantic_relevance") or 0.0),
+            -int(item.get("_ranking_literal_match_count") or 0),
+            str(item.get("name") or "").lower(),
+        )
+
+    if exact_names:
+        selected_internal = sorted(
+            [*registered_candidates, *workflow_candidates],
+            key=lambda item: (
+                0 if item.get("kind") == "registered_tool" else 1,
+                str(item.get("name") or "").lower(),
+            ),
+        )
+    else:
+        frontier_direct = sorted(
+            [item for item in registered_candidates if item.get("query_match") is True],
+            key=direct_sort_key,
+        )
+        frontier_workflows = sorted(
+            [
+                item
+                for item in workflow_candidates
+                if item.get("query_match") is True
+                and str(item.get("name") or "").lower() not in dominated_names
+            ],
+            key=workflow_sort_key,
+        )
+        outside_frontier_direct = sorted(
+            [
+                item
+                for item in registered_candidates
+                if item.get("query_match") is not True
+            ],
+            key=direct_sort_key,
+        )
+        outside_frontier_workflows = sorted(
+            [
+                item
+                for item in workflow_candidates
+                if item.get("query_match") is not True
+            ],
+            key=workflow_sort_key,
+        )
+        dominated_workflows = sorted(
+            [
+                item
+                for item in workflow_candidates
+                if str(item.get("name") or "").lower() in dominated_names
+            ],
+            key=workflow_sort_key,
+        )
+        selected_internal = [
+            *_interleave_capability_frontier(
+                frontier_direct,
+                frontier_workflows,
+            ),
+            *outside_frontier_direct,
+            *outside_frontier_workflows,
+            *dominated_workflows,
+        ]
+
+    selected = [_strip_capability_ranking_metadata(item) for item in selected_internal]
+    matched_total = sum(1 for item in selected if item.get("query_match") is True)
+    frontier_total = sum(
+        1
+        for item in selected
+        if item.get("query_match") is True
+        and (
+            not isinstance(item.get("selection"), Mapping)
+            or item["selection"].get("frontier_status") != "declared_dominated"
+        )
+    )
     page = selected[offset : offset + limit]
     next_offset = offset + len(page)
     return {
@@ -1652,9 +2199,24 @@ def _capability_catalogue(
         "registered_tool_total": registered_delegated_total,
         "represented_workflow_total": represented_workflow_total,
         "matched_total": matched_total,
-        "ranking": (
-            "represented_semantic_relevance_then_literal_query_match_then_name"
-        ),
+        "frontier_total": frontier_total,
+        "dominated_total": len(dominated_capabilities),
+        "ranking": "minimum_adequate_cost_sensitive_frontier",
+        "selection_policy": {
+            "schema_version": _CAPABILITY_SELECTION_POLICY_SCHEMA_VERSION,
+            "semantic_adequacy_owner": "adaptive_model",
+            "mechanical_dominance": "declared_equivalence_only",
+            "cost_rule": (
+                "compare_declared_cost_only_after_material_outcome_and_"
+                "evidence_adequacy"
+            ),
+            "frontier_order": (
+                "interleave_direct_and_workflow_candidates_with_lower_"
+                "orchestration_cost_first"
+            ),
+            "representedness_priority": False,
+        },
+        "dominated_capabilities": dominated_capabilities,
         "catalogue_scope": (
             "requested_exact_names"
             if exact_names
@@ -2274,6 +2836,8 @@ def execute_adaptive_turn(
     delegated_lookup = {name.lower(): name for name in delegated_names}
     workflow_capabilities_by_name: dict[str, Any] = {}
     latest_workflow_discovery: dict[str, Any] | None = None
+    catalogued_capabilities_by_name: dict[str, dict[str, Any]] = {}
+    latest_capability_selection_policy: dict[str, Any] | None = None
     available_tools = _tool_definitions()
     final_synthesis_tools = [
         tool
@@ -3342,6 +3906,16 @@ def execute_adaptive_turn(
                                         max(1, requested_workflow_limit),
                                     ),
                                     timeout_seconds=remaining_discovery_seconds,
+                                    registered_capability_categories={
+                                        name: str(definition.category).strip().lower()
+                                        for name in delegated_names
+                                        if (
+                                            definition := gateway.get_method_definition(
+                                                name
+                                            )
+                                        )
+                                        is not None
+                                    },
                                 )
                             )
                         except Exception as exc:  # noqa: BLE001
@@ -3369,6 +3943,29 @@ def execute_adaptive_turn(
                             workflow_capabilities_by_name.values()
                         ),
                         workflow_discovery=latest_workflow_discovery,
+                    )
+                    raw_catalogued_capabilities = output.get("capabilities")
+                    if isinstance(
+                        raw_catalogued_capabilities, Sequence
+                    ) and not isinstance(
+                        raw_catalogued_capabilities,
+                        (str, bytes, bytearray),
+                    ):
+                        for raw_capability in raw_catalogued_capabilities:
+                            if not isinstance(raw_capability, Mapping):
+                                continue
+                            catalogued_name = str(
+                                raw_capability.get("name") or ""
+                            ).strip()
+                            if catalogued_name:
+                                catalogued_capabilities_by_name[
+                                    catalogued_name.lower()
+                                ] = dict(raw_capability)
+                    raw_selection_policy = output.get("selection_policy")
+                    latest_capability_selection_policy = (
+                        dict(raw_selection_policy)
+                        if isinstance(raw_selection_policy, Mapping)
+                        else None
                     )
                 else:
                     output = _error_payload(
@@ -4281,6 +4878,71 @@ def execute_adaptive_turn(
                                 invocation[receipt_key] = receipt_value
                 if transport_metadata:
                     invocation["transport"] = transport_metadata
+                catalogued_capability = catalogued_capabilities_by_name.get(
+                    canonical_name.lower()
+                )
+                if isinstance(catalogued_capability, Mapping):
+                    for profile_key in (
+                        "plan_profile",
+                        "effect_profile",
+                        "selection",
+                    ):
+                        profile_value = catalogued_capability.get(profile_key)
+                        if isinstance(profile_value, Mapping):
+                            invocation[profile_key] = dict(profile_value)
+                actual_cost = {
+                    key: transport_metadata.get(key)
+                    for key in (
+                        "duration_ms",
+                        "queue_duration_ms",
+                        "handler_duration_ms",
+                        "transport_overhead_ms",
+                    )
+                    if transport_metadata.get(key) is not None
+                }
+                aux_calls.append(
+                    {
+                        "type": "adaptive_turn_capability_selection",
+                        "schema_version": (_CAPABILITY_SELECTION_TRACE_SCHEMA_VERSION),
+                        "capability_name": canonical_name,
+                        "capability_kind": contained_result.capability_kind,
+                        "execution_method": execution_method_name,
+                        "selection_policy": dict(
+                            latest_capability_selection_policy or {}
+                        ),
+                        "plan_profile": (
+                            dict(invocation["plan_profile"])
+                            if isinstance(
+                                invocation.get("plan_profile"),
+                                Mapping,
+                            )
+                            else None
+                        ),
+                        "effect_profile": (
+                            dict(invocation["effect_profile"])
+                            if isinstance(
+                                invocation.get("effect_profile"),
+                                Mapping,
+                            )
+                            else None
+                        ),
+                        "selection": (
+                            dict(invocation["selection"])
+                            if isinstance(
+                                invocation.get("selection"),
+                                Mapping,
+                            )
+                            else None
+                        ),
+                        "actual_cost": actual_cost,
+                        "status": status,
+                        **(
+                            {"effect_status": effect_status}
+                            if effect_status is not None
+                            else {}
+                        ),
+                    }
+                )
                 tool_invocations.append(invocation)
                 _emit(
                     progress_tracker,

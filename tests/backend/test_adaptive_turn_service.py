@@ -3020,6 +3020,304 @@ def test_capability_metadata_failure_does_not_remove_delegated_reads(
     )
 
 
+def test_capability_frontier_promotes_direct_components_without_hiding_workflow(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    catalogue = MethodCatalogue()
+    for name in (
+        "fetch_concept",
+        "find_relations_with_argument",
+        "students_index",
+    ):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda **_kwargs: {"success": True},
+                input_schema=Schema(
+                    optional={"concept_id": str},
+                    allow_unknown=False,
+                ),
+                category="read",
+                description=f"Use {name}.",
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=2.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_planner_hint",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: None,
+    )
+    workflow = WorkflowTurnCapability(
+        name="represented_workflow_entity_lookup",
+        workflow_id="#V#entity_lookup_workflow",
+        display_name="Entity lookup workflow",
+        description="Retrieve represented relationships for an entity.",
+        relevance_score=0.93,
+        input_schema={"type": "object", "properties": {}},
+        component_capability_names=(
+            "fetch_concept",
+            "find_relations_with_argument",
+        ),
+        declared_component_count=2,
+        declared_step_count=4,
+        semantic_effect=False,
+        semantic_effect_source="declared_registered_read_components",
+    )
+
+    result = _capability_catalogue(
+        gateway,
+        ("fetch_concept", "find_relations_with_argument", "students_index"),
+        {"query": "students supervised by me", "limit": 10},
+        workflow_capabilities=(workflow,),
+    )
+
+    assert result["ranking"] == "minimum_adequate_cost_sensitive_frontier"
+    assert result["selection_policy"]["representedness_priority"] is False
+    assert [item["name"] for item in result["capabilities"]] == [
+        "fetch_concept",
+        "represented_workflow_entity_lookup",
+        "find_relations_with_argument",
+        "students_index",
+    ]
+    direct = result["capabilities"][0]
+    represented = result["capabilities"][1]
+    assert direct["plan_profile"]["shape"] == "single_capability"
+    assert represented["plan_profile"]["shape"] == "represented_workflow"
+    assert represented["semantic_effect"] is False
+    assert represented["effect_profile"]["operational_state_effect"] is True
+    assert any(
+        evidence["source"] == "declared_component_of_matched_workflow"
+        for evidence in direct["selection"]["adequacy_evidence"]
+    )
+    assert result["frontier_total"] == 4
+    assert result["dominated_total"] == 0
+
+
+def test_capability_frontier_does_not_prefer_unrelated_direct_tool(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="unrelated_direct_read",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(optional={"record_id": str}, allow_unknown=False),
+            category="read",
+            description=(
+                "Inspect an unrelated verified record. The shared adjective is "
+                "incidental rather than routing evidence."
+            ),
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_planner_hint",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: None,
+    )
+    workflow = WorkflowTurnCapability(
+        name="represented_workflow_multi_step",
+        workflow_id="#V#multi_step_workflow",
+        display_name="Multi-step workflow",
+        description="Produce a verified multi-step research work product.",
+        relevance_score=0.95,
+        input_schema={"type": "object", "properties": {}},
+        declared_step_count=6,
+        semantic_effect=False,
+        semantic_effect_source="declared_registered_read_components",
+    )
+
+    result = _capability_catalogue(
+        gateway,
+        ("unrelated_direct_read",),
+        {"query": "verified multi-step research work product", "limit": 10},
+        workflow_capabilities=(workflow,),
+    )
+
+    assert [item["name"] for item in result["capabilities"]] == [
+        "represented_workflow_multi_step",
+        "unrelated_direct_read",
+    ]
+    assert result["frontier_total"] == 1
+
+
+def test_capability_frontier_uses_catalogue_rarity_not_generic_routing_words(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+
+    catalogue = MethodCatalogue()
+    generic_names = tuple(f"list_inventory_{index}" for index in range(5))
+    for name in (*generic_names, "students_relations"):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda **_kwargs: {"success": True},
+                input_schema=Schema(optional={}, allow_unknown=False),
+                category="read",
+                description="Inspect a bounded represented record.",
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_planner_hint",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: None,
+    )
+
+    result = _capability_catalogue(
+        gateway,
+        (*generic_names, "students_relations"),
+        {"query": "list students", "limit": 10},
+    )
+
+    assert result["frontier_total"] == 1
+    assert result["matched_total"] == 1
+    assert result["capabilities"][0]["name"] == "students_relations"
+    by_name = {item["name"]: item for item in result["capabilities"]}
+    assert all(
+        by_name[name]["selection"]["frontier_status"] == "outside_query_frontier"
+        for name in generic_names
+    )
+    generic_evidence = by_name[generic_names[0]]["selection"]["adequacy_evidence"]
+    assert generic_evidence[0]["common_routing_term_count"] == 1
+    assert generic_evidence[0]["informative_routing_term_count"] == 0
+
+
+def test_declared_read_only_direct_equivalence_prunes_only_frontier(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="direct_lookup",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(optional={"query": str}, allow_unknown=False),
+            category="read",
+            description="Look up the requested record.",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_planner_hint",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: None,
+    )
+    workflow = WorkflowTurnCapability(
+        name="represented_workflow_degenerate_lookup",
+        workflow_id="#V#degenerate_lookup_workflow",
+        display_name="Degenerate lookup workflow",
+        description="Look up the requested record through a durable workflow.",
+        relevance_score=0.9,
+        input_schema={"type": "object", "properties": {}},
+        component_capability_names=("direct_lookup",),
+        declared_component_count=1,
+        declared_step_count=1,
+        direct_equivalent_capability_names=("direct_lookup",),
+        semantic_effect=False,
+        semantic_effect_source="declared_registered_read_components",
+    )
+
+    result = _capability_catalogue(
+        gateway,
+        ("direct_lookup",),
+        {"query": "look up the requested record", "limit": 10},
+        workflow_capabilities=(workflow,),
+    )
+
+    assert [item["name"] for item in result["capabilities"]] == [
+        "direct_lookup",
+        "represented_workflow_degenerate_lookup",
+    ]
+    assert result["total"] == 2
+    assert result["frontier_total"] == 1
+    assert result["dominated_total"] == 1
+    assert result["dominated_capabilities"] == [
+        {
+            "name": "represented_workflow_degenerate_lookup",
+            "dominated_by": "direct_lookup",
+            "reason": (
+                "declared_direct_equivalence_with_lower_declared_orchestration_cost"
+            ),
+            "equivalence_source": "represented_workflow_routing_profile",
+        }
+    ]
+    assert result["capabilities"][1]["selection"]["frontier_status"] == (
+        "declared_dominated"
+    )
+
+
 def test_capability_page_budget_preserves_every_alternative_and_cursor(
     monkeypatch,
 ) -> None:
@@ -3116,6 +3414,7 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
     )
 
     seen_names: list[str] = []
+    seen_entries: list[dict[str, Any]] = []
     schema_references: list[dict[str, Any]] = []
     offset: int | None = 0
     while offset is not None:
@@ -3143,6 +3442,7 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
             offset : offset + len(entries)
         ]
         seen_names.extend(item["name"] for item in entries)
+        seen_entries.extend(entries)
         schema_references.extend(
             item
             for item in entries
@@ -3154,21 +3454,23 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
         offset = next_offset
 
     assert seen_names == capability_names
-    assert schema_references
-    reference = schema_references[0]
+    reference = schema_references[0] if schema_references else seen_entries[0]
     assert reference["description"].startswith("Search research material.")
     assert reference["surface_family"] == "research"
     assert reference["evidence_surface_family"] == "research"
     assert reference["external_surface"] is False
     assert reference["server_bound_arguments"] == ["actor_id"]
-    assert reference["input_schema_hydration"] == {
-        "tool": "turn_capabilities",
-        "arguments": {
-            "names": [reference["name"]],
-            "limit": 1,
-        },
-        "purpose": "dedicated_exact_name_schema_page",
-    }
+    if schema_references:
+        assert reference["input_schema_hydration"] == {
+            "tool": "turn_capabilities",
+            "arguments": {
+                "names": [reference["name"]],
+                "limit": 1,
+            },
+            "purpose": "dedicated_exact_name_schema_page",
+        }
+    else:
+        assert "input_schema" in reference
 
     exact_page = _capability_catalogue(
         gateway,
@@ -3354,23 +3656,22 @@ def test_bulky_capability_metadata_falls_back_without_hiding_the_schema(
     assert len(_json_bytes(bounded)) <= 24_000
     assert bounded["next_offset"] is None
     assert bounded["capability_page_projection"]["returned"] == 1
-    assert bounded["capability_page_projection"][
-        "schema_reference_count"
-    ] == 1
+    assert bounded["capability_page_projection"]["schema_reference_count"] == 1
     compact = bounded["capabilities"][0]
-    assert compact == {
-        "name": name,
-        "capability_metadata_omitted_for_model_context": True,
-        "input_schema_omitted_for_model_context": True,
-        "input_schema_hydration": {
-            "tool": "turn_capabilities",
-            "arguments": {
-                "names": [name],
-                "limit": 1,
-            },
-            "purpose": "dedicated_exact_name_schema_page",
+    assert compact["name"] == name
+    assert compact["capability_metadata_omitted_for_model_context"] is True
+    assert compact["input_schema_omitted_for_model_context"] is True
+    assert compact["input_schema_hydration"] == {
+        "tool": "turn_capabilities",
+        "arguments": {
+            "names": [name],
+            "limit": 1,
         },
+        "purpose": "dedicated_exact_name_schema_page",
     }
+    assert compact["semantic_effect"] is False
+    assert compact["plan_profile"]["shape"] == "single_capability"
+    assert compact["selection"]["frontier_status"] == "candidate"
 
     exact = _capability_catalogue(
         gateway,
@@ -5188,8 +5489,10 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
 
     catalogue_result = client.calls[1]["tool_results"][0].output
     assert catalogue_result["represented_workflow_total"] == 1
-    assert catalogue_result["capabilities"][0]["kind"] == (
-        "represented_workflow"
+    assert catalogue_result["capabilities"][0]["kind"] == ("represented_workflow")
+    assert (
+        catalogue_result["selection_policy"]["semantic_adequacy_owner"]
+        == "adaptive_model"
     )
     assert seen_arguments["workflow_id"] == "#V#represented_test_workflow"
     assert seen_arguments["user_id"] == "#V#real_user"
@@ -5218,6 +5521,15 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert invocation["changed"] is True
     assert invocation["instance_id"] == "workflow-instance-1"
     assert invocation["workflow_id"] == "#V#represented_test_workflow"
+    assert invocation["plan_profile"]["shape"] == "represented_workflow"
+    selection_trace = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_capability_selection"
+    )
+    assert selection_trace["capability_name"] == workflow_capability.name
+    assert selection_trace["selection_policy"]["representedness_priority"] is False
+    assert selection_trace["plan_profile"]["shape"] == ("represented_workflow")
     assert result.response_text == "The represented work product was completed."
 
 

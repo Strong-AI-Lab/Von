@@ -458,6 +458,9 @@ Current fields:
 - `role`: `execution` | `authoring` | `maintenance`
 - `authoring_intent_required`: bool
 - `prefer_existing_capability`: bool
+- `direct_equivalent_capability_names`: optional ordered list of registered
+  capabilities that are represented as producing the same material outcome and
+  evidence as the workflow with lower orchestration cost
 
 Current override-policy rule:
 
@@ -470,6 +473,22 @@ Current override-policy rule:
 - when no discovered launchable custom workflow remains suitable after applying
   semantic-fit and role checks, routing MUST preserve the non-custom fallback
   path and record an explicit decline reason in routing diagnostics.
+
+Ordinary-turn capability selection treats direct calls, small compositions,
+and represented workflows as plans on one bounded frontier. The adaptive model
+owns semantic adequacy: it may prefer a workflow when composition, verification,
+durability, governance, or recovery is material, but representedness alone is
+not a quality signal. Actor-visible registered tools declared by a matched
+workflow are exposed as plausible simpler component plans without claiming that
+one component is equivalent to the whole workflow.
+
+Mechanical dominance is deliberately narrower. A read-only workflow may be
+removed from the active frontier only when its authoritative routing profile
+explicitly names an actor-visible read-only direct equivalent. The workflow
+remains addressable by exact name and visible in the complete catalogue for
+inspection. Do not use `direct_equivalent_capability_names` for an approximate
+shortcut, a component that omits material evidence, or merely because a
+workflow is slow; those cases remain semantic decisions and evaluation inputs.
 
 Current fallback discipline:
 

@@ -37,6 +37,15 @@ def test_discovery_exposes_only_executable_routing_eligible_workflows(
                     "is_executable": True,
                     "routing_eligible": True,
                     "match_source": "semantic",
+                    "routing_index_metadata": {
+                        "required_tools": [
+                            "fetch_concept",
+                            "find_relations_with_argument",
+                        ],
+                        "compact_executability": {
+                            "step_count": 3,
+                        },
+                    },
                 },
                 {
                     "concept_id": "#V#draft_workflow",
@@ -88,17 +97,37 @@ def test_discovery_exposes_only_executable_routing_eligible_workflows(
         user_concept_id="#V#user",
         organisation_concept_id="#V#org",
         turn_id="turn-123",
+        registered_capability_categories={
+            "fetch_concept": "read",
+            "find_relations_with_argument": "read",
+        },
     )
 
-    assert [item.workflow_id for item in capabilities] == [
-        "#V#usable_workflow"
-    ]
+    assert [item.workflow_id for item in capabilities] == ["#V#usable_workflow"]
     capability = capabilities[0]
     assert capability.name.startswith("represented_workflow_")
     inputs_schema = capability.input_schema["properties"]["inputs"]
     assert list(inputs_schema["properties"]) == ["record_id"]
     assert inputs_schema["required"] == ["record_id"]
     assert "prompt" in capability.input_schema["x-von-server-provided-inputs"]
+    assert capability.semantic_effect is False
+    assert capability.semantic_effect_source == ("declared_registered_read_components")
+    catalogue_entry = capability.to_catalogue_entry()
+    assert catalogue_entry["semantic_effect"] is False
+    assert catalogue_entry["effect_profile"] == {
+        "schema_version": "capability_effect_profile.v1",
+        "semantic_effect": False,
+        "semantic_effect_source": "declared_registered_read_components",
+        "operational_state_effect": True,
+        "operational_state_effect_reason": (
+            "workflow invocation creates or advances a durable instance"
+        ),
+    }
+    assert catalogue_entry["plan_profile"]["component_capability_names"] == [
+        "fetch_concept",
+        "find_relations_with_argument",
+    ]
+    assert catalogue_entry["plan_profile"]["cost_profile"]["declared_step_count"] == 3
     assert diagnostic["status"] == "completed"
     assert diagnostic["match_count"] == 1
     assert diagnostic["candidate_count"] == 3
@@ -129,6 +158,71 @@ def test_discovery_requires_authenticated_actor_without_querying_index(
 
     assert capabilities == []
     assert diagnostic["status"] == "authenticated_actor_required"
+
+
+def test_discovery_marks_declared_write_workflow_without_hiding_unknowns(
+    monkeypatch,
+):
+    from src.backend.services.workflow_turn_capability_service import (
+        discover_turn_workflow_capabilities,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        lambda *_args, **_kwargs: {
+            "matches": [
+                {
+                    "concept_id": "#V#write_workflow",
+                    "name": "Write workflow",
+                    "description": "Create a represented work product.",
+                    "relevance_score": 0.9,
+                    "is_executable": True,
+                    "routing_eligible": True,
+                    "routing_index_metadata": {
+                        "required_tools": ["create_concepts"],
+                    },
+                },
+                {
+                    "concept_id": "#V#unknown_workflow",
+                    "name": "Unknown workflow",
+                    "description": "Run an unclassified represented process.",
+                    "relevance_score": 0.8,
+                    "is_executable": True,
+                    "routing_eligible": True,
+                    "routing_index_metadata": {
+                        "required_tools": ["unavailable_private_operation"],
+                    },
+                },
+            ],
+            "candidate_count": 2,
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.vontology_loader.resolve_workflow_launch_input_contract",
+        lambda _workflow_id: (None, None),
+    )
+
+    capabilities, _diagnostic = discover_turn_workflow_capabilities(
+        "create or inspect a represented work product",
+        namespace="#V#user@org",
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        turn_id="turn-effects",
+        registered_capability_categories={
+            "create_concepts": "write",
+        },
+    )
+
+    by_id = {item.workflow_id: item for item in capabilities}
+    assert by_id["#V#write_workflow"].semantic_effect is True
+    assert by_id["#V#write_workflow"].semantic_effect_source == (
+        "declared_registered_write_component"
+    )
+    assert by_id["#V#unknown_workflow"].semantic_effect is None
+    unknown_entry = by_id["#V#unknown_workflow"].to_catalogue_entry()
+    assert unknown_entry["semantic_effect"] is None
+    assert unknown_entry["effect_profile"]["operational_state_effect"] is True
 
 
 def test_execution_arguments_bind_workflow_and_actor_server_side():
