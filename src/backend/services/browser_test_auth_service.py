@@ -655,6 +655,27 @@ def _chat_fixture_specs() -> Iterable[dict[str, Any]]:
         {
             "session_id": "browser-fixture-user-view-state",
             "session_name": "Authenticated user-view fixture sanity check",
+            "conversation_situation": {
+                "text": (
+                    "The user and Von are validating the authenticated browser "
+                    "experience. Their shared goal is to keep saved conversations, "
+                    "unread messages, organisation context, and the conversation "
+                    "situation inspectable at desktop and mobile widths. Refreshing "
+                    "this browser-test fixture must not duplicate its durable records."
+                ),
+                "source_request_id": "browser_user_view.v1:situation",
+            },
+            "conversation_observations": (
+                {
+                    "observation_id": "browser_user_view.v1:fixture-ready",
+                    "kind": "fixture_state",
+                    "observed_at_utc": _BROWSER_TEST_FIXTURE_STABLE_SEEDED_AT,
+                    "capability_name": "authenticated_browser_user_view",
+                    "terminal_status": "ready",
+                    "outcome_finality": "fixture",
+                    "changed": False,
+                },
+            ),
             "history": (
                 {
                     "fixture_entry_id": "user-view-fixture-user-1",
@@ -793,7 +814,11 @@ def _ensure_fixture_chat_session(
     with bypass_access_control():
         doc = coll.find_one(
             {"user_id": user_concept_id, "session_id": session_id},
-            {"history.fixture_entry_id": 1},
+            {
+                "history.fixture_entry_id": 1,
+                "conversation_situation": 1,
+                "conversation_observations.observation_id": 1,
+            },
         )
 
     existing_ids: set[str] = set()
@@ -822,10 +847,62 @@ def _ensure_fixture_chat_session(
         )
         created_entries += 1
 
+    situation_updated = False
+    situation_spec = spec.get("conversation_situation")
+    if isinstance(situation_spec, Mapping):
+        situation_text = str(situation_spec.get("text") or "").strip()
+        existing_situation = (
+            doc.get("conversation_situation") if isinstance(doc, Mapping) else None
+        )
+        existing_text = (
+            str(existing_situation.get("text") or "").strip()
+            if isinstance(existing_situation, Mapping)
+            else ""
+        )
+        existing_revision = (
+            existing_situation.get("revision")
+            if isinstance(existing_situation, Mapping)
+            and isinstance(existing_situation.get("revision"), int)
+            and not isinstance(existing_situation.get("revision"), bool)
+            else 0
+        )
+        if situation_text and situation_text != existing_text:
+            result = chat_history_service.set_chat_history_conversation_situation(
+                user_id=user_concept_id,
+                session_id=session_id,
+                text=situation_text,
+                expected_revision=max(0, existing_revision),
+                source="browser_test_fixture",
+                updated_by=VON_SYSTEM_ID,
+                namespace=namespace,
+                include_legacy=False,
+                source_request_id=str(
+                    situation_spec.get("source_request_id")
+                    or f"{_BROWSER_TEST_FIXTURE_ID}:situation"
+                ),
+            )
+            situation_updated = bool(result.get("updated"))
+
+    observations_added = 0
+    for observation in spec.get("conversation_observations") or ():
+        if not isinstance(observation, dict):
+            continue
+        result = chat_history_service.append_chat_history_conversation_observation(
+            user_id=user_concept_id,
+            session_id=session_id,
+            observation=observation,
+            namespace=namespace,
+            include_legacy=False,
+        )
+        if result.get("updated"):
+            observations_added += 1
+
     return {
         "session_id": session_id,
         "session_name": session_name,
         "created_entries": created_entries,
+        "situation_updated": situation_updated,
+        "observations_added": observations_added,
     }
 
 

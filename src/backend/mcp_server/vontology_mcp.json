@@ -228,7 +228,7 @@
         },
         {
             "name": "chat_history_get_segments",
-            "description": "Fetch the stored conversation transcript in segment form, with optional embedded assistant llm_debug_data and history_location locators. Prefer conversation_ref over raw session_id on model-driven paths.",
+            "description": "Fetch the bounded stored conversation carrier: transcript segments, inspectable situation text, exact observations, and optional assistant llm_debug_data with history_location locators. Prefer conversation_ref over raw session_id on model-driven paths; use offset/limit when a delegated response is paged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -277,6 +277,12 @@
                     },
                     "include_legacy": {
                         "type": "boolean"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "limit": {
+                        "type": "integer"
                     }
                 },
                 "required": [],
@@ -751,7 +757,7 @@
         },
         {
             "name": "conversation_telemetry_get_locator",
-            "description": "Build the compact conversation telemetry locator so agents can fetch the same stored conversation/turn diagnostics without pasting large JSON blobs. Prefer conversation_ref over raw session_id on model-driven paths.",
+            "description": "Build compact conversation telemetry and carrier-freshness metadata, with an authority-bound descriptor for fetching the full conversation carrier through chat_history_get_segments. Prefer conversation_ref over raw session_id on model-driven paths.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -16125,6 +16125,64 @@ def _turn_execution_namespace_coverage_report(**kwargs):
     )
 
 
+_DELEGATED_TELEMETRY_STDIO_MAX_RESPONSE_CHARS_DEFAULT = 100_000
+_DELEGATED_TELEMETRY_STDIO_MAX_RESPONSE_CHARS_MIN = 10_000
+_DELEGATED_TELEMETRY_PAGE_CONTEXT_FIELDS = (
+    "request_id",
+    "history_location",
+    "read_delegation",
+    "provenance",
+    "session_id",
+    "chat_session_id",
+    "history_owner_user_id",
+    "requested_user_id",
+    "namespace",
+    "access_mode",
+    "identifier_binding",
+)
+
+
+def _delegated_telemetry_json_default(value: Any) -> Any:
+    """Return a stable JSON representation for persisted BSON/Python values."""
+
+    if isinstance(value, datetime):
+        normalised = value
+        if normalised.tzinfo is None:
+            normalised = normalised.replace(tzinfo=timezone.utc)
+        return normalised.isoformat()
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=lambda item: str(item))
+    return str(value)
+
+
+def _delegated_telemetry_stdio_max_response_chars() -> int:
+    """Mirror the stdio text guard without importing its catalogue consumer."""
+
+    raw_value = os.getenv("VON_MCP_STDIO_MAX_RESPONSE_CHARS")
+    if raw_value:
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            parsed = _DELEGATED_TELEMETRY_STDIO_MAX_RESPONSE_CHARS_DEFAULT
+        return max(_DELEGATED_TELEMETRY_STDIO_MAX_RESPONSE_CHARS_MIN, parsed)
+    return _DELEGATED_TELEMETRY_STDIO_MAX_RESPONSE_CHARS_DEFAULT
+
+
+def _delegated_telemetry_stdio_response_chars(payload: Mapping[str, Any]) -> int:
+    """Measure the exact JSON text length checked by the stdio response guard."""
+
+    import json
+
+    return len(
+        json.dumps(
+            dict(payload),
+            indent=2,
+            ensure_ascii=True,
+            default=_delegated_telemetry_json_default,
+        )
+    )
+
+
 def _bounded_delegated_telemetry_payload(
     payload: Mapping[str, Any],
     *,
@@ -16162,39 +16220,85 @@ def _bounded_delegated_telemetry_payload(
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        default=_delegated_telemetry_json_default,
     )
+    canonical_payload = json.loads(canonical_json)
     total_chars = len(canonical_json)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    end = min(total_chars, offset + limit)
-    page = {
-        "schema_version": "bounded_telemetry_json_page.v1",
-        "artifact_kind": artifact_kind,
-        "encoding": "canonical_json_ascii",
-        "sha256": digest,
-        "offset": offset,
-        "limit": limit,
-        "returned_chars": max(0, end - offset),
-        "total_chars": total_chars,
-        "has_more": end < total_chars,
-        "next_offset": end if end < total_chars else None,
-        "json_chunk": canonical_json[offset:end] if offset <= total_chars else "",
-    }
-    if preserve_inline_below_limit and offset == 0 and total_chars <= limit:
-        return {
-            **dict(payload),
-            "bounded_read": {
-                key: value for key, value in page.items() if key != "json_chunk"
-            },
-        }
-    return {
+    response_limit = _delegated_telemetry_stdio_max_response_chars()
+
+    page_context: dict[str, Any] = {
         "success": True,
         "artifact_kind": artifact_kind,
-        "request_id": payload.get("request_id"),
-        "history_location": payload.get("history_location"),
-        "read_delegation": payload.get("read_delegation"),
-        "provenance": payload.get("provenance"),
-        "bounded_read": page,
     }
+    for field_name in _DELEGATED_TELEMETRY_PAGE_CONTEXT_FIELDS:
+        if field_name in canonical_payload or field_name in {
+            "request_id",
+            "history_location",
+            "read_delegation",
+            "provenance",
+        }:
+            page_context[field_name] = canonical_payload.get(field_name)
+
+    def _page_for_end(end: int) -> dict[str, Any]:
+        return {
+            "schema_version": "bounded_telemetry_json_page.v1",
+            "artifact_kind": artifact_kind,
+            "encoding": "canonical_json_ascii",
+            "sha256": digest,
+            "offset": offset,
+            "limit": limit,
+            "returned_chars": max(0, end - offset),
+            "total_chars": total_chars,
+            "has_more": end < total_chars,
+            "next_offset": end if end < total_chars else None,
+            "json_chunk": (canonical_json[offset:end] if offset <= total_chars else ""),
+        }
+
+    def _paged_response_for_end(end: int) -> dict[str, Any]:
+        return {
+            **page_context,
+            "bounded_read": _page_for_end(end),
+        }
+
+    if preserve_inline_below_limit and offset == 0 and total_chars <= limit:
+        inline_page = _page_for_end(total_chars)
+        inline_payload = {
+            **canonical_payload,
+            "bounded_read": {
+                key: value for key, value in inline_page.items() if key != "json_chunk"
+            },
+        }
+        if _delegated_telemetry_stdio_response_chars(inline_payload) <= response_limit:
+            return inline_payload
+
+    requested_end = min(total_chars, offset + limit)
+    requested_page = _paged_response_for_end(requested_end)
+    if _delegated_telemetry_stdio_response_chars(requested_page) <= response_limit:
+        return requested_page
+
+    low = min(offset, total_chars)
+    high = requested_end
+    while low < high:
+        candidate_end = (low + high + 1) // 2
+        candidate_page = _paged_response_for_end(candidate_end)
+        if _delegated_telemetry_stdio_response_chars(candidate_page) <= response_limit:
+            low = candidate_end
+        else:
+            high = candidate_end - 1
+
+    if low <= offset and offset < total_chars:
+        return {
+            **page_context,
+            "success": False,
+            "error_code": "telemetry_page_envelope_too_large",
+            "message": (
+                "Authority-bound telemetry page metadata exceeds the configured "
+                "stdio response guard."
+            ),
+            "response_guard_chars": response_limit,
+        }
+    return _paged_response_for_end(low)
 
 
 def _chat_history_get_segments(**kwargs):
@@ -16258,6 +16362,7 @@ def _chat_history_get_segments(**kwargs):
             include_debug=include_debug,
             history_tail_limit=effective_kwargs.get("history_tail_limit"),
             return_meta=True,
+            include_conversation_state=True,
         )
     except chat_history_service.ChatHistoryServiceError as exc:
         return make_error_response(
@@ -16274,6 +16379,26 @@ def _chat_history_get_segments(**kwargs):
     else:
         segments, meta = result, {"history_truncated": False}
 
+    meta_mapping = meta if isinstance(meta, Mapping) else {}
+    raw_situation = meta_mapping.get("conversation_situation")
+    conversation_situation = (
+        dict(raw_situation) if isinstance(raw_situation, Mapping) else None
+    )
+    raw_observations = meta_mapping.get("conversation_observations")
+    conversation_observations = (
+        list(raw_observations) if isinstance(raw_observations, list) else []
+    )
+    raw_observation_state = meta_mapping.get("conversation_observation_state")
+    if isinstance(raw_observation_state, Mapping):
+        conversation_observation_state = dict(raw_observation_state)
+    else:
+        conversation_observation_state = {
+            "schema_version": "conversation_observation_state.v1",
+            "retained_count": len(conversation_observations),
+            "total_count": len(conversation_observations),
+            "omitted_count": 0,
+            "retention_limit": chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS,
+        }
     payload = {
         "success": True,
         "session_id": access.get("session_id"),
@@ -16285,17 +16410,42 @@ def _chat_history_get_segments(**kwargs):
         "identifier_binding": access.get("identifier_binding"),
         "segments": segments,
         "segment_count": len(segments) if isinstance(segments, list) else 0,
-        "history_truncated": bool(
-            meta.get("history_truncated") if isinstance(meta, Mapping) else False
-        ),
+        "history_truncated": bool(meta_mapping.get("history_truncated", False)),
+        "conversation_situation": conversation_situation,
+        "conversation_observations": conversation_observations,
+        "conversation_observation_state": conversation_observation_state,
     }
     if authorisation.get("delegated"):
         payload["read_delegation"] = authorisation.get("read_delegation")
-    return _with_rag_provenance(
+    provenanced_payload = _with_rag_provenance(
         payload=payload,
         item_kind="chat_history_segments",
         source_system="mongo.chat_history",
     )
+    bounded_payload = _bounded_delegated_telemetry_payload(
+        provenanced_payload,
+        arguments=effective_kwargs,
+        delegated=bool(authorisation.get("delegated")),
+        artifact_kind="chat_history_segments",
+        preserve_inline_below_limit=True,
+    )
+    if authorisation.get("delegated"):
+        for field_name in (
+            "session_id",
+            "chat_session_id",
+            "history_owner_user_id",
+            "requested_user_id",
+            "namespace",
+            "access_mode",
+            "identifier_binding",
+            "read_delegation",
+        ):
+            if field_name in provenanced_payload:
+                bounded_payload.setdefault(
+                    field_name,
+                    provenanced_payload[field_name],
+                )
+    return bounded_payload
 
 
 def _chat_history_get_debug_entry(**kwargs):
@@ -35704,6 +35854,8 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
                     "history_tail_limit": (int, type(None)),
                     "include_debug": (bool,),
                     "include_legacy": (bool,),
+                    "offset": (int,),
+                    "limit": (int,),
                 },
                 allow_unknown=True,
                 description=(
@@ -35714,9 +35866,10 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             output_schema=None,
             category="read",
             description=(
-                "Fetch the stored conversation transcript in segment form, with optional embedded "
-                "assistant llm_debug_data and history_location locators. Prefer conversation_ref "
-                "over raw session_id on model-driven paths."
+                "Fetch the bounded stored conversation carrier: transcript segments, inspectable "
+                "situation text, exact observations, and optional assistant llm_debug_data with "
+                "history_location locators. Prefer conversation_ref over raw session_id on "
+                "model-driven paths; use offset/limit when a delegated response is paged."
             ),
         ),
         MethodDefinition(
@@ -35771,9 +35924,10 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             output_schema=None,
             category="read",
             description=(
-                "Build the compact conversation telemetry locator so agents can fetch the same "
-                "stored conversation/turn diagnostics without pasting large JSON blobs. Prefer "
-                "conversation_ref over raw session_id on model-driven paths."
+                "Build compact conversation telemetry and carrier-freshness metadata, with an "
+                "authority-bound descriptor for fetching the full conversation carrier through "
+                "chat_history_get_segments. Prefer conversation_ref over raw session_id on "
+                "model-driven paths."
             ),
         ),
         MethodDefinition(

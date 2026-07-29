@@ -233,6 +233,9 @@ describe('chat conversation info copy control', () => {
         const payload = JSON.parse(navigator.clipboard.writeText.mock.calls[0][0]);
         expect(payload.mcp_access).toEqual(signedAccess);
         expect(payload.mcp_access.turn_execution_list).toBeUndefined();
+        expect(payload.agent_instructions.steps).toContain(
+            'Call chat_history_get_segments for the bounded conversation-carrier projection, including the shared situation, retained exact observations, observation state, and transcript segments.'
+        );
         expect(payload.retrieval_status).toBe('server_delegation_available');
     });
 });

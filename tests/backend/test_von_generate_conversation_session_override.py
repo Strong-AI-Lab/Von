@@ -264,6 +264,7 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
     events: list[tuple[str, object]] = []
     adaptive_calls: list[dict[str, Any]] = []
     set_calls: list[dict[str, Any]] = []
+    state_calls: list[dict[str, Any]] = []
 
     existing_situation = {
         "text": "We are deciding how to represent the paper.",
@@ -279,16 +280,60 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
             "summary": "The paper representation completed.",
         }
     ]
+    observation_state = {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 1,
+        "total_count": 1,
+        "omitted_count": 0,
+        "retention_limit": 24,
+    }
+    canonical_situation = {
+        "text": "We are representing the paper; its canonical identity is now known.",
+        "revision": 5,
+        "source": "adaptive_turn",
+        "updated_by": "#V#user",
+        "updated_at": "2026-07-29T09:00:00+00:00",
+        "source_request_id": "request-from-turn",
+    }
+    canonical_observations = [
+        *observations,
+        {
+            "observation_id": "identity:paper",
+            "kind": "canonical_read_back",
+            "summary": "The paper identity is available.",
+        },
+    ]
+    canonical_observation_state = {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 2,
+        "total_count": 2,
+        "omitted_count": 0,
+        "retention_limit": 24,
+    }
+
+    def _session_state(**kwargs: Any) -> dict[str, Any]:
+        state_calls.append(dict(kwargs))
+        if len(state_calls) == 1:
+            return {
+                "session_id": kwargs["session_id"],
+                "history": [{"role": "user", "content": "Earlier context"}],
+                "conversation_situation": existing_situation,
+                "conversation_observations": observations,
+                "conversation_observation_state": observation_state,
+            }
+        canonical_situation["source_request_id"] = adaptive_calls[0]["turn_id"]
+        return {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": canonical_situation,
+            "conversation_observations": canonical_observations,
+            "conversation_observation_state": canonical_observation_state,
+        }
 
     monkeypatch.setattr(
         von_routes.chat_history_service,
         "get_chat_history_session_state",
-        lambda **kwargs: {
-            "session_id": kwargs["session_id"],
-            "history": [{"role": "user", "content": "Earlier context"}],
-            "conversation_situation": existing_situation,
-            "conversation_observations": observations,
-        },
+        _session_state,
     )
 
     def _add_message(**kwargs: Any) -> None:
@@ -310,12 +355,13 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
     def _set_situation(**kwargs: Any) -> dict[str, Any]:
         set_calls.append(dict(kwargs))
         events.append(("situation", kwargs["text"]))
+        next_revision = kwargs["expected_revision"] + 1
         return {
             "updated": True,
             "matched": True,
             "conflict": False,
             "expected_revision": kwargs["expected_revision"],
-            "current_revision": kwargs["expected_revision"] + 1,
+            "current_revision": next_revision,
             "session_id": kwargs["session_id"],
         }
 
@@ -336,6 +382,13 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
     )
 
     assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["conversation_situation"] == canonical_situation
+    assert body["conversation_observations"] == canonical_observations
+    assert (
+        body["conversation_observation_state"]
+        == canonical_observation_state
+    )
     assert adaptive_calls[0]["conversation_id"] == "session-situation"
     assert (
         adaptive_calls[0]["conversation_situation"]
@@ -360,6 +413,19 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
             "source_request_id": adaptive_calls[0]["turn_id"],
         }
     ]
+    assert state_calls == [
+        {
+            "user_id": "#V#user",
+            "session_id": "session-situation",
+            "namespace": "#V#user@org",
+        },
+        {
+            "user_id": "#V#user",
+            "session_id": "session-situation",
+            "namespace": "#V#user@org",
+            "include_history": False,
+        },
+    ]
     assistant_event_index = next(
         index
         for index, event in enumerate(events)
@@ -378,21 +444,69 @@ def test_generate_returns_answer_when_situation_revision_conflicts(monkeypatch):
 
     history_calls: list[dict[str, object]] = []
     app = _make_app(monkeypatch, history_calls)
+    state_calls: list[dict[str, Any]] = []
+    initial_observations = [
+        {
+            "observation_id": "turn:start",
+            "kind": "turn_state",
+            "summary": "The turn started from revision 2.",
+        }
+    ]
+    concurrent_observations = [
+        {
+            "observation_id": "turn:concurrent",
+            "kind": "turn_state",
+            "summary": "Another turn updated the shared situation.",
+        }
+    ]
+    concurrent_observation_state = {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 1,
+        "total_count": 3,
+        "omitted_count": 2,
+        "retention_limit": 24,
+    }
+
+    def _session_state(**kwargs: Any) -> dict[str, Any]:
+        state_calls.append(dict(kwargs))
+        if len(state_calls) == 1:
+            return {
+                "session_id": kwargs["session_id"],
+                "history": [],
+                "conversation_situation": {
+                    "text": "Loaded situation",
+                    "revision": 2,
+                    "source": "adaptive_turn",
+                    "updated_by": "#V#user",
+                    "updated_at": "2026-07-29T08:00:00+00:00",
+                },
+                "conversation_observations": initial_observations,
+                "conversation_observation_state": {
+                    "schema_version": "conversation_observation_state.v1",
+                    "retained_count": 1,
+                    "total_count": 1,
+                    "omitted_count": 0,
+                    "retention_limit": 24,
+                },
+            }
+        return {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": {
+                "text": "Concurrently updated situation",
+                "revision": 3,
+                "source": "adaptive_turn",
+                "updated_by": "#V#other",
+                "updated_at": "2026-07-29T08:01:00+00:00",
+            },
+            "conversation_observations": concurrent_observations,
+            "conversation_observation_state": concurrent_observation_state,
+        }
 
     monkeypatch.setattr(
         von_routes.chat_history_service,
         "get_chat_history_session_state",
-        lambda **kwargs: {
-            "session_id": kwargs["session_id"],
-            "history": [],
-            "conversation_situation": {
-                "text": "Loaded situation",
-                "revision": 2,
-                "source": "adaptive_turn",
-                "updated_by": "#V#user",
-                "updated_at": "2026-07-29T08:00:00+00:00",
-            },
-        },
+        _session_state,
     )
     monkeypatch.setattr(
         von_routes,
@@ -427,7 +541,134 @@ def test_generate_returns_answer_when_situation_revision_conflicts(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.get_json()["response"] == "useful answer"
+    body = response.get_json()
+    assert body["response"] == "useful answer"
+    assert body["conversation_situation"]["text"] == (
+        "Concurrently updated situation"
+    )
+    assert body["conversation_observations"] == concurrent_observations
+    assert (
+        body["conversation_observation_state"]
+        == concurrent_observation_state
+    )
+    assert state_calls == [
+        {
+            "user_id": "#V#user",
+            "session_id": "session-conflict",
+            "namespace": "#V#user@org",
+        },
+        {
+            "user_id": "#V#user",
+            "session_id": "session-conflict",
+            "namespace": "#V#user@org",
+            "include_history": False,
+        },
+    ]
+
+
+def test_generate_preserves_turn_start_carrier_when_read_back_fails(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    state_calls: list[dict[str, Any]] = []
+    initial_situation = {
+        "text": "Loaded situation",
+        "revision": 7,
+        "source": "adaptive_turn",
+        "updated_by": "#V#user",
+        "updated_at": "2026-07-29T08:00:00+00:00",
+    }
+    initial_observations = [
+        {
+            "observation_id": "turn:start",
+            "kind": "turn_state",
+            "summary": "This belongs to the loaded situation.",
+        }
+    ]
+    initial_observation_state = {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 1,
+        "total_count": 4,
+        "omitted_count": 3,
+        "retention_limit": 24,
+    }
+
+    def _session_state(**kwargs: Any) -> dict[str, Any]:
+        state_calls.append(dict(kwargs))
+        if len(state_calls) == 1:
+            return {
+                "session_id": kwargs["session_id"],
+                "history": [],
+                "conversation_situation": initial_situation,
+                "conversation_observations": initial_observations,
+                "conversation_observation_state": initial_observation_state,
+            }
+        raise RuntimeError("read-back unavailable")
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        _session_state,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "execute_adaptive_turn",
+        lambda **_kwargs: AdaptiveTurnResult(
+            response_text="useful answer despite read failure",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+            conversation_situation="A newly proposed situation",
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "set_chat_history_conversation_situation",
+        lambda **kwargs: {
+            "updated": True,
+            "matched": True,
+            "conflict": False,
+            "expected_revision": kwargs["expected_revision"],
+            "current_revision": 8,
+            "session_id": kwargs["session_id"],
+            "conversation_situation": {
+                "text": kwargs["text"],
+                "revision": 8,
+                "source": "adaptive_turn",
+                "updated_by": "#V#user",
+                "updated_at": "2026-07-29T08:02:00+00:00",
+            },
+        },
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Continue",
+            "conversation_session_id": "session-read-failure",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["response"] == "useful answer despite read failure"
+    assert body["conversation_situation"] == initial_situation
+    assert body["conversation_observations"] == initial_observations
+    assert body["conversation_observation_state"] == initial_observation_state
+    assert state_calls == [
+        {
+            "user_id": "#V#user",
+            "session_id": "session-read-failure",
+            "namespace": "#V#user@org",
+        },
+        {
+            "user_id": "#V#user",
+            "session_id": "session-read-failure",
+            "namespace": "#V#user@org",
+            "include_history": False,
+        },
+    ]
 
 
 def test_shared_generate_uses_owner_situation_and_owner_storage_copy(monkeypatch):
@@ -489,7 +730,13 @@ def test_shared_generate_uses_owner_situation_and_owner_storage_copy(monkeypatch
             "user_id": "#V#owner",
             "session_id": "shared-session",
             "namespace": "#V#owner@org",
-        }
+        },
+        {
+            "user_id": "#V#owner",
+            "session_id": "shared-session",
+            "namespace": "#V#owner@org",
+            "include_history": False,
+        },
     ]
     assert invitee_history_calls == [
         ("#V#user", "shared-session", {"namespace": "#V#user@org"})

@@ -50,21 +50,62 @@ def test_chat_history_get_segments_returns_provenanced_payload(monkeypatch):
         },
     )
 
+    situation = {
+        "text": "The shared situation is inspectable.",
+        "revision": 3,
+        "source": "adaptive_turn",
+        "updated_by": "#V#user",
+        "updated_at": "2026-07-29T10:00:00+00:00",
+    }
+    observations = [
+        {
+            "schema_version": "conversation_observation.v1",
+            "observation_id": "effect-1",
+            "kind": "late_terminal_effect",
+        }
+    ]
+    observation_state = {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 1,
+        "total_count": 2,
+        "omitted_count": 1,
+        "retention_limit": 12,
+    }
+
+    def get_segments(*_args, **kwargs):
+        assert kwargs["include_conversation_state"] is True
+        return (
+            [
+                {
+                    "segment_index": 0,
+                    "history": [{"role": "assistant", "content": "Done"}],
+                }
+            ],
+            {
+                "history_truncated": False,
+                "conversation_situation": situation,
+                "conversation_observations": observations,
+                "conversation_observation_state": observation_state,
+            },
+        )
+
     monkeypatch.setattr(
         "src.backend.services.chat_history_service.get_chat_history_segments",
-        lambda *args, **kwargs: (
-            [{"segment_index": 0, "history": [{"role": "assistant", "content": "Done"}]}],
-            {"history_truncated": False},
-        ),
+        get_segments,
     )
 
-    result = cat._chat_history_get_segments(session_id="chat-1", namespace="#V#user@org")
+    result = cat._chat_history_get_segments(
+        session_id="chat-1", namespace="#V#user@org"
+    )
 
     assert result["success"] is True
     assert result["session_id"] == "chat-1"
     assert result["chat_session_id"] == "chat-1"
     assert result["segment_count"] == 1
     assert result["history_truncated"] is False
+    assert result["conversation_situation"] == situation
+    assert result["conversation_observations"] == observations
+    assert result["conversation_observation_state"] == observation_state
     assert result["identifier_binding"]["mode"] == "raw_parameters"
     assert result["provenance"]["item_kind"] == "chat_history_segments"
 

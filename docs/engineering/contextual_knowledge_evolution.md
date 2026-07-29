@@ -98,6 +98,13 @@ Raw actor-scoped diagnostic text remains in its authoritative diagnostic
 carrier. Situation revisions retain the producing request identity so an
 invisible sidecar change can be traced to the turn that authored it.
 
+Treat the situation, retained observations, and omission state as one coherent
+carrier snapshot at read boundaries. After a mutation or reset, read back the
+whole projection rather than combining a new situation revision with
+turn-start observation state. An authoritative read may legitimately reduce
+counts or clear content; stale asynchronous responses must not repopulate what
+that read superseded.
+
 Carrier visibility, contribution, and destructive authority are different.
 An accepted participant may contribute turns without thereby acquiring the
 right to reset the owner's transcript and shared situation. Treat erase,
@@ -147,7 +154,12 @@ As observed on 29 July 2026, related capabilities are distributed across:
 
 - inspectable conversation-situation text and bounded exact observations on
   chat-history sessions, used as provisional per-conversation context rather
-  than publication or canonical knowledge;
+  than publication or canonical knowledge; the conversation UI exposes the
+  text, revision provenance, retention state, and exact retained observations;
+- an authority-bound, bounded `chat_history_get_segments` projection that
+  carries the same situation and observations for telemetry consumers, while
+  the compact conversation locator reports only availability and freshness
+  metadata plus the route to that carrier-bearing read;
 - base concept and text relations in `concept_service.py`,
   `concept_relation_service.py`, and `text_value_service.py`;
 - actor- and organisation-visible assertion deltas in

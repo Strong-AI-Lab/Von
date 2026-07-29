@@ -433,6 +433,9 @@ def _build_generate_success_body(
     llm_debug_info: Mapping[str, Any],
     display_elements_contract: Mapping[str, Any] | None,
     rag_trace: Any,
+    conversation_situation: Mapping[str, Any] | None = None,
+    conversation_observations: Sequence[Mapping[str, Any]] | None = None,
+    conversation_observation_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "success": success,
@@ -461,6 +464,21 @@ def _build_generate_success_body(
         ),
         "display_elements": display_elements_contract,
         "rag_trace": rag_trace,
+        "conversation_situation": (
+            dict(conversation_situation)
+            if isinstance(conversation_situation, Mapping)
+            else None
+        ),
+        "conversation_observations": [
+            dict(observation)
+            for observation in (conversation_observations or ())
+            if isinstance(observation, Mapping)
+        ],
+        "conversation_observation_state": (
+            dict(conversation_observation_state)
+            if isinstance(conversation_observation_state, Mapping)
+            else None
+        ),
     }
 
 

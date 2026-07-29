@@ -71,6 +71,20 @@ def test_build_conversation_locator_prefers_exact_namespace_and_preserves_org_sc
             "namespace": "#V#u@org",
             "organisation_concept_id": "#V#org",
             "session_name": "Org Session",
+            "conversation_situation": {
+                "text": "Inspectable carrier text must not enter the locator.",
+                "revision": 7,
+                "source": "adaptive_turn",
+                "updated_by": "#V#u",
+                "updated_at": "2026-07-29T10:00:00Z",
+            },
+            "conversation_observations": [
+                {
+                    "observation_id": "effect-1",
+                    "kind": "late_terminal_effect",
+                }
+            ],
+            "conversation_observation_total": 4,
             "history": [
                 {
                     "role": "assistant",
@@ -108,6 +122,20 @@ def test_build_conversation_locator_prefers_exact_namespace_and_preserves_org_sc
     assert payload["metadata"]["total_turns"] == 1
     assert payload["metadata"]["transcript_turn_count"] == 1
     assert payload["turns"][0]["request_id"] == "req-123"
+    assert payload["conversation_situation_state"] == {
+        "available": True,
+        "revision": 7,
+        "updated_at": "2026-07-29T10:00:00+00:00",
+    }
+    assert payload["conversation_observation_state"] == {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 1,
+        "total_count": 4,
+        "omitted_count": 3,
+        "retention_limit": 12,
+    }
+    assert "conversation_situation" not in payload
+    assert "conversation_observations" not in payload
     debug_args = payload["turns"][0]["mcp_access"]["chat_history_get_debug_entry"][
         "arguments"
     ]
@@ -132,3 +160,54 @@ def test_build_conversation_locator_prefers_exact_namespace_and_preserves_org_sc
     )
     assert verified_conversation_ref["success"] is True
     assert verified_conversation_ref["chat_session_id"] == "s1"
+    segments_descriptor = payload["mcp_access"]["chat_history_get_segments"]
+    assert "conversation carrier" in segments_descriptor["purpose"]
+
+
+def test_build_conversation_locator_keeps_carrier_freshness_when_history_is_empty(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+    from src.backend.services.conversation_telemetry_locator_service import (
+        build_conversation_llm_telemetry_locator,
+    )
+
+    calls = []
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_telemetry_locator_projection",
+        lambda *args, **kwargs: (
+            calls.append((args, kwargs))
+            or {
+                "session_id": "empty-session",
+                "namespace": "#V#u@org",
+                "organisation_concept_id": "#V#org",
+                "history": [],
+                "conversation_situation_state": {
+                    "available": True,
+                    "revision": 2,
+                    "updated_at": "2026-07-29T11:00:00+00:00",
+                },
+                "conversation_observation_state": {
+                    "schema_version": "conversation_observation_state.v1",
+                    "retained_count": 0,
+                    "total_count": 1,
+                    "omitted_count": 1,
+                    "retention_limit": 12,
+                },
+            }
+        ),
+    )
+
+    payload = build_conversation_llm_telemetry_locator(
+        user_id="#V#u",
+        session_id="empty-session",
+        namespace="#V#u@org",
+        organisation_concept_id="#V#org",
+    )
+
+    assert len(calls) == 1
+    assert payload["turns"] == []
+    assert payload["metadata"]["transcript_turn_count"] == 0
+    assert payload["conversation_situation_state"]["revision"] == 2
+    assert payload["conversation_observation_state"]["total_count"] == 1

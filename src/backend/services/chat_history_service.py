@@ -1606,53 +1606,15 @@ def get_chat_history_session_state(
 
     if not isinstance(doc, dict):
         return None
-    try:
-        conversation_situation = _conversation_situation_from_doc(doc)
-    except ChatHistoryServiceError as exc:
-        # A corrupt optional carrier must not make the canonical transcript
-        # unavailable. Writes remain strict and CAS will not overwrite the
-        # malformed field because its revision cannot match.
-        logger.warning(
-            "Ignoring malformed conversation situation for session_id=%s: %s",
-            session_id,
-            exc,
-        )
-        conversation_situation = None
     history = (
         _normalise_chat_history_entries(doc.get("history", []))
         if include_history
         else []
     )
-    observations = _conversation_observations_from_doc(doc)
-    raw_observations = doc.get("conversation_observations")
-    raw_retained_count = (
-        len(raw_observations) if isinstance(raw_observations, list) else 0
-    )
-    raw_observation_total = doc.get("conversation_observation_total")
-    observation_total = (
-        raw_observation_total
-        if isinstance(raw_observation_total, int)
-        and not isinstance(raw_observation_total, bool)
-        and raw_observation_total >= 0
-        else raw_retained_count
-    )
-    observation_total = max(
-        observation_total,
-        raw_retained_count,
-        len(observations),
-    )
     state = {
         "session_id": session_id,
         "history": history,
-        "conversation_situation": conversation_situation,
-        "conversation_observations": observations,
-        "conversation_observation_state": {
-            "schema_version": "conversation_observation_state.v1",
-            "retained_count": len(observations),
-            "total_count": observation_total,
-            "omitted_count": max(0, observation_total - len(observations)),
-            "retention_limit": CONVERSATION_OBSERVATION_MAX_ITEMS,
-        },
+        **_conversation_state_from_doc(doc),
     }
     if (
         include_history
@@ -1989,6 +1951,50 @@ def _conversation_observations_from_doc(
     return observations
 
 
+def _conversation_state_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Return bounded conversation state without making an optional carrier brittle."""
+
+    try:
+        conversation_situation = _conversation_situation_from_doc(doc)
+    except ChatHistoryServiceError as exc:
+        logger.warning(
+            "Ignoring malformed conversation situation for session_id=%s: %s",
+            doc.get("session_id"),
+            exc,
+        )
+        conversation_situation = None
+
+    observations = _conversation_observations_from_doc(doc)
+    raw_observations = doc.get("conversation_observations")
+    raw_retained_count = (
+        len(raw_observations) if isinstance(raw_observations, list) else 0
+    )
+    raw_observation_total = doc.get("conversation_observation_total")
+    observation_total = (
+        raw_observation_total
+        if isinstance(raw_observation_total, int)
+        and not isinstance(raw_observation_total, bool)
+        and raw_observation_total >= 0
+        else raw_retained_count
+    )
+    observation_total = max(
+        observation_total,
+        raw_retained_count,
+        len(observations),
+    )
+    return {
+        "conversation_situation": conversation_situation,
+        "conversation_observations": observations,
+        "conversation_observation_state": {
+            "schema_version": "conversation_observation_state.v1",
+            "retained_count": len(observations),
+            "total_count": observation_total,
+            "omitted_count": max(0, observation_total - len(observations)),
+            "retention_limit": CONVERSATION_OBSERVATION_MAX_ITEMS,
+        },
+    }
+
+
 def append_chat_history_conversation_observation(
     *,
     user_id: str,
@@ -2113,11 +2119,12 @@ def append_chat_history_conversation_observation(
         include_legacy=include_legacy,
         include_history=False,
     )
-    observations = (
+    raw_observations = (
         current_state.get("conversation_observations")
         if isinstance(current_state, dict)
         else []
     )
+    observations = raw_observations if isinstance(raw_observations, list) else []
     duplicate = any(
         isinstance(item, dict) and item.get("observation_id") == observation_id
         for item in observations
@@ -2301,6 +2308,84 @@ def _hydrate_chat_history_entries(history: Any) -> List[Dict[str, Any]]:
     return _normalise_chat_history_entries(history, hydrate_blob_refs=True)
 
 
+def _conversation_locator_state_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact carrier availability/freshness without exposing its content."""
+
+    raw_situation_state = doc.get("conversation_situation_state")
+    raw_situation = doc.get("conversation_situation")
+    if isinstance(raw_situation_state, dict):
+        situation_available = raw_situation_state.get("available") is True
+        raw_revision = raw_situation_state.get("revision")
+        raw_updated_at = raw_situation_state.get("updated_at")
+    else:
+        situation_available = bool(
+            isinstance(raw_situation, dict)
+            and isinstance(raw_situation.get("text"), str)
+            and raw_situation.get("text", "").strip()
+        )
+        raw_revision = (
+            raw_situation.get("revision") if isinstance(raw_situation, dict) else None
+        )
+        raw_updated_at = (
+            raw_situation.get("updated_at") if isinstance(raw_situation, dict) else None
+        )
+    situation_revision = (
+        raw_revision
+        if isinstance(raw_revision, int)
+        and not isinstance(raw_revision, bool)
+        and raw_revision >= 0
+        else None
+    )
+    situation_updated_at = _coerce_datetime(raw_updated_at)
+
+    raw_observation_state = doc.get("conversation_observation_state")
+    raw_observations = doc.get("conversation_observations")
+    fallback_retained_count = (
+        len(raw_observations) if isinstance(raw_observations, list) else 0
+    )
+    retained_candidate = (
+        raw_observation_state.get("retained_count")
+        if isinstance(raw_observation_state, dict)
+        else fallback_retained_count
+    )
+    retained_count = (
+        retained_candidate
+        if isinstance(retained_candidate, int)
+        and not isinstance(retained_candidate, bool)
+        and retained_candidate >= 0
+        else fallback_retained_count
+    )
+    total_candidate = (
+        raw_observation_state.get("total_count")
+        if isinstance(raw_observation_state, dict)
+        else doc.get("conversation_observation_total")
+    )
+    total_count = (
+        total_candidate
+        if isinstance(total_candidate, int)
+        and not isinstance(total_candidate, bool)
+        and total_candidate >= 0
+        else retained_count
+    )
+    total_count = max(total_count, retained_count)
+    return {
+        "conversation_situation_state": {
+            "available": situation_available,
+            "revision": situation_revision,
+            "updated_at": (
+                situation_updated_at.isoformat() if situation_updated_at else None
+            ),
+        },
+        "conversation_observation_state": {
+            "schema_version": "conversation_observation_state.v1",
+            "retained_count": retained_count,
+            "total_count": total_count,
+            "omitted_count": max(0, total_count - retained_count),
+            "retention_limit": CONVERSATION_OBSERVATION_MAX_ITEMS,
+        },
+    }
+
+
 def get_chat_history_telemetry_locator_projection(
     user_id: str,
     session_id: str,
@@ -2357,6 +2442,39 @@ def get_chat_history_telemetry_locator_projection(
         "created_at": 1,
         "updated_at": 1,
         "history": compact_history_projection,
+        "conversation_situation_state": {
+            "available": {
+                "$cond": [
+                    {
+                        "$eq": [
+                            {"$type": "$conversation_situation.text"},
+                            "string",
+                        ]
+                    },
+                    {
+                        "$gt": [
+                            {"$strLenCP": "$conversation_situation.text"},
+                            0,
+                        ]
+                    },
+                    False,
+                ]
+            },
+            "revision": "$conversation_situation.revision",
+            "updated_at": "$conversation_situation.updated_at",
+        },
+        "conversation_observation_state": {
+            "retained_count": {
+                "$size": {
+                    "$cond": [
+                        {"$isArray": "$conversation_observations"},
+                        "$conversation_observations",
+                        [],
+                    ]
+                }
+            },
+            "total_count": "$conversation_observation_total",
+        },
     }
 
     try:
@@ -2386,15 +2504,25 @@ def get_chat_history_telemetry_locator_projection(
                 )
             else:
                 # Test doubles and older collection adapters may not expose aggregate.
+                fallback_projection = {
+                    key: value
+                    for key, value in metadata_projection.items()
+                    if key
+                    not in {
+                        "history",
+                        "conversation_situation_state",
+                        "conversation_observation_state",
+                    }
+                } | {
+                    "history": 1,
+                    "conversation_situation": 1,
+                    "conversation_observations": 1,
+                    "conversation_observation_total": 1,
+                }
                 doc = _read_find_one(
                     chat_history_coll,
                     query,
-                    {
-                        key: value
-                        for key, value in metadata_projection.items()
-                        if key != "history"
-                    }
-                    | {"history": 1},
+                    fallback_projection,
                     operation=(
                         "get_chat_history_telemetry_locator_projection.find_fallback"
                     ),
@@ -2402,7 +2530,14 @@ def get_chat_history_telemetry_locator_projection(
             if doc is not None:
                 break
         _record_chat_history_read_success()
-        return dict(doc) if isinstance(doc, dict) else None
+        if not isinstance(doc, dict):
+            return None
+        payload = dict(doc)
+        payload.update(_conversation_locator_state_from_doc(payload))
+        payload.pop("conversation_situation", None)
+        payload.pop("conversation_observations", None)
+        payload.pop("conversation_observation_total", None)
+        return payload
     except PyMongoError as exc:
         _record_chat_history_read_failure(
             "get_chat_history_telemetry_locator_projection",
@@ -2430,12 +2565,14 @@ def get_chat_history_segments(
     history_tail_limit: Optional[int] = None,
     return_meta: bool = False,
     hydrate_blob_refs: bool = False,
+    include_conversation_state: bool = False,
 ) -> List[List[Dict[str, Any]]] | tuple[List[List[Dict[str, Any]]], Dict[str, Any]]:
     """
     Return chat history split into segments separated by reset markers.
     Retrieves history from the requested session only.
 
-    When return_meta is True, returns (segments, {"history_truncated": bool}).
+    When return_meta is True, returns ``(segments, metadata)``. Callers may opt
+    into bounded conversation state in that metadata without another DB read.
     """
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
@@ -2452,7 +2589,16 @@ def get_chat_history_segments(
         history_offset = 0
         history_length = None
         doc = None
-        projection = None
+        projection = (
+            {
+                "history": 1,
+                "conversation_situation": 1,
+                "conversation_observations": 1,
+                "conversation_observation_total": 1,
+            }
+            if include_conversation_state
+            else None
+        )
         read_queries = _build_chat_history_session_read_queries(
             user_id=user_id,
             session_id=session_id,
@@ -2464,17 +2610,24 @@ def get_chat_history_segments(
                 if hasattr(chat_history_coll, "aggregate") and callable(
                     getattr(chat_history_coll, "aggregate")
                 ):
+                    tail_projection = {
+                        "history": _history_tail_projection_expr(
+                            history_tail_limit=history_tail_limit,
+                            include_debug=include_debug,
+                        ),
+                        "history_length": {"$size": _history_array_expr()},
+                    }
+                    if include_conversation_state:
+                        tail_projection.update(
+                            {
+                                "conversation_situation": 1,
+                                "conversation_observations": 1,
+                                "conversation_observation_total": 1,
+                            }
+                        )
                     pipeline = [
                         {"$match": query},
-                        {
-                            "$project": {
-                                "history": _history_tail_projection_expr(
-                                    history_tail_limit=history_tail_limit,
-                                    include_debug=include_debug,
-                                ),
-                                "history_length": {"$size": _history_array_expr()},
-                            }
-                        },
+                        {"$project": tail_projection},
                     ]
                     try:
                         doc = next(
@@ -2513,7 +2666,10 @@ def get_chat_history_segments(
                 break
         if not doc:
             _record_chat_history_read_success()
-            return ([], {"history_truncated": False}) if return_meta else []
+            empty_meta = {"history_truncated": False}
+            if include_conversation_state:
+                empty_meta.update(_conversation_state_from_doc({}))
+            return ([], empty_meta) if return_meta else []
 
         history = _normalise_chat_history_entries(
             doc.get("history") or [],
@@ -2521,7 +2677,10 @@ def get_chat_history_segments(
         )
         if not isinstance(history, list) or not history:
             _record_chat_history_read_success()
-            return ([], {"history_truncated": False}) if return_meta else []
+            empty_history_meta = {"history_truncated": False}
+            if include_conversation_state:
+                empty_history_meta.update(_conversation_state_from_doc(doc))
+            return ([], empty_history_meta) if return_meta else []
         if history_length is None:
             history_length_raw = doc.get("history_length")
             if isinstance(history_length_raw, int):
@@ -2565,7 +2724,10 @@ def get_chat_history_segments(
         result = _chunk_history_segments(segments, segment_size)
         _record_chat_history_read_success()
         if return_meta:
-            return result, {"history_truncated": history_truncated}
+            result_meta = {"history_truncated": history_truncated}
+            if include_conversation_state:
+                result_meta.update(_conversation_state_from_doc(doc))
+            return result, result_meta
         return result
     except PyMongoError as e:
         _record_chat_history_read_failure("get_chat_history_segments", e)

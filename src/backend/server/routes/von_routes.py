@@ -9286,6 +9286,85 @@ def _persist_conversation_situation_fail_soft(
         )
 
 
+def _read_conversation_carrier_after_persistence_fail_soft(
+    *,
+    user_id: str | None,
+    session_id: str,
+    namespace: str | None,
+    fallback_situation: Mapping[str, Any] | None,
+    fallback_observations: list[dict[str, Any]],
+    fallback_observation_state: Mapping[str, Any],
+    request_id: str | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
+    """Read one canonical carrier snapshot, preserving the turn-start snapshot on failure."""
+
+    fallback_snapshot = (
+        dict(fallback_situation) if isinstance(fallback_situation, Mapping) else None,
+        [
+            dict(observation)
+            for observation in fallback_observations
+            if isinstance(observation, Mapping)
+        ],
+        dict(fallback_observation_state),
+    )
+    if not isinstance(user_id, str) or not user_id.strip():
+        return fallback_snapshot
+
+    try:
+        session_state = chat_history_service.get_chat_history_session_state(
+            user_id=user_id.strip(),
+            session_id=session_id,
+            namespace=namespace,
+            include_history=False,
+        )
+        if not isinstance(session_state, Mapping):
+            raise RuntimeError("canonical conversation session state was not found")
+
+        conversation_situation, _, _ = (
+            _normalise_conversation_situation_descriptor(
+                session_state.get("conversation_situation")
+            )
+        )
+        observations = (
+            [
+                dict(observation)
+                for observation in session_state.get(
+                    "conversation_observations", []
+                )
+                if isinstance(observation, Mapping)
+            ]
+            if isinstance(session_state.get("conversation_observations"), list)
+            else []
+        )
+        raw_observation_state = session_state.get(
+            "conversation_observation_state"
+        )
+        observation_state = (
+            dict(raw_observation_state)
+            if isinstance(raw_observation_state, Mapping)
+            else {
+                "schema_version": "conversation_observation_state.v1",
+                "retained_count": len(observations),
+                "total_count": len(observations),
+                "omitted_count": 0,
+                "retention_limit": (
+                    chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
+                ),
+            }
+        )
+        return conversation_situation, observations, observation_state
+    except Exception as exc:
+        _safe_app_log(
+            "warning",
+            "Conversation carrier read-back unavailable for session_id=%s "
+            "request_id=%s: %s",
+            session_id,
+            request_id,
+            exc,
+        )
+        return fallback_snapshot
+
+
 def _namespace_is_org_scoped(namespace: str | None) -> bool:
     return (
         isinstance(namespace, str)
@@ -12819,6 +12898,19 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             updated_by=user_concept_id,
             request_id=request_id,
         )
+        (
+            response_conversation_situation,
+            response_conversation_observations,
+            response_conversation_observation_state,
+        ) = _read_conversation_carrier_after_persistence_fail_soft(
+            user_id=history_user_id,
+            session_id=session_id,
+            namespace=history_namespace,
+            fallback_situation=conversation_situation_descriptor,
+            fallback_observations=conversation_observations,
+            fallback_observation_state=conversation_observation_state,
+            request_id=request_id,
+        )
 
         if progress_updates_enabled:
             final_progress_payload = {
@@ -12868,6 +12960,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 llm_debug_info=llm_debug_info,
                 display_elements_contract=display_elements_contract,
                 rag_trace=rag_trace,
+                conversation_situation=response_conversation_situation,
+                conversation_observations=response_conversation_observations,
+                conversation_observation_state=(
+                    response_conversation_observation_state
+                ),
             )
         )
         if adaptive_success:
