@@ -482,6 +482,28 @@ not a quality signal. Actor-visible registered tools declared by a matched
 workflow are exposed as plausible simpler component plans without claiming that
 one component is equivalent to the whole workflow.
 
+Registered tools and represented workflows participate in semantic capability
+retrieval before that frontier is paged for the model. Their physical indexes
+remain partitioned by authority surface: registered interface metadata may use
+a shared tool-capability index, while workflow retrieval remains actor-filtered.
+Only capabilities already delegated to the current actor are unified into the
+turn frontier. Retrieval similarity is evidence of possible adequacy, not an
+invocation permission or a proof that two plans are equivalent.
+
+Within each plan shape, semantic retrieval ranks plausible candidates before
+the lower-cost direct and higher-cost workflow alternatives are interleaved.
+This ensures that a semantically relevant direct path is present in the
+model-visible page rather than being hidden behind weak lexical matches. The
+model still decides whether a direct call or small composition can produce the
+material work product and evidence.
+
+Schema discovery remains an optional ordinary capability, not a compulsory
+stage. When semantic retrieval surfaces it for represented-knowledge work, the
+model may use it to retrieve predicates, types, inverse directions, or reified
+relationship shapes before a relation-bearing read. A typed unavailable or
+degraded retrieval index falls back to the bounded catalogue; it must not be
+reported as authoritative evidence that no suitable capability exists.
+
 Mechanical dominance is deliberately narrower. A read-only workflow may be
 removed from the active frontier only when its authoritative routing profile
 explicitly names an actor-visible read-only direct equivalent. The workflow

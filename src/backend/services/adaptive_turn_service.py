@@ -477,6 +477,7 @@ def _bounded_capability_catalogue_output(
             "dominated_total",
             "ranking",
             "selection_policy",
+            "capability_retrieval",
             "dominated_capabilities",
             "catalogue_scope",
             "offset",
@@ -1650,6 +1651,11 @@ def _capability_catalogue(
     query_tokens = {
         token for token in re.findall(r"[a-z0-9_]+", query) if len(token) > 1
     }
+    registered_tool_retrieval: dict[str, Any] = {
+        "schema_version": "registered_tool_capability_retrieval.v1",
+        "status": "not_requested",
+        "result_count": 0,
+    }
     registered_candidates: list[dict[str, Any]] = []
     registered_by_name: dict[str, dict[str, Any]] = {}
     registered_delegated_total = 0
@@ -1782,6 +1788,7 @@ def _capability_catalogue(
             "_ranking_literal_match_count": literal_match_count,
             "_ranking_literal_phrase_match": literal_phrase_match,
             "_ranking_component_match_count": 0,
+            "_ranking_semantic_relevance": 0.0,
             "_ranking_routing_match_tokens": routing_match_tokens,
             "_ranking_description_literal_match_count": (
                 description_literal_match_count
@@ -1862,6 +1869,54 @@ def _capability_catalogue(
                 )
         candidate_selection["adequacy_evidence"] = adequacy_evidence
         candidate["selection"] = candidate_selection
+
+    if query and not exact_names:
+        try:
+            from src.backend.services.registered_tool_capability_retrieval_service import (
+                retrieve_registered_tool_capability_scores,
+            )
+
+            semantic_scores, registered_tool_retrieval = (
+                retrieve_registered_tool_capability_scores(
+                    query,
+                    registered_candidates,
+                    gateway=gateway,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            semantic_scores = {}
+            registered_tool_retrieval = {
+                "schema_version": "registered_tool_capability_retrieval.v1",
+                "status": "degraded",
+                "result_count": 0,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:500],
+            }
+        for candidate in registered_candidates:
+            name = str(candidate.get("name") or "").strip()
+            relevance_score = float(semantic_scores.get(name) or 0.0)
+            if relevance_score <= 0.0:
+                continue
+            candidate["query_match"] = True
+            candidate["_ranking_semantic_relevance"] = relevance_score
+            candidate_selection = dict(candidate.get("selection") or {})
+            adequacy_evidence = list(
+                candidate_selection.get("adequacy_evidence") or []
+            )
+            adequacy_evidence.append(
+                {
+                    "source": "registered_tool_capability_semantic_relevance",
+                    "relevance_score": round(relevance_score, 4),
+                }
+            )
+            candidate_selection.update(
+                {
+                    "frontier_status": "candidate",
+                    "adequacy_evidence": adequacy_evidence,
+                    "semantic_adequacy_owner": "adaptive_model",
+                }
+            )
+            candidate["selection"] = candidate_selection
 
     workflow_candidates: list[dict[str, Any]] = []
     represented_workflow_total = 0
@@ -2108,6 +2163,7 @@ def _capability_catalogue(
     def direct_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
         return (
             -int(bool(item.get("_ranking_literal_phrase_match"))),
+            -float(item.get("_ranking_semantic_relevance") or 0.0),
             -int(item.get("_ranking_component_match_count") or 0),
             -int(item.get("_ranking_literal_match_count") or 0),
             str(item.get("name") or "").lower(),
@@ -2211,10 +2267,27 @@ def _capability_catalogue(
                 "evidence_adequacy"
             ),
             "frontier_order": (
-                "interleave_direct_and_workflow_candidates_with_lower_"
-                "orchestration_cost_first"
+                "semantically_rank_each_plan_shape_then_interleave_direct_"
+                "and_workflow_candidates_with_lower_orchestration_cost_first"
             ),
             "representedness_priority": False,
+        },
+        "capability_retrieval": {
+            "schema_version": "turn_capability_retrieval.v1",
+            "registered_tools": dict(registered_tool_retrieval),
+            "represented_workflows": {
+                "status": (
+                    str(workflow_discovery.get("status") or "available")
+                    if isinstance(workflow_discovery, Mapping)
+                    else "not_requested"
+                ),
+                "result_count": len(workflow_candidates),
+                "source": "represented_workflow_capability_index",
+            },
+            "authority_partitioning": (
+                "retrieval_indexes_are_partitioned_by_authority_surface_and_"
+                "unified_only_after_actor_delegation"
+            ),
         },
         "dominated_capabilities": dominated_capabilities,
         "catalogue_scope": (

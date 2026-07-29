@@ -68,6 +68,28 @@ def _acknowledge_effect_observation_journal(
     )
 
 
+@pytest.fixture(autouse=True)
+def _disable_live_registered_tool_capability_rag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep unit tests independent of the configured embedding backend."""
+
+    from src.backend.services import registered_tool_capability_retrieval_service
+
+    monkeypatch.setattr(
+        registered_tool_capability_retrieval_service,
+        "retrieve_registered_tool_capability_scores",
+        lambda _query, _candidates, **_kwargs: (
+            {},
+            {
+                "schema_version": "registered_tool_capability_retrieval.v1",
+                "status": "valid_empty",
+                "result_count": 0,
+            },
+        ),
+    )
+
+
 class _SequenceClient:
     def __init__(self, *responses: Any) -> None:
         self.responses = list(responses)
@@ -3156,6 +3178,105 @@ def test_capability_frontier_promotes_direct_components_without_hiding_workflow(
     )
     assert result["frontier_total"] == 4
     assert result["dominated_total"] == 0
+
+
+def test_semantic_tool_retrieval_puts_cheaper_schema_plan_in_visible_frontier(
+    monkeypatch,
+) -> None:
+    from src.backend.services import (
+        registered_tool_capability_retrieval_service,
+        tool_metadata_service,
+    )
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    catalogue = MethodCatalogue()
+    for name in (
+        "generic_read",
+        "search_concepts",
+        "find_relations_with_argument",
+    ):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda **_kwargs: {"success": True},
+                input_schema=Schema(optional={"query": str}, allow_unknown=True),
+                category="read",
+                description=f"Use {name}.",
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=2.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_planner_hint",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        registered_tool_capability_retrieval_service,
+        "retrieve_registered_tool_capability_scores",
+        lambda _query, _candidates, **_kwargs: (
+            {
+                "search_concepts": 0.97,
+                "find_relations_with_argument": 0.94,
+                "generic_read": 0.2,
+            },
+            {
+                "schema_version": "registered_tool_capability_retrieval.v1",
+                "status": "results_available",
+                "result_count": 3,
+            },
+        ),
+    )
+    workflow = WorkflowTurnCapability(
+        name="represented_workflow_entity_lookup",
+        workflow_id="#V#entity_lookup_workflow",
+        display_name="Entity lookup workflow",
+        description="Retrieve represented relationships for an entity.",
+        relevance_score=0.96,
+        input_schema={"type": "object", "properties": {}},
+        declared_component_count=2,
+        unresolved_component_count=2,
+        declared_step_count=3,
+        semantic_effect=None,
+    )
+
+    result = _capability_catalogue(
+        gateway,
+        ("generic_read", "search_concepts", "find_relations_with_argument"),
+        {"query": "who is supervised by this person", "limit": 6},
+        workflow_capabilities=(workflow,),
+    )
+
+    assert [item["name"] for item in result["capabilities"]] == [
+        "search_concepts",
+        "represented_workflow_entity_lookup",
+        "find_relations_with_argument",
+        "generic_read",
+    ]
+    assert result["capability_retrieval"]["registered_tools"]["status"] == (
+        "results_available"
+    )
+    search_candidate = result["capabilities"][0]
+    assert search_candidate["plan_profile"]["cost_profile"]["durable_runtime"] is False
+    assert any(
+        evidence["source"] == "registered_tool_capability_semantic_relevance"
+        for evidence in search_candidate["selection"]["adequacy_evidence"]
+    )
 
 
 def test_capability_frontier_does_not_prefer_unrelated_direct_tool(

@@ -2458,6 +2458,26 @@ def _initialise_internal_mcp_gateway(app: Flask):
             app.logger.info(
                 "[mcp_gateway] Enabled with %d registered methods.", method_count
             )
+            if not _is_running_under_pytest():
+                try:
+                    from ..services.registered_tool_capability_retrieval_service import (
+                        prewarm_registered_tool_capability_index,
+                    )
+
+                    prewarm_started = prewarm_registered_tool_capability_index(
+                        gateway_instance
+                    )
+                    app.logger.info(
+                        "[capability_retrieval] Registered-tool semantic index "
+                        "prewarm started=%s.",
+                        prewarm_started,
+                    )
+                except Exception as exc:
+                    app.logger.warning(
+                        "[capability_retrieval] Registered-tool semantic index "
+                        "prewarm unavailable: %s",
+                        exc,
+                    )
         else:
             app.logger.info(
                 "[mcp_gateway] Initialised (disabled). Set VON_INTERNAL_MCP_ENABLE=1 to activate. Methods=%d",

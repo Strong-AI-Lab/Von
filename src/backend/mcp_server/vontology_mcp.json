@@ -4520,7 +4520,7 @@
         },
         {
             "name": "search_concepts",
-            "description": "Find concepts. For 'list instances of X': use instance_of='#V#type' param (e.g., instance_of='#V#researcher'). For 'find X': use query param. Other key params: filter_kind=['individual'|'type'], include_hierarchy_path=true (shows paths), match_type='exact'|'substring'|'similarity'.",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6371,7 +6371,7 @@
         },
         {
             "name": "vontology_concept_search",
-            "description": "Namespaced alias for concept search used by the MCP orchestrator. Same parameters as search_concepts (query required; pass empty string when using instance_of filters).",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
