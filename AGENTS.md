@@ -26,7 +26,11 @@ a reasonable interpretation, take a bounded action, inspect the result, and
 repair mistakes. Uncertainty alone is not a reason to refuse, interrupt the
 user, or demand confirmation. Ask when authority is missing or when plausible
 choices differ materially in privacy exposure, external commitment, cost, or
-harm that cannot readily be detected and recovered.
+harm that cannot readily be detected and recovered. Also ask one focused
+question when a material fact, preference, or constraint cannot be obtained
+from the shared situation, accessible evidence, tools, or a reasonable
+recoverable assumption. That is information acquisition, not a permission
+ritual; continue independent useful work where possible.
 
 Von is also a research platform for testing whether represented knowledge and
 behavioural authority improve reliability, adaptability, inspectability, and
@@ -129,11 +133,23 @@ never be forced onto newer evidence.
    semantics, validation, execution, persistence, integrations, safety, and
    performance-critical mechanisms. It must not silently become the durable
    home of task-specific semantic policy that should be represented.
-9. **Share situation without requiring stages.** When more than one consumer or
-   model call is justified, share the canonical situation and give each only
+9. **Let conversations carry their shared situations.** A conversation is a
+   distinguished carrier of the participants' evolving situation across turns,
+   not merely a message transcript. Its situation is a provisional, revisable
+   account of material objectives, referents, commitments, assumptions,
+   unknowns, questions, effects, and outcome criteria—not canonical domain
+   truth or an authority grant. Bring relevant projections and exact
+   observations from other carriers into it while leaving canonical task,
+   effect, document, and knowledge stores authoritative. When more than one
+   consumer or model call is justified, share that situation and give each only
    the context it needs. Record material additions, omissions, summaries, and
-   provenance in proportion to the claim. A simple or direct turn need not
-   instantiate a universal turn-state object or stage projections.
+   provenance in proportion to the claim, and do not widen actor-scoped
+   diagnostics merely because the carrier has a wider audience. Visibility or
+   contribution to a shared conversation does not by itself grant authority to
+   erase or replace its owner-scoped carrier. Use the weakest adequate
+   representation; inspectable text is a good default, not a hard requirement.
+   A simple or direct turn need not instantiate a universal state object,
+   schema, summarisation stage, or stage projections.
 10. **Preserve opportunity.** Support layers should expose typed facts,
     bounded actions, evidence, retry/recovery options, and partial progress so a
     capable model can still succeed. A safety requirement may close an unsafe
@@ -141,7 +157,10 @@ never be forced onto newer evidence.
 11. **Minimal imposition.** Use available context and tools before interrupting
     the user. Prefer low-burden, reversible progress, and treat needless
     refusal, clarification, or confirmation as real failures. Ask when
-    ambiguity is decision-relevant or authority is missing.
+    ambiguity is decision-relevant, material information is otherwise
+    unavailable, or authority is missing. Preserve an unanswered material
+    question in the shared situation and continue independent useful work; do
+    not turn elicitation into performative confirmation.
 12. **Evidence proportional to the claim.** Do not demand release-grade proof
     for a mechanical change, and do not claim end-to-end success from a unit
     test. Match validation cost to risk and asserted scope.
@@ -182,6 +201,7 @@ Use these defaults:
 | Ambiguous action choice or adaptive recovery | Model judgement with bounded tools, read-back, and evaluation |
 | Semantic judgement that may change with models or evidence | Prompt/programme plus evaluation |
 | Reusable, inspectable multi-step behaviour, especially durable or recoverable | VWL workflow |
+| Evolving conversation objectives, referents, commitments, unknowns, questions, and effect observations | Inspectable conversation-situation text, supplemented by structure only where it has a clear advantage |
 | Durable typed knowledge, provenance, policy identity, or cross-session state | Vontology/KB |
 | Raw document, trace, event, blob, cache, or derived index | Fit-for-purpose store with represented manifest/provenance where needed |
 

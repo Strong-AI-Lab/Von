@@ -47,6 +47,14 @@ logger = logging.getLogger(__name__)
 
 _DETERMINISTIC_RAG_DOC_NAMESPACE = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7")
 _SESSION_NAME_MAX_LEN = 80
+CONVERSATION_SITUATION_TEXT_MAX_CHARS = 12_000
+_CONVERSATION_SITUATION_SOURCE_MAX_CHARS = 120
+_CONVERSATION_SITUATION_UPDATER_MAX_CHARS = 160
+_CONVERSATION_SITUATION_REQUEST_ID_MAX_CHARS = 160
+CONVERSATION_OBSERVATION_MAX_ITEMS = 12
+_CONVERSATION_OBSERVATION_ID_MAX_CHARS = 128
+_CONVERSATION_OBSERVATION_KIND_MAX_CHARS = 80
+_CONVERSATION_OBSERVATION_VALUE_MAX_CHARS = 1_000
 _CHAT_HISTORY_INDEXES_READY = False
 _CHAT_HISTORY_INDEXES_LOCK = threading.Lock()
 _CHAT_HISTORY_READ_CIRCUIT_LOCK = threading.Lock()
@@ -1400,6 +1408,871 @@ def get_chat_history(
         raise ChatHistoryServiceError(f"Could not retrieve chat history: {e}") from e
 
 
+def _normalise_conversation_situation_metadata(
+    value: Any,
+    *,
+    field_name: str,
+    max_chars: int,
+    required: bool,
+) -> Optional[str]:
+    if not isinstance(value, str):
+        if required:
+            raise ChatHistoryServiceError(f"{field_name} is required.")
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        if required:
+            raise ChatHistoryServiceError(f"{field_name} is required.")
+        return None
+    if len(cleaned) > max_chars:
+        raise ChatHistoryServiceError(
+            f"{field_name} must be {max_chars} characters or fewer."
+        )
+    return cleaned
+
+
+def _normalise_conversation_situation_revision(
+    value: Any,
+    *,
+    field_name: str = "expected_revision",
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ChatHistoryServiceError(f"{field_name} must be a non-negative integer.")
+    return value
+
+
+def _conversation_situation_from_doc(
+    doc: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    raw = doc.get("conversation_situation")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ChatHistoryServiceError(
+            "Stored conversation situation is not a valid object."
+        )
+
+    revision = _normalise_conversation_situation_revision(
+        raw.get("revision"),
+        field_name="stored conversation situation revision",
+    )
+    text = raw.get("text")
+    if text is not None:
+        if not isinstance(text, str):
+            raise ChatHistoryServiceError(
+                "Stored conversation situation text is not valid."
+            )
+        if len(text) > CONVERSATION_SITUATION_TEXT_MAX_CHARS:
+            raise ChatHistoryServiceError(
+                "Stored conversation situation text exceeds the configured limit."
+            )
+
+    updated_at = _coerce_datetime(raw.get("updated_at"))
+    descriptor = {
+        "text": text,
+        "revision": revision,
+        "source": _normalise_conversation_situation_metadata(
+            raw.get("source"),
+            field_name="stored conversation situation source",
+            max_chars=_CONVERSATION_SITUATION_SOURCE_MAX_CHARS,
+            required=False,
+        ),
+        "updated_by": _normalise_conversation_situation_metadata(
+            raw.get("updated_by"),
+            field_name="stored conversation situation updater",
+            max_chars=_CONVERSATION_SITUATION_UPDATER_MAX_CHARS,
+            required=False,
+        ),
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+    source_request_id = _normalise_conversation_situation_metadata(
+        raw.get("source_request_id"),
+        field_name="stored conversation situation source request",
+        max_chars=_CONVERSATION_SITUATION_REQUEST_ID_MAX_CHARS,
+        required=False,
+    )
+    if source_request_id is not None:
+        descriptor["source_request_id"] = source_request_id
+    return descriptor
+
+
+def get_chat_history_session_state(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    history_tail_limit: Optional[int] = None,
+    include_debug: bool = True,
+    include_history: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Return bounded state carried by one canonical chat-history session.
+
+    This is deliberately separate from :func:`get_chat_history`, whose
+    established list return type remains the message-history contract.
+    Selecting a shared session owner is a route/authority concern; this read
+    only resolves the explicitly supplied owner, session, and namespace.
+    """
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_session_state")
+
+    try:
+        doc = None
+        history_length: Optional[int] = None
+        for query in _build_chat_history_session_read_queries(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        ):
+            if (
+                include_history
+                and isinstance(history_tail_limit, int)
+                and not isinstance(history_tail_limit, bool)
+                and history_tail_limit > 0
+                and hasattr(chat_history_coll, "aggregate")
+                and callable(getattr(chat_history_coll, "aggregate"))
+            ):
+                pipeline = [
+                    {"$match": query},
+                    {
+                        "$project": {
+                            "_id": 0,
+                            "session_id": 1,
+                            "history": _history_tail_projection_expr(
+                                history_tail_limit=history_tail_limit,
+                                include_debug=include_debug,
+                            ),
+                            "history_length": {
+                                "$size": _history_array_expr()
+                            },
+                            "conversation_situation": 1,
+                            "conversation_observations": 1,
+                            "conversation_observation_total": 1,
+                        }
+                    },
+                ]
+                try:
+                    doc = next(
+                        _read_aggregate(
+                            chat_history_coll,
+                            pipeline,
+                            operation=(
+                                "get_chat_history_session_state.aggregate_tail"
+                            ),
+                        ),
+                        None,
+                    )
+                except PyMongoError:
+                    raise
+                except Exception:
+                    doc = None
+            if doc is None:
+                projection = {
+                    "_id": 0,
+                    "session_id": 1,
+                    "conversation_situation": 1,
+                    "conversation_observations": 1,
+                    "conversation_observation_total": 1,
+                }
+                if include_history:
+                    projection["history"] = 1
+                doc = _read_find_one(
+                    chat_history_coll,
+                    query,
+                    projection,
+                    operation="get_chat_history_session_state.find_session",
+                )
+            if doc is not None:
+                raw_history_length = doc.get("history_length")
+                if isinstance(raw_history_length, int):
+                    history_length = raw_history_length
+                break
+        _record_chat_history_read_success()
+    except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_session_state", e)
+        logger.exception("Error retrieving chat history session state: %s", e)
+        raise ChatHistoryServiceError(
+            f"Could not retrieve chat history session state: {e}"
+        ) from e
+
+    if not isinstance(doc, dict):
+        return None
+    try:
+        conversation_situation = _conversation_situation_from_doc(doc)
+    except ChatHistoryServiceError as exc:
+        # A corrupt optional carrier must not make the canonical transcript
+        # unavailable. Writes remain strict and CAS will not overwrite the
+        # malformed field because its revision cannot match.
+        logger.warning(
+            "Ignoring malformed conversation situation for session_id=%s: %s",
+            session_id,
+            exc,
+        )
+        conversation_situation = None
+    history = (
+        _normalise_chat_history_entries(doc.get("history", []))
+        if include_history
+        else []
+    )
+    observations = _conversation_observations_from_doc(doc)
+    raw_observations = doc.get("conversation_observations")
+    raw_retained_count = (
+        len(raw_observations) if isinstance(raw_observations, list) else 0
+    )
+    raw_observation_total = doc.get("conversation_observation_total")
+    observation_total = (
+        raw_observation_total
+        if isinstance(raw_observation_total, int)
+        and not isinstance(raw_observation_total, bool)
+        and raw_observation_total >= 0
+        else raw_retained_count
+    )
+    observation_total = max(
+        observation_total,
+        raw_retained_count,
+        len(observations),
+    )
+    state = {
+        "session_id": session_id,
+        "history": history,
+        "conversation_situation": conversation_situation,
+        "conversation_observations": observations,
+        "conversation_observation_state": {
+            "schema_version": "conversation_observation_state.v1",
+            "retained_count": len(observations),
+            "total_count": observation_total,
+            "omitted_count": max(0, observation_total - len(observations)),
+            "retention_limit": CONVERSATION_OBSERVATION_MAX_ITEMS,
+        },
+    }
+    if (
+        include_history
+        and isinstance(history_tail_limit, int)
+        and not isinstance(history_tail_limit, bool)
+        and history_tail_limit > 0
+    ):
+        if isinstance(history_length, int) and history_length >= 0:
+            state["history_offset"] = max(0, history_length - len(history))
+            state["history_truncated"] = history_length > len(history)
+        else:
+            state["history_offset"] = 0
+            state["history_truncated"] = len(history) >= history_tail_limit
+    return state
+
+
+def _compare_and_set_chat_history_conversation_situation(
+    *,
+    user_id: str,
+    session_id: str,
+    text: Optional[str],
+    expected_revision: int,
+    source: str,
+    updated_by: str,
+    namespace: Optional[str],
+    include_legacy: bool,
+    source_request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    revision = _normalise_conversation_situation_revision(expected_revision)
+    source_value = _normalise_conversation_situation_metadata(
+        source,
+        field_name="source",
+        max_chars=_CONVERSATION_SITUATION_SOURCE_MAX_CHARS,
+        required=True,
+    )
+    updater_value = _normalise_conversation_situation_metadata(
+        updated_by,
+        field_name="updated_by",
+        max_chars=_CONVERSATION_SITUATION_UPDATER_MAX_CHARS,
+        required=True,
+    )
+    source_request_value = _normalise_conversation_situation_metadata(
+        source_request_id,
+        field_name="source_request_id",
+        max_chars=_CONVERSATION_SITUATION_REQUEST_ID_MAX_CHARS,
+        required=False,
+    )
+
+    if text is not None:
+        if not isinstance(text, str) or not text.strip():
+            raise ChatHistoryServiceError(
+                "text must be a non-empty string; use the clear helper to reset it."
+            )
+        if len(text) > CONVERSATION_SITUATION_TEXT_MAX_CHARS:
+            raise ChatHistoryServiceError(
+                "text must be "
+                f"{CONVERSATION_SITUATION_TEXT_MAX_CHARS} characters or fewer."
+            )
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    next_revision = revision + 1
+    updated_at = datetime.now(timezone.utc)
+    stored_situation: Dict[str, Any] = {
+        "revision": next_revision,
+        "source": source_value,
+        "updated_by": updater_value,
+        "updated_at": updated_at,
+    }
+    if text is not None:
+        stored_situation["text"] = text
+    if source_request_value is not None:
+        stored_situation["source_request_id"] = source_request_value
+
+    session_query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    revision_query: Dict[str, Any]
+    if revision == 0:
+        revision_query = {
+            "$or": [
+                {"conversation_situation": {"$exists": False}},
+                {"conversation_situation": None},
+            ]
+        }
+    else:
+        revision_query = {"conversation_situation.revision": revision}
+    cas_query = {"$and": [session_query, revision_query]}
+
+    try:
+        result = chat_history_coll.update_one(
+            cas_query,
+            {"$set": {"conversation_situation": stored_situation}},
+        )
+    except PyMongoError as e:
+        logger.error(
+            "Error updating chat history conversation situation: %s",
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not update chat history conversation situation: {e}"
+        ) from e
+
+    matched = bool(getattr(result, "matched_count", 0) > 0)
+    updated = bool(getattr(result, "modified_count", 0) > 0)
+    if matched and not updated:
+        raise ChatHistoryServiceError(
+            "Conversation situation update matched but was not persisted."
+        )
+
+    if updated:
+        returned_situation = {
+            "text": text,
+            "revision": next_revision,
+            "source": source_value,
+            "updated_by": updater_value,
+            "updated_at": updated_at.isoformat(),
+        }
+        if source_request_value is not None:
+            returned_situation["source_request_id"] = source_request_value
+        return {
+            "updated": True,
+            "matched": True,
+            "conflict": False,
+            "expected_revision": revision,
+            "current_revision": next_revision,
+            "session_id": session_id,
+            "conversation_situation": returned_situation,
+        }
+
+    current_state = get_chat_history_session_state(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+        include_history=False,
+    )
+    current_situation = (
+        current_state.get("conversation_situation")
+        if isinstance(current_state, dict)
+        else None
+    )
+    current_revision = (
+        current_situation.get("revision")
+        if isinstance(current_situation, dict)
+        else None
+    )
+    session_exists = current_state is not None
+    return {
+        "updated": False,
+        "matched": session_exists,
+        "conflict": session_exists,
+        "expected_revision": revision,
+        "current_revision": current_revision,
+        "session_id": session_id,
+        "conversation_situation": current_situation,
+    }
+
+
+def set_chat_history_conversation_situation(
+    *,
+    user_id: str,
+    session_id: str,
+    text: str,
+    expected_revision: int,
+    source: str,
+    updated_by: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    source_request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compare-and-set the inspectable text carrying the conversation situation."""
+    return _compare_and_set_chat_history_conversation_situation(
+        user_id=user_id,
+        session_id=session_id,
+        text=text,
+        expected_revision=expected_revision,
+        source=source,
+        updated_by=updated_by,
+        namespace=namespace,
+        include_legacy=include_legacy,
+        source_request_id=source_request_id,
+    )
+
+
+def clear_chat_history_conversation_situation(
+    *,
+    user_id: str,
+    session_id: str,
+    expected_revision: int,
+    source: str,
+    updated_by: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    source_request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Clear situation text while advancing its revision to prevent stale writes."""
+    return _compare_and_set_chat_history_conversation_situation(
+        user_id=user_id,
+        session_id=session_id,
+        text=None,
+        expected_revision=expected_revision,
+        source=source,
+        updated_by=updated_by,
+        namespace=namespace,
+        include_legacy=include_legacy,
+        source_request_id=source_request_id,
+    )
+
+
+_CONVERSATION_OBSERVATION_STRING_FIELDS = frozenset(
+    {
+        "schema_version",
+        "observation_id",
+        "kind",
+        "observed_at_utc",
+        "request_id",
+        "effect_id",
+        "call_id",
+        "capability_name",
+        "execution_id",
+        "workflow_id",
+        "instance_id",
+        "terminal_status",
+        "effect_status",
+        "outcome_finality",
+        "final_state",
+        "completed_at",
+        "execution_trace_id",
+    }
+)
+
+
+def _normalise_conversation_observation(
+    value: Any,
+    *,
+    strict: bool,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        if strict:
+            raise ChatHistoryServiceError("observation must be an object.")
+        return None
+
+    try:
+        observation_id = _normalise_conversation_situation_metadata(
+            value.get("observation_id"),
+            field_name="observation.observation_id",
+            max_chars=_CONVERSATION_OBSERVATION_ID_MAX_CHARS,
+            required=strict,
+        )
+        kind = _normalise_conversation_situation_metadata(
+            value.get("kind"),
+            field_name="observation.kind",
+            max_chars=_CONVERSATION_OBSERVATION_KIND_MAX_CHARS,
+            required=strict,
+        )
+    except ChatHistoryServiceError:
+        if strict:
+            raise
+        return None
+    if not observation_id or not kind:
+        return None
+
+    normalised: Dict[str, Any] = {
+        "schema_version": "conversation_observation.v1",
+        "observation_id": observation_id,
+        "kind": kind,
+    }
+    for field_name in _CONVERSATION_OBSERVATION_STRING_FIELDS:
+        if field_name in {"schema_version", "observation_id", "kind"}:
+            continue
+        raw = value.get(field_name)
+        if raw is None:
+            continue
+        if not isinstance(raw, str):
+            if strict:
+                raise ChatHistoryServiceError(
+                    f"observation.{field_name} must be a string."
+                )
+            continue
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        if len(cleaned) > _CONVERSATION_OBSERVATION_VALUE_MAX_CHARS:
+            if strict:
+                raise ChatHistoryServiceError(
+                    f"observation.{field_name} must be "
+                    f"{_CONVERSATION_OBSERVATION_VALUE_MAX_CHARS} characters "
+                    "or fewer."
+                )
+            cleaned = cleaned[:_CONVERSATION_OBSERVATION_VALUE_MAX_CHARS]
+        normalised[field_name] = cleaned
+
+    for boolean_field in ("changed", "failure_detail_available"):
+        boolean_value = value.get(boolean_field)
+        if isinstance(boolean_value, bool):
+            normalised[boolean_field] = boolean_value
+        elif boolean_value is not None and strict:
+            raise ChatHistoryServiceError(
+                f"observation.{boolean_field} must be a boolean."
+            )
+    return normalised
+
+
+def _conversation_observations_from_doc(
+    doc: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    raw_observations = doc.get("conversation_observations")
+    if raw_observations is None:
+        return []
+    if not isinstance(raw_observations, list):
+        logger.warning(
+            "Ignoring malformed conversation observations for session_id=%s",
+            doc.get("session_id"),
+        )
+        return []
+
+    observations: List[Dict[str, Any]] = []
+    for raw in raw_observations[-CONVERSATION_OBSERVATION_MAX_ITEMS:]:
+        normalised = _normalise_conversation_observation(raw, strict=False)
+        if normalised is not None:
+            observations.append(normalised)
+    return observations
+
+
+def append_chat_history_conversation_observation(
+    *,
+    user_id: str,
+    session_id: str,
+    observation: Dict[str, Any],
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Any]:
+    """Append one bounded exact observation, idempotently while it is retained.
+
+    These observations supplement the model-authored situation text with
+    mechanically exact events from other carriers, such as a durable workflow
+    reaching terminal state after its originating turn ended. They are context,
+    not authority, and this projection never executes or retries the effect.
+    Producers that may replay after this bounded ring evicts an item must keep
+    their own durable projection watermark.
+    """
+
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+    normalised = _normalise_conversation_observation(observation, strict=True)
+    if normalised is None:
+        raise ChatHistoryServiceError("observation is required.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    session_query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    observation_id = normalised["observation_id"]
+    append_query = {
+        "$and": [
+            session_query,
+            {
+                "conversation_observations.observation_id": {
+                    "$ne": observation_id
+                }
+            },
+        ]
+    }
+    try:
+        existing_observations_expression = {
+            "$cond": [
+                {"$isArray": "$conversation_observations"},
+                "$conversation_observations",
+                [],
+            ]
+        }
+        stored_total_expression = {
+            "$cond": [
+                {"$isNumber": "$conversation_observation_total"},
+                {"$floor": "$conversation_observation_total"},
+                0,
+            ]
+        }
+        result = chat_history_coll.update_one(
+            append_query,
+            [
+                {
+                    "$set": {
+                        "conversation_observations": {
+                            "$slice": [
+                                {
+                                    "$concatArrays": [
+                                        existing_observations_expression,
+                                        [normalised],
+                                    ]
+                                },
+                                -CONVERSATION_OBSERVATION_MAX_ITEMS,
+                            ]
+                        },
+                        "conversation_observation_total": {
+                            "$add": [
+                                {
+                                    "$max": [
+                                        {
+                                            "$size": (
+                                                existing_observations_expression
+                                            )
+                                        },
+                                        stored_total_expression,
+                                    ]
+                                },
+                                1,
+                            ]
+                        },
+                    }
+                }
+            ],
+        )
+    except PyMongoError as e:
+        logger.error(
+            "Error appending chat history conversation observation: %s",
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not append chat history conversation observation: {e}"
+        ) from e
+
+    updated = bool(getattr(result, "modified_count", 0) > 0)
+    if updated:
+        return {
+            "updated": True,
+            "matched": True,
+            "duplicate": False,
+            "session_id": session_id,
+            "observation_id": observation_id,
+        }
+
+    current_state = get_chat_history_session_state(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+        include_history=False,
+    )
+    observations = (
+        current_state.get("conversation_observations")
+        if isinstance(current_state, dict)
+        else []
+    )
+    duplicate = any(
+        isinstance(item, dict) and item.get("observation_id") == observation_id
+        for item in observations
+    )
+    return {
+        "updated": False,
+        "matched": current_state is not None,
+        "duplicate": duplicate,
+        "reason": "duplicate" if duplicate else "session_not_found",
+        "session_id": session_id,
+        "observation_id": observation_id,
+    }
+
+
+def clear_chat_history_conversation_observations(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Any]:
+    """Clear prior exact observations when the conversation is explicitly reset."""
+
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    try:
+        result = chat_history_coll.update_one(
+            query,
+            {
+                "$unset": {
+                    "conversation_observations": "",
+                    "conversation_observation_total": "",
+                }
+            },
+        )
+    except PyMongoError as e:
+        logger.error(
+            "Error clearing chat history conversation observations: %s",
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not clear chat history conversation observations: {e}"
+        ) from e
+    return {
+        "updated": bool(getattr(result, "modified_count", 0) > 0),
+        "matched": bool(getattr(result, "matched_count", 0) > 0),
+        "session_id": session_id,
+    }
+
+
+def reset_chat_history_conversation_state(
+    *,
+    user_id: str,
+    session_id: str,
+    updated_by: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Any]:
+    """Atomically start a new transcript segment and reset its carried state.
+
+    The atomic update gives reset a single ordering point. A turn that loaded
+    the pre-reset situation cannot later overwrite the cleared revision, while
+    a turn that starts after reset may revise the new situation normally.
+    """
+
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+    updater_value = _normalise_conversation_situation_metadata(
+        updated_by,
+        field_name="updated_by",
+        max_chars=_CONVERSATION_SITUATION_UPDATER_MAX_CHARS,
+        required=True,
+    )
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    updated_at = datetime.now(timezone.utc)
+    reset_marker = {
+        "role": "system",
+        "content": "__RESET__",
+        "timestamp": updated_at,
+    }
+    update_pipeline = [
+        {
+            "$set": {
+                "history": {
+                    "$concatArrays": [
+                        {"$ifNull": ["$history", []]},
+                        [reset_marker],
+                    ]
+                },
+                "conversation_situation": {
+                    "revision": {
+                        "$add": [
+                            {
+                                "$convert": {
+                                    "input": "$conversation_situation.revision",
+                                    "to": "int",
+                                    "onError": 0,
+                                    "onNull": 0,
+                                }
+                            },
+                            1,
+                        ]
+                    },
+                    "source": "conversation_reset",
+                    "updated_by": updater_value,
+                    "updated_at": updated_at,
+                },
+                "updated_at": updated_at,
+            }
+        },
+        {"$unset": "conversation_observations"},
+        {"$unset": "conversation_observation_total"},
+    ]
+    try:
+        result = chat_history_coll.update_one(query, update_pipeline)
+    except PyMongoError as e:
+        logger.error(
+            "Error atomically resetting chat history conversation state: %s",
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not reset chat history conversation state: {e}"
+        ) from e
+    return {
+        "updated": bool(getattr(result, "modified_count", 0) > 0),
+        "matched": bool(getattr(result, "matched_count", 0) > 0),
+        "session_id": session_id,
+    }
+
+
 def _normalise_chat_history_entries(
     history: Any,
     *,
@@ -1998,13 +2871,34 @@ def _upsert_turn_execution_projection_for_message(
     if not isinstance(record, dict):
         return
 
+    actor = record.get("actor") if isinstance(record.get("actor"), dict) else {}
+    actor_user_id = (
+        _safe_str(actor.get("user_concept_id"))
+        or _safe_str(record.get("user_id"))
+        or _safe_str(user_id)
+    )
+    actor_namespace = (
+        _safe_str(actor.get("namespace"))
+        or _safe_str(record.get("namespace"))
+        or _safe_str(namespace)
+    )
+    actor_org_id = (
+        _safe_str(actor.get("organisation_concept_id"))
+        or _safe_str(record.get("org_id"))
+        or _safe_str(org_id)
+    )
+    projection_record = dict(record)
+    projection_record["history_owner_user_id"] = user_id
+    if _safe_str(namespace):
+        projection_record["history_namespace"] = _safe_str(namespace)
+
     try:
         outcome = upsert_turn_execution_record_projection(
-            record=record,
-            user_id=user_id,
+            record=projection_record,
+            user_id=actor_user_id,
             session_id=session_id,
-            namespace=namespace,
-            org_id=org_id,
+            namespace=actor_namespace,
+            org_id=actor_org_id,
         )
         if isinstance(outcome, dict) and not outcome.get("updated", False):
             reason = outcome.get("reason")
@@ -2021,12 +2915,12 @@ def _upsert_turn_execution_projection_for_message(
             )
             return
         critique_outcome = schedule_episode_critique_memory_from_turn(
-            record=record,
+            record=projection_record,
             llm_debug_data=llm_debug_data,
-            user_id=user_id,
+            user_id=actor_user_id,
             session_id=session_id,
-            namespace=namespace,
-            org_id=org_id,
+            namespace=actor_namespace,
+            org_id=actor_org_id,
         )
         if isinstance(critique_outcome, dict) and not critique_outcome.get(
             "scheduled", False

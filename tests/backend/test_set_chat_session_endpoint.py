@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import types
+from typing import Any
+
 import pytest
 import src.backend.server.routes.von_routes as von_routes
 from pymongo.errors import PyMongoError
@@ -251,17 +253,26 @@ def test_set_chat_session_allows_shared_invite(monkeypatch, app_client):
 
 def test_history_uses_query_session_id(monkeypatch, app_client):
     _, client = app_client
-    captured: dict[str, str] = {}
+    captured: dict[str, Any] = {}
 
-    def fake_get_segments(user_id, session_id, **kwargs):
+    def fake_get_session_state(*, user_id, session_id, **kwargs):
         captured["user_id"] = user_id
         captured["session_id"] = session_id
-        return [[{"role": "user", "content": "hi"}]]
+        captured.update(kwargs)
+        return {
+            "session_id": session_id,
+            "history": [{"role": "user", "content": "hi"}],
+            "conversation_situation": None,
+            "history_offset": 11,
+            "history_truncated": True,
+        }
 
     import src.backend.services.chat_history_service as chat_history_service
 
     monkeypatch.setattr(
-        chat_history_service, "get_chat_history_segments", fake_get_segments
+        chat_history_service,
+        "get_chat_history_session_state",
+        fake_get_session_state,
     )
     monkeypatch.setattr(
         chat_history_service, "has_chat_history_session", lambda *args, **kwargs: True
@@ -273,24 +284,30 @@ def test_history_uses_query_session_id(monkeypatch, app_client):
         lambda *args, **kwargs: True,
     )
 
-    import src.backend.services.shared_conversation_service as shared_conversation_service
-
     monkeypatch.setattr(
-        shared_conversation_service,
-        "get_accepted_invite_for_user_session",
-        lambda *args, **kwargs: {"inviter_user_id": "#V#u"},
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: ("#V#u", None),
     )
 
     with client.session_transaction() as sess:
         sess["user_concept_id"] = "#V#u"
         sess["session_id"] = "session-from-cookie"
 
-    resp = client.get("/von/history?segments=1&session_id=session-from-query")
+    resp = client.get(
+        "/von/history?segments=1&segment_size=1&tail_limit=1"
+        "&include_debug=0&session_id=session-from-query"
+    )
 
     assert resp.status_code == 200
     js = resp.get_json()
-    assert js["history"] == [{"role": "user", "content": "hi"}]
+    assert len(js["history"]) == 1
+    assert js["history"][0]["role"] == "user"
+    assert js["history"][0]["content"] == "hi"
     assert captured["session_id"] == "session-from-query"
+    assert captured["history_tail_limit"] == 1
+    assert captured["include_debug"] is False
+    assert js["has_more_history"] is True
 
     with client.session_transaction() as sess:
         assert sess.get("session_id") == "session-from-cookie"
@@ -357,7 +374,7 @@ def test_history_returns_degraded_payload_for_transient_chat_history_errors(
     )
     monkeypatch.setattr(
         chat_history_service,
-        "get_chat_history_segments",
+        "get_chat_history_session_state",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             chat_history_service.ChatHistoryServiceError(
                 "timed out while retrieving history"

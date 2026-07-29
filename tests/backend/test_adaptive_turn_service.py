@@ -30,13 +30,18 @@ from src.backend.security.access_control import (
     get_effective_user_concept_id,
 )
 from src.backend.services.adaptive_turn_service import (
+    _CONVERSATION_OBSERVATIONS_MAX_BYTES,
+    _CONVERSATION_OBSERVATIONS_MAX_ITEMS,
+    _CONVERSATION_SITUATION_MAX_CHARS,
     _bound_tool_results_for_model,
+    _bounded_conversation_observation_projection,
     _capability_catalogue,
     _compact_context_after_limit,
     _compact_evidence_index,
+    _effect_result_target_ids,
     _effect_subject_authorised,
     _effect_subject_authority_denial,
-    _effect_result_target_ids,
+    _extract_conversation_situation_sidecar,
     _final_synthesis_context,
     _json_bytes,
     _trusted_tool_payload,
@@ -683,6 +688,391 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     }
 
 
+def test_terminal_answer_can_update_a_revisable_conversation_situation() -> None:
+    current_situation = (
+        "We are deciding how to represent an evolving conversation situation. "
+        "The storage choice is still open."
+    )
+    revised_situation = (
+        "We are implementing a lightweight, inspectable text description of the "
+        "conversation situation. It remains provisional and may contain "
+        "sub-situations. The next step is to validate same-call continuity."
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response=(
+                "I have implemented the smallest same-call carrier seam.\n\n"
+                "<von_conversation_situation>\n"
+                f"{revised_situation}\n"
+                "</von_conversation_situation>"
+            )
+        )
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Continue with the agreed first step.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-with-situation",
+        conversation_id="conversation-123",
+        conversation_situation=current_situation,
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == (
+        "I have implemented the smallest same-call carrier seam."
+    )
+    assert "<von_conversation_situation>" not in result.response_text
+    assert revised_situation not in result.response_text
+    assert result.conversation_situation == revised_situation
+
+    system_message = client.calls[0]["system_message"]
+    assert "conversation-123" in system_message
+    assert current_situation in system_message
+    assert "provisional, revisable theory" in system_message
+    assert "one focused question" in system_message
+    assert "unavailable information is distinct from performative permission" in (
+        system_message
+    )
+    assert "<von_conversation_situation>" in system_message
+
+
+def test_material_unknown_is_elicited_then_resolved_through_shared_situation() -> None:
+    outstanding_situation = (
+        "Objective: prepare the corpus comparison. "
+        "Material unknown: which corpus the user intends. "
+        "Outstanding question: Which corpus should I use? "
+        "Independent work can continue on the comparison structure."
+    )
+    first_client = _SequenceClient(
+        LLMResponse(
+            text_response=(
+                "Which corpus should I use?\n"
+                "<von_conversation_situation>\n"
+                f"{outstanding_situation}\n"
+                "</von_conversation_situation>"
+            )
+        )
+    )
+
+    first_turn = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Prepare the comparison.",
+        context=[],
+        llm_client=first_client,
+        model="test-model",
+        conversation_id="conversation-elicitation",
+        conversation_situation=(
+            "Objective: prepare the corpus comparison. "
+            "The intended corpus is not yet known."
+        ),
+        turn_id="turn-elicitation-question",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert first_turn.response_text == "Which corpus should I use?"
+    assert first_turn.response_text.count("?") == 1
+    assert "permission" not in first_turn.response_text.lower()
+    assert first_turn.conversation_situation == outstanding_situation
+
+    resolved_situation = (
+        "Objective: compare the British National Corpus with the existing "
+        "baseline. The user selected the British National Corpus, resolving "
+        "the prior material unknown. Next step: compute the comparison."
+    )
+    second_client = _SequenceClient(
+        LLMResponse(
+            text_response=(
+                "I’ll use the British National Corpus and proceed with the "
+                "comparison.\n"
+                "<von_conversation_situation>\n"
+                f"{resolved_situation}\n"
+                "</von_conversation_situation>"
+            )
+        )
+    )
+    second_turn = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Use the British National Corpus.",
+        context=[
+            {"role": "assistant", "content": first_turn.response_text},
+            {"role": "user", "content": "Use the British National Corpus."},
+        ],
+        llm_client=second_client,
+        model="test-model",
+        conversation_id="conversation-elicitation",
+        conversation_situation=first_turn.conversation_situation,
+        turn_id="turn-elicitation-answer",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert outstanding_situation in second_client.calls[0]["system_message"]
+    assert second_turn.response_text == (
+        "I’ll use the British National Corpus and proceed with the comparison."
+    )
+    assert "?" not in second_turn.response_text
+    assert second_turn.conversation_situation == resolved_situation
+
+
+def test_tool_resolvable_unknown_is_observed_without_questioning_the_user() -> None:
+    invoked_queries: list[str] = []
+
+    def _read(**kwargs: Any) -> dict[str, Any]:
+        invoked_queries.append(str(kwargs.get("query")))
+        return {"success": True, "current_corpus": "Lancaster-Oslo/Bergen"}
+
+    revised_situation = (
+        "Objective: continue the corpus comparison. The canonical configuration "
+        "says the current corpus is Lancaster-Oslo/Bergen; no user answer was "
+        "needed."
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-corpus",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "current configured corpus"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "The configured corpus is Lancaster-Oslo/Bergen, so I can "
+                "continue.\n"
+                "<von_conversation_situation>\n"
+                f"{revised_situation}\n"
+                "</von_conversation_situation>"
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(_read),
+        prompt="Continue with the configured corpus.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        conversation_id="conversation-tool-resolvable",
+        conversation_situation=(
+            "Objective: continue the corpus comparison. "
+            "The current configured corpus is unknown but available via tools."
+        ),
+        turn_id="turn-tool-resolvable",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked_queries == ["current configured corpus"]
+    assert "?" not in result.response_text
+    assert result.conversation_situation == revised_situation
+
+
+def test_machine_observations_are_bounded_separate_and_not_redispatched() -> None:
+    observations = [
+        {
+            "observation_id": observation_id,
+            "effect_id": f"effect-{index}",
+            "outcome": "succeeded",
+            "canonical_terminal": True,
+        }
+        for index, observation_id in enumerate(
+            [
+                "omitted-old-a",
+                "omitted-old-b",
+                "retained-00",
+                "retained-01",
+                "retained-02",
+                "retained-03",
+                "retained-04",
+                "retained-05",
+                "retained-06",
+                "retained-07",
+            ]
+        )
+    ]
+    projection = _bounded_conversation_observation_projection(observations)
+    projection_with_prior_omissions = (
+        _bounded_conversation_observation_projection(
+            observations,
+            omitted_before=5,
+        )
+    )
+
+    assert projection is not None
+    assert projection_with_prior_omissions is not None
+    assert len(projection["observations"]) == _CONVERSATION_OBSERVATIONS_MAX_ITEMS
+    assert projection["observations"] == observations[-8:]
+    assert projection["omitted_count"] == 2
+    assert projection_with_prior_omissions["omitted_count"] == 7
+    assert (
+        len(_json_bytes(projection["observations"]))
+        <= _CONVERSATION_OBSERVATIONS_MAX_BYTES
+    )
+
+    client = _SequenceClient(LLMResponse(text_response="The recorded effect succeeded."))
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="What happened to the pending effect?",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        conversation_id="conversation-with-observations",
+        conversation_situation="The effect was pending when the previous turn ended.",
+        conversation_observations=observations,
+        conversation_observation_state={"omitted_count": 3},
+        turn_id="turn-with-observations",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "The recorded effect succeeded."
+    system_message = client.calls[0]["system_message"]
+    assert "omitted-old-a" not in system_message
+    assert "omitted-old-b" not in system_message
+    assert "retained-00" in system_message
+    assert "retained-07" in system_message
+    assert '"omitted_count": 5' in system_message
+    assert "projected separately from the provisional plain-text situation" in (
+        system_message
+    )
+    assert "Never redispatch an effect merely to learn an outcome already recorded" in (
+        system_message
+    )
+    assert "reconcile that outcome into the visible answer" in system_message
+
+
+def test_oversized_machine_observation_is_omitted_without_partial_projection() -> None:
+    projection = _bounded_conversation_observation_projection(
+        [
+            {
+                "observation_id": "too-large",
+                "payload": "x" * (_CONVERSATION_OBSERVATIONS_MAX_BYTES + 1),
+            }
+        ]
+    )
+
+    assert projection is not None
+    assert projection["observations"] == []
+    assert projection["omitted_count"] == 1
+
+
+def test_absent_situation_sidecar_preserves_the_current_situation() -> None:
+    current_situation = "The user and Von are still choosing the next useful step."
+    client = _SequenceClient(LLMResponse(text_response="Here is the answer."))
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Answer from the situation already established.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        conversation_id="conversation-unchanged",
+        conversation_situation=current_situation,
+        turn_id="turn-situation-unchanged",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == "Here is the answer."
+    assert result.conversation_situation == current_situation
+
+
+def test_situation_sidecar_without_visible_answer_is_a_non_answer() -> None:
+    current_situation = "The user still needs a visible answer."
+    client = _SequenceClient(
+        LLMResponse(
+            text_response=(
+                "<von_conversation_situation>\n"
+                "Updated theory but no user work product.\n"
+                "</von_conversation_situation>"
+            )
+        )
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Give me the answer.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        conversation_id="conversation-sidecar-only",
+        conversation_situation=current_situation,
+        turn_id="turn-sidecar-only",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "model_non_answer"
+    assert result.response_text == (
+        "The model returned a conversation-situation update but no "
+        "user-visible answer."
+    )
+    assert result.conversation_situation == current_situation
+
+
+@pytest.mark.parametrize(
+    "raw_response",
+    [
+        (
+            "Visible answer.\n"
+            "<von_conversation_situation>\n"
+            "Missing the terminal tag."
+        ),
+        "Visible answer.\n</von_conversation_situation>",
+        (
+            "Visible answer.\n"
+            "<von_conversation_situation>Updated.</von_conversation_situation>\n"
+            "Unexpected visible suffix."
+        ),
+        (
+            "Visible answer.\n"
+            "<von_conversation_situation>First.</von_conversation_situation>\n"
+            "<von_conversation_situation>Second.</von_conversation_situation>"
+        ),
+        (
+            "Visible answer.\n"
+            "<von_conversation_situation >Protocol variant.</"
+            "von_conversation_situation>"
+        ),
+        (
+            "Visible answer.\n"
+            "<VON_CONVERSATION_SITUATION>Protocol variant.</"
+            "VON_CONVERSATION_SITUATION>"
+        ),
+        (
+            "Visible answer.\n"
+            "<von_conversation_situation>"
+            + ("x" * (_CONVERSATION_SITUATION_MAX_CHARS + 1))
+            + "</von_conversation_situation>"
+        ),
+    ],
+)
+def test_invalid_situation_sidecar_is_hidden_and_preserves_current_state(
+    raw_response: str,
+) -> None:
+    visible_text, situation = _extract_conversation_situation_sidecar(
+        raw_response,
+        current_situation="Original situation.",
+    )
+
+    assert visible_text == "Visible answer."
+    assert "von_conversation_situation" not in visible_text
+    assert situation == "Original situation."
+
+
 def test_model_slash_evidence_pointer_hydrates_the_whole_result() -> None:
     client = _RootAliasHydrationClient()
 
@@ -1084,10 +1474,16 @@ def test_ordinary_effect_authorises_actor_profile_without_visibility_lookup(
     assert result.tool_invocations[0]["changed"] is True
 
 
-def test_terminal_model_failure_cannot_claim_no_change_after_effect() -> None:
+def test_finality_fallback_rejects_pre_reconciliation_situation() -> None:
+    current_situation = "The representation effect has not yet been observed."
     client = _SequenceClient(
         LLMResponse(
-            text_response="I have not changed anything.",
+            text_response=(
+                "I have not changed anything.\n"
+                "<von_conversation_situation>\n"
+                "The representation definitely did not change.\n"
+                "</von_conversation_situation>"
+            ),
             tool_calls=[
                 ToolCall(
                     tool_name="turn_invoke_capability",
@@ -1120,6 +1516,8 @@ def test_terminal_model_failure_cannot_claim_no_change_after_effect() -> None:
         user_concept_id="#V#person",
         org_concept_id="#V#org",
         turn_id="effect-before-model-failure",
+        conversation_id="conversation-with-effect-failure",
+        conversation_situation=current_situation,
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
     )
@@ -1128,8 +1526,58 @@ def test_terminal_model_failure_cannot_claim_no_change_after_effect() -> None:
     assert result.effect_finality_fallback is True
     assert "will not claim that nothing changed" in result.response_text
     assert "I have not changed anything" not in result.response_text
+    assert "von_conversation_situation" not in result.response_text
+    assert result.conversation_situation == current_situation
     assert result.tool_invocations[0]["effect_status"] == "succeeded"
     assert result.tool_invocations[0]["changed"] is True
+
+
+def test_model_error_after_read_rejects_interim_situation_sidecar() -> None:
+    current_situation = "The canonical corpus is not yet observed."
+    client = _SequenceClient(
+        LLMResponse(
+            text_response=(
+                "I am checking the canonical corpus.\n"
+                "<von_conversation_situation>\n"
+                "Stale interim theory before the read result.\n"
+                "</von_conversation_situation>"
+            ),
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-model-failure",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "canonical corpus"},
+                    },
+                )
+            ],
+        ),
+        TimeoutError("final model call failed"),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "canonical_corpus": "Lancaster-Oslo/Bergen",
+            }
+        ),
+        prompt="Which corpus is canonical?",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="read-before-model-failure",
+        conversation_id="conversation-read-failure",
+        conversation_situation=current_situation,
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "model_error"
+    assert result.response_text == "I am checking the canonical corpus."
+    assert "von_conversation_situation" not in result.response_text
+    assert result.conversation_situation == current_situation
 
 
 def test_post_handler_output_validation_failure_is_indeterminate() -> None:

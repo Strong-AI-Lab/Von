@@ -1,6 +1,75 @@
 from flask import Flask
 
 
+def test_history_exposes_conversation_situation_without_message_segments(
+    monkeypatch,
+):
+    from src.backend.server.routes import von_routes
+
+    situation = {
+        "text": "The user and Von are planning the first implementation slice.",
+        "revision": 3,
+        "source": "adaptive_turn",
+        "updated_by": "#V#test_user",
+        "updated_at": "2026-07-29T09:00:00+00:00",
+    }
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#test_user"},
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: ("#V#test_user", None),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": situation,
+        },
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    response = app.test_client().get(
+        "/von/history",
+        query_string={"session_id": "session-empty"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "history": [],
+        "segments_returned": 0,
+        "total_segments": 0,
+        "has_more_history": False,
+        "conversation_situation": situation,
+        "conversation_observations": [],
+        "conversation_observation_state": {
+            "schema_version": "conversation_observation_state.v1",
+            "retained_count": 0,
+            "total_count": 0,
+            "omitted_count": 0,
+            "retention_limit": 12,
+        },
+    }
+
+
 def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypatch):
     from src.backend.server.routes.von_routes import von_bp
 
@@ -29,12 +98,32 @@ def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypat
         lambda *_args, **_kwargs: True,
     )
 
-    def _segments(*args, **kwargs):
-        calls["args"] = args
-        calls["kwargs"] = kwargs
-        assert kwargs.get("hydrate_blob_refs") in (None, False)
-        payload = [
-            [
+    situation = {
+        "text": "We are checking compact history retrieval.",
+        "revision": 2,
+        "source": "adaptive_turn",
+        "updated_by": "#V#test_user",
+        "updated_at": "2026-06-03T00:01:00+00:00",
+    }
+    observations = [
+        {
+            "observation_id": "late-effect:req-compact",
+            "kind": "durable_effect_terminal",
+            "summary": "The represented effect completed after its originating turn.",
+        }
+    ]
+
+    def _session_state(*, user_id, session_id, namespace, **_kwargs):
+        calls["state"] = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "namespace": namespace,
+        }
+        return {
+            "session_id": session_id,
+            "conversation_situation": situation,
+            "conversation_observations": observations,
+            "history": [
                 {
                     "role": "assistant",
                     "content": "compact answer",
@@ -48,15 +137,12 @@ def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypat
                         "messages": compact_debug_ref,
                     },
                 }
-            ]
-        ]
-        if kwargs.get("return_meta"):
-            return payload, {"history_truncated": False}
-        return payload
+            ],
+        }
 
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_segments",
-        _segments,
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_session_state",
+        _session_state,
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_debug_entry",
@@ -80,8 +166,13 @@ def test_history_endpoint_returns_compact_debug_refs_without_hydration(monkeypat
     history = body["history"]
     assert history[0]["llm_debug_data"]["messages"] == compact_debug_ref
     assert "large raw payload" not in str(body)
-    assert calls["kwargs"]["include_debug"] is True
-    assert calls["kwargs"]["return_meta"] is True
+    assert body["conversation_situation"] == situation
+    assert body["conversation_observations"] == observations
+    assert calls["state"] == {
+        "user_id": "#V#test_user",
+        "session_id": "session-compact",
+        "namespace": "#V#test_user",
+    }
 
 
 def test_history_debug_returns_stored_turn_execution_diagnostics(monkeypatch):

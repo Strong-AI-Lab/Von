@@ -84,6 +84,48 @@ def test_add_message_to_history_upserts_turn_execution_projection() -> None:
     mock_build.assert_not_called()
 
 
+def test_turn_projection_keeps_actor_scope_and_records_history_owner() -> None:
+    captured: dict = {}
+
+    def _capture_projection(**kwargs):
+        captured.update(kwargs)
+        return {"updated": True, "request_id": "req-shared-turn"}
+
+    with (
+        patch(
+            "src.backend.services.chat_history_service.upsert_turn_execution_record_projection",
+            side_effect=_capture_projection,
+        ),
+        patch(
+            "src.backend.services.chat_history_service.schedule_episode_critique_memory_from_turn",
+            return_value={"scheduled": True},
+        ),
+    ):
+        chat_history_service._upsert_turn_execution_projection_for_message(
+            message={"role": "assistant", "content": "Done."},
+            llm_debug_data={
+                "turn_execution_record": {
+                    "request_id": "req-shared-turn",
+                    "actor": {
+                        "user_concept_id": "#V#invitee",
+                        "namespace": "#V#invitee@org",
+                        "organisation_concept_id": "#V#org",
+                    },
+                }
+            },
+            user_id="#V#owner",
+            session_id="shared-session",
+            namespace="#V#owner@org",
+            org_id="#V#org",
+        )
+
+    assert captured["user_id"] == "#V#invitee"
+    assert captured["namespace"] == "#V#invitee@org"
+    assert captured["session_id"] == "shared-session"
+    assert captured["record"]["history_owner_user_id"] == "#V#owner"
+    assert captured["record"]["history_namespace"] == "#V#owner@org"
+
+
 def test_add_message_to_history_synthesises_turn_execution_projection_without_record() -> None:
     mock_coll = MagicMock()
 
