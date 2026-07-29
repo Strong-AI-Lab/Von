@@ -72,8 +72,27 @@ def _make_app(monkeypatch, history_calls: list[dict[str, object]]) -> Flask:
         lambda **kwargs: history_calls.append(kwargs),
     )
     monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": None,
+        },
+    )
+    monkeypatch.setattr(
         "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
         lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.set_chat_history_conversation_situation",
+        lambda **kwargs: {
+            "updated": True,
+            "matched": True,
+            "conflict": False,
+            "expected_revision": kwargs["expected_revision"],
+            "current_revision": kwargs["expected_revision"] + 1,
+            "session_id": kwargs["session_id"],
+        },
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.build_context_concept_reference_metadata",
@@ -233,3 +252,250 @@ def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active
     assert bound_sessions == [
         ("window-identity", body["conversation_session_id"], "#V#user")
     ]
+
+
+def test_generate_carries_and_updates_inspectable_conversation_situation(
+    monkeypatch,
+):
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    events: list[tuple[str, object]] = []
+    adaptive_calls: list[dict[str, Any]] = []
+    set_calls: list[dict[str, Any]] = []
+
+    existing_situation = {
+        "text": "We are deciding how to represent the paper.",
+        "revision": 4,
+        "source": "adaptive_turn",
+        "updated_by": "#V#user",
+        "updated_at": "2026-07-29T08:00:00+00:00",
+    }
+    observations = [
+        {
+            "observation_id": "effect:paper-representation",
+            "kind": "durable_effect_terminal",
+            "summary": "The paper representation completed.",
+        }
+    ]
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [{"role": "user", "content": "Earlier context"}],
+            "conversation_situation": existing_situation,
+            "conversation_observations": observations,
+        },
+    )
+
+    def _add_message(**kwargs: Any) -> None:
+        history_calls.append(dict(kwargs))
+        events.append(("message", dict(kwargs["message"])))
+
+    def _adaptive(**kwargs: Any) -> AdaptiveTurnResult:
+        adaptive_calls.append(dict(kwargs))
+        return AdaptiveTurnResult(
+            response_text="updated answer",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+            conversation_situation=(
+                "We are representing the paper; its canonical identity is now known."
+            ),
+        )
+
+    def _set_situation(**kwargs: Any) -> dict[str, Any]:
+        set_calls.append(dict(kwargs))
+        events.append(("situation", kwargs["text"]))
+        return {
+            "updated": True,
+            "matched": True,
+            "conflict": False,
+            "expected_revision": kwargs["expected_revision"],
+            "current_revision": kwargs["expected_revision"] + 1,
+            "session_id": kwargs["session_id"],
+        }
+
+    monkeypatch.setattr(von_routes, "_add_chat_history_message", _add_message)
+    monkeypatch.setattr(von_routes, "execute_adaptive_turn", _adaptive)
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "set_chat_history_conversation_situation",
+        _set_situation,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Continue",
+            "conversation_session_id": "session-situation",
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert adaptive_calls[0]["conversation_id"] == "session-situation"
+    assert (
+        adaptive_calls[0]["conversation_situation"]
+        == existing_situation["text"]
+    )
+    assert adaptive_calls[0]["conversation_observations"] == observations
+    assert any(
+        message.get("content") == "Earlier context"
+        for message in adaptive_calls[0]["context"]
+    )
+    assert set_calls == [
+        {
+            "user_id": "#V#user",
+            "session_id": "session-situation",
+            "text": (
+                "We are representing the paper; its canonical identity is now known."
+            ),
+            "expected_revision": 4,
+            "source": "adaptive_turn",
+            "updated_by": "#V#user",
+            "namespace": "#V#user@org",
+            "source_request_id": adaptive_calls[0]["turn_id"],
+        }
+    ]
+    assistant_event_index = next(
+        index
+        for index, event in enumerate(events)
+        if event[0] == "message"
+        and isinstance(event[1], dict)
+        and event[1].get("role") == "assistant"
+    )
+    situation_event_index = next(
+        index for index, event in enumerate(events) if event[0] == "situation"
+    )
+    assert assistant_event_index < situation_event_index
+
+
+def test_generate_returns_answer_when_situation_revision_conflicts(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+            "conversation_situation": {
+                "text": "Loaded situation",
+                "revision": 2,
+                "source": "adaptive_turn",
+                "updated_by": "#V#user",
+                "updated_at": "2026-07-29T08:00:00+00:00",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "execute_adaptive_turn",
+        lambda **_kwargs: AdaptiveTurnResult(
+            response_text="useful answer",
+            extra_messages=(),
+            tool_invocations=(),
+            aux_llm_calls=(),
+            conversation_situation="Locally updated situation",
+        ),
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "set_chat_history_conversation_situation",
+        lambda **kwargs: {
+            "updated": False,
+            "matched": True,
+            "conflict": True,
+            "expected_revision": kwargs["expected_revision"],
+            "current_revision": 3,
+            "session_id": kwargs["session_id"],
+        },
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Continue",
+            "conversation_session_id": "session-conflict",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["response"] == "useful answer"
+
+
+def test_shared_generate_uses_owner_situation_and_owner_storage_copy(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    history_calls: list[dict[str, object]] = []
+    app = _make_app(monkeypatch, history_calls)
+    state_calls: list[dict[str, Any]] = []
+    invitee_history_calls: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **_kwargs: (
+            "#V#owner",
+            {
+                "conversation_owner_user_id": "#V#owner",
+                "organisation_concept_id": "#V#org",
+            },
+        ),
+    )
+
+    def _state(**kwargs: Any) -> dict[str, Any]:
+        state_calls.append(dict(kwargs))
+        return {
+            "session_id": kwargs["session_id"],
+            "history": [{"role": "assistant", "content": "Owner answer"}],
+            "conversation_situation": {
+                "text": "Shared situation",
+                "revision": 1,
+                "source": "adaptive_turn",
+                "updated_by": "#V#owner",
+                "updated_at": "2026-07-29T08:00:00+00:00",
+            },
+        }
+
+    def _invitee_history(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        invitee_history_calls.append((*args, kwargs))
+        return [{"role": "user", "content": "Invitee contribution"}]
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service, "get_chat_history_session_state", _state
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service, "get_chat_history", _invitee_history
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Continue the shared work",
+            "conversation_session_id": "shared-session",
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert state_calls == [
+        {
+            "user_id": "#V#owner",
+            "session_id": "shared-session",
+            "namespace": "#V#owner@org",
+        }
+    ]
+    assert invitee_history_calls == [
+        ("#V#user", "shared-session", {"namespace": "#V#user@org"})
+    ]
+    assert all(call["user_id"] == "#V#owner" for call in history_calls)
+    assert all(call["namespace"] == "#V#owner@org" for call in history_calls)
+    adaptive_call = app.config["_ADAPTIVE_TURN_CALLS"][0]
+    assert adaptive_call["conversation_id"] == "shared-session"
+    assert adaptive_call["conversation_situation"] == "Shared situation"

@@ -5,7 +5,7 @@
 - **Authority:** Explanatory guidance under `AGENTS.md`; adds no independent
   per-task gate or control taxonomy
 - **Created:** 2026-04-03
-- **Last reviewed:** 2026-07-25
+- **Last reviewed:** 2026-07-29
 - **Freshness boundary:** Principle, not current implementation evidence
 
 ## 1. Purpose
@@ -107,6 +107,15 @@ Von should normally exhaust the context it already has access to before asking h
 - accessible tool results.
 
 Questions should normally be **narrow, low-effort, and high-value**. If the remaining ambiguity is not materially decision-relevant, interruption is often the wrong default.
+
+The converse matters too: a focused question is a legitimate information-
+acquisition action when a material fact, preference, or constraint is not
+available from those sources and a recoverable assumption would change the
+undertaking. This is not the same as asking for permission Von already has.
+Record the outstanding question in the conversation's shared situation so it
+survives the turn, ask only what unlocks a materially better next step, and
+continue any independent useful work rather than making the whole undertaking
+wait.
 
 The same rule applies after a failed specialised route. If a selected workflow
 fails before meaningful tool progress or durable effect verification, Von

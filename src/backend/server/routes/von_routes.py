@@ -9083,6 +9083,209 @@ def _add_chat_history_message(
     )
 
 
+def _normalise_conversation_situation_descriptor(
+    value: Any,
+) -> tuple[dict[str, Any] | None, str | None, int]:
+    """Return the inspectable descriptor, model-facing text, and CAS revision."""
+
+    if not isinstance(value, Mapping):
+        return None, None, 0
+    text_value = value.get("text")
+    revision_value = value.get("revision")
+    return (
+        dict(value),
+        text_value.strip()
+        if isinstance(text_value, str) and text_value.strip()
+        else None,
+        revision_value
+        if isinstance(revision_value, int)
+        and not isinstance(revision_value, bool)
+        and revision_value >= 0
+        else 0,
+    )
+
+
+def _load_conversation_session_state_fail_soft(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: str | None,
+    request_id: str | None = None,
+    fail_soft: bool = True,
+    history_tail_limit: int | None = None,
+    include_debug: bool = True,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    str | None,
+    int,
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
+    """Read history and its sidecar together without making either load-bearing."""
+
+    try:
+        state_kwargs: dict[str, Any] = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "namespace": namespace,
+        }
+        if isinstance(history_tail_limit, int) and history_tail_limit > 0:
+            state_kwargs["history_tail_limit"] = history_tail_limit
+        if include_debug is False:
+            state_kwargs["include_debug"] = False
+        session_state = chat_history_service.get_chat_history_session_state(
+            **state_kwargs
+        )
+        history = (
+            [
+                dict(message)
+                for message in session_state.get("history", [])
+                if isinstance(message, Mapping)
+            ]
+            if isinstance(session_state, Mapping)
+            and isinstance(session_state.get("history"), list)
+            else []
+        )
+        raw_situation = (
+            session_state.get("conversation_situation")
+            if isinstance(session_state, Mapping)
+            else None
+        )
+        observations = (
+            [
+                dict(observation)
+                for observation in session_state.get("conversation_observations", [])
+                if isinstance(observation, Mapping)
+            ]
+            if isinstance(session_state, Mapping)
+            and isinstance(session_state.get("conversation_observations"), list)
+            else []
+        )
+        descriptor, text, revision = _normalise_conversation_situation_descriptor(
+            raw_situation
+        )
+        history_meta = {
+            "history_offset": (
+                session_state.get("history_offset")
+                if isinstance(session_state, Mapping)
+                and isinstance(session_state.get("history_offset"), int)
+                else 0
+            ),
+            "history_truncated": bool(
+                isinstance(session_state, Mapping)
+                and session_state.get("history_truncated") is True
+            ),
+            "conversation_observation_state": (
+                dict(session_state.get("conversation_observation_state"))
+                if isinstance(session_state, Mapping)
+                and isinstance(
+                    session_state.get("conversation_observation_state"),
+                    Mapping,
+                )
+                else {
+                    "schema_version": "conversation_observation_state.v1",
+                    "retained_count": len(observations),
+                    "total_count": len(observations),
+                    "omitted_count": 0,
+                    "retention_limit": (
+                        chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
+                    ),
+                }
+            ),
+        }
+        return history, descriptor, text, revision, observations, history_meta
+    except Exception as exc:
+        if not fail_soft:
+            raise
+        _safe_app_log(
+            "warning",
+            "Conversation session-state read unavailable for session_id=%s "
+            "request_id=%s: %s",
+            session_id,
+            request_id,
+            exc,
+        )
+        return [], None, None, 0, [], {
+            "history_offset": 0,
+            "history_truncated": False,
+            "conversation_observation_state": {
+                "schema_version": "conversation_observation_state.v1",
+                "retained_count": 0,
+                "total_count": 0,
+                "omitted_count": 0,
+                "retention_limit": (
+                    chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
+                ),
+            },
+        }
+
+
+def _persist_conversation_situation_fail_soft(
+    *,
+    user_id: str | None,
+    session_id: str,
+    namespace: str | None,
+    previous_text: str | None,
+    updated_text: Any,
+    expected_revision: int,
+    updated_by: str | None,
+    request_id: str | None = None,
+) -> None:
+    """Persist a material sidecar update; a concurrent revision never loses the answer."""
+
+    if (
+        not isinstance(user_id, str)
+        or not user_id.strip()
+        or not isinstance(updated_by, str)
+        or not updated_by.strip()
+        or not isinstance(updated_text, str)
+        or not updated_text.strip()
+    ):
+        return
+    updated_text = updated_text.strip()
+    previous_text = (
+        previous_text.strip()
+        if isinstance(previous_text, str) and previous_text.strip()
+        else None
+    )
+    if updated_text == previous_text:
+        return
+
+    try:
+        result = chat_history_service.set_chat_history_conversation_situation(
+            user_id=user_id.strip(),
+            session_id=session_id,
+            text=updated_text,
+            expected_revision=max(0, int(expected_revision)),
+            source="adaptive_turn",
+            updated_by=updated_by.strip(),
+            namespace=namespace,
+            source_request_id=request_id,
+        )
+    except Exception as exc:
+        _safe_app_log(
+            "warning",
+            "Conversation situation persistence unavailable for session_id=%s "
+            "request_id=%s: %s",
+            session_id,
+            request_id,
+            exc,
+        )
+        return
+
+    if isinstance(result, Mapping) and result.get("conflict") is True:
+        _safe_app_log(
+            "warning",
+            "Conversation situation revision conflict for session_id=%s "
+            "request_id=%s expected_revision=%s current_revision=%s",
+            session_id,
+            request_id,
+            expected_revision,
+            result.get("current_revision"),
+        )
+
+
 def _namespace_is_org_scoped(namespace: str | None) -> bool:
     return (
         isinstance(namespace, str)
@@ -10221,6 +10424,28 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         user_concept_id=user_concept_id, session_id=session_id
     )
     history_user_id = history_owner_user_id or user_concept_id
+    history_namespace = _canonical_conversation_history_namespace(
+        owner_user_id=history_user_id,
+        actor_namespace=(
+            user_namespace
+            if isinstance(user_namespace, str) and user_namespace.strip()
+            else None
+        ),
+        shared_invite=shared_invite,
+    )
+    conversation_situation_descriptor: dict[str, Any] | None = None
+    conversation_situation_text: str | None = None
+    conversation_situation_revision = 0
+    conversation_observations: list[dict[str, Any]] = []
+    conversation_observation_state: dict[str, Any] = {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 0,
+        "total_count": 0,
+        "omitted_count": 0,
+        "retention_limit": (
+            chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
+        ),
+    }
     _check_background_cancellation("shared conversation owner")
 
     if history_user_id:
@@ -10239,6 +10464,27 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         _check_background_cancellation("chat-history lookup")
         _chat_history_start_perf = time.perf_counter()
         try:
+            (
+                owner_history,
+                conversation_situation_descriptor,
+                conversation_situation_text,
+                conversation_situation_revision,
+                conversation_observations,
+                _conversation_history_meta,
+            ) = _load_conversation_session_state_fail_soft(
+                user_id=history_user_id,
+                session_id=session_id,
+                namespace=history_namespace,
+                request_id=request_id,
+                fail_soft=False,
+            )
+            loaded_observation_state = _conversation_history_meta.get(
+                "conversation_observation_state"
+            )
+            if isinstance(loaded_observation_state, Mapping):
+                conversation_observation_state = dict(
+                    loaded_observation_state
+                )
             if (
                 shared_invite
                 and history_owner_user_id
@@ -10250,11 +10496,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     if isinstance(shared_invite, Mapping)
                     else None
                 )
-                owner_history_namespace = _derive_namespace_for_user_org(
-                    history_owner_user_id, shared_invite_org_concept_id
-                ) or chat_history_service.resolve_chat_history_namespace(
-                    history_owner_user_id
-                )
                 invitee_history_namespace = (
                     user_namespace
                     if isinstance(user_namespace, str) and user_namespace.strip()
@@ -10263,11 +10504,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
                 ) or chat_history_service.resolve_chat_history_namespace(
                     user_concept_id
-                )
-                owner_history = chat_history_service.get_chat_history(
-                    history_owner_user_id,
-                    session_id,
-                    namespace=owner_history_namespace,
                 )
                 invitee_history = chat_history_service.get_chat_history(
                     user_concept_id,
@@ -10282,15 +10518,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 context = _merge_shared_histories(owner_history, invitee_history)
             else:
-                context = chat_history_service.get_chat_history(
-                    history_user_id,
-                    session_id,
-                    namespace=(
-                        user_namespace
-                        if isinstance(user_namespace, str) and user_namespace.strip()
-                        else None
-                    ),
-                )
+                context = owner_history
             _check_background_cancellation("chat-history lookup")
         except Exception as chat_history_exc:
             if not chat_history_service.is_transient_chat_history_error(
@@ -10363,7 +10591,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "content": prompt_text,
                     "author_user_id": user_concept_id,
                 },
-                namespace=user_namespace,
+                namespace=history_namespace,
                 organisation_concept_id=org_concept_id,
                 role_in_org=role_in_org,
                 skip_rag_indexing=True,
@@ -11008,6 +11236,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             workflow_launch_inputs=request_workflow_launch_inputs,
             progress_tracker=progress_tracker,
             turn_id=request_id,
+            conversation_id=session_id,
+            conversation_history_owner_user_id=history_user_id,
+            conversation_history_namespace=history_namespace,
+            conversation_situation=conversation_situation_text,
+            conversation_observations=conversation_observations,
+            conversation_observation_state=conversation_observation_state,
         )
         llm_interaction["duration_ms"] = (
             time.perf_counter() - adaptive_turn_started
@@ -11022,6 +11256,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         adaptive_success = adaptive_terminal_status == "completed"
         response_text = adaptive_turn_result.response_text
+        updated_conversation_situation_text = getattr(
+            adaptive_turn_result, "conversation_situation", None
+        )
         effect_finality_fallback = bool(
             adaptive_turn_result.effect_finality_fallback
         )
@@ -12250,22 +12487,26 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         context_stats = _calculate_context_stats(sent_context_stats_messages)
 
-        # stored_context should reflect the persisted user/session history when authenticated,
-        # not the unauthenticated in-memory CONTEXT list.
-        if user_concept_id:
-            try:
-                persisted_history = chat_history_service.get_chat_history(
-                    user_concept_id,
-                    session_id,
-                    namespace=(
-                        user_namespace
-                        if isinstance(user_namespace, str) and user_namespace.strip()
-                        else None
-                    ),
+        # The canonical owner history was already loaded above. Re-reading an
+        # actor-scoped copy here both wastes an Atlas round trip and is wrong
+        # for shared conversations.
+        if history_user_id:
+            stored_context_for_stats = [
+                dict(message)
+                for message in context
+                if isinstance(message, Mapping)
+            ]
+            if _user_message_persisted_early:
+                stored_context_for_stats.append(
+                    {
+                        "role": "user",
+                        "content": prompt_text,
+                        "author_user_id": user_concept_id,
+                    }
                 )
-            except Exception:
-                persisted_history = []
-            current_context_stats = _calculate_context_stats(persisted_history)
+            current_context_stats = _calculate_context_stats(
+                stored_context_for_stats
+            )
         else:
             current_context_stats = _calculate_context_stats(
                 current_app.config["CONTEXT"]
@@ -12374,7 +12615,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             turn_execution_mcp_access = _build_turn_execution_mcp_access(
                 request_id=request_id,
                 session_id=session_id,
-                namespace=user_namespace,
+                namespace=history_namespace,
                 history_owner_user_id=history_user_id,
                 organisation_concept_id=org_concept_id,
                 delegated_actor_user_id=user_concept_id,
@@ -12478,7 +12719,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 response_text=response_text,
                 session_id=session_id,
                 namespace=user_namespace,
-                user_id=history_user_id or user_concept_id,
+                actor_concept_id=user_concept_id,
+                user_id=user_concept_id,
                 org_id=org_concept_id,
             )
 
@@ -12557,7 +12799,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             tool_messages=tool_messages,
             response_text=response_text,
             llm_debug_info=llm_debug_info,
-            user_namespace=user_namespace,
+            user_namespace=history_namespace,
             org_concept_id=org_concept_id,
             role_in_org=role_in_org,
             current_context=current_app.config.get("CONTEXT", []),
@@ -12566,6 +12808,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             limit_context_size_fn=_limit_context_size,
             timing_recorder=turn_timing_recorder,
             refresh_llm_debug_timing_fn=_refresh_llm_debug_timing_payload,
+        )
+        _persist_conversation_situation_fail_soft(
+            user_id=history_user_id,
+            session_id=session_id,
+            namespace=history_namespace,
+            previous_text=conversation_situation_text,
+            updated_text=updated_conversation_situation_text,
+            expected_revision=conversation_situation_revision,
+            updated_by=user_concept_id,
+            request_id=request_id,
         )
 
         if progress_updates_enabled:
@@ -12791,6 +13043,9 @@ def history():
                 "segments_returned": 0,
                 "total_segments": 0,
                 "has_more_history": False,
+                "conversation_situation": None,
+                "conversation_observations": [],
+                "conversation_observation_state": None,
             }
         )
 
@@ -12841,64 +13096,87 @@ def history():
         if not isinstance(owner_user_id, str) or not owner_user_id:
             return jsonify({"error": "Not authorised for conversation"}), 403
 
+        owner_namespace = _canonical_conversation_history_namespace(
+            owner_user_id=owner_user_id,
+            actor_namespace=namespace,
+            shared_invite=shared_invite,
+        )
+        (
+            owner_history,
+            conversation_situation_descriptor,
+            _conversation_situation_text,
+            _conversation_situation_revision,
+            conversation_observations,
+            owner_history_meta,
+        ) = _load_conversation_session_state_fail_soft(
+            user_id=owner_user_id,
+            session_id=session_id,
+            namespace=owner_namespace,
+            fail_soft=False,
+            history_tail_limit=history_tail_limit,
+            include_debug=include_debug,
+        )
+
+        invitee_history_truncated = False
         if shared_invite and user_concept_id and owner_user_id != user_concept_id:
-            owner_history = chat_history_service.get_chat_history(
-                owner_user_id, session_id
+            invitee_state = chat_history_service.get_chat_history_session_state(
+                user_id=user_concept_id,
+                session_id=session_id,
+                namespace=(
+                    namespace
+                    if isinstance(namespace, str) and namespace.strip()
+                    else None
+                ),
+                history_tail_limit=history_tail_limit,
+                include_debug=include_debug,
             )
-            invitee_history = chat_history_service.get_chat_history(
-                user_concept_id, session_id
+            invitee_history = (
+                [
+                    dict(message)
+                    for message in invitee_state.get("history", [])
+                    if isinstance(message, Mapping)
+                ]
+                if isinstance(invitee_state, Mapping)
+                and isinstance(invitee_state.get("history"), list)
+                else []
+            )
+            invitee_history_truncated = bool(
+                isinstance(invitee_state, Mapping)
+                and invitee_state.get("history_truncated") is True
             )
             owner_history = _apply_default_author(owner_history, owner_user_id)
             invitee_history = _apply_default_author(invitee_history, user_concept_id)
-            merged_history = _merge_shared_histories(owner_history, invitee_history)
-
-            history_truncated = False
-            if history_tail_limit and len(merged_history) > history_tail_limit:
-                merged_history = merged_history[-history_tail_limit:]
-                history_truncated = True
-
-            segments = chat_history_service._split_history_into_segments_with_locations(
-                merged_history,
-                session_id=session_id,
-                include_debug=include_debug,
-                owner_user_id=owner_user_id,
+            canonical_history = _merge_shared_histories(
+                owner_history, invitee_history
             )
-            segments = chat_history_service._chunk_history_segments(
-                segments, segment_size
-            )
-            meta = {"history_truncated": history_truncated}
         else:
-            if shared_invite:
-                owner_namespace = (
-                    _derive_namespace_for_user_org(
-                        owner_user_id,
-                        shared_invite.get("organisation_concept_id"),
-                    )
-                    or namespace
-                )
-            else:
-                # JVNAUTOSCI-1011: Use window-context namespace, not flask session
-                owner_namespace = namespace
-            # Fallback if namespace is None (e.g. legacy sessions without org)
-            if not owner_namespace:
-                owner_namespace = chat_history_service.resolve_chat_history_namespace(
-                    owner_user_id
-                )
-            segments_result = chat_history_service.get_chat_history_segments(
-                owner_user_id,
-                session_id,
-                include_locations=True,
-                namespace=owner_namespace,
-                segment_size=segment_size,
-                include_debug=include_debug,
-                history_tail_limit=history_tail_limit,
-                return_meta=True,
-            )
-            if isinstance(segments_result, tuple):
-                segments, meta = segments_result
-            else:
-                segments = segments_result
-                meta = {"history_truncated": False}
+            canonical_history = owner_history
+
+        history_offset = (
+            int(owner_history_meta.get("history_offset") or 0)
+            if not shared_invite
+            else 0
+        )
+        history_truncated = bool(
+            owner_history_meta.get("history_truncated") is True
+            or invitee_history_truncated
+        )
+        if history_tail_limit and len(canonical_history) > history_tail_limit:
+            history_offset += len(canonical_history) - history_tail_limit
+            canonical_history = canonical_history[-history_tail_limit:]
+            history_truncated = True
+
+        segments = chat_history_service._split_history_into_segments_with_locations(
+            canonical_history,
+            session_id=session_id,
+            include_debug=include_debug,
+            history_offset=history_offset,
+            owner_user_id=owner_user_id,
+        )
+        segments = chat_history_service._chunk_history_segments(
+            segments, segment_size
+        )
+        meta = {"history_truncated": history_truncated}
         total_segments = len(segments)
 
         if total_segments == 0:
@@ -12908,6 +13186,11 @@ def history():
                     "segments_returned": 0,
                     "total_segments": 0,
                     "has_more_history": False,
+                    "conversation_situation": conversation_situation_descriptor,
+                    "conversation_observations": conversation_observations,
+                    "conversation_observation_state": owner_history_meta.get(
+                        "conversation_observation_state"
+                    ),
                 }
             )
 
@@ -12929,6 +13212,11 @@ def history():
                 "segments_returned": segments_returned,
                 "total_segments": total_segments,
                 "has_more_history": has_more,
+                "conversation_situation": conversation_situation_descriptor,
+                "conversation_observations": conversation_observations,
+                "conversation_observation_state": owner_history_meta.get(
+                    "conversation_observation_state"
+                ),
             }
         )
     except Exception as e:
@@ -12947,6 +13235,9 @@ def history():
                         "segments_returned": 0,
                         "total_segments": 0,
                         "has_more_history": False,
+                        "conversation_situation": None,
+                        "conversation_observations": [],
+                        "conversation_observation_state": None,
                     },
                 )
             )
@@ -14451,9 +14742,54 @@ def reset_context():
         session_id = session.get("session_id")
 
         if user_concept_id and session_id:
-            chat_history_service.add_reset_marker_to_history(
-                user_concept_id, session_id
+            owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+                user_concept_id=user_concept_id,
+                session_id=session_id,
             )
+            owner_user_id = owner_user_id or user_concept_id
+            if shared_invite and owner_user_id != user_concept_id:
+                return (
+                    jsonify(
+                        {
+                            "error": "conversation_owner_required_for_shared_reset",
+                            "error_code": (
+                                "conversation_owner_required_for_shared_reset"
+                            ),
+                        }
+                    ),
+                    403,
+                )
+            window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+            effective = get_effective_context(
+                window_session_id, dict(session), user_concept_id
+            )
+            actor_namespace = (
+                effective.get("namespace")
+                if isinstance(effective, Mapping)
+                else session.get("namespace")
+            )
+            owner_namespace = _canonical_conversation_history_namespace(
+                owner_user_id=owner_user_id,
+                actor_namespace=(
+                    actor_namespace if isinstance(actor_namespace, str) else None
+                ),
+                shared_invite=shared_invite,
+            )
+            reset_outcome = (
+                chat_history_service.reset_chat_history_conversation_state(
+                    user_id=owner_user_id,
+                    session_id=session_id,
+                    updated_by=user_concept_id,
+                    namespace=owner_namespace,
+                )
+            )
+            if not bool(
+                isinstance(reset_outcome, Mapping)
+                and reset_outcome.get("matched") is True
+            ):
+                raise RuntimeError(
+                    "Conversation session was not found during reset."
+                )
 
         # Clear the conversation context
         current_app.config["CONTEXT"] = []
@@ -15959,6 +16295,28 @@ def _derive_namespace_for_user_org(
         )
     except Exception:
         return None
+
+
+def _canonical_conversation_history_namespace(
+    *,
+    owner_user_id: str | None,
+    actor_namespace: str | None,
+    shared_invite: Mapping[str, Any] | None,
+) -> str | None:
+    """Resolve the one owner-scoped storage namespace for a conversation."""
+
+    if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+        return None
+    if isinstance(shared_invite, Mapping):
+        shared_org_id = _normalise_concept_id(
+            shared_invite.get("organisation_concept_id")
+        )
+        return _derive_namespace_for_user_org(
+            owner_user_id, shared_org_id
+        ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+    if isinstance(actor_namespace, str) and actor_namespace.strip():
+        return actor_namespace.strip()
+    return chat_history_service.resolve_chat_history_namespace(owner_user_id)
 
 
 def _clean_optional_text(value: Any) -> str | None:

@@ -124,7 +124,12 @@ _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_FIELD_ENTRIES = 32
 _FINAL_ANSWER_PUBLIC_PROJECTION_MAX_IDENTIFIERS = 32
 _LATE_EFFECT_OBSERVATION_MAX_ID_CHARS = 512
 _EFFECT_OBSERVATION_PHASES = frozenset(
-    {"dispatch_intent", "turn_terminal", "late_terminal"}
+    {
+        "dispatch_intent",
+        "turn_terminal",
+        "late_terminal",
+        "conversation_projection",
+    }
 )
 _SAFE_EFFECT_JOURNAL_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _FINAL_ANSWER_PROJECTION_SECRET_KEY_PARTS = (
@@ -11340,6 +11345,8 @@ def record_effect_observation_phase(
     session_id: Any = None,
     namespace: Any = None,
     org_id: Any = None,
+    history_owner_user_id: Any = None,
+    history_namespace: Any = None,
 ) -> dict[str, Any]:
     """Persist one immutable mechanical phase for an ordinary effect.
 
@@ -11443,6 +11450,14 @@ def record_effect_observation_phase(
         if clean_value:
             identity_entry[field_name] = clean_value
     phase_set: dict[str, Any] = {phase_path: phase_entry}
+    for field_name, raw_value in (
+        ("session_id", session_id),
+        ("history_owner_user_id", history_owner_user_id),
+        ("history_namespace", history_namespace),
+    ):
+        clean_value = _safe_str(raw_value)
+        if clean_value:
+            phase_set[field_name] = clean_value
     # Dispatch intent is durably acknowledged before the handler can start, so
     # it is the authoritative creation point for stable effect identity.  Later
     # terminal receipts must never replace its creation time or call identity.
@@ -11691,6 +11706,11 @@ def reconcile_durable_workflow_terminal_effect(
             {"request_id": clean_request_id, **actor_scope},
             projection={
                 "_id": 0,
+                "session_id": 1,
+                "user_id": 1,
+                "namespace": 1,
+                "history_owner_user_id": 1,
+                "history_namespace": 1,
                 "effect_observation_journal": 1,
             },
             operation="reconcile_durable_workflow_terminal_effect.find_record",
@@ -11848,6 +11868,141 @@ def reconcile_durable_workflow_terminal_effect(
         namespace=namespace,
         org_id=org_id,
     )
+    conversation_observation_outcome: dict[str, Any] = {
+        "updated": False,
+        "reason": "effect_observation_not_acknowledged",
+    }
+    if bool(outcome.get("updated") or outcome.get("duplicate")):
+        observation_identity = json.dumps(
+            {
+                "request_id": clean_request_id,
+                "effect_id": matched_effect_id,
+                "instance_id": clean_instance_id,
+                "phase": "late_terminal",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        conversation_observation_id = hashlib.sha256(
+            observation_identity.encode("utf-8")
+        ).hexdigest()
+        prior_projection = matched_entry.get("conversation_projection")
+        prior_projection_id = (
+            _safe_str(prior_projection.get("observation_id"))
+            if isinstance(prior_projection, Mapping)
+            else None
+        )
+        history_user_id = _safe_str(
+            record.get("history_owner_user_id")
+        ) or _safe_str(record.get("user_id"))
+        history_session_id = _safe_str(record.get("session_id"))
+        history_namespace = _safe_str(
+            record.get("history_namespace")
+        ) or _safe_str(record.get("namespace"))
+        if prior_projection_id == conversation_observation_id:
+            conversation_observation_outcome = {
+                "updated": False,
+                "duplicate": True,
+                "reason": "already_projected",
+                "observation_id": conversation_observation_id,
+            }
+        elif not history_user_id:
+            conversation_observation_outcome = {
+                "updated": False,
+                "reason": "history_owner_unavailable",
+            }
+        elif not history_session_id:
+            conversation_observation_outcome = {
+                "updated": False,
+                "reason": "chat_session_unavailable",
+            }
+        else:
+            conversation_observation = {
+                "schema_version": "conversation_observation.v1",
+                "observation_id": conversation_observation_id,
+                "kind": "durable_workflow_terminal",
+                "observed_at_utc": observation.get("observed_at_utc"),
+                "request_id": clean_request_id,
+                "effect_id": matched_effect_id,
+                "call_id": observation.get("call_id"),
+                "capability_name": observation.get("capability_name"),
+                "execution_id": execution_id,
+                "workflow_id": clean_workflow_id,
+                "instance_id": clean_instance_id,
+                "terminal_status": clean_terminal_status,
+                "effect_status": effect_status,
+                "changed": changed,
+                "outcome_finality": "canonical_durable_terminal",
+                "final_state": canonical_receipt.get("final_state"),
+                "completed_at": canonical_receipt.get("completed_at"),
+                "failure_detail_available": (
+                    True
+                    if canonical_receipt.get("error")
+                    or canonical_receipt.get("error_step")
+                    else None
+                ),
+                "execution_trace_id": canonical_receipt.get(
+                    "execution_trace_id"
+                ),
+            }
+            conversation_observation = {
+                key: value
+                for key, value in conversation_observation.items()
+                if value is not None
+            }
+            try:
+                # Import locally: chat history already depends on this service
+                # when it builds the ordinary turn projection.
+                from .chat_history_service import (
+                    append_chat_history_conversation_observation,
+                )
+
+                conversation_observation_outcome = (
+                    append_chat_history_conversation_observation(
+                        user_id=history_user_id,
+                        session_id=history_session_id,
+                        namespace=history_namespace,
+                        observation=conversation_observation,
+                    )
+                )
+            except Exception as exc:
+                # The canonical effect journal remains authoritative. Projection
+                # into the conversation is useful continuity, but it must never
+                # make durable workflow terminal reconciliation fail.
+                logger.warning(
+                    "Failed to project durable terminal observation into "
+                    "conversation request_id=%s instance_id=%s: %s",
+                    clean_request_id,
+                    clean_instance_id,
+                    exc,
+                )
+                conversation_observation_outcome = {
+                    "updated": False,
+                    "reason": "conversation_projection_unavailable",
+                }
+            if bool(
+                conversation_observation_outcome.get("updated")
+                or conversation_observation_outcome.get("duplicate")
+            ):
+                projection_record_outcome = record_effect_observation_phase(
+                    request_id=clean_request_id,
+                    effect_id=matched_effect_id,
+                    phase="conversation_projection",
+                    observation={
+                        "observation_id": conversation_observation_id,
+                        "carrier": "chat_history_session",
+                        "session_id": history_session_id,
+                        "outcome_finality": "canonical_durable_terminal",
+                    },
+                    user_id=user_id,
+                    namespace=namespace,
+                    org_id=org_id,
+                )
+                conversation_observation_outcome = {
+                    **conversation_observation_outcome,
+                    "projection_record": projection_record_outcome,
+                }
     return {
         **outcome,
         "instance_id": clean_instance_id,
@@ -11855,6 +12010,7 @@ def reconcile_durable_workflow_terminal_effect(
         "terminal_status": clean_terminal_status,
         "effect_status": effect_status,
         "execution_id": execution_id,
+        "conversation_observation": conversation_observation_outcome,
     }
 
 

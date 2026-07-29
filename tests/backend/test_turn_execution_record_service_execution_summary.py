@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -1064,6 +1065,7 @@ def test_durable_workflow_terminal_reconciles_timed_out_turn_effect(
     monkeypatch,
 ) -> None:
     import mongomock
+    import src.backend.services.chat_history_service as chat_history_service
     import src.backend.services.turn_execution_record_service as record_service
 
     collection = mongomock.MongoClient().von_test.turn_execution_records
@@ -1078,10 +1080,31 @@ def test_durable_workflow_terminal_reconciles_timed_out_turn_effect(
         "_turn_execution_mongo_comment",
         lambda *_args, **_kwargs: None,
     )
+    projected_observations: list[dict[str, Any]] = []
+    projected_ids: set[str] = set()
+
+    def _append_conversation_observation(**kwargs: Any) -> dict[str, Any]:
+        projected_observations.append(dict(kwargs))
+        observation_id = kwargs["observation"]["observation_id"]
+        if observation_id in projected_ids:
+            return {"updated": False, "duplicate": True}
+        projected_ids.add(observation_id)
+        return {"updated": True, "duplicate": False}
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "append_chat_history_conversation_observation",
+        _append_conversation_observation,
+    )
     scope = {
-        "user_id": "#V#user",
-        "namespace": "#V#user@org",
+        "user_id": "#V#invitee",
+        "namespace": "#V#invitee@org",
         "org_id": "#V#org",
+    }
+    conversation_carrier = {
+        "session_id": "session-durable-late",
+        "history_owner_user_id": "#V#owner",
+        "history_namespace": "#V#owner@org",
     }
     record_effect_observation_phase(
         request_id="req-durable-late",
@@ -1092,6 +1115,7 @@ def test_durable_workflow_terminal_reconciles_timed_out_turn_effect(
             "capability_name": "represented_workflow_test",
             "dispatch_state": "intent_recorded",
         },
+        **conversation_carrier,
         **scope,
     )
     record_effect_observation_phase(
@@ -1119,6 +1143,7 @@ def test_durable_workflow_terminal_reconciles_timed_out_turn_effect(
                 "execution_id": "mcp-durable-late",
             },
         },
+        **conversation_carrier,
         **scope,
     )
 
@@ -1147,10 +1172,47 @@ def test_durable_workflow_terminal_reconciles_timed_out_turn_effect(
     assert outcome["effect_status"] == "succeeded"
     assert duplicate["updated"] is False
     assert duplicate["duplicate"] is True
+    assert outcome["conversation_observation"]["updated"] is True
+    assert duplicate["conversation_observation"]["duplicate"] is True
+    assert duplicate["conversation_observation"]["reason"] == "already_projected"
+    assert len(projected_observations) == 1
+    projection = projected_observations[0]
+    assert projection["user_id"] == "#V#owner"
+    assert projection["session_id"] == "session-durable-late"
+    assert projection["namespace"] == "#V#owner@org"
+    assert projection["observation"] == {
+        "schema_version": "conversation_observation.v1",
+        "observation_id": projection["observation"]["observation_id"],
+        "kind": "durable_workflow_terminal",
+        "observed_at_utc": projection["observation"]["observed_at_utc"],
+        "request_id": "req-durable-late",
+        "effect_id": "effect_durable_late",
+        "call_id": "call-durable-late",
+        "capability_name": "represented_workflow_test",
+        "execution_id": "mcp-durable-late",
+        "workflow_id": "#V#durable_workflow",
+        "instance_id": "instance-durable-late",
+        "terminal_status": "completed",
+        "effect_status": "succeeded",
+        "changed": True,
+        "outcome_finality": "canonical_durable_terminal",
+        "final_state": "#V#completed_state",
+        "completed_at": "2026-07-28T15:03:45Z",
+        "execution_trace_id": "trace-durable-late",
+    }
     stored = collection.find_one({"request_id": "req-durable-late"})
     late_terminal = stored["effect_observation_journal"][
         "effect_durable_late"
     ]["late_terminal"]
+    conversation_projection = stored["effect_observation_journal"][
+        "effect_durable_late"
+    ]["conversation_projection"]
+    assert (
+        conversation_projection["observation_id"]
+        == projection["observation"]["observation_id"]
+    )
+    assert conversation_projection["carrier"] == "chat_history_session"
+    assert conversation_projection["session_id"] == "session-durable-late"
     assert late_terminal["outcome"] == "late_success"
     assert late_terminal["effect_status"] == "succeeded"
     assert late_terminal["changed"] is True

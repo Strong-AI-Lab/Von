@@ -70,6 +70,53 @@ In particular:
 Qualify “canonical” when using it. Say canonical **concept identity**, live
 **authority**, base **publication**, or durable **read-back**, as applicable.
 
+### 2.1 Conversation situations as lightweight theories
+
+A conversation is a distinguished carrier of what its participants currently
+take their shared undertaking to be. That situation is not identical to the
+transcript: it may carry resolved referents, continuing objectives,
+commitments, assumptions, material unknowns, outstanding questions, observed
+effects, outcome criteria, and links to relevant sub-situations or other
+carriers. In this broad contextual sense it is a theory, but it need not begin
+as a formal logic, Vontology graph, workflow, or universal state schema.
+
+An inspectable, bounded plain-text description on the conversation is the
+default while it remains adequate. Treat it as provisional and revisable, not
+as canonical domain truth, durable publication, enduring memory, or an
+authority grant. Exact machine observations may accompany it as a small
+structured projection when identity, idempotence, or effect reconciliation
+benefits from structure. The originating task, workflow, document, or
+knowledge store remains authoritative; the conversation imports the
+observation needed for continuity and does not redispatch an effect merely to
+rediscover its recorded outcome.
+
+The initial structured observation projection is intentionally a recent,
+bounded suffix rather than a second event store. It reports how many earlier
+observations were omitted, keeps the durable producer's projection watermark,
+and carries only audience-safe outcome fields into a shared conversation.
+Raw actor-scoped diagnostic text remains in its authoritative diagnostic
+carrier. Situation revisions retain the producing request identity so an
+invisible sidecar change can be traced to the turn that authored it.
+
+Carrier visibility, contribution, and destructive authority are different.
+An accepted participant may contribute turns without thereby acquiring the
+right to reset the owner's transcript and shared situation. Treat erase,
+replacement, and other high-blast-radius carrier operations as separate
+authority decisions.
+
+Text and inspectability are preferences, not hard criteria. A stronger or
+different representation earns its place when a current capability needs a
+clear advantage such as field-level concurrent revision, stable typed
+identity, cross-conversation querying, inference, independent governance, or
+more reliable effect reconciliation. Where useful, retain an inspectable
+projection, but do not preserve text ceremony when another representation is
+materially better.
+
+Do not turn the carrier into a compulsory summarisation stage. A direct turn
+may read the current situation and revise it in the same model call. Add
+sub-situation identity, promotion, inheritance, conflict resolution, or
+cross-session reuse only when actual work needs those semantics.
+
 ## 3. Four questions for a coding agent
 
 For a triggered change, ask only:
@@ -98,6 +145,9 @@ claim.
 
 As observed on 29 July 2026, related capabilities are distributed across:
 
+- inspectable conversation-situation text and bounded exact observations on
+  chat-history sessions, used as provisional per-conversation context rather
+  than publication or canonical knowledge;
 - base concept and text relations in `concept_service.py`,
   `concept_relation_service.py`, and `text_value_service.py`;
 - actor- and organisation-visible assertion deltas in

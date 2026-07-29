@@ -89,11 +89,15 @@ def test_von_reset_clears_context_and_records_history_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, client = app_client
-    calls: list[tuple[str, str]] = []
+    reset_calls: list[dict[str, object]] = []
+
+    def _reset_state(**kwargs):
+        reset_calls.append(dict(kwargs))
+        return {"updated": True, "matched": True}
 
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.chat_history_service.add_reset_marker_to_history",
-        lambda user_concept_id, session_id: calls.append((user_concept_id, session_id)),
+        "src.backend.server.routes.von_routes.chat_history_service.reset_chat_history_conversation_state",
+        _reset_state,
     )
 
     with client.session_transaction() as flask_session:
@@ -108,7 +112,14 @@ def test_von_reset_clears_context_and_records_history_marker(
         "message": "Context reset successfully",
     }
     assert app.config["CONTEXT"] == []
-    assert calls == [("#V#test_user", "session-1")]
+    assert reset_calls == [
+        {
+            "user_id": "#V#test_user",
+            "session_id": "session-1",
+            "updated_by": "#V#test_user",
+            "namespace": None,
+        }
+    ]
 
 
 def test_von_reset_succeeds_even_if_request_logging_is_broken(
@@ -118,8 +129,8 @@ def test_von_reset_succeeds_even_if_request_logging_is_broken(
     app, client = app_client
 
     monkeypatch.setattr(
-        "src.backend.server.routes.von_routes.chat_history_service.add_reset_marker_to_history",
-        lambda *_args, **_kwargs: None,
+        "src.backend.server.routes.von_routes.chat_history_service.reset_chat_history_conversation_state",
+        lambda **_kwargs: {"updated": True, "matched": True},
     )
 
     def _raise_invalid_argument(*_args, **_kwargs):
@@ -140,3 +151,40 @@ def test_von_reset_succeeds_even_if_request_logging_is_broken(
         "message": "Context reset successfully",
     }
     assert app.config["CONTEXT"] == []
+
+
+def test_shared_conversation_invitee_cannot_reset_owner_carrier(
+    app_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = app_client
+    reset_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._resolve_shared_conversation_owner",
+        lambda **_kwargs: (
+            "#V#owner",
+            {
+                "conversation_owner_user_id": "#V#owner",
+                "invitee_user_id": "#V#invitee",
+                "status": "accepted",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.reset_chat_history_conversation_state",
+        lambda **kwargs: reset_calls.append(dict(kwargs)),
+    )
+
+    with client.session_transaction() as flask_session:
+        flask_session["user_concept_id"] = "#V#invitee"
+        flask_session["session_id"] = "shared-session"
+
+    response = client.post("/von/reset")
+
+    assert response.status_code == 403
+    assert response.get_json()["error_code"] == (
+        "conversation_owner_required_for_shared_reset"
+    )
+    assert reset_calls == []
+    assert app.config["CONTEXT"] == ["existing"]
