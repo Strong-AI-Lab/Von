@@ -87,15 +87,71 @@ def test_scoped_assertion_indexes_are_ensured_once_per_database(monkeypatch):
 
     assert coll_first is coll_second
     assert coll_first is not None
-    assert len(coll_first.create_index_calls) == 4
-    assert {
-        str(call["kwargs"].get("name")) for call in coll_first.create_index_calls
-    } == {
-        "assertion_id_unique",
-        "subject_audience_updated_at_desc",
-        "object_audience_updated_at_desc",
-        "predicate_audience_updated_at_desc",
+    assert len(coll_first.create_index_calls) == 8
+    calls_by_name = {
+        str(call["kwargs"].get("name")): call
+        for call in coll_first.create_index_calls
     }
+    assert set(calls_by_name) == {
+        "assertion_id_unique",
+        "audience_status_updated_at_desc_assertion_id",
+        "subject_audience_status_updated_at_desc_assertion_id",
+        "object_audience_status_updated_at_desc_assertion_id",
+        "predicate_audience_status_updated_at_desc_assertion_id",
+        "audience_status_id",
+        "subject_audience_status_id",
+        "predicate_audience_status_id",
+    }
+    assert calls_by_name["audience_status_updated_at_desc_assertion_id"]["keys"] == [
+        ("scope.audience_keys", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("updated_at", mc.DESCENDING),
+        ("assertion_id", mc.ASCENDING),
+    ]
+    assert calls_by_name[
+        "object_audience_status_updated_at_desc_assertion_id"
+    ]["keys"] == [
+        ("object_concept_id", mc.ASCENDING),
+        ("scope.audience_keys", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("updated_at", mc.DESCENDING),
+        ("assertion_id", mc.ASCENDING),
+    ]
+    assert calls_by_name[
+        "predicate_audience_status_updated_at_desc_assertion_id"
+    ]["keys"] == [
+        ("predicate", mc.ASCENDING),
+        ("scope.audience_keys", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("updated_at", mc.DESCENDING),
+        ("assertion_id", mc.ASCENDING),
+    ]
+    assert calls_by_name[
+        "subject_audience_status_updated_at_desc_assertion_id"
+    ]["keys"] == [
+        ("subject_concept_id", mc.ASCENDING),
+        ("scope.audience_keys", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("updated_at", mc.DESCENDING),
+        ("assertion_id", mc.ASCENDING),
+    ]
+    assert calls_by_name["audience_status_id"]["keys"] == [
+        ("scope.audience_keys", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("_id", mc.ASCENDING),
+    ]
+    assert calls_by_name["subject_audience_status_id"]["keys"] == [
+        ("subject_concept_id", mc.ASCENDING),
+        ("scope.audience_keys", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("_id", mc.ASCENDING),
+    ]
+    assert calls_by_name["predicate_audience_status_id"]["keys"] == [
+        ("predicate", mc.ASCENDING),
+        ("scope.audience_keys", mc.ASCENDING),
+        ("status", mc.ASCENDING),
+        ("_id", mc.ASCENDING),
+    ]
 
 
 def test_interaction_session_indexes_are_ensured_once_per_database(monkeypatch):
@@ -210,11 +266,26 @@ def test_text_relation_indexes_cover_concept_search_and_atlas_name_lookup(monkey
     assert calls_by_name.keys() >= {
         "context_name_type_predicate_text",
         "object_predicate_subject_lookup",
+        "subject_concept_id_id",
+        "predicate_id",
+        "updated_at_id",
     }
     assert calls_by_name["object_predicate_subject_lookup"]["keys"] == [
         ("object_text_id", mc.ASCENDING),
         ("predicate", mc.ASCENDING),
         ("subject_concept_id", mc.ASCENDING),
+    ]
+    assert calls_by_name["subject_concept_id_id"]["keys"] == [
+        ("subject_concept_id", mc.ASCENDING),
+        ("_id", mc.ASCENDING),
+    ]
+    assert calls_by_name["predicate_id"]["keys"] == [
+        ("predicate", mc.ASCENDING),
+        ("_id", mc.ASCENDING),
+    ]
+    assert calls_by_name["updated_at_id"]["keys"] == [
+        ("updated_at", mc.ASCENDING),
+        ("_id", mc.ASCENDING),
     ]
 
 

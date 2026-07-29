@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Governing instructions for work in this repository, subordinate
   to current explicit user direction and higher-level safety rules
-- **Last reviewed:** 27 July 2026
+- **Last reviewed:** 29 July 2026
 - **Review trigger:** A material change to Von's product focus, authority model,
   security posture, or acceptance doctrine
 
@@ -150,6 +150,16 @@ never be forced onto newer evidence.
     latency, cost, human burden, failure recovery, and maintenance impact.
 14. **Prefer subtraction.** Remove obsolete stages, fallbacks, prompts, tools,
     tests, and documentation when evidence shows they add cost without value.
+15. **Preserve contextual degrees of freedom.** When work changes durable
+    assertions or their retrieval, do not silently make concept identity,
+    assertion context, provenance, audience or authority, publication status,
+    and physical storage interchangeable. A bounded implementation may use an
+    implicit context or a separate store; keep that simplification explicit and
+    local enough that a later context or theory mechanism need not reinterpret
+    domain meaning. Add general machinery only when a current capability or
+    evidence needs it. Use the
+    [contextual knowledge evolution guide](docs/engineering/contextual_knowledge_evolution.md)
+    when this boundary is material.
 
 ## 4. Choosing the authority surface
 

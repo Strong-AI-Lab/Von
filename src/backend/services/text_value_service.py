@@ -7,7 +7,17 @@ text_relations repositories, with simple normalization and validation.
 from __future__ import annotations
 
 import re
-from typing import Dict, Any, List, Optional, Literal, Sequence, cast, Tuple
+from typing import (
+    Any,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 from datetime import datetime, timezone
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -35,17 +45,44 @@ _EVENT_TYPE_TEXT_RELATION_UPSERTED = "text_relation.upserted"
 _EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
 _EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 
+TextContextView = Literal["base_publication", "actor_effective"]
+_TEXT_CONTEXT_VIEWS = frozenset({"base_publication", "actor_effective"})
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def _iso_utc(value: Any) -> str | None:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, str) and value.strip():
-        return value.strip()
+    resolved = _as_utc_datetime(value)
+    if resolved is not None:
+        return resolved.isoformat()
     return None
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    resolved: datetime
+    if isinstance(value, datetime):
+        resolved = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            resolved = datetime.fromisoformat(
+                value.strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+    else:
+        return None
+    if resolved.tzinfo is None:
+        resolved = resolved.replace(tzinfo=timezone.utc)
+    return resolved.astimezone(timezone.utc)
+
+
+def _row_timestamp(row: Dict[str, Any]) -> datetime:
+    resolved = _as_utc_datetime(
+        row.get("relation_updated_at") or row.get("relation_created_at")
+    )
+    return resolved or datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _invalidate_stats_for_predicate_change(predicate: str | None) -> None:
@@ -399,10 +436,14 @@ def get_texts_for_concept(
     limit: int = 50,
     recent_first: bool = False,
     max_time_ms: Optional[int] = None,
+    *,
+    context_view: TextContextView = "base_publication",
 ) -> List[Dict[str, Any]]:
-    """Fetch linked TextValues for a concept, optionally filtered by predicate and lang.
+    """Fetch text assertions in an explicit semantic view.
 
-    Returns a list of { text, lang, text_value_id, predicate, relation_id, context }.
+    ``base_publication`` preserves the repository's historical relation-store
+    read. ``actor_effective`` overlays scoped assertions visible to the current
+    trusted actor. Storage location alone must not choose the view.
     """
     rows_by_concept = get_texts_for_concepts(
         [subject_concept_id],
@@ -411,6 +452,7 @@ def get_texts_for_concept(
         limit_per_concept=limit,
         recent_first=recent_first,
         max_time_ms=max_time_ms,
+        context_view=context_view,
     )
     return rows_by_concept.get(subject_concept_id, [])
 
@@ -425,13 +467,19 @@ def get_texts_for_concepts(
     recent_first: bool = False,
     max_time_ms: Optional[int] = None,
     query_metadata: Optional[Dict[str, Any]] = None,
+    context_view: TextContextView = "base_publication",
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Fetch linked TextValues for many concepts with one relation/text join.
+    """Fetch text assertions for many concepts in an explicit semantic view.
 
     Returns rows grouped by concept id. This is deliberately generic support for
     Vontology-heavy paths such as workflow publication/read-back, where many
     step concepts need their policy text relations at once.
     """
+    if context_view not in _TEXT_CONTEXT_VIEWS:
+        raise ValueError(
+            "context_view must be 'base_publication' or 'actor_effective'"
+        )
+
     candidate_subject_ids: List[str] = []
     seen_subject_ids: set[str] = set()
     for raw_id in subject_concept_ids:
@@ -457,6 +505,10 @@ def get_texts_for_concepts(
                     "raw_relation_count": 0,
                     "relation_query_limit": 0,
                     "relation_query_truncated": False,
+                    "context_view": context_view,
+                    "scoped_assertion_count": 0,
+                    "scoped_query_limit": 0,
+                    "scoped_query_truncated": False,
                 }
             )
         return {}
@@ -503,7 +555,7 @@ def get_texts_for_concepts(
     rows_by_concept: Dict[str, List[Dict[str, Any]]] = {
         subject_id: [] for subject_id in ordered_subject_ids
     }
-    rows = (
+    base_rows = (
         _resolve_text_rows_from_relations(
             relations,
             lang=lang,
@@ -513,14 +565,34 @@ def get_texts_for_concepts(
         if relations
         else []
     )
-    from .scoped_assertion_service import (
-        list_visible_scoped_assertions,
-        scoped_text_assertion_to_relation_row,
-    )
+    scoped_rows: List[Dict[str, Any]] = []
+    scoped_query_limit = 0
+    scoped_query_truncated = False
+    scoped_visibility_filtered = False
+    scoped_counts_are_lower_bounds = False
+    scoped_per_concept: Dict[str, Dict[str, Any]] = {}
+    if context_view == "actor_effective":
+        from .scoped_assertion_service import (
+            MAX_PAGE_CANDIDATES,
+            MAX_PAGE_LIMIT,
+            MAX_PAGE_SUBJECTS,
+            list_visible_scoped_assertions_page,
+            scoped_text_assertion_to_relation_row,
+        )
 
-    scoped_assertions = list_visible_scoped_assertions(
-        subject_concept_ids=ordered_subject_ids,
-        predicates=(
+        requested_per_concept = max(limit_per_concept, 1)
+        scoped_per_concept_limit = min(
+            requested_per_concept,
+            MAX_PAGE_LIMIT,
+        )
+        max_subjects_per_query = min(
+            MAX_PAGE_SUBJECTS,
+            max(
+                1,
+                MAX_PAGE_CANDIDATES // (scoped_per_concept_limit + 1),
+            ),
+        )
+        scoped_predicates = (
             [predicate]
             if predicate
             else [
@@ -529,24 +601,92 @@ def get_texts_for_concepts(
                 if isinstance(item, str) and str(item).strip()
             ]
             or None
-        ),
-        object_kind="text",
-        limit=max(len(ordered_subject_ids) * max(limit_per_concept, 1), 1),
-    )
-    for assertion in scoped_assertions:
-        scoped_row = scoped_text_assertion_to_relation_row(assertion)
-        if scoped_row is None:
-            continue
-        if lang and scoped_row.get("lang") != lang:
-            continue
-        rows.append(scoped_row)
+        )
+        if requested_per_concept > scoped_per_concept_limit:
+            scoped_query_truncated = True
+            scoped_counts_are_lower_bounds = True
+        for batch_start in range(
+            0,
+            len(ordered_subject_ids),
+            max_subjects_per_query,
+        ):
+            subject_batch = ordered_subject_ids[
+                batch_start : batch_start + max_subjects_per_query
+            ]
+            scoped_page = list_visible_scoped_assertions_page(
+                subject_concept_ids=subject_batch,
+                predicates=scoped_predicates,
+                object_kind="text",
+                languages=[lang] if lang else None,
+                limit=min(
+                    MAX_PAGE_LIMIT,
+                    max(len(subject_batch) * scoped_per_concept_limit, 1),
+                ),
+                limit_per_subject=scoped_per_concept_limit,
+            )
+            scoped_query_limit += (
+                len(subject_batch) * scoped_per_concept_limit
+            )
+            scoped_query_truncated = bool(
+                scoped_query_truncated or scoped_page.get("truncated")
+            )
+            scoped_visibility_filtered = bool(
+                scoped_visibility_filtered
+                or scoped_page.get("visibility_filtered")
+            )
+            scoped_counts_are_lower_bounds = bool(
+                scoped_counts_are_lower_bounds
+                or scoped_page.get("counts_are_lower_bounds")
+            )
+            page_by_subject = scoped_page.get("per_subject")
+            if isinstance(page_by_subject, Mapping):
+                for subject_id, subject_page in page_by_subject.items():
+                    if not isinstance(subject_page, Mapping):
+                        continue
+                    scoped_per_concept[str(subject_id)] = {
+                        "returned": int(subject_page.get("returned") or 0),
+                        "limit": subject_page.get("limit"),
+                        "has_more": bool(subject_page.get("has_more")),
+                        "visibility_filtered": bool(
+                            subject_page.get("visibility_filtered")
+                        ),
+                        "counts_are_lower_bounds": bool(
+                            subject_page.get("counts_are_lower_bounds")
+                        ),
+                    }
+            for assertion in scoped_page.get("items") or ():
+                scoped_row = scoped_text_assertion_to_relation_row(assertion)
+                if scoped_row is None:
+                    continue
+                scoped_rows.append(scoped_row)
+
+    if query_metadata is not None:
+        query_metadata.update(
+            {
+                "context_view": context_view,
+                "scoped_assertion_count": len(scoped_rows),
+                "scoped_query_limit": scoped_query_limit,
+                "scoped_query_truncated": scoped_query_truncated,
+                "scoped_visibility_filtered": scoped_visibility_filtered,
+                "scoped_counts_are_lower_bounds": (
+                    scoped_counts_are_lower_bounds
+                ),
+                "scoped_per_concept": scoped_per_concept,
+            }
+        )
 
     if recent_first:
-        rows.sort(
-            key=lambda row: str(
-                row.get("relation_updated_at") or row.get("relation_created_at") or ""
-            ),
-            reverse=True,
+        rows = [*base_rows, *scoped_rows]
+        rows.sort(key=_row_timestamp, reverse=True)
+    else:
+        # Direct actor-scoped deltas are surfaced before the base rows in a
+        # bounded effective view so a small limit cannot make the actor's own
+        # assertion disappear. This is retrieval priority, not logical
+        # override: both row kinds remain explicitly labelled.
+        rows = (
+            [*scoped_rows, *base_rows]
+            if context_view == "actor_effective"
+            else base_rows
         )
     for row in rows:
         subject_concept_id = row.get("subject_concept_id")
@@ -620,6 +760,7 @@ def _resolve_text_rows_from_relations(
                 "text_value_id": str(tv.get("_id")),
                 "predicate": r.get("predicate"),
                 "relation_id": str(r.get("_id")) if r.get("_id") else None,
+                "row_kind": "base_text_relation",
                 "context": r.get("context", {}),
                 "provenance": tv.get("provenance", {}),
                 "text_value_created_at": _iso_utc(tv.get("created_at")),
@@ -1066,16 +1207,23 @@ def get_text_relations_summary(
     predicates: Optional[List[str]] = None,
     languages: Optional[List[str]] = None,
     max_relation_ids_per_group: int = 25,
+    context_view: TextContextView = "base_publication",
 ) -> Dict[str, Any]:
-    """Return counts + relation IDs grouped by predicate/language.
+    """Return bounded counts and typed row IDs by predicate/language.
 
     This is intentionally "lightweight": it does not return full text bodies.
 
     Notes:
     - Text relation documents do not store language directly; language is derived from
       the referenced text_values documents.
-    - `languages` is therefore a post-filter applied after resolving text value lang.
+    - Base `languages` filtering is applied after resolving text value language.
+    - Actor-effective scoped counts are lower bounds when
+      ``scoped_query_truncated`` is true.
     """
+    if context_view not in _TEXT_CONTEXT_VIEWS:
+        raise ValueError(
+            "context_view must be 'base_publication' or 'actor_effective'"
+        )
     if not can_access_concept(subject_concept_id):
         raise PermissionError("User cannot view text for an inaccessible concept")
 
@@ -1149,7 +1297,10 @@ def get_text_relations_summary(
                 "language": lang,
                 "count": 0,
                 "relation_ids": [],
+                "assertion_ids": [],
                 "latest_relation_id": None,
+                "latest_assertion_id": None,
+                "latest_row_kind": None,
                 "latest_updated_at": None,
             }
             grouped[key] = bucket
@@ -1160,21 +1311,39 @@ def get_text_relations_summary(
             if len(bucket["relation_ids"]) < max_relation_ids_per_group:
                 bucket["relation_ids"].append(rel_id)
 
-        updated_at = rel.get("updated_at") or rel.get("created_at")
-        if updated_at is not None:
+        updated_at = _iso_utc(rel.get("updated_at") or rel.get("created_at"))
+        if updated_at:
             current_latest = bucket.get("latest_updated_at")
             if current_latest is None or updated_at > current_latest:
                 bucket["latest_updated_at"] = updated_at
                 bucket["latest_relation_id"] = rel_id
+                bucket["latest_assertion_id"] = None
+                bucket["latest_row_kind"] = "base_text_relation"
 
-    from .scoped_assertion_service import list_visible_scoped_assertions
+    scoped_assertions: List[Dict[str, Any]] = []
+    scoped_query_truncated = False
+    scoped_visibility_filtered = False
+    scoped_counts_are_lower_bounds = False
+    if context_view == "actor_effective":
+        from .scoped_assertion_service import (
+            list_visible_scoped_assertions_page,
+        )
 
-    scoped_assertions = list_visible_scoped_assertions(
-        subject_concept_ids=[subject_concept_id],
-        predicates=predicates,
-        object_kind="text",
-        limit=1000,
-    )
+        scoped_page = list_visible_scoped_assertions_page(
+            subject_concept_ids=[subject_concept_id],
+            predicates=predicates,
+            object_kind="text",
+            languages=languages,
+            limit=1000,
+        )
+        scoped_assertions = list(scoped_page.get("items") or ())
+        scoped_query_truncated = bool(scoped_page.get("truncated"))
+        scoped_visibility_filtered = bool(
+            scoped_page.get("visibility_filtered")
+        )
+        scoped_counts_are_lower_bounds = bool(
+            scoped_page.get("counts_are_lower_bounds")
+        )
     for assertion in scoped_assertions:
         object_text = assertion.get("object_text")
         if not isinstance(object_text, dict):
@@ -1191,40 +1360,43 @@ def get_text_relations_summary(
                 "language": lang,
                 "count": 0,
                 "relation_ids": [],
+                "assertion_ids": [],
                 "latest_relation_id": None,
+                "latest_assertion_id": None,
+                "latest_row_kind": None,
                 "latest_updated_at": None,
             }
             grouped[key] = bucket
         bucket["count"] += 1
         bucket["scoped_count"] = int(bucket.get("scoped_count") or 0) + 1
         assertion_id = str(assertion.get("assertion_id") or "")
-        if assertion_id and len(bucket["relation_ids"]) < max_relation_ids_per_group:
-            bucket["relation_ids"].append(assertion_id)
-        updated_at = assertion.get("updated_at") or assertion.get("created_at")
+        if assertion_id and len(bucket["assertion_ids"]) < max_relation_ids_per_group:
+            bucket["assertion_ids"].append(assertion_id)
+        updated_at = _iso_utc(
+            assertion.get("updated_at") or assertion.get("created_at")
+        )
         current_latest = bucket.get("latest_updated_at")
-        if updated_at is not None and (
-            current_latest is None or str(updated_at) > str(current_latest)
-        ):
+        if updated_at and (current_latest is None or updated_at > current_latest):
             bucket["latest_updated_at"] = updated_at
-            bucket["latest_relation_id"] = assertion_id
+            bucket["latest_relation_id"] = None
+            bucket["latest_assertion_id"] = assertion_id
+            bucket["latest_row_kind"] = "scoped_assertion"
 
     summary_items = list(grouped.values())
     summary_items.sort(
         key=lambda x: (x.get("predicate") or "", x.get("language") or "")
     )
-    for item in summary_items:
-        # Make datetime JSON-friendly
-        dt = item.get("latest_updated_at")
-        if isinstance(dt, datetime):
-            item["latest_updated_at"] = dt.isoformat()
-
     return {
         "success": True,
         "concept_id": subject_concept_id,
+        "context_view": context_view,
         "groups": summary_items,
         "groups_found": len(summary_items),
         "total_relations_scanned": len(rels) + len(scoped_assertions),
         "scoped_relations_scanned": len(scoped_assertions),
+        "scoped_query_truncated": scoped_query_truncated,
+        "scoped_visibility_filtered": scoped_visibility_filtered,
+        "counts_are_lower_bounds": scoped_counts_are_lower_bounds,
         "max_relation_ids_per_group": max_relation_ids_per_group,
     }
 

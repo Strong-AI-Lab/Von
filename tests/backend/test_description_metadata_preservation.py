@@ -77,11 +77,17 @@ def test_get_texts_for_concept_returns_provenance_and_timestamps(monkeypatch):
 
     monkeypatch.setattr(text_value_service, "can_access_concept", lambda *_: True)
     monkeypatch.setattr(
+        text_value_service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+    monkeypatch.setattr(
         text_value_service.TextRelationsRepository,
         "find",
         lambda *args, **kwargs: [
             {
                 "_id": relation_id,
+                "subject_concept_id": "#V#desc_test",
                 "predicate": "hasDescription",
                 "object_text_id": text_value_id,
                 "context": {"confidence_score": 0.66},

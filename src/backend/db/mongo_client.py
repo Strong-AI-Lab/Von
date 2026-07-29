@@ -1142,6 +1142,27 @@ def _ensure_text_relations_indexes(coll: Collection) -> None:
     coll.create_index([("object_text_id", ASCENDING)], name="object_text_id_1")
     coll.create_index(
         [
+            ("subject_concept_id", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="subject_concept_id_id",
+    )
+    coll.create_index(
+        [
+            ("predicate", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="predicate_id",
+    )
+    coll.create_index(
+        [
+            ("updated_at", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="updated_at_id",
+    )
+    coll.create_index(
+        [
             ("object_text_id", ASCENDING),
             ("predicate", ASCENDING),
             ("subject_concept_id", ASCENDING),
@@ -1199,27 +1220,68 @@ def _ensure_scoped_knowledge_assertions_indexes(coll: Collection) -> None:
     )
     coll.create_index(
         [
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
+        ],
+        name="audience_status_updated_at_desc_assertion_id",
+    )
+    coll.create_index(
+        [
             ("subject_concept_id", ASCENDING),
             ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
             ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
         ],
-        name="subject_audience_updated_at_desc",
+        name="subject_audience_status_updated_at_desc_assertion_id",
     )
     coll.create_index(
         [
             ("object_concept_id", ASCENDING),
             ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
             ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
         ],
-        name="object_audience_updated_at_desc",
+        name="object_audience_status_updated_at_desc_assertion_id",
     )
     coll.create_index(
         [
             ("predicate", ASCENDING),
             ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
             ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
         ],
-        name="predicate_audience_updated_at_desc",
+        name="predicate_audience_status_updated_at_desc_assertion_id",
+    )
+    coll.create_index(
+        [
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="audience_status_id",
+    )
+    coll.create_index(
+        [
+            ("subject_concept_id", ASCENDING),
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="subject_audience_status_id",
+    )
+    coll.create_index(
+        [
+            ("predicate", ASCENDING),
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="predicate_audience_status_id",
     )
 
 

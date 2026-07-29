@@ -4,13 +4,13 @@ import argparse
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from src.backend.db.repositories.text_value_repository import TextRelationsRepository
 from src.backend.services.rag_service import RAGBackendUnavailable, get_rag_service
 from src.backend.services.rag_text_relation_sync_service import (
     TextRelationRagDoc,
-    collect_text_relation_docs_for_namespace,
+    iter_text_relation_docs_for_namespace,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> ReindexArgs:
         "--page-size",
         type=int,
         default=5000,
-        help="How many raw relations to scan per DB page (default: 5000).",
+        help=(
+            "Maximum source rows retained per one-pass scan batch "
+            "(default: 5000)."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -152,7 +155,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> ReindexArgs:
         "--scan-limit",
         type=int,
         default=0,
-        help="Maximum raw relations to scan (0 = no limit).",
+        help="Maximum combined base/scoped documents to scan (0 = no limit).",
     )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -186,14 +189,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> ReindexArgs:
     )
 
 
-def _chunks(
-    items: List[TextRelationRagDoc], n: int
-) -> Iterable[List[TextRelationRagDoc]]:
-    step = max(int(n), 1)
-    for i in range(0, len(items), step):
-        yield items[i : i + step]
-
-
 def run_reindex(args: ReindexArgs) -> int:
     rel_filter: dict[str, Any] = {}
     if args.predicates:
@@ -204,15 +199,12 @@ def run_reindex(args: ReindexArgs) -> int:
         rel_filter["subject_concept_id"] = {"$in": list(args.concept_ids)}
 
     total_raw = TextRelationsRepository.count_documents(rel_filter)
-    raw_to_scan = total_raw
-    if args.scan_limit:
-        raw_to_scan = min(raw_to_scan, args.scan_limit)
-
     logger.info(
-        "Starting reindex: namespace=%s raw_total=%s raw_scan=%s dry_run=%s",
+        "Starting reindex: namespace=%s base_raw_total=%s combined_scan_limit=%s "
+        "dry_run=%s",
         args.namespace,
         total_raw,
-        raw_to_scan,
+        args.scan_limit or "unbounded",
         args.dry_run,
     )
 
@@ -227,53 +219,77 @@ def run_reindex(args: ReindexArgs) -> int:
     total_candidates = 0
     added = 0
     failed = 0
+    deleted = 0
 
-    raw_skip = 0
-    sort = [("_id", 1)]
+    def _delete_stale_batch(stale_ids: Sequence[str]) -> None:
+        nonlocal deleted
+        if rag is None:
+            return
+        deduplicated = list(dict.fromkeys(stale_ids))
+        for start in range(0, len(deduplicated), args.batch_size):
+            deleted += int(
+                rag.delete_documents(
+                    deduplicated[start : start + args.batch_size],
+                    namespace=args.namespace,
+                )
+            )
 
-    while raw_skip < raw_to_scan:
-        docs = collect_text_relation_docs_for_namespace(
-            namespace=args.namespace,
-            predicates=args.predicates,
-            languages=args.languages,
-            concept_ids=args.concept_ids,
-            updated_since=args.updated_since,
-            skip=raw_skip,
-            sort=sort,
-            limit=min(args.page_size, raw_to_scan - raw_skip),
-        )
-
-        total_candidates += len(docs)
-
-        if rag is not None and docs:
-            for batch in _chunks(docs, args.batch_size):
+    source = iter_text_relation_docs_for_namespace(
+        namespace=args.namespace,
+        predicates=args.predicates,
+        languages=args.languages,
+        concept_ids=args.concept_ids,
+        updated_since=args.updated_since,
+        limit=args.scan_limit or None,
+        source_batch_size=args.page_size,
+        stale_doc_sink=_delete_stale_batch if rag is not None else None,
+    )
+    pending_batch: List[TextRelationRagDoc] = []
+    progress_interval = max(args.page_size * 2, 1)
+    for doc in source:
+        total_candidates += 1
+        if rag is not None:
+            pending_batch.append(doc)
+            if len(pending_batch) >= args.batch_size:
                 payload = [
-                    {"id": d.doc_id, "text": d.text, "metadata": d.metadata}
-                    for d in batch
+                    {"id": item.doc_id, "text": item.text, "metadata": item.metadata}
+                    for item in pending_batch
                 ]
-                ok, bad = rag.upsert_documents(payload, namespace=args.namespace)
+                ok, bad = rag.upsert_documents(
+                    payload,
+                    namespace=args.namespace,
+                )
                 added += int(ok)
                 failed += int(bad)
-
-        raw_skip += args.page_size
-
-        if raw_skip % max(args.page_size * 2, 1) == 0:
+                pending_batch = []
+        if total_candidates % progress_interval == 0:
             logger.info(
-                "Progress: scanned=%s/%s candidates=%s added=%s failed=%s",
-                min(raw_skip, raw_to_scan),
-                raw_to_scan,
+                "Progress: scanned=%s scan_limit=%s candidates=%s added=%s failed=%s",
+                total_candidates,
+                args.scan_limit or "unbounded",
                 total_candidates,
                 added,
                 failed,
             )
 
+    if rag is not None and pending_batch:
+        payload = [
+            {"id": item.doc_id, "text": item.text, "metadata": item.metadata}
+            for item in pending_batch
+        ]
+        ok, bad = rag.upsert_documents(payload, namespace=args.namespace)
+        added += int(ok)
+        failed += int(bad)
+
     success = failed == 0
     logger.info(
-        "Finished reindex: success=%s candidates=%s added=%s failed=%s",
+        "Finished reindex: success=%s candidates=%s added=%s failed=%s "
+        "pruned=%s",
         success,
         total_candidates,
         added,
         failed,
+        deleted,
     )
 
     if args.dry_run:

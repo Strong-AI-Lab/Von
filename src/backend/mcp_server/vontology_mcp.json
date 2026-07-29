@@ -25,18 +25,28 @@
         },
         {
             "name": "add_relationship",
-            "description": "Add one concept-to-concept or concept-to-text relationship. Structural predicates use their existing aliases; a custom predicate uses its exact #V# concept ID. If that exact custom predicate is missing, predicate_if_missing={name, description?} can canonically create or reuse and verify it before this relationship attempt.",
+            "description": "Add one concept-to-concept or concept-to-text relationship. Structural predicates use their aliases. A custom predicate may be supplied by exact #V# ID or resolved natural-language name. Use predicate_ref for typed ambiguity/not-found recovery and explicitly request creation with on_missing='create_typed_predicate' plus value_kind='concept' or 'text'. Creation/reuse is verified before the relationship attempt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "source_id": {
                         "type": "string"
                     },
-                    "predicate": {
-                        "type": "string"
-                    },
                     "target": {
                         "type": "string"
+                    },
+                    "predicate": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "predicate_ref": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
                     },
                     "predicate_if_missing": {
                         "type": [
@@ -54,11 +64,10 @@
                 },
                 "required": [
                     "source_id",
-                    "predicate",
                     "target"
                 ],
                 "additionalProperties": true,
-                "description": "add_relationship input: source_id (str), predicate (str, structural relationship name or exact #V# predicate concept ID), target (str). For a missing dynamic predicate only, predicate_if_missing may be {name: str, description?: str}; its name must canonically identify the exact requested predicate. The capability creates or reuses and verifies that predicate before attempting the edge."
+                "description": "add_relationship input: source_id and target plus exactly one useful predicate reference. predicate accepts a structural relationship, natural-language predicate name, or exact #V# predicate ID. predicate_ref is the typed form: {concept_id} or {name, on_missing?: 'fail'|'create_typed_predicate', value_kind?: 'concept'|'text', description?}. Legacy predicate_if_missing remains supported for exact dynamic predicates. Creation is attempted only when explicitly requested, then verified before the edge."
             }
         },
         {
@@ -202,14 +211,14 @@
                             "null"
                         ]
                     },
+                    "include_legacy": {
+                        "type": "boolean"
+                    },
                     "offset": {
                         "type": "integer"
                     },
                     "limit": {
                         "type": "integer"
-                    },
-                    "include_legacy": {
-                        "type": "boolean"
                     }
                 },
                 "required": [],
@@ -961,7 +970,7 @@
                     "concept_id"
                 ],
                 "additionalProperties": true,
-                "description": "delete_text_relation input: concept_id (str), relation_id (str, optional - preferred method), predicate (str, optional for predicate+text deletion), text (str, optional with predicate), language (str, optional), garbage_collect (bool, optional - if true, delete orphaned text_values)"
+                "description": "delete_text_relation input: concept_id plus a base_text_relation relation_id (preferred), or predicate+text and optional language. Scoped assertion IDs are not text-relation IDs. garbage_collect optionally deletes orphaned text_values."
             }
         },
         {
@@ -1943,7 +1952,7 @@
         },
         {
             "name": "fetch_concept",
-            "description": "Fetch full details of ONE specific concept by its ID (format: #V#concept_name). Use when you already know the exact concept_id and need complete information (description, predicates, relationships). Don't use for searching.",
+            "description": "Fetch full details of one concept by exact ID. An authenticated actor receives actor_effective scoped enrichment; identity or namespace supplied only in an ordinary tool payload is ignored and the response is explicitly base_publication. Don't use for searching.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2102,7 +2111,7 @@
         },
         {
             "name": "find_relations_with_argument",
-            "description": "Find relation assertions where a concept appears in one or more argument positions. The anchor entity must be supplied in concept_id; use argument_index to choose the relation slot instead of inventing subject/object payload fields. Supports exact graph matching and full-text text-relation matching with optional predicate/kind filters and pagination.",
+            "description": "Find relation assertions where a concept appears in one or more argument positions. The anchor entity must be supplied in concept_id; use argument_index to choose the relation slot instead of inventing subject/object payload fields. Supports exact graph matching and full-text text-relation matching with optional predicate/kind filters and pagination. Verified actors receive actor_effective results; payload-only identity is ignored and yields base_publication. Truncated actor overlays expose bounded recovery rather than a misleading offset continuation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2305,7 +2314,7 @@
         },
         {
             "name": "get_predicate_incidence",
-            "description": "Summarise which predicates are actually observed around a concept or across instances of a type. The anchor entity goes in concept_id; argument_index='subject' means inspect outgoing subject-side relations, not that the payload should contain a subject field. Use when you need distinct predicates plus counts before choosing a predicate-specific extent or filtered relation lookup. For kind-specific turns such as papers, projects, students, organisations, or other represented related things, set include_argument_type_counts=true to get direct asserted type distributions for non-anchor arguments. Set role_expansion_mode='explicit' with represented node-type or role-predicate filters when the immediate neighbour is a reified/event/claim node whose other role fillers are the useful retrieval targets.",
+            "description": "Summarise which predicates are actually observed around a concept or across instances of a type. The anchor entity goes in concept_id; argument_index='subject' means inspect outgoing subject-side relations, not that the payload should contain a subject field. Use when you need distinct predicates plus counts before choosing a predicate-specific extent or filtered relation lookup. Start with bounded minimal incidence (a modest limit, without argument type counts, previews, or text snippets), then request those richer fields only when the initial evidence shows they are needed; avoid concurrent rich incidence probes by default. Set role_expansion_mode='explicit' with represented node-type or role-predicate filters when the immediate neighbour is a reified/event/claim node whose other role fillers are the useful retrieval targets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2557,7 +2566,7 @@
         },
         {
             "name": "get_text_relations",
-            "description": "Retrieve text relations for a concept, optionally filtered by predicate/language. Returns all text attachments (hasContent, hasDescription, hasName, etc.). Use to query what text is attached to a concept.",
+            "description": "Retrieve labelled text-assertion rows for a concept, optionally filtered by predicate/language. The serving authority boundary selects context_view: trusted actor-bound internal calls use actor_effective; actorless calls and ordinary payload-only identity use base_publication. Inspect row_kind; only a base_text_relation relation_id is valid for update/delete.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2592,7 +2601,7 @@
         },
         {
             "name": "get_text_relations_summary",
-            "description": "Return a lightweight summary of text relations for a concept: counts + relation IDs grouped by predicate/language (no full text bodies). Use to quickly decide what to fetch next.",
+            "description": "Return a lightweight, context-labelled text-assertion summary grouped by predicate/language (no full text bodies). The serving authority boundary selects actor_effective or base_publication; ordinary payload-only identity is ignored. Relation and assertion IDs remain separate; inspect counts_are_lower_bounds before treating scoped counts as complete.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6136,7 +6145,7 @@
                     "new_text"
                 ],
                 "additionalProperties": true,
-                "description": "update_text_relation input: concept_id (str), relation_id (str), new_text (str), language (str, optional)"
+                "description": "update_text_relation input: concept_id, relation_id, new_text, and optional language. relation_id must come from a base_text_relation row; scoped_assertion IDs are not mutable text-relation IDs."
             }
         },
         {
@@ -6249,7 +6258,7 @@
         },
         {
             "name": "upsert_text_relation",
-            "description": "Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types. More general than add_names which is specialized for hasName relations only.",
+            "description": "Add or update a canonical text relation when the actor has mutation authority over the subject concept. On an actor-bound surface that exposes upsert_scoped_assertion, use that capability for knowledge about a visible concept the actor does not own. Supports hasContent, hasDescription, hasNote, hasName, and existing custom predicate concepts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6741,10 +6750,16 @@
                         "type": "string"
                     },
                     "user_id": {
-                        "type": "string"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "org_id": {
-                        "type": "string"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "namespace": {
                         "type": [

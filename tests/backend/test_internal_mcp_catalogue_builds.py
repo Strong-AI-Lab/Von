@@ -6,6 +6,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
 
     assert "add_relationship" in methods
     assert "upsert_scoped_assertion" in methods
+    assert "retract_scoped_assertion" in methods
     assert "list_scoped_assertions" in methods
     assert "remove_relationship" in methods
     assert "preview_remove_relationship" in methods
@@ -74,6 +75,10 @@ def test_default_catalogue_exposes_calibrated_effect_admission_windows():
 
     assert catalogue.get("create_concepts").effect_admission_window_sec is None
     assert catalogue.get("upsert_text_relation").effect_admission_window_sec == 8.0
+    assert (
+        catalogue.get("retract_scoped_assertion").effect_admission_window_sec
+        == 8.0
+    )
     assert catalogue.get("add_relationship").effect_admission_window_sec == 5.0
     assert snapshot["create_concepts"]["effect_admission_window_sec"] is None
     assert snapshot["upsert_text_relation"]["effect_admission_window_sec"] == 8.0
@@ -147,6 +152,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }.isdisjoint(actor_mail_reads)
     assert delegated_effects == {
         "create_concepts",
+        "retract_scoped_assertion",
         "upsert_scoped_assertion",
         "upsert_text_relation",
         "add_relationship",
@@ -180,6 +186,31 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "canonical_publication": False,
     }
     assert scoped_definition.ordinary_turn_mutation_subject_argument is None
+    retract_definition = catalogue.get("retract_scoped_assertion")
+    assert retract_definition.input_schema.required == {"assertion_id": str}
+    assert retract_definition.input_schema.optional == {}
+    assert retract_definition.ordinary_turn_trusted_argument_bindings == {
+        "acting_user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+        "namespace": "turn_namespace",
+    }
+    assert catalogue.get(
+        "search_knowledge_base"
+    ).ordinary_turn_trusted_argument_bindings == {
+        "namespace": "turn_namespace",
+        "user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+    }
+    for capability_name in (
+        "rag_list_collections",
+        "rag_list_indexed",
+        "rag_get_item",
+    ):
+        assert catalogue.get(
+            capability_name
+        ).ordinary_turn_trusted_argument_bindings == {
+            "namespace": "turn_namespace",
+        }
 
     # Server-bound resources are absent until the entry point supplies the
     # actor's represented binding; the model never selects the profile.

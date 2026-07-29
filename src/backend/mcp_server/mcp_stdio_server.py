@@ -201,7 +201,7 @@ if TYPE_CHECKING:
         get_search_proxy,
     )
     from src.backend.integrations.google import gmail_service
-    from src.backend.services.rag_service import RAGBackendUnavailable, get_rag_service
+    from src.backend.services.rag_service import RAGBackendUnavailable
 
 # Avoid UnicodeEncodeError on Windows consoles (default cp1252) when any
 # dependency logs Unicode (e.g. checkmarks). MCP runs over stdio; we must not
@@ -486,7 +486,7 @@ bind_internal_mcp_actor_context_source = (
 gmail_service = importlib.import_module("src.backend.integrations.google.gmail_service")
 _bind_imports(
     "src.backend.services.rag_service",
-    ["get_rag_service", "RAGBackendUnavailable"],
+    ["RAGBackendUnavailable"],
 )
 
 # Create MCP server instance
@@ -1706,12 +1706,20 @@ async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextCont
         ]
 
     try:
-        relations = get_texts_for_concept(
-            subject_concept_id=concept_id,
-            predicate=predicate,
-            lang=language,
-            limit=limit,
+        from src.backend.security.access_control import (
+            force_access_control_enforcement,
         )
+
+        with force_access_control_enforcement():
+            relations = get_texts_for_concept(
+                subject_concept_id=concept_id,
+                predicate=predicate,
+                lang=language,
+                limit=limit,
+                # Direct stdio calls have no authenticated actor scope. Keep
+                # this surface on the globally visible base publication view.
+                context_view="base_publication",
+            )
 
         # Add text previews for long content
         for relation in relations:
@@ -1721,6 +1729,7 @@ async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextCont
 
         payload = {
             "concept_id": concept_id,
+            "context_view": "base_publication",
             "relations_found": len(relations),
             "relations": relations,
         }
@@ -2046,73 +2055,84 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
         ]
 
     try:
-        concept = get_concept_by_concept_id(concept_id)
-        if not concept:
-            return [
-                _json_error(
-                    f"Concept '{concept_id}' not found",
-                    error_code="concept_not_found",
-                    suggestions=[
-                        "Check the concept_id spelling",
-                        "Use search_concepts to find available concepts",
-                    ],
-                    related_concept_ids=[concept_id],
-                )
-            ]
-
-        concept = enrich_concept_with_text_relations(concept)
-
-        # NOTE: mcp_stdio_server runs as a top-level script in stdio mode.
-        # Relative imports fail in that runtime ("no known parent package"),
-        # so this import must remain absolute.
-        from src.backend.services.relationship_write_service import (
-            detect_vacuous_typing,
+        from src.backend.security.access_control import (
+            force_access_control_enforcement,
         )
 
-        vacuous_warning = detect_vacuous_typing(concept)
-        if vacuous_warning:
-            concept["_vacuous_typing_warning"] = vacuous_warning
+        with force_access_control_enforcement():
+            concept = get_concept_by_concept_id(concept_id)
+            if not concept:
+                return [
+                    _json_error(
+                        f"Concept '{concept_id}' not found",
+                        error_code="concept_not_found",
+                        suggestions=[
+                            "Check the concept_id spelling",
+                            "Use search_concepts to find available concepts",
+                        ],
+                        related_concept_ids=[concept_id],
+                    )
+                ]
 
-        include_relations_arg1 = bool(arguments.get("include_relations_arg1"))
-        include_relations_any_arg = bool(arguments.get("include_relations_any_arg"))
-        include_text_relations_arg1 = arguments.get(
-            "include_text_relations_arg1", False
-        )
-        predicate_filter = arguments.get("predicate_filter")
-        limit = arguments.get("limit")
-        offset = arguments.get("offset")
-        include_concept_preview = arguments.get("include_concept_preview", True)
-        include_uncertain = bool(arguments.get("include_uncertain", False))
-        uncertainty_mode = arguments.get("uncertainty_mode")
-        uncertainty_statuses = arguments.get("uncertainty_statuses")
+            concept = enrich_concept_with_text_relations(concept)
 
-        if predicate_filter is not None and not isinstance(predicate_filter, list):
-            if isinstance(predicate_filter, (tuple, set)):
-                predicate_filter = list(predicate_filter)
-            else:
-                predicate_filter = [predicate_filter]
-
-        if any(
-            [
-                include_relations_arg1,
-                include_relations_any_arg,
-                include_text_relations_arg1,
-            ]
-        ):
-            relations_payload = build_concept_relations_payload(
-                concept,
-                include_relations_arg1=include_relations_arg1,
-                include_relations_any_arg=include_relations_any_arg,
-                include_text_relations_arg1=include_text_relations_arg1,
-                predicate_filter=predicate_filter,
-                limit=limit,
-                offset=offset,
-                include_concept_preview=include_concept_preview,
-                include_uncertain=include_uncertain,
-                uncertainty_mode=uncertainty_mode,
-                uncertainty_statuses=uncertainty_statuses,
+            # NOTE: mcp_stdio_server runs as a top-level script in stdio mode.
+            # Relative imports fail in that runtime ("no known parent package"),
+            # so this import must remain absolute.
+            from src.backend.services.relationship_write_service import (
+                detect_vacuous_typing,
             )
-            concept["relations"] = relations_payload
+
+            vacuous_warning = detect_vacuous_typing(concept)
+            if vacuous_warning:
+                concept["_vacuous_typing_warning"] = vacuous_warning
+
+            include_relations_arg1 = bool(arguments.get("include_relations_arg1"))
+            include_relations_any_arg = bool(
+                arguments.get("include_relations_any_arg")
+            )
+            include_text_relations_arg1 = arguments.get(
+                "include_text_relations_arg1", False
+            )
+            predicate_filter = arguments.get("predicate_filter")
+            limit = arguments.get("limit")
+            offset = arguments.get("offset")
+            include_concept_preview = arguments.get(
+                "include_concept_preview", True
+            )
+            include_uncertain = bool(arguments.get("include_uncertain", False))
+            uncertainty_mode = arguments.get("uncertainty_mode")
+            uncertainty_statuses = arguments.get("uncertainty_statuses")
+
+            if predicate_filter is not None and not isinstance(
+                predicate_filter, list
+            ):
+                if isinstance(predicate_filter, (tuple, set)):
+                    predicate_filter = list(predicate_filter)
+                else:
+                    predicate_filter = [predicate_filter]
+
+            if any(
+                [
+                    include_relations_arg1,
+                    include_relations_any_arg,
+                    include_text_relations_arg1,
+                ]
+            ):
+                relations_payload = build_concept_relations_payload(
+                    concept,
+                    include_relations_arg1=include_relations_arg1,
+                    include_relations_any_arg=include_relations_any_arg,
+                    include_text_relations_arg1=include_text_relations_arg1,
+                    predicate_filter=predicate_filter,
+                    limit=limit,
+                    offset=offset,
+                    include_concept_preview=include_concept_preview,
+                    include_uncertain=include_uncertain,
+                    uncertainty_mode=uncertainty_mode,
+                    uncertainty_statuses=uncertainty_statuses,
+                )
+                concept["relations"] = relations_payload
         return [_json_text(concept)]
     except Exception as exc:
         return [
@@ -2142,23 +2162,30 @@ async def _handle_find_relations_with_argument(
         ]
 
     try:
-        payload = find_relations_with_argument(
-            concept_id=str(concept_id),
-            argument_index=arguments.get("argument_index"),
-            predicate_filter=arguments.get("predicate_filter"),
-            relation_kind=arguments.get("relation_kind"),
-            scope=arguments.get("scope"),
-            include_text_snippets=bool(arguments.get("include_text_snippets", False)),
-            include_concept_preview=bool(
-                arguments.get("include_concept_preview", True)
-            ),
-            limit=arguments.get("limit"),
-            offset=arguments.get("offset"),
-            sort_by=arguments.get("sort_by"),
-            include_uncertain=bool(arguments.get("include_uncertain", False)),
-            uncertainty_mode=arguments.get("uncertainty_mode"),
-            uncertainty_statuses=arguments.get("uncertainty_statuses"),
+        from src.backend.security.access_control import (
+            force_access_control_enforcement,
         )
+
+        with force_access_control_enforcement():
+            payload = find_relations_with_argument(
+                concept_id=str(concept_id),
+                argument_index=arguments.get("argument_index"),
+                predicate_filter=arguments.get("predicate_filter"),
+                relation_kind=arguments.get("relation_kind"),
+                scope=arguments.get("scope"),
+                include_text_snippets=bool(
+                    arguments.get("include_text_snippets", False)
+                ),
+                include_concept_preview=bool(
+                    arguments.get("include_concept_preview", True)
+                ),
+                limit=arguments.get("limit"),
+                offset=arguments.get("offset"),
+                sort_by=arguments.get("sort_by"),
+                include_uncertain=bool(arguments.get("include_uncertain", False)),
+                uncertainty_mode=arguments.get("uncertainty_mode"),
+                uncertainty_statuses=arguments.get("uncertainty_statuses"),
+            )
         return [_json_text(payload)]
     except Exception as exc:
         return [
@@ -2306,12 +2333,21 @@ async def _handle_get_text_relations_summary(
         ]
 
     try:
-        payload = get_text_relations_summary(
-            concept_id,
-            predicates=arguments.get("predicates"),
-            languages=arguments.get("languages"),
-            max_relation_ids_per_group=arguments.get("max_relation_ids_per_group", 25),
+        from src.backend.security.access_control import (
+            force_access_control_enforcement,
         )
+
+        with force_access_control_enforcement():
+            payload = get_text_relations_summary(
+                concept_id,
+                predicates=arguments.get("predicates"),
+                languages=arguments.get("languages"),
+                max_relation_ids_per_group=arguments.get(
+                    "max_relation_ids_per_group", 25
+                ),
+                # Direct stdio calls have no authenticated actor scope.
+                context_view="base_publication",
+            )
         return [_json_text(payload)]
     except Exception as exc:
         return [
@@ -3496,29 +3532,39 @@ async def _handle_search_knowledge_base(arguments: dict[str, Any]) -> list[TextC
             )
         ]
     try:
-        service = get_rag_service()
-        permissions_context = {}
-        try:
-            from flask import session as flask_session
-
-            if flask_session.get("user_id"):
-                permissions_context["user_id"] = flask_session.get("user_id")
-            if flask_session.get("org_id"):
-                permissions_context["organisation_concept_id"] = flask_session.get(
-                    "org_id"
-                )
-        except (ImportError, RuntimeError):
-            pass
-
-        results = service.query(
-            query_text=query,
-            top_k=arguments.get("top_k", 5),
-            namespace=arguments.get("namespace"),
-            permissions_context=(permissions_context if permissions_context else None),
+        from src.backend.security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
         )
-        return [
-            _json_text({"results": results, "count": len(results), "success": True})
-        ]
+
+        inherited_preexisting_actor = (
+            internal_mcp_gateway_module.get_internal_mcp_preexisting_actor_context()
+        )
+        effective_user_id = get_effective_user_concept_id()
+        effective_org_id = get_effective_organisation_concept_id()
+        server_bound_actor = inherited_preexisting_actor or (
+            (effective_user_id, effective_org_id)
+            if effective_user_id or effective_org_id
+            else None
+        )
+        inherited_source = (
+            internal_mcp_gateway_module.get_internal_mcp_actor_context_source()
+        )
+        actor_context_source = (
+            "preexisting_authenticated_or_workflow_context"
+            if server_bound_actor is not None
+            else "trusted_operator_payload_fallback"
+            if inherited_source == "trusted_operator_payload_fallback"
+            else "tool_payload_fallback"
+        )
+        with bind_internal_mcp_actor_context_source(
+            actor_context_source,
+            preexisting_actor_context=server_bound_actor,
+        ):
+            result = internal_mcp_catalogue_module._search_knowledge_base(
+                **arguments
+            )
+        return [_json_text(result)]
     except RAGBackendUnavailable as exc:
         return [
             _json_text({"error": f"RAG service unavailable: {exc}", "success": False})

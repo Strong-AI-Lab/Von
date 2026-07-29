@@ -49,6 +49,19 @@ class TextRelationPredicateResolutionError(ValueError):
         self.suggestions = list(suggestions or [])
 
 
+def predicate_concept_id_for_storage(predicate: Any) -> str | None:
+    """Return the represented predicate concept for one stored text predicate."""
+
+    predicate_text = str(predicate or "").strip()
+    if predicate_text in _CORE_TEXT_PREDICATE_CONCEPT_BY_STORAGE:
+        return _CORE_TEXT_PREDICATE_CONCEPT_BY_STORAGE[predicate_text]
+    if predicate_text in _CORE_TEXT_PREDICATE_STORAGE_BY_CONCEPT_ID:
+        return predicate_text
+    if predicate_text.startswith("#V#"):
+        return predicate_text
+    return None
+
+
 def _relationship_values(doc: Mapping[str, Any], key: str) -> set[str]:
     relationships = doc.get("relationships")
     if not isinstance(relationships, Mapping):
@@ -177,6 +190,7 @@ def resolve_text_relation_predicate_for_write(
 
 
 __all__ = [
+    "predicate_concept_id_for_storage",
     "TextRelationPredicateResolution",
     "TextRelationPredicateResolutionError",
     "resolve_text_relation_predicate_for_write",

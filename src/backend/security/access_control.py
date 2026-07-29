@@ -25,6 +25,10 @@ _log = logging.getLogger(__name__)
 _MANUAL_USER: ContextVar[Optional[str]] = ContextVar("access_manual_user", default=None)
 _MANUAL_ORG: ContextVar[Optional[str]] = ContextVar("access_manual_org", default=None)
 _BYPASS: ContextVar[bool] = ContextVar("access_bypass", default=False)
+_FORCE_ENFORCEMENT: ContextVar[bool] = ContextVar(
+    "access_force_enforcement",
+    default=False,
+)
 _EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar(
     "access_evaluator", default=None
 )
@@ -425,6 +429,8 @@ def is_bypass_enabled() -> bool:
 def should_enforce_access_control() -> bool:
     if is_bypass_enabled():
         return False
+    if _FORCE_ENFORCEMENT.get():
+        return True
     if _MANUAL_USER.get() is not None or _MANUAL_ORG.get() is not None:
         return True
     return has_request_context()
@@ -874,6 +880,19 @@ def override_current_actor(
         _EVALUATOR.reset(eval_token)
         _MANUAL_ORG.reset(org_token)
         _MANUAL_USER.reset(user_token)
+
+
+@contextmanager
+def force_access_control_enforcement():
+    """Enforce global-only visibility even when no actor identity is bound."""
+
+    token = _FORCE_ENFORCEMENT.set(True)
+    eval_token = _EVALUATOR.set(None)
+    try:
+        yield
+    finally:
+        _EVALUATOR.reset(eval_token)
+        _FORCE_ENFORCEMENT.reset(token)
 
 
 @contextmanager

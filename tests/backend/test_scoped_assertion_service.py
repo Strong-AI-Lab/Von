@@ -1,11 +1,48 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
+
 import mongomock
 import pytest
 
 
 def _collection():
     return mongomock.MongoClient()["von_test"]["scoped_knowledge_assertions"]
+
+
+def _stored_text_assertion(
+    *,
+    assertion_id: str,
+    subject_concept_id: str,
+    audience_key: str = "org:#V#trusted_org",
+) -> dict:
+    now = datetime.now(timezone.utc)
+    return {
+        "schema_version": "scoped_knowledge_assertion.v1",
+        "assertion_id": assertion_id,
+        "subject_concept_id": subject_concept_id,
+        "predicate": "#V#has_description",
+        "object_kind": "text",
+        "object_text": {
+            "text": f"Text for {assertion_id}",
+            "language": "en-NZ",
+        },
+        "object_concept_id": None,
+        "scope": {
+            "mode": "organisation",
+            "user_concept_id": "#V#author",
+            "organisation_concept_id": "#V#trusted_org",
+            "audience_keys": [audience_key],
+        },
+        "provenance": {
+            "asserted_by_user_concept_id": "#V#author",
+        },
+        "canonical_publication": False,
+        "status": "asserted",
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def test_visible_global_subject_accepts_user_scoped_text_assertion(monkeypatch):
@@ -56,6 +93,67 @@ def test_visible_global_subject_accepts_user_scoped_text_assertion(monkeypatch):
     assert read_back["provenance"]["turn_id"] == "turn-1"
 
 
+def test_org_members_keep_distinct_immutable_assertion_provenance(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+
+    first = service.upsert_scoped_assertion(
+        subject_concept_id="#V#shared_subject",
+        predicate="hasDescription",
+        target_text="The same organisation-visible claim.",
+        scope_mode="organisation",
+        evidence={"source": "first-member"},
+        acting_user_concept_id="#V#member_one",
+        organisation_concept_id="#V#trusted_org",
+        turn_id="member-one-turn",
+    )
+    second = service.upsert_scoped_assertion(
+        subject_concept_id="#V#shared_subject",
+        predicate="hasDescription",
+        target_text="The same organisation-visible claim.",
+        scope_mode="organisation",
+        evidence={"source": "second-member"},
+        acting_user_concept_id="#V#member_two",
+        organisation_concept_id="#V#trusted_org",
+        turn_id="member-two-turn",
+    )
+
+    assert first["assertion_id"] != second["assertion_id"]
+    assert collection.count_documents({}) == 2
+    assert (
+        first["assertion"]["provenance"]["asserted_by_user_concept_id"]
+        == "#V#member_one"
+    )
+    assert (
+        second["assertion"]["provenance"]["asserted_by_user_concept_id"]
+        == "#V#member_two"
+    )
+
+    repeated = service.upsert_scoped_assertion(
+        subject_concept_id="#V#shared_subject",
+        predicate="hasDescription",
+        target_text="The same organisation-visible claim.",
+        scope_mode="organisation",
+        evidence={"source": "replacement-attempt"},
+        acting_user_concept_id="#V#member_one",
+        organisation_concept_id="#V#trusted_org",
+        turn_id="later-turn",
+    )
+    assert repeated["changed"] is False
+    assert repeated["assertion_id"] == first["assertion_id"]
+    assert repeated["assertion"]["provenance"]["turn_id"] == "member-one-turn"
+    assert repeated["assertion"]["provenance"]["evidence"] == {
+        "source": "first-member"
+    }
+
+
 def test_scoped_assertions_do_not_cross_actor_or_organisation(monkeypatch):
     from src.backend.services import scoped_assertion_service as service
 
@@ -92,6 +190,356 @@ def test_scoped_assertions_do_not_cross_actor_or_organisation(monkeypatch):
     assert other_org == []
 
 
+def test_unfiltered_reads_recheck_subject_and_concept_target_visibility(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    visible_concepts = {
+        "#V#subject",
+        "#V#target",
+        "#V#hasDescription",
+        "#V#related_to",
+    }
+    monkeypatch.setattr(
+        service,
+        "can_access_concept",
+        lambda concept_id: concept_id in visible_concepts,
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: {
+            concept_id
+            for concept_id in concept_ids
+            if concept_id in visible_concepts
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "validate_predicate_concept",
+        lambda _predicate: (True, None, None),
+    )
+    service.upsert_scoped_assertion(
+        subject_concept_id="#V#subject",
+        predicate="hasDescription",
+        target_text="A visible text claim.",
+        scope_mode="organisation",
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    service.upsert_scoped_assertion(
+        subject_concept_id="#V#subject",
+        predicate="#V#related_to",
+        target_concept_id="#V#target",
+        scope_mode="organisation",
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+
+    initially_visible = service.list_visible_scoped_assertions(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    assert len(initially_visible) == 2
+
+    visible_concepts.remove("#V#related_to")
+    after_predicate_revocation = service.list_visible_scoped_assertions(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    assert [item["object_kind"] for item in after_predicate_revocation] == [
+        "text"
+    ]
+    visible_concepts.add("#V#related_to")
+
+    visible_concepts.remove("#V#target")
+    target_revocation_page = service.list_visible_scoped_assertions_page(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    assert [item["object_kind"] for item in target_revocation_page["items"]] == [
+        "text"
+    ]
+    assert target_revocation_page["visibility_filtered"] is False
+    assert target_revocation_page["counts_are_lower_bounds"] is False
+
+    visible_concepts.remove("#V#hasDescription")
+    assert (
+        service.list_visible_scoped_assertions(
+            user_concept_id="#V#member",
+            organisation_concept_id="#V#trusted_org",
+        )
+        == []
+    )
+
+    visible_concepts.remove("#V#subject")
+    after_subject_revocation = service.list_visible_scoped_assertions(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    assert after_subject_revocation == []
+
+
+def test_explicit_read_actor_must_match_ambient_trusted_actor(monkeypatch):
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import scoped_assertion_service as service
+
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        _collection,
+    )
+    with override_current_actor("#V#member", "#V#organisation_a"):
+        with pytest.raises(PermissionError, match="organisation audience"):
+            service.list_visible_scoped_assertions(
+                user_concept_id="#V#member",
+                organisation_concept_id="#V#organisation_b",
+            )
+        with pytest.raises(PermissionError, match="user audience"):
+            service.list_visible_scoped_assertions(
+                user_concept_id="#V#other_member",
+                organisation_concept_id="#V#organisation_a",
+            )
+    # A user whose effective organisation has been revoked cannot revive the
+    # old audience by supplying its identifier explicitly.
+    with override_current_actor("#V#member", None):
+        with pytest.raises(PermissionError, match="organisation audience"):
+            service.list_visible_scoped_assertions(
+                user_concept_id="#V#member",
+                organisation_concept_id="#V#organisation_a",
+            )
+
+
+def test_explicit_read_actor_binds_current_visibility_checks(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    collection.insert_one(
+        _stored_text_assertion(
+            assertion_id="ska_one",
+            subject_concept_id="#V#subject",
+        )
+    )
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    observed_actors = []
+
+    def _filter_accessible(concept_ids):
+        observed_actors.append(
+            (
+                service.get_effective_user_concept_id(),
+                service.get_effective_organisation_concept_id(),
+            )
+        )
+        return set(concept_ids)
+
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        _filter_accessible,
+    )
+    assertions = service.list_visible_scoped_assertions(
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+
+    assert len(assertions) == 1
+    assert observed_actors
+    assert set(observed_actors) == {
+        ("#V#member", "#V#trusted_org"),
+    }
+
+
+def test_per_subject_page_is_one_bounded_non_starving_aggregate(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    subjects = ["#V#subject_a", "#V#subject_b"]
+    documents = [
+        _stored_text_assertion(
+            assertion_id=f"ska_{subject[-1]}_{index}",
+            subject_concept_id=subject,
+        )
+        for subject in subjects
+        for index in range(3)
+    ]
+
+    class _AggregateCollection:
+        name = "scoped_knowledge_assertions"
+
+        def __init__(self):
+            self.pipelines = []
+
+        def aggregate(self, pipeline):
+            self.pipelines.append(pipeline)
+            return iter(documents)
+
+    collection = _AggregateCollection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+
+    page = service.list_visible_scoped_assertions_page(
+        subject_concept_ids=subjects,
+        object_kind="text",
+        limit_per_subject=2,
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+
+    assert len(collection.pipelines) == 1
+    pipeline = collection.pipelines[0]
+    union_stages = [stage["$unionWith"] for stage in pipeline if "$unionWith" in stage]
+    assert len(union_stages) == 1
+    assert pipeline[2] == {"$limit": 5001}
+    assert union_stages[0]["pipeline"][2] == {"$limit": 5001}
+    assert all("$skip" not in stage for stage in pipeline)
+    assert all(
+        "$skip" not in stage
+        for stage in union_stages[0]["pipeline"]
+    )
+    assert page["returned"] == 4
+    assert page["has_more"] is True
+    assert page["truncated"] is True
+    assert page["counts_are_lower_bounds"] is True
+    for subject in subjects:
+        subject_page = page["per_subject"][subject]
+        assert subject_page["returned"] == 2
+        assert subject_page["has_more"] is True
+        assert subject_page["next_offset"] == 2
+        assert all(
+            item["subject_concept_id"] == subject
+            for item in subject_page["items"]
+        )
+
+
+def test_hidden_candidates_do_not_change_visible_paging_or_diagnostics(
+    monkeypatch,
+):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    newest_hidden = _stored_text_assertion(
+        assertion_id="ska_hidden",
+        subject_concept_id="#V#hidden",
+    )
+    first_visible = _stored_text_assertion(
+        assertion_id="ska_visible_1",
+        subject_concept_id="#V#visible_1",
+    )
+    second_visible = _stored_text_assertion(
+        assertion_id="ska_visible_2",
+        subject_concept_id="#V#visible_2",
+    )
+    newest_hidden["updated_at"] = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    first_visible["updated_at"] = datetime(
+        2026, 7, 29, 11, tzinfo=timezone.utc
+    )
+    second_visible["updated_at"] = datetime(
+        2026, 7, 29, 10, tzinfo=timezone.utc
+    )
+    collection.insert_many([newest_hidden, first_visible, second_visible])
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    visibility_batches = []
+
+    def _filter_accessible(concept_ids):
+        batch = set(concept_ids)
+        if batch:
+            visibility_batches.append(batch)
+        return {
+            concept_id
+            for concept_id in batch
+            if concept_id != "#V#hidden"
+        }
+
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        _filter_accessible,
+    )
+
+    first_page = service.list_visible_scoped_assertions_page(
+        limit=1,
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    second_page = service.list_visible_scoped_assertions_page(
+        limit=1,
+        offset=1,
+        user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+
+    assert [item["assertion_id"] for item in first_page["items"]] == [
+        "ska_visible_1"
+    ]
+    assert first_page["has_more"] is True
+    assert first_page["next_offset"] == 1
+    assert first_page["visibility_filtered"] is False
+    assert first_page["counts_are_lower_bounds"] is True
+    assert [item["assertion_id"] for item in second_page["items"]] == [
+        "ska_visible_2"
+    ]
+    assert second_page["has_more"] is False
+    assert second_page["next_offset"] is None
+    assert second_page["visibility_filtered"] is False
+    assert second_page["counts_are_lower_bounds"] is False
+    assert len(visibility_batches) == 2
+    assert all("#V#hidden" in batch for batch in visibility_batches)
+
+
+def test_core_predicate_filters_match_storage_and_concept_id_forms(
+    monkeypatch,
+):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    stored = _stored_text_assertion(
+        assertion_id="ska_core_predicate",
+        subject_concept_id="#V#visible",
+    )
+    stored["predicate"] = "hasNote"
+    collection.insert_one(stored)
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids),
+    )
+
+    for predicate in ("hasNote", "#V#hasNote"):
+        page = service.list_visible_scoped_assertions_page(
+            predicates=[predicate],
+            user_concept_id="#V#member",
+            organisation_concept_id="#V#trusted_org",
+        )
+        assert [row["assertion_id"] for row in page["items"]] == [
+            "ska_core_predicate"
+        ]
+
+
 def test_service_rejects_namespace_that_disagrees_with_trusted_actor(monkeypatch):
     from src.backend.services import scoped_assertion_service as service
 
@@ -112,6 +560,317 @@ def test_service_rejects_namespace_that_disagrees_with_trusted_actor(monkeypatch
             namespace="#V#attacker@other_org",
             canonical_publication=False,
         )
+
+
+def test_write_actor_cannot_conflict_with_ambient_trusted_actor(monkeypatch):
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+
+    def _unexpected_access(_concept_id):
+        raise AssertionError("actor conflict must fail before concept access")
+
+    monkeypatch.setattr(service, "can_access_concept", _unexpected_access)
+    with override_current_actor("#V#member", "#V#organisation_a"):
+        with pytest.raises(PermissionError, match="acting user"):
+            service.upsert_scoped_assertion(
+                subject_concept_id="#V#subject",
+                predicate="hasDescription",
+                target_text="Conflicting user.",
+                acting_user_concept_id="#V#other_member",
+                organisation_concept_id="#V#organisation_a",
+            )
+        with pytest.raises(PermissionError, match="organisation"):
+            service.upsert_scoped_assertion(
+                subject_concept_id="#V#subject",
+                predicate="hasDescription",
+                target_text="Conflicting organisation.",
+                acting_user_concept_id="#V#member",
+                organisation_concept_id="#V#organisation_b",
+            )
+    assert collection.count_documents({}) == 0
+
+
+def test_predicate_visibility_precedes_concept_predicate_validation(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    events = []
+
+    def _can_access(concept_id):
+        events.append(("access", concept_id))
+        return concept_id != "#V#hidden_predicate"
+
+    def _validate(predicate):
+        events.append(("validate", predicate))
+        return True, None, None
+
+    monkeypatch.setattr(service, "can_access_concept", _can_access)
+    monkeypatch.setattr(service, "validate_predicate_concept", _validate)
+
+    with pytest.raises(PermissionError, match="predicate concept"):
+        service.upsert_scoped_assertion(
+            subject_concept_id="#V#subject",
+            predicate="#V#hidden_predicate",
+            target_concept_id="#V#target",
+            acting_user_concept_id="#V#member",
+        )
+
+    assert ("access", "#V#hidden_predicate") in events
+    assert not any(event[0] == "validate" for event in events)
+    assert collection.count_documents({}) == 0
+
+
+def test_user_scope_is_org_independent_and_replay_preserves_origin(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+
+    first = service.upsert_scoped_assertion(
+        subject_concept_id="#V#subject",
+        predicate="hasDescription",
+        target_text="User-enduring claim.",
+        scope_mode="user",
+        evidence={"source": "first-context"},
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#organisation_a",
+        namespace="#V#member@organisation_a",
+        turn_id="first-turn",
+    )
+    replay = service.upsert_scoped_assertion(
+        subject_concept_id="#V#subject",
+        predicate="hasDescription",
+        target_text="User-enduring claim.",
+        scope_mode="user",
+        evidence={"source": "replacement-attempt"},
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#organisation_b",
+        namespace="#V#member@organisation_b",
+        turn_id="replay-turn",
+    )
+
+    assert first["changed"] is True
+    assert replay["changed"] is False
+    assert replay["assertion_id"] == first["assertion_id"]
+    assert collection.count_documents({}) == 1
+    assertion = replay["canonical_read_back"]
+    assert assertion["scope"]["organisation_concept_id"] is None
+    assert assertion["scope"]["namespace"] == service.resolve_canonical_namespace(
+        None,
+        "#V#member",
+        None,
+    )
+    assert assertion["provenance"]["organisation_concept_id"] == "#V#organisation_a"
+    assert assertion["provenance"]["namespace"] == "#V#member@organisation_a"
+    assert assertion["provenance"]["turn_id"] == "first-turn"
+    assert assertion["provenance"]["evidence"] == {
+        "source": "first-context"
+    }
+    assert replay["canonical_read_back"] == first["canonical_read_back"]
+
+    retracted = service.retract_scoped_assertion(
+        assertion_id=first["assertion_id"],
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#organisation_b",
+        namespace="#V#member@organisation_b",
+    )
+    assert retracted["changed"] is True
+    assert retracted["assertion"]["status"] == "retracted"
+
+
+def test_atomic_creation_reports_changed_once_under_concurrency(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    worker_count = 8
+    barrier = Barrier(worker_count)
+
+    def _write(index):
+        barrier.wait()
+        return service.upsert_scoped_assertion(
+            subject_concept_id="#V#subject",
+            predicate="hasDescription",
+            target_text="One concurrently asserted claim.",
+            scope_mode="organisation",
+            evidence={"worker": index},
+            acting_user_concept_id="#V#member",
+            organisation_concept_id="#V#trusted_org",
+            turn_id=f"turn-{index}",
+        )
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        receipts = list(executor.map(_write, range(worker_count)))
+
+    assert sum(receipt["changed"] is True for receipt in receipts) == 1
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({})["_id"] == receipts[0]["assertion_id"]
+    canonical_ids = {
+        receipt["canonical_read_back"]["assertion_id"] for receipt in receipts
+    }
+    assert canonical_ids == {receipts[0]["assertion_id"]}
+    original_provenance = collection.find_one(
+        {"assertion_id": receipts[0]["assertion_id"]}
+    )["provenance"]
+
+    service.retract_scoped_assertion(
+        assertion_id=receipts[0]["assertion_id"],
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        reactivation_receipts = list(
+            executor.map(_write, range(worker_count))
+        )
+
+    assert (
+        sum(receipt["changed"] is True for receipt in reactivation_receipts)
+        == 1
+    )
+    reactivated = collection.find_one(
+        {"assertion_id": receipts[0]["assertion_id"]}
+    )
+    assert reactivated["status"] == "asserted"
+    assert reactivated["provenance"] == original_provenance
+    assert "retracted_at" not in reactivated
+    assert len(reactivated["retraction_history"]) == 1
+    assert reactivated["reassertion_provenance"][
+        "reasserted_by_user_concept_id"
+    ] == "#V#member"
+    for receipt in reactivation_receipts:
+        json.dumps(receipt["canonical_read_back"])
+
+
+def test_original_author_can_idempotently_retract_after_visibility_loss(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    receipt = service.upsert_scoped_assertion(
+        subject_concept_id="#V#subject",
+        predicate="hasDescription",
+        target_text="Retractable claim.",
+        scope_mode="organisation",
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+
+    def _visibility_must_not_be_consulted(_concept_id):
+        raise AssertionError("retraction must survive concept visibility loss")
+
+    monkeypatch.setattr(
+        service,
+        "can_access_concept",
+        _visibility_must_not_be_consulted,
+    )
+    first = service.retract_scoped_assertion(
+        assertion_id=receipt["assertion_id"],
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+    repeated = service.retract_scoped_assertion(
+        assertion_id=receipt["assertion_id"],
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+
+    assert first["success"] is True
+    assert first["effect_status"] == "succeeded"
+    assert first["changed"] is True
+    assert first["assertion"]["status"] == "retracted"
+    assert first["assertion"]["retracted_at"]
+    assert first["assertion"]["retraction_provenance"] == {
+        "retracted_by_user_concept_id": "#V#member",
+        "organisation_concept_id": "#V#trusted_org",
+        "namespace": "#V#member@trusted_org",
+        "capability_name": "retract_scoped_assertion",
+    }
+    assert repeated["changed"] is False
+    assert repeated["canonical_read_back"] == first["canonical_read_back"]
+    assert (
+        service.list_visible_scoped_assertions(
+            user_concept_id="#V#member",
+            organisation_concept_id="#V#trusted_org",
+        )
+        == []
+    )
+
+
+def test_retraction_denial_does_not_reveal_existence(monkeypatch):
+    from src.backend.services import scoped_assertion_service as service
+
+    collection = _collection()
+    monkeypatch.setattr(
+        service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    monkeypatch.setattr(service, "can_access_concept", lambda _concept_id: True)
+    receipt = service.upsert_scoped_assertion(
+        subject_concept_id="#V#subject",
+        predicate="hasDescription",
+        target_text="Owned claim.",
+        scope_mode="organisation",
+        acting_user_concept_id="#V#member",
+        organisation_concept_id="#V#trusted_org",
+    )
+
+    with pytest.raises(PermissionError) as wrong_author:
+        service.retract_scoped_assertion(
+            assertion_id=receipt["assertion_id"],
+            acting_user_concept_id="#V#other_member",
+            organisation_concept_id="#V#trusted_org",
+        )
+    with pytest.raises(PermissionError) as wrong_org:
+        service.retract_scoped_assertion(
+            assertion_id=receipt["assertion_id"],
+            acting_user_concept_id="#V#member",
+            organisation_concept_id="#V#other_org",
+        )
+    with pytest.raises(PermissionError) as missing:
+        service.retract_scoped_assertion(
+            assertion_id="ska_00000000000000000000000000000000",
+            acting_user_concept_id="#V#member",
+            organisation_concept_id="#V#trusted_org",
+        )
+
+    expected = "scoped assertion is unavailable to the current actor"
+    assert str(wrong_author.value) == expected
+    assert str(wrong_org.value) == expected
+    assert str(missing.value) == expected
+    assert collection.find_one(
+        {"assertion_id": receipt["assertion_id"]}
+    )["status"] == "asserted"
 
 
 def test_concept_target_assertion_is_retrievable_from_either_argument(monkeypatch):
@@ -199,7 +958,7 @@ def test_trusted_tool_payload_replaces_model_supplied_scope():
     assert payload["canonical_publication"] is False
 
 
-def test_generic_text_read_merges_visible_scoped_assertions(monkeypatch):
+def test_actor_effective_text_read_merges_visible_scoped_assertions(monkeypatch):
     from src.backend.security.access_control import override_current_actor
     from src.backend.services import scoped_assertion_service as scoped_service
     from src.backend.services import text_value_service
@@ -239,10 +998,13 @@ def test_generic_text_read_merges_visible_scoped_assertions(monkeypatch):
         rows = text_value_service.get_texts_for_concept(
             "#V#gillian_dobbie",
             predicate="hasDescription",
+            context_view="actor_effective",
         )
 
     assert len(rows) == 1
     assert rows[0]["text"] == "Scoped programme context."
     assert rows[0]["assertion_id"].startswith("ska_")
+    assert rows[0]["relation_id"] is None
+    assert rows[0]["row_kind"] == "scoped_assertion"
     assert rows[0]["canonical_publication"] is False
     assert rows[0]["storage_surface"] == "scoped_knowledge_assertions"

@@ -87,6 +87,292 @@ def _run_async_compat(async_fn):
         return executor.submit(caller_context.run, _run_in_worker).result()
 
 
+def _scoped_assertion_actor_claim(
+    kwargs: Mapping[str, Any],
+    field_names: Sequence[str],
+    *,
+    mismatch_field: str,
+) -> Any:
+    """Return one compatible actor claim across legacy payload aliases."""
+
+    claimed_values: list[Any] = []
+    normalised_values: set[str] = set()
+    for field_name in field_names:
+        value = kwargs.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        cleaned = value.strip()
+        normalised = cleaned if cleaned.startswith("#") else f"#V#{cleaned}"
+        claimed_values.append(value)
+        normalised_values.add(normalised)
+    if len(normalised_values) > 1:
+        raise WorkflowActorScopeError(
+            "workflow_actor_scope_mismatch",
+            mismatch_fields=(mismatch_field,),
+        )
+    return claimed_values[0] if claimed_values else None
+
+
+def _scoped_assertion_actor_scope_error_response(
+    exc: Exception,
+) -> dict[str, Any]:
+    reason = str(getattr(exc, "reason", "") or "workflow_actor_scope_mismatch")
+    if reason == "workflow_actor_authority_required":
+        reason = "authenticated_actor_context_required"
+    mismatch_fields = getattr(exc, "mismatch_fields", ())
+    return make_error_response(
+        reason,
+        (
+            "Scoped-assertion access requires trusted actor provenance, and "
+            "payload identity claims must match that actor."
+        ),
+        details={
+            "mismatch_fields": [
+                str(item)
+                for item in mismatch_fields
+                if item in {"user_id", "org_id", "namespace"}
+            ]
+        },
+    )
+
+
+def _resolve_internal_mcp_scoped_assertion_actor_scope(
+    kwargs: Mapping[str, Any],
+    *,
+    surface: str,
+    require_actor: bool = False,
+    ignore_untrusted_payload_identity: bool = False,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Resolve actor scope without promoting generic tool-payload identity.
+
+    InternalMCP's default gateway installs user/organisation payload fields as a
+    compatibility access context. That context is not authentication. Scoped
+    assertion paths therefore bind only an actor that pre-dated the invocation,
+    an explicitly trusted operator fallback, or a deliberate direct in-process
+    call with no identity claims. Generic knowledge reads may instead discard
+    untrusted claims and bind no actor, preserving their base-publication view.
+    """
+
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from ...services.workflow_actor_scope_service import (
+        resolve_authoritative_workflow_actor_scope,
+    )
+    from .gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+    )
+
+    try:
+        source = get_internal_mcp_actor_context_source()
+        preexisting_actor = get_internal_mcp_preexisting_actor_context()
+        payload_claims_are_trusted = (
+            source == "trusted_operator_payload_fallback"
+        )
+        discard_payload_claims = (
+            ignore_untrusted_payload_identity
+            and not payload_claims_are_trusted
+        )
+        if discard_payload_claims:
+            claimed_user = None
+            claimed_org = None
+            claimed_namespace = None
+        else:
+            claimed_user = _scoped_assertion_actor_claim(
+                kwargs,
+                (
+                    "acting_user_concept_id",
+                    "user_concept_id",
+                    "user_id",
+                    "actor_user_id",
+                ),
+                mismatch_field="user_id",
+            )
+            claimed_org = _scoped_assertion_actor_claim(
+                kwargs,
+                (
+                    "organisation_concept_id",
+                    "org_concept_id",
+                    "organisation_id",
+                    "org_id",
+                ),
+                mismatch_field="org_id",
+            )
+            claimed_namespace = kwargs.get("namespace")
+        has_identity_claim = any(
+            isinstance(value, str) and bool(value.strip())
+            for value in (claimed_user, claimed_org, claimed_namespace)
+        )
+
+        ambient_kwargs: dict[str, Any]
+        allow_unscoped_claims = False
+        if preexisting_actor is not None:
+            ambient_kwargs = {
+                "ambient_user_id": preexisting_actor[0],
+                "ambient_org_id": preexisting_actor[1],
+                "ambient_context_supplied": True,
+            }
+        elif source == "trusted_operator_payload_fallback":
+            ambient_kwargs = {
+                "ambient_user_id": None,
+                "ambient_org_id": None,
+                "ambient_context_supplied": False,
+            }
+            allow_unscoped_claims = True
+        elif source is None:
+            ambient_user = get_effective_user_concept_id()
+            ambient_org = get_effective_organisation_concept_id()
+            if ambient_user or ambient_org:
+                ambient_kwargs = {
+                    "ambient_user_id": ambient_user,
+                    "ambient_org_id": ambient_org,
+                    "ambient_context_supplied": True,
+                }
+            elif not has_identity_claim:
+                # Preserve actorless direct unit/startup reads. They see no
+                # scoped rows because no audience is bound.
+                ambient_kwargs = {
+                    "ambient_user_id": None,
+                    "ambient_org_id": None,
+                    "ambient_context_supplied": False,
+                }
+                allow_unscoped_claims = True
+            else:
+                raise WorkflowActorScopeError(
+                    "workflow_actor_authority_required"
+                )
+        elif source == "tool_payload_fallback" and not has_identity_claim:
+            if require_actor:
+                raise WorkflowActorScopeError(
+                    "workflow_actor_authority_required"
+                )
+            # Actorless generic reads retain their established base-publication
+            # behaviour. With no audience keys, lower services cannot expose
+            # scoped rows.
+            ambient_kwargs = {
+                "ambient_user_id": None,
+                "ambient_org_id": None,
+                "ambient_context_supplied": False,
+            }
+            allow_unscoped_claims = True
+        else:
+            # In particular, ``tool_payload_fallback`` is the ordinary gateway
+            # path whose identity originated in these same untrusted fields.
+            raise WorkflowActorScopeError("workflow_actor_authority_required")
+
+        actor_scope = resolve_authoritative_workflow_actor_scope(
+                claimed_user_id=claimed_user,
+                claimed_org_id=claimed_org,
+                claimed_namespace=claimed_namespace,
+                allow_unscoped_claims=allow_unscoped_claims,
+                **ambient_kwargs,
+        )
+        if require_actor and not bool(
+            actor_scope.user_concept_id
+            or actor_scope.organisation_concept_id
+        ):
+            raise WorkflowActorScopeError("workflow_actor_authority_required")
+        return actor_scope, None
+    except WorkflowActorScopeError as exc:
+        logger.info(
+            "Denied %s scoped-assertion access: %s",
+            surface,
+            getattr(exc, "reason", type(exc).__name__),
+        )
+        return None, _scoped_assertion_actor_scope_error_response(exc)
+
+
+@contextmanager
+def _bind_internal_mcp_scoped_assertion_actor(actor_scope: Any):
+    """Apply only the actor scope returned by the provenance guard."""
+
+    from ...security.access_control import (
+        force_access_control_enforcement,
+        override_current_actor,
+    )
+
+    with (
+        override_current_actor(
+            actor_scope.user_concept_id,
+            actor_scope.organisation_concept_id,
+        ),
+        force_access_control_enforcement(),
+    ):
+        yield
+
+
+def _internal_mcp_knowledge_context_view(actor_scope: Any) -> str:
+    """Select the semantic read view from verified actor authority only."""
+
+    if actor_scope.user_concept_id or actor_scope.organisation_concept_id:
+        return "actor_effective"
+    return "base_publication"
+
+
+def _annotate_bounded_relation_lookup(
+    payload: Mapping[str, Any],
+    *,
+    concept_id: str,
+    predicate_filter: Any,
+    relation_kind: Any,
+) -> dict[str, Any]:
+    """Make a truncated actor overlay explicit and non-pageable as a whole."""
+
+    result = dict(payload)
+    if not bool(result.get("total_hits_is_lower_bound")):
+        return result
+
+    paging = dict(result.get("paging") or {})
+    paging.update(
+        {
+            "continuation_supported": False,
+            "next_offset": None,
+            "offset_semantics": "bounded_actor_overlay_snapshot",
+        }
+    )
+    result["paging"] = paging
+
+    scoped_arguments: dict[str, Any] = {
+        "argument_concept_id": concept_id,
+        "limit": 200,
+        "offset": 0,
+    }
+    if isinstance(predicate_filter, list) and predicate_filter:
+        scoped_arguments["predicates"] = predicate_filter
+    relation_kind_token = str(relation_kind or "").strip().lower()
+    if relation_kind_token == "text":
+        scoped_arguments["object_kind"] = "text"
+    elif relation_kind_token == "binary":
+        scoped_arguments["object_kind"] = "concept"
+
+    result["continuation"] = {
+        "status": "bounded_overlay_incomplete",
+        "can_continue_with_offset": False,
+        "reason": (
+            "The actor-effective overlay was capped before combined sorting "
+            "and paging, so a later offset would not be a complete continuation."
+        ),
+        "recovery_options": [
+            {
+                "action": "narrow_and_restart",
+                "restart_offset": 0,
+                "suggested_filters": [
+                    "predicate_filter",
+                    "relation_kind",
+                ],
+            },
+            {
+                "tool": "list_scoped_assertions",
+                "arguments": scoped_arguments,
+                "scope": "scoped_overlay_only",
+            },
+        ],
+    }
+    return result
+
+
 def _get_vontology_tree(**kwargs):
     from ...vontology.utils_vontology import get_vontology_tree
 
@@ -106,41 +392,60 @@ def _get_concept_by_concept_id(**kwargs):
     if not concept_id:
         raise ValueError("concept_id is required")
 
-    access = describe_concept_access(concept_id)
-    if access.get("exists") is True and access.get("accessible") is False:
-        return make_error_response(
-            "access_denied",
-            f"Concept is not accessible: {concept_id}",
-            details=access,
-            suggestions=[
-                "Use search_concepts under the current namespace to find accessible concepts",
-                "Choose an accessible concept before attempting reads or writes",
-            ],
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="concept enrichment",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return denial
+    context_view = _internal_mcp_knowledge_context_view(actor_scope)
+
+    with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+        access = describe_concept_access(concept_id)
+        if access.get("exists") is True and access.get("accessible") is False:
+            return make_error_response(
+                "access_denied",
+                f"Concept is not accessible: {concept_id}",
+                details=access,
+                suggestions=[
+                    "Use search_concepts under the current namespace to find accessible concepts",
+                    "Choose an accessible concept before attempting reads or writes",
+                ],
+            )
+
+        concept = get_concept_by_concept_id(concept_id=concept_id)
+
+        # Use shared enrichment logic (migrate-on-read + fetch names from text relations)
+        if not concept:
+            return concept
+
+        concept = enrich_concept_with_text_relations(concept)
+
+        scoped_assertion_rows: list[dict[str, Any]] = []
+        if context_view == "actor_effective":
+            from ...services.scoped_assertion_service import (
+                list_visible_scoped_assertions,
+            )
+
+            scoped_assertion_rows = list_visible_scoped_assertions(
+                subject_concept_ids=[concept_id],
+                limit=101,
+            )
+        scoped_assertions_truncated = len(scoped_assertion_rows) > 100
+        scoped_assertions = scoped_assertion_rows[:100]
+        concept["context_view"] = context_view
+        concept["scoped_assertions"] = scoped_assertions
+        concept["scoped_assertion_count"] = len(scoped_assertions)
+        concept["scoped_assertions_truncated"] = scoped_assertions_truncated
+        concept["scoped_assertion_count_is_lower_bound"] = (
+            scoped_assertions_truncated
         )
 
-    concept = get_concept_by_concept_id(concept_id=concept_id)
-
-    # Use shared enrichment logic (migrate-on-read + fetch names from text relations)
-    if not concept:
-        return concept
-
-    concept = enrich_concept_with_text_relations(concept)
-
-    from ...services.scoped_assertion_service import (
-        list_visible_scoped_assertions,
-    )
-
-    scoped_assertions = list_visible_scoped_assertions(
-        subject_concept_ids=[concept_id],
-        limit=100,
-    )
-    concept["scoped_assertions"] = scoped_assertions
-    concept["scoped_assertion_count"] = len(scoped_assertions)
-
-    # Detect vacuous typing (soft warning for agents to repair)
-    vacuous_warning = detect_vacuous_typing(concept)
-    if vacuous_warning:
-        concept["_vacuous_typing_warning"] = vacuous_warning
+        # Detect vacuous typing (soft warning for agents to repair)
+        vacuous_warning = detect_vacuous_typing(concept)
+        if vacuous_warning:
+            concept["_vacuous_typing_warning"] = vacuous_warning
 
     include_relations_arg1 = bool(kwargs.get("include_relations_arg1"))
     include_relations_any_arg = bool(kwargs.get("include_relations_any_arg"))
@@ -156,19 +461,20 @@ def _get_concept_by_concept_id(**kwargs):
     if any(
         [include_relations_arg1, include_relations_any_arg, include_text_relations_arg1]
     ):
-        relations_payload = build_concept_relations_payload(
-            concept,
-            include_relations_arg1=include_relations_arg1,
-            include_relations_any_arg=include_relations_any_arg,
-            include_text_relations_arg1=include_text_relations_arg1,
-            predicate_filter=predicate_filter,
-            limit=limit,
-            offset=offset,
-            include_concept_preview=include_concept_preview,
-            include_uncertain=include_uncertain,
-            uncertainty_mode=uncertainty_mode,
-            uncertainty_statuses=uncertainty_statuses,
-        )
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            relations_payload = build_concept_relations_payload(
+                concept,
+                include_relations_arg1=include_relations_arg1,
+                include_relations_any_arg=include_relations_any_arg,
+                include_text_relations_arg1=include_text_relations_arg1,
+                predicate_filter=predicate_filter,
+                limit=limit,
+                offset=offset,
+                include_concept_preview=include_concept_preview,
+                include_uncertain=include_uncertain,
+                uncertainty_mode=uncertainty_mode,
+                uncertainty_statuses=uncertainty_statuses,
+            )
         concept["relations"] = relations_payload
 
     return concept
@@ -181,20 +487,37 @@ def _find_relations_with_argument(**kwargs):
     if concept_id is None or not str(concept_id).strip():
         raise ValueError("concept_id is required")
 
-    return find_relations_with_argument(
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="relation lookup",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return denial
+    context_view = _internal_mcp_knowledge_context_view(actor_scope)
+
+    with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+        payload = find_relations_with_argument(
+            concept_id=str(concept_id),
+            argument_index=kwargs.get("argument_index"),
+            predicate_filter=kwargs.get("predicate_filter"),
+            relation_kind=kwargs.get("relation_kind"),
+            scope=kwargs.get("scope"),
+            include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
+            include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
+            limit=kwargs.get("limit"),
+            offset=kwargs.get("offset"),
+            sort_by=kwargs.get("sort_by"),
+            include_uncertain=bool(kwargs.get("include_uncertain", False)),
+            uncertainty_mode=kwargs.get("uncertainty_mode"),
+            uncertainty_statuses=kwargs.get("uncertainty_statuses"),
+            context_view=context_view,
+        )
+    return _annotate_bounded_relation_lookup(
+        payload,
         concept_id=str(concept_id),
-        argument_index=kwargs.get("argument_index"),
         predicate_filter=kwargs.get("predicate_filter"),
         relation_kind=kwargs.get("relation_kind"),
-        scope=kwargs.get("scope"),
-        include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
-        include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
-        limit=kwargs.get("limit"),
-        offset=kwargs.get("offset"),
-        sort_by=kwargs.get("sort_by"),
-        include_uncertain=bool(kwargs.get("include_uncertain", False)),
-        uncertainty_mode=kwargs.get("uncertainty_mode"),
-        uncertainty_statuses=kwargs.get("uncertainty_statuses"),
     )
 
 
@@ -2087,15 +2410,75 @@ def _upsert_scoped_assertion(**kwargs):
             "Missing 'predicate' parameter",
             details={"missing": ["predicate"]},
         )
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="scoped assertion mutation",
+        require_actor=True,
+    )
+    if denial is not None:
+        return denial
+    if actor_scope.user_concept_id is None:
+        return make_error_response(
+            "authenticated_actor_context_required",
+            "Scoped assertion mutation requires an authenticated user actor.",
+        )
+
+    service_kwargs = {
+        field_name: kwargs.get(field_name)
+        for field_name in (
+            "subject_concept_id",
+            "predicate",
+            "target_text",
+            "target_concept_id",
+            "language",
+            "scope_mode",
+            "evidence",
+            "turn_id",
+        )
+        if field_name in kwargs
+    }
+    service_kwargs.update(
+        {
+            "acting_user_concept_id": actor_scope.user_concept_id,
+            "organisation_concept_id": actor_scope.organisation_concept_id,
+            "namespace": actor_scope.namespace,
+            "canonical_publication": False,
+        }
+    )
     try:
-        result = upsert_scoped_assertion(**kwargs)
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            result = upsert_scoped_assertion(**service_kwargs)
         assertion = result.get("assertion")
         if isinstance(assertion, dict) and assertion.get("object_kind") == "text":
-            maybe_sync_concept_text_relations_to_rag(
-                namespace=kwargs.get("namespace"),
-                concept_id=str(subject_concept_id),
-                predicate=str(assertion.get("predicate") or predicate),
-            )
+            try:
+                derived_maintenance = maybe_sync_concept_text_relations_to_rag(
+                    namespace=actor_scope.namespace,
+                    concept_id=str(subject_concept_id),
+                    predicate=str(assertion.get("predicate") or predicate),
+                    scoped_assertion_id=assertion.get("assertion_id"),
+                )
+            except Exception as exc:
+                # The canonical assertion and its read-back already succeeded.
+                # Derived-index maintenance must not turn that durable receipt
+                # into an indeterminate write result.
+                logger.warning(
+                    "Scoped assertion persisted but RAG refresh scheduling "
+                    "failed: %s",
+                    exc,
+                )
+                derived_maintenance = {
+                    "mechanism": "in_memory_bounded_queue",
+                    "durable": False,
+                    "success": False,
+                    "scheduled": False,
+                    "skipped": False,
+                    "reason": "schedule_failed",
+                    "error": str(exc),
+                }
+            result = {
+                **result,
+                "derived_maintenance": derived_maintenance,
+            }
         return result
     except PermissionError as exc:
         return make_error_response(
@@ -2120,9 +2503,102 @@ def _upsert_scoped_assertion(**kwargs):
         )
 
 
+def _retract_scoped_assertion(**kwargs):
+    from ...services.rag_text_relation_change_hook_service import (
+        maybe_sync_concept_text_relations_to_rag,
+    )
+    from ...services.scoped_assertion_service import retract_scoped_assertion
+
+    assertion_id = kwargs.get("assertion_id")
+    if not assertion_id:
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'assertion_id' parameter",
+            details={"missing": ["assertion_id"]},
+        )
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="scoped assertion retraction",
+        require_actor=True,
+    )
+    if denial is not None:
+        return denial
+    if actor_scope.user_concept_id is None:
+        return make_error_response(
+            "authenticated_actor_context_required",
+            "Scoped assertion retraction requires an authenticated user actor.",
+        )
+
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            result = retract_scoped_assertion(
+                assertion_id=assertion_id,
+                acting_user_concept_id=actor_scope.user_concept_id,
+                organisation_concept_id=actor_scope.organisation_concept_id,
+                namespace=actor_scope.namespace,
+            )
+        assertion = result.get("assertion")
+        if (
+            isinstance(assertion, dict)
+            and assertion.get("object_kind") == "text"
+            and assertion.get("subject_concept_id")
+            and assertion.get("predicate")
+        ):
+            try:
+                derived_maintenance = maybe_sync_concept_text_relations_to_rag(
+                    namespace=actor_scope.namespace,
+                    concept_id=str(assertion["subject_concept_id"]),
+                    predicate=str(assertion["predicate"]),
+                    scoped_assertion_id=str(
+                        assertion.get("assertion_id") or assertion_id
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Scoped assertion retracted but RAG refresh scheduling "
+                    "failed: %s",
+                    exc,
+                )
+                derived_maintenance = {
+                    "mechanism": "in_memory_bounded_queue",
+                    "durable": False,
+                    "success": False,
+                    "scheduled": False,
+                    "skipped": False,
+                    "reason": "schedule_failed",
+                    "error": str(exc),
+                }
+            result = {
+                **result,
+                "derived_maintenance": derived_maintenance,
+            }
+        return result
+    except PermissionError as exc:
+        return make_error_response(
+            "access_denied",
+            str(exc),
+            details={"assertion_id": str(assertion_id)},
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_scoped_assertion",
+            str(exc),
+            details={"assertion_id": str(assertion_id)},
+        )
+    except Exception as exc:
+        return _indeterminate_effect_error(
+            "The scoped-assertion retraction raised unexpectedly.",
+            details={
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "assertion_id": str(assertion_id),
+            },
+        )
+
+
 def _list_scoped_assertions(**kwargs):
     from ...services.scoped_assertion_service import (
-        list_visible_scoped_assertions,
+        list_visible_scoped_assertions_page,
     )
 
     subject_concept_id = kwargs.get("subject_concept_id")
@@ -2130,19 +2606,47 @@ def _list_scoped_assertions(**kwargs):
     predicate = kwargs.get("predicate")
     if predicate and not predicates:
         predicates = [predicate]
-    assertions = list_visible_scoped_assertions(
-        subject_concept_ids=([str(subject_concept_id)] if subject_concept_id else None),
-        argument_concept_id=kwargs.get("argument_concept_id"),
-        predicates=predicates,
-        object_kind=kwargs.get("object_kind"),
-        limit=kwargs.get("limit") or 200,
-        user_concept_id=kwargs.get("acting_user_concept_id"),
-        organisation_concept_id=kwargs.get("organisation_concept_id"),
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="scoped assertion listing",
+        require_actor=True,
     )
+    if denial is not None:
+        return denial
+    with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+        page = list_visible_scoped_assertions_page(
+            subject_concept_ids=(
+                [str(subject_concept_id)] if subject_concept_id else None
+            ),
+            argument_concept_id=kwargs.get("argument_concept_id"),
+            predicates=predicates,
+            object_kind=kwargs.get("object_kind"),
+            languages=kwargs.get("languages"),
+            limit=kwargs.get("limit") or 200,
+            offset=kwargs.get("offset") or 0,
+            user_concept_id=actor_scope.user_concept_id,
+            organisation_concept_id=actor_scope.organisation_concept_id,
+        )
+    assertions = list(page.get("items") or ())
+    counts_are_lower_bounds = bool(page.get("counts_are_lower_bounds"))
     return {
         "success": True,
         "assertions": assertions,
         "assertions_found": len(assertions),
+        "paging": {
+            "limit": page.get("limit"),
+            "offset": page.get("offset"),
+            "returned": page.get("returned"),
+            "has_more": bool(page.get("has_more")),
+            "next_offset": page.get("next_offset"),
+            "visibility_filtered": bool(page.get("visibility_filtered")),
+            "counts_are_lower_bounds": counts_are_lower_bounds,
+        },
+        **(
+            {"assertions_found_is_lower_bound": True}
+            if counts_are_lower_bounds
+            else {}
+        ),
         "canonical_publication": False,
     }
 
@@ -2166,19 +2670,30 @@ def _get_text_relations(**kwargs):
             suggestions=["Provide the concept ID to retrieve text relations for"],
         )
 
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="text retrieval",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return denial
+    context_view = _internal_mcp_knowledge_context_view(actor_scope)
+
     try:
-        relations = get_texts_for_concept(
-            subject_concept_id=concept_id,
-            predicate=predicate,
-            lang=language,
-            limit=limit,
-            recent_first=(
-                recent_first
-                if isinstance(recent_first, bool)
-                else str(recent_first or "").strip().lower()
-                in {"1", "true", "yes", "on"}
-            ),
-        )
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            relations = get_texts_for_concept(
+                subject_concept_id=concept_id,
+                predicate=predicate,
+                lang=language,
+                limit=limit,
+                context_view=context_view,
+                recent_first=(
+                    recent_first
+                    if isinstance(recent_first, bool)
+                    else str(recent_first or "").strip().lower()
+                    in {"1", "true", "yes", "on"}
+                ),
+            )
 
         # Add text previews for long content
         for relation in relations:
@@ -2188,6 +2703,7 @@ def _get_text_relations(**kwargs):
 
         return {
             "concept_id": concept_id,
+            "context_view": context_view,
             "relations_found": len(relations),
             "relations": relations,
         }
@@ -2371,13 +2887,24 @@ def _get_text_relations_summary(**kwargs):
             suggestions=["Provide the concept ID to get text relations summary for"],
         )
 
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="text summary",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return denial
+    context_view = _internal_mcp_knowledge_context_view(actor_scope)
+
     try:
-        return get_text_relations_summary(
-            concept_id,
-            predicates=predicates,
-            languages=languages,
-            max_relation_ids_per_group=max_relation_ids_per_group,
-        )
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            return get_text_relations_summary(
+                concept_id,
+                predicates=predicates,
+                languages=languages,
+                max_relation_ids_per_group=max_relation_ids_per_group,
+                context_view=context_view,
+            )
     except Exception as exc:
         return make_error_response(
             "exception",
@@ -8792,12 +9319,48 @@ def _upsert_scoped_assertion_output_schema() -> Schema:
             "canonical_read_back": (dict, type(None)),
             "canonical_publication": (bool, type(None)),
             "storage_surface": (str, type(None)),
+            "derived_maintenance": (dict, type(None)),
             "error": (str, type(None)),
         },
         allow_unknown=True,
         description=(
             "Scoped assertion write receipt with durable read-back. "
-            "canonical_publication is always false."
+            "canonical_publication is always false. derived_maintenance reports "
+            "best-effort index refresh scheduling without changing effect success."
+        ),
+    )
+
+
+def _retract_scoped_assertion_input_schema() -> Schema:
+    return Schema(
+        required={"assertion_id": str},
+        optional={},
+        allow_unknown=True,
+        description=(
+            "retract_scoped_assertion input: exact assertion_id only. Actor, "
+            "organisation, and namespace are server-bound."
+        ),
+    )
+
+
+def _retract_scoped_assertion_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "effect_status": (str, type(None)),
+            "changed": (bool, type(None)),
+            "assertion_id": (str, type(None)),
+            "assertion": (dict, type(None)),
+            "canonical_read_back": (dict, type(None)),
+            "canonical_publication": (bool, type(None)),
+            "storage_surface": (str, type(None)),
+            "derived_maintenance": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Idempotent scoped-assertion retraction receipt with durable "
+            "read-back. derived_maintenance is best-effort and non-authoritative."
         ),
     )
 
@@ -8811,12 +9374,15 @@ def _list_scoped_assertions_input_schema() -> Schema:
             "predicate": (str, type(None)),
             "predicates": (list, type(None)),
             "object_kind": (str, type(None)),
+            "languages": (list, type(None)),
             "limit": (int, type(None)),
+            "offset": (int, type(None)),
         },
         allow_unknown=True,
         description=(
             "List assertions visible in the trusted user/organisation scope, "
-            "optionally filtered by subject, argument, predicate, or object kind."
+            "bounded by limit/offset and optionally filtered by subject, argument, "
+            "predicate, object kind, or text language."
         ),
     )
 
@@ -8829,8 +9395,15 @@ def _list_scoped_assertions_output_schema() -> Schema:
             "assertions_found": int,
             "canonical_publication": bool,
         },
-        optional={},
+        optional={
+            "assertions_found_is_lower_bound": (bool, type(None)),
+            "paging": (dict, type(None)),
+        },
         allow_unknown=True,
+        description=(
+            "Visible actor-scoped assertions with paging and completeness metadata; "
+            "these rows are not canonical publication."
+        ),
     )
 
 
@@ -8857,10 +9430,16 @@ def _get_text_relations_output_schema() -> Schema:
         },
         optional={
             "relations": (list, type(None)),
+            "context_view": (str, type(None)),
             "error": (str, type(None)),
         },
         allow_unknown=True,
-        description="get_text_relations output: concept_id (str), relations_found (int), relations (list of {text, lang, text_value_id, predicate, relation_id, context, text_preview?}), error (str if failed)",
+        description=(
+            "get_text_relations output: context_view labels base_publication or "
+            "actor_effective rows. Inspect row_kind. base_text_relation rows have "
+            "a relation_id usable by update/delete; scoped_assertion rows have "
+            "assertion_id and relation_id=null."
+        ),
     )
 
 
@@ -8875,7 +9454,11 @@ def _update_text_relation_input_schema() -> Schema:
             "language": (str, type(None)),
         },
         allow_unknown=True,
-        description="update_text_relation input: concept_id (str), relation_id (str), new_text (str), language (str, optional)",
+        description=(
+            "update_text_relation input: concept_id, relation_id, new_text, and "
+            "optional language. relation_id must come from a base_text_relation "
+            "row; scoped_assertion IDs are not mutable text-relation IDs."
+        ),
     )
 
 
@@ -8909,7 +9492,12 @@ def _delete_text_relation_input_schema() -> Schema:
             "garbage_collect": (bool,),
         },
         allow_unknown=True,
-        description="delete_text_relation input: concept_id (str), relation_id (str, optional - preferred method), predicate (str, optional for predicate+text deletion), text (str, optional with predicate), language (str, optional), garbage_collect (bool, optional - if true, delete orphaned text_values)",
+        description=(
+            "delete_text_relation input: concept_id plus a base_text_relation "
+            "relation_id (preferred), or predicate+text and optional language. "
+            "Scoped assertion IDs are not text-relation IDs. garbage_collect "
+            "optionally deletes orphaned text_values."
+        ),
     )
 
 
@@ -8936,9 +9524,19 @@ def _get_text_relations_summary_output_schema() -> Schema:
             "total_relations_scanned": int,
             "max_relation_ids_per_group": int,
         },
-        optional={"error": (str, type(None))},
+        optional={
+            "context_view": (str, type(None)),
+            "scoped_query_truncated": (bool, type(None)),
+            "counts_are_lower_bounds": (bool, type(None)),
+            "error": (str, type(None)),
+        },
         allow_unknown=True,
-        description="get_text_relations_summary output: success, concept_id, groups[{predicate, language, count, relation_ids, latest_relation_id, latest_updated_at}], groups_found, total_relations_scanned",
+        description=(
+            "get_text_relations_summary output: context-labelled grouped counts. "
+            "relation_ids and assertion_ids remain separate; row-specific latest "
+            "IDs are labelled. In actor_effective view, scoped_query_truncated and "
+            "counts_are_lower_bounds make the bounded overlay explicit."
+        ),
     )
 
 
@@ -9147,13 +9745,19 @@ def _find_relations_with_argument_output_schema() -> Schema:
             "hits": list,
             "paging": dict,
         },
-        optional={},
+        optional={
+            "context_view": (str, type(None)),
+            "total_hits_is_lower_bound": (bool, type(None)),
+            "continuation": (dict, type(None)),
+        },
         allow_unknown=True,
         description=(
             "find_relations_with_argument output: concept_id, total_hits, hits[] "
             "(source_concept_id, predicate_concept_id, relation_kind, argument_indexes, "
             "target_value, optional previews/snippets, relation_metadata, access_granted, "
-            "follow_up_actions, score, optional uncertainty metadata), and paging metadata."
+            "follow_up_actions, score, optional uncertainty metadata), context_view, "
+            "and paging metadata. A truncated actor overlay is labelled as a lower "
+            "bound and disables offset continuation, with recovery options."
         ),
     )
 
@@ -11242,9 +11846,13 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
             )
         return enriched
 
-    from .gateway import get_internal_mcp_preexisting_actor_context
+    from .gateway import (
+        get_internal_mcp_actor_context_source,
+        get_internal_mcp_preexisting_actor_context,
+    )
 
     preexisting_actor = get_internal_mcp_preexisting_actor_context()
+    actor_context_source = get_internal_mcp_actor_context_source()
     if preexisting_actor is not None:
         trusted_user = _normalise_concept_id(preexisting_actor[0])
         trusted_org = _normalise_concept_id(preexisting_actor[1])
@@ -11286,6 +11894,23 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
                 "namespace_mismatch": False,
                 "provided_namespace": explicit_namespace,
                 "derived_namespace": trusted_namespace,
+            }
+        )
+
+    if actor_context_source == "tool_payload_fallback":
+        # The default InternalMCP gateway installs payload identity only as a
+        # compatibility context. It is not authentication and must never select
+        # another actor's RAG namespace or permissions.
+        return _finalise_report(
+            {
+                "namespace": None,
+                "namespace_source": "untrusted_payload_rejected",
+                "namespace_resolution_note": (
+                    "authenticated_actor_context_required"
+                ),
+                "namespace_mismatch": False,
+                "provided_namespace": explicit_namespace,
+                "derived_namespace": None,
             }
         )
 
@@ -17276,61 +17901,86 @@ def _search_knowledge_base(**kwargs):
     start = time.perf_counter()
 
     try:
-        service = get_rag_service()  # Default backend
+        # The namespace resolver is the authority boundary for actor-private
+        # RAG access.  Build row-level permissions from its accepted trusted
+        # components, never from raw tool arguments.
+        permissions_context: dict[str, Any] = {}
+        resolved_user_concept_id = ns_report.get("derived_user_concept_id")
+        if (
+            isinstance(resolved_user_concept_id, str)
+            and resolved_user_concept_id.strip()
+        ):
+            permissions_context["user_id"] = resolved_user_concept_id.strip()
+        resolved_org_concept_id = ns_report.get(
+            "derived_organisation_concept_id"
+        )
+        if (
+            isinstance(resolved_org_concept_id, str)
+            and resolved_org_concept_id.strip()
+        ):
+            permissions_context["organisation_concept_id"] = (
+                resolved_org_concept_id.strip()
+            )
 
-        # Build permissions context from Flask session for org-scoped RAG filtering.
-        # IMPORTANT: Use concept IDs (e.g. #V#user) rather than email/usernames.
-        permissions_context = {}
+        # Flask identity is a trusted compatibility source, but may only fill
+        # a component the accepted namespace report did not establish.  A
+        # conflicting session must fail closed rather than selecting one
+        # actor's physical namespace with another actor's row permissions.
         try:
             from flask import session as flask_session
 
-            user_concept_id = flask_session.get("user_concept_id")
-            if isinstance(user_concept_id, str) and user_concept_id.strip():
-                permissions_context["user_id"] = user_concept_id.strip()
-            elif flask_session.get("user_id"):
+            session_user_concept_id = flask_session.get("user_concept_id")
+            if not (
+                isinstance(session_user_concept_id, str)
+                and session_user_concept_id.strip()
+            ) and flask_session.get("user_id"):
                 # Backwards compatibility: some sessions store a non-concept user_id.
-                # Fall back to that only if we don't have a concept ID.
-                permissions_context["user_id"] = flask_session.get("user_id")
-            org_concept_id = flask_session.get("organisation_concept_id")
-            if not org_concept_id:
+                session_user_concept_id = flask_session.get("user_id")
+            session_org_concept_id = flask_session.get(
+                "organisation_concept_id"
+            )
+            if not session_org_concept_id:
                 # Backwards compatibility for older session key.
-                org_concept_id = flask_session.get("org_id")
-            if org_concept_id:
-                permissions_context["organisation_concept_id"] = org_concept_id
+                session_org_concept_id = flask_session.get("org_id")
         except (ImportError, RuntimeError):
-            # Not in Flask context (e.g., external MCP stdio server).
-            # Derive the same effective filtering keys we use in-server when possible.
-            user = kwargs.get("user")
-            user_id = user.get("id") if isinstance(user, dict) else None
-            if isinstance(user_id, str) and user_id.strip():
-                # IMPORTANT: Use concept IDs verbatim (case sensitive, e.g. #V#person).
-                permissions_context["user_id"] = user_id.strip()
+            session_user_concept_id = None
+            session_org_concept_id = None
 
-            org_concept_id = kwargs.get("organisation_concept_id")
-            if isinstance(org_concept_id, str) and org_concept_id.strip():
-                permissions_context["organisation_concept_id"] = org_concept_id.strip()
-            elif (
-                isinstance(kwargs.get("org_id"), str)
-                and str(kwargs.get("org_id")).strip()
+        def _clean_identity_component(value: Any) -> str | None:
+            if not isinstance(value, str) or not value.strip():
+                return None
+            cleaned = value.strip()
+            if cleaned.startswith("#v#"):
+                return f"#V#{cleaned[3:]}"
+            return cleaned if cleaned.startswith("#V#") else f"#V#{cleaned}"
+
+        for permission_key, session_value in (
+            ("user_id", session_user_concept_id),
+            ("organisation_concept_id", session_org_concept_id),
+        ):
+            session_component = _clean_identity_component(session_value)
+            if session_component is None:
+                continue
+            resolved_component = _clean_identity_component(
+                permissions_context.get(permission_key)
+            )
+            if (
+                resolved_component is not None
+                and resolved_component != session_component
             ):
-                permissions_context["organisation_concept_id"] = str(
-                    kwargs.get("org_id")
-                ).strip()
-
-            # If the namespace is in the user@org form, it contains enough
-            # information to derive both IDs without trusting arbitrary inputs.
-            if isinstance(ns, str) and "@" in ns:
-                user_part, org_part = ns.split("@", 1)
-                if user_part.strip() and "user_id" not in permissions_context:
-                    permissions_context["user_id"] = user_part.strip()
-                if (
-                    org_part.strip()
-                    and "organisation_concept_id" not in permissions_context
-                ):
-                    org_part_clean = org_part.strip()
-                    if not org_part_clean.startswith("#V#"):
-                        org_part_clean = f"#V#{org_part_clean}"
-                    permissions_context["organisation_concept_id"] = org_part_clean
+                return make_error_response(
+                    "namespace_mismatch",
+                    (
+                        "Authenticated session identity conflicts with the "
+                        "resolved RAG namespace; request was not executed."
+                    ),
+                    details={
+                        "mismatch_fields": [permission_key],
+                        "namespace_source": ns_report.get("namespace_source"),
+                    },
+                )
+            if resolved_component is None:
+                permissions_context[permission_key] = session_component
 
         # Optional semantic filtering (handled by the backend).
         mode = kwargs.get("mode")
@@ -17349,6 +17999,7 @@ def _search_knowledge_base(**kwargs):
         if isinstance(predicates, list):
             permissions_context["predicates"] = predicates
 
+        service = get_rag_service()  # Default backend
         results = service.query(
             query_text=query_text,
             top_k=kwargs.get("top_k", 5),
@@ -22529,13 +23180,6 @@ def _build_rag_file_copy_item(
 def _rag_list_indexed(**kwargs):
     from ...db.connection_manager import get_db
 
-    db = get_db()
-    if db is None:
-        return make_error_response(
-            "db_unavailable",
-            "Database connection unavailable",
-            suggestions=["Check database connectivity and configuration"],
-        )
     collection_report = _resolve_rag_collection_from_kwargs(kwargs)
     collection = collection_report.get("effective_collection")
     limit = max(1, _normalise_non_negative_int(kwargs.get("limit") or 20))
@@ -22555,6 +23199,14 @@ def _rag_list_indexed(**kwargs):
             details={"namespace_report": ns_report},
         )
     ns = ns.strip()
+
+    db = get_db()
+    if db is None:
+        return make_error_response(
+            "db_unavailable",
+            "Database connection unavailable",
+            suggestions=["Check database connectivity and configuration"],
+        )
 
     if not isinstance(collection, str) or not collection:
         collection = "ka_sessions"
@@ -23518,11 +24170,23 @@ def _rag_list_indexed(**kwargs):
             for row in raw_items:
                 if not isinstance(row, dict):
                     continue
+                row_kind = (
+                    str(row.get("row_kind") or "base_text_relation").strip()
+                    or "base_text_relation"
+                )
+                relation_id = row.get("relation_id")
+                assertion_id = row.get("assertion_id")
+                index_item_id = row.get("index_item_id")
                 items.append(
                     {
                         "collection": collection,
-                        "session_id": row.get("relation_id"),
-                        "relation_id": row.get("relation_id"),
+                        "session_id": (
+                            relation_id or assertion_id or index_item_id
+                        ),
+                        "index_item_id": index_item_id,
+                        "row_kind": row_kind,
+                        "relation_id": relation_id,
+                        "assertion_id": assertion_id,
                         "subject_concept_id": row.get("subject_concept_id"),
                         "predicate": row.get("predicate"),
                         "lang": row.get("lang"),
@@ -23530,7 +24194,11 @@ def _rag_list_indexed(**kwargs):
                         "updated_at": row.get("updated_at"),
                         "namespace": ns,
                         "item_kind": "vontology_text_relation",
-                        "source_system": "mongo.text_relations",
+                        "source_system": (
+                            "mongo.scoped_knowledge_assertions"
+                            if row_kind == "scoped_assertion"
+                            else "mongo.text_relations"
+                        ),
                         "namespace_source": ns_report.get("namespace_source"),
                     }
                 )
@@ -23574,13 +24242,6 @@ def _rag_get_item(**kwargs):
     from ...db.connection_manager import get_db
     from bson import ObjectId
 
-    db = get_db()
-    if db is None:
-        return make_error_response(
-            "db_unavailable",
-            "Database connection unavailable",
-            suggestions=["Check database connectivity and configuration"],
-        )
     collection_report = _resolve_rag_collection_from_kwargs(kwargs)
     collection = collection_report.get("effective_collection")
     session_id = kwargs.get("session_id")
@@ -23606,6 +24267,14 @@ def _rag_get_item(**kwargs):
             details={"namespace_report": ns_report},
         )
     ns = ns.strip()
+
+    db = get_db()
+    if db is None:
+        return make_error_response(
+            "db_unavailable",
+            "Database connection unavailable",
+            suggestions=["Check database connectivity and configuration"],
+        )
 
     if not isinstance(collection, str) or not collection:
         collection = "ka_sessions"
@@ -24139,14 +24808,23 @@ def _rag_get_item(**kwargs):
             "collection": collection,
             **collection_report,
             "session_id": session_id,
+            "index_item_id": doc.doc_id,
+            "row_kind": (
+                doc.metadata.get("row_kind") or "base_text_relation"
+            ),
             "relation_id": doc.metadata.get("relation_id"),
+            "assertion_id": doc.metadata.get("assertion_id"),
             "subject_concept_id": doc.metadata.get("subject_concept_id"),
             "predicate": doc.metadata.get("predicate"),
             "lang": doc.metadata.get("lang"),
             "namespace": ns,
             "preview": (doc.text or "")[:4000],
             "item_kind": "vontology_text_relation",
-            "source_system": "mongo.text_relations",
+            "source_system": (
+                "mongo.scoped_knowledge_assertions"
+                if doc.metadata.get("row_kind") == "scoped_assertion"
+                else "mongo.text_relations"
+            ),
             "namespace_source": ns_report.get("namespace_source"),
             "effective_namespace": ns,
             "effective_namespace_source": ns_report.get("namespace_source"),
@@ -32993,7 +33671,12 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_concept_fetch_input_schema(),
             output_schema=None,
             category="read",
-            description="Fetch full details of ONE specific concept by its ID (format: #V#concept_name). Use when you already know the exact concept_id and need complete information (description, predicates, relationships). Don't use for searching.",
+            description=(
+                "Fetch full details of one concept by exact ID. An authenticated "
+                "actor receives actor_effective scoped enrichment; identity or "
+                "namespace supplied only in an ordinary tool payload is ignored and "
+                "the response is explicitly base_publication. Don't use for searching."
+            ),
         ),
         MethodDefinition(
             name="find_relations_with_argument",
@@ -33007,7 +33690,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "argument_index to choose the relation slot instead of inventing "
                 "subject/object payload fields. Supports exact graph matching and "
                 "full-text text-relation matching with optional predicate/kind filters "
-                "and pagination."
+                "and pagination. Verified actors receive actor_effective results; "
+                "payload-only identity is ignored and yields base_publication. "
+                "Truncated actor overlays expose bounded recovery rather than a "
+                "misleading offset continuation."
             ),
         ),
         MethodDefinition(
@@ -33194,6 +33880,27 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ),
         ),
         MethodDefinition(
+            name="retract_scoped_assertion",
+            handler=_retract_scoped_assertion,
+            input_schema=_retract_scoped_assertion_input_schema(),
+            output_schema=_retract_scoped_assertion_output_schema(),
+            category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=8.0,
+            description=(
+                "Idempotently retract one actor-scoped assertion by exact "
+                "assertion_id. The server binds actor, organisation, and namespace; "
+                "only the original authorised author can retract it. The durable "
+                "receipt remains successful even if derived-index refresh scheduling "
+                "fails, with that maintenance result reported separately."
+            ),
+        ),
+        MethodDefinition(
             name="list_scoped_assertions",
             handler=_list_scoped_assertions,
             input_schema=_list_scoped_assertions_input_schema(),
@@ -33205,7 +33912,8 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             },
             description=(
                 "Read provenance-bearing non-canonical assertions visible to the "
-                "trusted user or organisation, with bounded filters."
+                "trusted user or organisation, with bounded filters and paging. This "
+                "dedicated scoped read requires trusted actor provenance."
             ),
         ),
         MethodDefinition(
@@ -33223,10 +33931,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ordinary_turn_mutation_subject_argument="concept_id",
             description=(
                 "Add or update a canonical text relation when the actor has mutation "
-                "authority over the subject concept. For knowledge about a visible "
-                "concept the actor does not own, use upsert_scoped_assertion instead. "
-                "Supports hasContent, hasDescription, hasNote, hasName, and existing "
-                "custom predicate concepts."
+                "authority over the subject concept. On an actor-bound surface that "
+                "exposes upsert_scoped_assertion, use that capability for knowledge "
+                "about a visible concept the actor does not own. Supports hasContent, "
+                "hasDescription, hasNote, hasName, and existing custom predicate "
+                "concepts."
             ),
         ),
         MethodDefinition(
@@ -33235,7 +33944,14 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_get_text_relations_input_schema(),
             output_schema=_get_text_relations_output_schema(),
             category="read",
-            description="Retrieve text relations for a concept, optionally filtered by predicate/language. Returns all text attachments (hasContent, hasDescription, hasName, etc.). Use to query what text is attached to a concept.",
+            description=(
+                "Retrieve labelled text-assertion rows for a concept, optionally "
+                "filtered by predicate/language. The serving authority boundary "
+                "selects context_view: trusted actor-bound internal calls use "
+                "actor_effective; actorless calls and ordinary payload-only identity "
+                "use base_publication. Inspect row_kind; only a "
+                "base_text_relation relation_id is valid for update/delete."
+            ),
         ),
         MethodDefinition(
             name="update_text_relation",
@@ -33259,7 +33975,14 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_get_text_relations_summary_input_schema(),
             output_schema=_get_text_relations_summary_output_schema(),
             category="read",
-            description="Return a lightweight summary of text relations for a concept: counts + relation IDs grouped by predicate/language (no full text bodies). Use to quickly decide what to fetch next.",
+            description=(
+                "Return a lightweight, context-labelled text-assertion summary "
+                "grouped by predicate/language (no full text bodies). The serving "
+                "authority boundary selects actor_effective or base_publication; "
+                "ordinary payload-only identity is ignored. "
+                "Relation and assertion IDs remain separate; inspect "
+                "counts_are_lower_bounds before treating scoped counts as complete."
+            ),
         ),
         MethodDefinition(
             name="upsert_singleton_text_relation",
@@ -34234,6 +34957,13 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             output_schema=_search_knowledge_base_output_schema(),
             category="read",
             timeout_sec=30.0,
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+                "user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": (
+                    "actor_organisation_concept_id"
+                ),
+            },
             description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
         ),
         MethodDefinition(
@@ -34243,6 +34973,13 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             output_schema=_search_concept_descriptions_output_schema(),
             category="read",
             timeout_sec=30.0,
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+                "user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": (
+                    "actor_organisation_concept_id"
+                ),
+            },
             description=(
                 "Semantic search over concept descriptions only (hasDescription text relations) for the current namespace. "
                 "Use when user asks to search the knowledge base but only within concept descriptions."
@@ -34255,6 +34992,13 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             output_schema=_get_related_concepts_output_schema(),
             category="read",
             timeout_sec=30.0,
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+                "user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": (
+                    "actor_organisation_concept_id"
+                ),
+            },
             description=(
                 "Find concepts with similar descriptions (vector similarity) within the current namespace. "
                 "Returns description chunks and metadata for related concepts."
@@ -34896,6 +35640,9 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
             description=(
                 "List available RAG collections/sources for the current user/namespace. "
                 "Use when user asks 'what is in my RAG store?' or needs to disambiguate KA sessions, "
@@ -34918,6 +35665,9 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
             description="List namespace-scoped RAG items for the selected collection (KA sessions, chat sessions, file-copy concepts, turn execution records, experiment runs, text relations).",
         ),
         MethodDefinition(
@@ -34934,6 +35684,9 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             ),
             output_schema=None,
             category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+            },
             description="Get one namespace-scoped RAG item (session/relation/file copy/turn record) with a safe preview. Respects namespace isolation.",
         ),
         MethodDefinition(

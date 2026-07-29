@@ -177,6 +177,150 @@ def test_search_knowledge_base_derives_permissions_context_from_namespace(monkey
     }
 
 
+def test_search_knowledge_base_rejects_conflicting_flask_actor(monkeypatch):
+    from flask import Flask, session
+
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    def _unexpected_backend_access(*_args, **_kwargs):
+        raise AssertionError("RAG backend must not be accessed")
+
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        _unexpected_backend_access,
+    )
+    app = Flask(__name__)
+    app.secret_key = "test-only"
+
+    with app.test_request_context("/"):
+        session["user_concept_id"] = "#V#authenticated_user"
+        session["organisation_concept_id"] = "#V#authenticated_org"
+        result = cat._search_knowledge_base(
+            query="workflow",
+            namespace="#V#other_user@other_org",
+        )
+
+    assert result["success"] is False
+    assert result["error_code"] == "namespace_mismatch"
+    assert result["error_details"]["mismatch_fields"] == ["user_id"]
+
+
+def test_default_gateway_rejects_untrusted_rag_namespace_before_backend_access(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    def _unexpected_backend_access(*_args, **_kwargs):
+        raise AssertionError("RAG or database backend must not be accessed")
+
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        _unexpected_backend_access,
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        _unexpected_backend_access,
+    )
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    claimed_namespace = "#V#claimed_user@claimed_org"
+
+    calls = {
+        "search_knowledge_base": {
+            "query": "private programme",
+            "namespace": claimed_namespace,
+        },
+        "rag_list_collections": {"namespace": claimed_namespace},
+        "rag_list_indexed": {"namespace": claimed_namespace},
+        "rag_get_item": {
+            "namespace": claimed_namespace,
+            "session_id": "claimed-session",
+        },
+    }
+    for method_name, payload in calls.items():
+        result = gateway.invoke(method_name, payload).payload
+        assert result["success"] is False
+        assert result["error"] == "namespace_required"
+        assert result["namespace_source"] == "untrusted_payload_rejected"
+        assert (
+            result["namespace_resolution_note"]
+            == "authenticated_actor_context_required"
+        )
+
+
+def test_gateway_rag_search_uses_preexisting_actor_and_rejects_conflict(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+    from src.backend.security.access_control import override_current_actor
+
+    stub = _StubRAG(
+        results=[
+            {
+                "id": "doc-1",
+                "text": "programme context",
+                "metadata": {},
+                "score": 0.9,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        lambda *_args, **_kwargs: stub,
+    )
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    with override_current_actor(
+        user_concept_id="#V#authenticated_user",
+        organisation_concept_id="#V#authenticated_org",
+    ):
+        accepted = gateway.invoke(
+            "search_knowledge_base",
+            {"query": "programme context"},
+        ).payload
+        denied = gateway.invoke(
+            "search_knowledge_base",
+            {
+                "query": "programme context",
+                "namespace": "#V#other_user@other_org",
+                "user_concept_id": "#V#other_user",
+                "organisation_concept_id": "#V#other_org",
+            },
+        ).payload
+
+    assert accepted["success"] is True
+    assert accepted["namespace"] == (
+        "#V#authenticated_user@authenticated_org"
+    )
+    assert accepted["namespace_source"] == "trusted_actor_context"
+    assert stub.last_permissions_context == {
+        "user_id": "#V#authenticated_user",
+        "organisation_concept_id": "#V#authenticated_org",
+    }
+    assert denied["success"] is False
+    assert denied["error"] == "namespace_mismatch"
+    assert set(denied["mismatch_fields"]) == {
+        "namespace",
+        "user_concept_id",
+        "organisation_concept_id",
+    }
+
+
 def test_search_knowledge_base_degrades_when_embedding_backend_fails(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

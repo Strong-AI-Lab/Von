@@ -1195,11 +1195,97 @@ class LlamaIndexRAGService(RAGService):
                 for attr, value in previous_embed_settings.items():
                     setattr(embed_model, attr, value)
 
+        knowledge_candidate_metadata = [
+            metadata
+            for node in nodes
+            if isinstance(
+                metadata := getattr(node.node, "metadata", None),
+                dict,
+            )
+            and (
+                metadata.get("type")
+                in {"text_relation", "scoped_knowledge_assertion"}
+                or metadata.get("source")
+                in {
+                    "vontology_text_relation",
+                    "scoped_knowledge_assertion",
+                }
+            )
+        ]
+        authorised_knowledge_keys: set[tuple[str, str]] = set()
+        if knowledge_candidate_metadata:
+            from ..scoped_rag_authority_service import (
+                current_authorised_rag_candidate_keys,
+            )
+
+            actor_user_id = (
+                permissions_context.get("user_id")
+                if isinstance(permissions_context, dict)
+                else None
+            )
+            actor_org_id = (
+                permissions_context.get("organisation_concept_id")
+                if isinstance(permissions_context, dict)
+                else None
+            )
+            try:
+                authorised_knowledge_keys = (
+                    current_authorised_rag_candidate_keys(
+                        knowledge_candidate_metadata,
+                        user_concept_id=actor_user_id,
+                        organisation_concept_id=actor_org_id,
+                    )
+                )
+            except Exception as exc:
+                # Knowledge rows fail closed when their live authority surface
+                # is unavailable; unrelated chat candidates remain usable.
+                logger.warning(
+                    "Knowledge RAG authority refresh failed closed: %s",
+                    exc,
+                )
+                authorised_knowledge_keys = set()
+
+        # Live authority is part of the retrieval boundary, not an ordinary
+        # semantic filter. Remove inaccessible knowledge rows before computing
+        # any externally visible count or candidate-window diagnostic so a
+        # stale vector entry cannot disclose that a relation or assertion exists.
+        authority_visible_nodes = []
+        for node in nodes:
+            metadata = getattr(node.node, "metadata", None)
+            candidate_key: tuple[str, str] | None = None
+            if isinstance(metadata, dict):
+                metadata_type = str(metadata.get("type") or "").strip()
+                metadata_source = str(metadata.get("source") or "").strip()
+                if (
+                    metadata_type == "scoped_knowledge_assertion"
+                    or metadata_source == "scoped_knowledge_assertion"
+                ):
+                    candidate_key = (
+                        "scoped_knowledge_assertion",
+                        str(metadata.get("assertion_id") or "").strip(),
+                    )
+                elif (
+                    metadata_type == "text_relation"
+                    or metadata_source == "vontology_text_relation"
+                ):
+                    candidate_key = (
+                        "text_relation",
+                        str(metadata.get("relation_id") or "").strip(),
+                    )
+            if candidate_key is not None:
+                if (
+                    not candidate_key[1]
+                    or candidate_key not in authorised_knowledge_keys
+                ):
+                    continue
+            authority_visible_nodes.append(node)
+
         def _matches_permissions(metadata: Any) -> bool:
-            if not permissions_context:
-                return True
             if not isinstance(metadata, dict):
                 return False
+            actual_type = metadata.get("type")
+            if not permissions_context:
+                return True
 
             # Optional semantic filtering.
             # Backwards compatible: if no filter keys provided, behaviour is unchanged.
@@ -1218,12 +1304,14 @@ class LlamaIndexRAGService(RAGService):
                 if m == "chat":
                     requested_types = ["chat_message"]
                 elif m == "concepts":
-                    requested_types = ["text_relation"]
+                    requested_types = [
+                        "text_relation",
+                        "scoped_knowledge_assertion",
+                    ]
                 elif m == "all" or not m:
                     pass
 
             if requested_types:
-                actual_type = metadata.get("type")
                 # Defensive fallback for older indices missing explicit type.
                 if not isinstance(actual_type, str) or not actual_type.strip():
                     src = metadata.get("source")
@@ -1273,10 +1361,8 @@ class LlamaIndexRAGService(RAGService):
             return True
 
         results = []
-        filtered_candidate_count = 0
-        for node in nodes:
+        for node in authority_visible_nodes:
             if not _matches_permissions(getattr(node.node, "metadata", None)):
-                filtered_candidate_count += 1
                 continue
             results.append(
                 {
@@ -1291,55 +1377,32 @@ class LlamaIndexRAGService(RAGService):
                 break
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
-        filter_keys = {
-            "mode",
-            "type",
-            "predicate",
-            "predicates",
-            "user_id",
-            "organisation_concept_id",
-        }
-        local_filter_requested = bool(
-            isinstance(permissions_context, dict)
-            and any(permissions_context.get(key) not in (None, "", [], {}) for key in filter_keys)
-        )
-        candidate_count = len(nodes) if isinstance(nodes, list) else None
-        candidate_limit_reached = bool(
-            candidate_count is not None and candidate_count >= similarity_top_k
-        )
-        filtered_window_incomplete = bool(
-            local_filter_requested
-            and filtered_candidate_count
-            and candidate_limit_reached
-            and len(results) < max(1, int(top_k))
-        )
-        filtered_window_exhausted = bool(
-            filtered_window_incomplete and not results
-        )
-        filtered_window_partial = bool(filtered_window_incomplete and results)
+        requested_result_count = max(1, int(top_k))
+        visible_result_count = len(results)
+        visible_window_complete = visible_result_count >= requested_result_count
         query_results = self._query_results_with_state(
             results,
             namespace=effective_namespace,
             status=(
                 "results_available"
-                if results and not filtered_window_partial
+                if visible_window_complete
                 else "partial_results"
-                if filtered_window_partial
-                else "candidate_window_exhausted"
-                if filtered_window_exhausted
-                else "valid_empty"
+                if visible_result_count
+                else "degraded"
             ),
             cause=(
-                "local_filter_candidate_window_exhausted"
-                if filtered_window_exhausted
-                else "local_filter_candidate_window_partial"
-                if filtered_window_partial
-                else "query_completed"
+                "query_completed"
+                if visible_window_complete
+                else "bounded_visible_result_window_underfilled"
+                if visible_result_count
+                else "bounded_visible_result_window_inconclusive"
             ),
-            candidate_count=candidate_count,
-            filtered_candidate_count=filtered_candidate_count,
-            candidate_limit=similarity_top_k,
-            candidate_limit_reached=candidate_limit_reached,
+            # Public diagnostics are deliberately authority-opaque. Expose only
+            # the visible result count and requested result bound, never raw,
+            # permission-filtered, or authority-filtered candidate volumes.
+            candidate_count=visible_result_count,
+            candidate_limit=requested_result_count,
+            candidate_limit_reached=visible_window_complete,
         )
         try:
             self._last_query_info = {
@@ -1353,7 +1416,7 @@ class LlamaIndexRAGService(RAGService):
                     if retrieval_candidate_limit is not None
                     else None
                 ),
-                "retrieved": len(nodes) if isinstance(nodes, list) else None,
+                "retrieved": visible_result_count,
                 "returned": len(results),
                 "elapsed_ms": elapsed_ms,
                 "retrieval_state": dict(query_results.retrieval_state),

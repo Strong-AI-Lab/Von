@@ -35,6 +35,7 @@ from src.backend.services.adaptive_turn_service import (
     _compact_context_after_limit,
     _compact_evidence_index,
     _effect_subject_authorised,
+    _effect_subject_authority_denial,
     _effect_result_target_ids,
     _final_synthesis_context,
     _json_bytes,
@@ -249,6 +250,7 @@ def _effect_gateway(
     write_timeout_sec: float = 1.0,
     effect_output_schema: Schema | None = None,
     effect_admission_window_sec: float | None = None,
+    include_scoped_assertion: bool = False,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -263,6 +265,11 @@ def _effect_gateway(
         ("create_concepts", None),
         ("upsert_text_relation", "concept_id"),
         ("add_relationship", "source_id"),
+        *(
+            (("upsert_scoped_assertion", None),)
+            if include_scoped_assertion
+            else ()
+        ),
     ):
         catalogue.register(
             MethodDefinition(
@@ -283,7 +290,19 @@ def _effect_gateway(
                     else (
                         {"namespace": "turn_namespace"}
                         if name == "upsert_text_relation"
-                        else None
+                        else (
+                            {
+                                "acting_user_concept_id": (
+                                    "actor_user_concept_id"
+                                ),
+                                "organisation_concept_id": (
+                                    "actor_organisation_concept_id"
+                                ),
+                                "namespace": "turn_namespace",
+                            }
+                            if name == "upsert_scoped_assertion"
+                            else None
+                        )
                     )
                 ),
                 ordinary_turn_fixed_arguments=(
@@ -297,7 +316,11 @@ def _effect_gateway(
                     else (
                         {"provenance": None}
                         if name == "upsert_text_relation"
-                        else None
+                        else (
+                            {"canonical_publication": False}
+                            if name == "upsert_scoped_assertion"
+                            else None
+                        )
                     )
                 ),
             )
@@ -2037,6 +2060,312 @@ def test_ordinary_effect_rejects_unscoped_subject_before_handler(
     assert "effect_subject_not_authorised" in (
         result.tool_invocations[0]["evidence"]["preview"]
     )
+
+
+def test_canonical_text_denial_exposes_scoped_assertion_recovery(
+    monkeypatch,
+) -> None:
+    from src.backend.db import mongo_client
+
+    class _Collection:
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"relationships": {}}
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    invoked: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append((name, arguments))
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": "ska_recovered",
+            "canonical_publication": False,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="canonical-text-denied",
+                    payload={
+                        "name": "upsert_text_relation",
+                        "arguments": {
+                            "concept_id": "#V#globally_visible_subject",
+                            "predicate": "hasNote",
+                            "text": "Actor-relative observation.",
+                            "language": "en-NZ",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="scoped-text-recovery",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": (
+                                "#V#globally_visible_subject"
+                            ),
+                            "predicate": "hasNote",
+                            "target_text": "Actor-relative observation.",
+                            "language": "en-NZ",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="The actor-scoped assertion was recorded."
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            handler,
+            include_scoped_assertion=True,
+        ),
+        prompt="Record this observation without changing shared publication.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="canonical-text-denied",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(invoked) == 1
+    recovered_name, recovered_arguments = invoked[0]
+    assert recovered_name == "upsert_scoped_assertion"
+    assert recovered_arguments["acting_user_concept_id"] == "#V#person"
+    assert recovered_arguments["organisation_concept_id"] == "#V#org"
+    assert recovered_arguments["namespace"] == "#V#person@org"
+    assert recovered_arguments["canonical_publication"] is False
+
+    denial = result.tool_invocations[0]
+    assert denial["effect_status"] == "failed"
+    preview = denial["evidence"]["preview"]
+    assert "effect_subject_not_authorised" in preview
+    assert "assert_in_actor_scope" in preview
+    assert "upsert_scoped_assertion" in preview
+    assert "#V#globally_visible_subject" in preview
+    assert "Actor-relative observation." in preview
+    recovery = result.tool_invocations[1]
+    assert recovery["effect_status"] == "succeeded"
+    assert recovery["changed"] is True
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The actor-scoped assertion was recorded."
+    assert denial["recovery_status"] == "succeeded"
+    assert denial["recovered_by_effect_id"] == recovery["effect_id"]
+
+
+@pytest.mark.parametrize(
+    "predicate_arguments",
+    [
+        {"predicate": "#V#hasResearchInterest"},
+        {
+            "predicate_ref": {
+                "concept_id": "#V#hasResearchInterest",
+                "value_kind": "concept",
+            }
+        },
+    ],
+)
+def test_canonical_relationship_denial_recovers_as_scoped_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate_arguments: dict[str, Any],
+) -> None:
+    from src.backend.db import mongo_client
+
+    class _Collection:
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"relationships": {}}
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    invoked: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append((name, arguments))
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": "ska_relationship_recovered",
+            "canonical_publication": False,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="canonical-relationship-denied",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#globally_visible_subject",
+                            **predicate_arguments,
+                            "target": "#V#represented_topic",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="scoped-relationship-recovery",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": (
+                                "#V#globally_visible_subject"
+                            ),
+                            "predicate": "#V#hasResearchInterest",
+                            "target_concept_id": "#V#represented_topic",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="The actor-scoped relationship was recorded."
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            handler,
+            include_scoped_assertion=True,
+        ),
+        prompt=(
+            "Record this represented relationship without changing shared "
+            "publication."
+        ),
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="canonical-relationship-denied",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(invoked) == 1
+    recovered_name, recovered_arguments = invoked[0]
+    assert recovered_name == "upsert_scoped_assertion"
+    assert recovered_arguments["subject_concept_id"] == (
+        "#V#globally_visible_subject"
+    )
+    assert recovered_arguments["predicate"] == "#V#hasResearchInterest"
+    assert recovered_arguments["target_concept_id"] == "#V#represented_topic"
+    assert recovered_arguments["acting_user_concept_id"] == "#V#person"
+    assert recovered_arguments["organisation_concept_id"] == "#V#org"
+    assert recovered_arguments["namespace"] == "#V#person@org"
+    assert recovered_arguments["canonical_publication"] is False
+
+    denial = result.tool_invocations[0]
+    assert denial["effect_status"] == "failed"
+    preview = denial["evidence"]["preview"]
+    assert "effect_subject_not_authorised" in preview
+    assert "assert_in_actor_scope" in preview
+    assert "#V#globally_visible_subject" in preview
+    assert "#V#hasResearchInterest" in preview
+    assert "#V#represented_topic" in preview
+    recovery = result.tool_invocations[1]
+    assert recovery["effect_status"] == "succeeded"
+    assert recovery["changed"] is True
+    assert result.terminal_status == "completed"
+    assert result.response_text == (
+        "The actor-scoped relationship was recorded."
+    )
+    assert denial["recovery_status"] == "succeeded"
+    assert denial["recovered_by_effect_id"] == recovery["effect_id"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {
+            "source_id": "#V#subject",
+            "predicate": "hasResearchInterest",
+            "target": "#V#topic",
+        },
+        {
+            "source_id": "#V#subject",
+            "predicate": "#V#hasResearchInterest",
+            "target": "Natural-language target",
+        },
+        {
+            "source_id": "#V#subject",
+            "predicate_ref": {"name": "hasResearchInterest"},
+            "target": "#V#topic",
+        },
+        {
+            "source_id": "#V#subject",
+            "predicate": "#V#hasResearchInterest",
+            "predicate_ref": {"concept_id": "#V#otherPredicate"},
+            "target": "#V#topic",
+        },
+        {
+            "source_id": "#V#subject",
+            "predicate_ref": {
+                "concept_id": "#V#hasResearchInterest",
+                "value_kind": "text",
+            },
+            "target": "#V#topic",
+        },
+        {
+            "source_id": "#V#subject",
+            "predicate_ref": {
+                "concept_id": "#V#hasResearchInterest",
+                "on_missing": "create_typed_predicate",
+            },
+            "target": "#V#topic",
+        },
+        {
+            "source_id": "#V#subject",
+            "predicate": "#V#hasResearchInterest",
+            "predicate_if_missing": {"name": "hasResearchInterest"},
+            "target": "#V#topic",
+        },
+    ],
+)
+def test_non_exact_relationship_denial_has_no_scoped_recovery(
+    arguments: dict[str, Any],
+) -> None:
+    denial = _effect_subject_authority_denial(
+        capability_name="add_relationship",
+        arguments=arguments,
+        scoped_assertion_available=True,
+    )
+
+    assert denial["error_code"] == "effect_subject_not_authorised"
+    assert "recovery_affordances" not in denial
 
 
 @pytest.mark.parametrize(

@@ -1875,6 +1875,105 @@ def _error_payload(
     }
 
 
+def _exact_represented_concept_id(value: Any) -> str | None:
+    """Return an explicit represented ID without resolving or canonicalising it."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if (
+        not cleaned.startswith("#V#")
+        or len(cleaned) == len("#V#")
+        or any(character.isspace() for character in cleaned)
+    ):
+        return None
+    return cleaned
+
+
+def _exact_scoped_relationship_predicate(
+    arguments: Mapping[str, Any],
+) -> str | None:
+    """Extract only a concept-valued predicate that needs no semantic resolution."""
+
+    if arguments.get("predicate_if_missing") is not None:
+        return None
+
+    predicate = arguments.get("predicate")
+    predicate_ref = arguments.get("predicate_ref")
+    if isinstance(predicate, str) and predicate.strip():
+        if predicate_ref is not None:
+            return None
+        return _exact_represented_concept_id(predicate)
+
+    if not isinstance(predicate_ref, Mapping):
+        return None
+    if isinstance(predicate_ref.get("name"), str) and predicate_ref["name"].strip():
+        return None
+    if str(predicate_ref.get("on_missing") or "fail").strip().lower() != "fail":
+        return None
+    if str(predicate_ref.get("value_kind") or "concept").strip().lower() != "concept":
+        return None
+    return _exact_represented_concept_id(predicate_ref.get("concept_id"))
+
+
+def _effect_subject_authority_denial(
+    *,
+    capability_name: str,
+    arguments: Mapping[str, Any],
+    scoped_assertion_available: bool,
+) -> dict[str, Any]:
+    """Return a bounded denial while preserving a semantically distinct path."""
+
+    payload = _error_payload(
+        "effect_subject_not_authorised",
+        "The effect subject is not scoped to the authenticated actor or organisation.",
+    )
+    if not scoped_assertion_available:
+        return payload
+
+    if capability_name == "upsert_text_relation":
+        alternative_arguments = {
+            "subject_concept_id": arguments.get("concept_id"),
+            "predicate": arguments.get("predicate"),
+            "target_text": arguments.get("text"),
+        }
+        language = arguments.get("language")
+        if isinstance(language, str) and language.strip():
+            alternative_arguments["language"] = language
+        semantic_effect = (
+            "if the subject is visible, create a provenance-bearing "
+            "actor-scoped assertion without publishing or mutating it"
+        )
+    elif capability_name == "add_relationship":
+        source_id = _exact_represented_concept_id(arguments.get("source_id"))
+        target_id = _exact_represented_concept_id(arguments.get("target"))
+        predicate_id = _exact_scoped_relationship_predicate(arguments)
+        if source_id is None or predicate_id is None or target_id is None:
+            return payload
+        alternative_arguments = {
+            "subject_concept_id": source_id,
+            "predicate": predicate_id,
+            "target_concept_id": target_id,
+        }
+        semantic_effect = (
+            "if the subject, predicate, and target are visible, create a "
+            "provenance-bearing actor-scoped assertion without publishing "
+            "or mutating the canonical relationship"
+        )
+    else:
+        return payload
+
+    payload["recovery_affordances"] = [
+        {
+            "action_type": "assert_in_actor_scope",
+            "tool": "upsert_scoped_assertion",
+            "arguments": alternative_arguments,
+            "semantic_effect": semantic_effect,
+        }
+    ]
+    return payload
+
+
 def _emit(progress_tracker: Any, payload: Mapping[str, Any]) -> None:
     if progress_tracker is None:
         return
@@ -2037,6 +2136,117 @@ def execute_adaptive_turn(
     last_partial_effect_generation = 0
     successful_effect_mutation_generation = 0
     terminal_failed_effect_requests: dict[str, tuple[int, str | None]] = {}
+    recoverable_effect_ids: dict[str, list[str]] = {}
+
+    def scoped_assertion_recovery_key(
+        capability_name: str,
+        arguments: Mapping[str, Any],
+    ) -> str | None:
+        """Identify one exact scoped assertion independently of trusted bindings."""
+
+        if capability_name != "upsert_scoped_assertion":
+            return None
+        subject_id = str(arguments.get("subject_concept_id") or "").strip()
+        predicate = str(arguments.get("predicate") or "").strip()
+        if not subject_id or not predicate:
+            return None
+        try:
+            from .text_relation_predicate_validation_service import (
+                predicate_concept_id_for_storage,
+            )
+
+            predicate = predicate_concept_id_for_storage(predicate) or predicate
+        except Exception:
+            pass
+        target_text = arguments.get("target_text")
+        target_concept_id = str(
+            arguments.get("target_concept_id") or ""
+        ).strip()
+        has_text = isinstance(target_text, str) and bool(target_text.strip())
+        has_concept = bool(target_concept_id)
+        if has_text == has_concept:
+            return None
+        semantic_identity = {
+            "subject_concept_id": subject_id,
+            "predicate": predicate,
+            "target_kind": "text" if has_text else "concept",
+            "target": (
+                str(target_text).strip() if has_text else target_concept_id
+            ),
+            "language": (
+                str(arguments.get("language") or "en-NZ").strip() or "en-NZ"
+                if has_text
+                else None
+            ),
+            "scope_mode": (
+                str(arguments.get("scope_mode") or "user").strip().lower()
+                or "user"
+            ),
+        }
+        return hashlib.sha256(_json_bytes(semantic_identity)).hexdigest()
+
+    def remember_recovery_affordance(
+        *,
+        effect_id: str,
+        payload: Any,
+    ) -> None:
+        if not isinstance(payload, Mapping):
+            return
+        affordances = payload.get("recovery_affordances")
+        if not isinstance(affordances, Sequence) or isinstance(
+            affordances,
+            (str, bytes, bytearray),
+        ):
+            return
+        for affordance in affordances:
+            if not isinstance(affordance, Mapping):
+                continue
+            tool_name = str(affordance.get("tool") or "").strip()
+            alternative_arguments = affordance.get("arguments")
+            if not isinstance(alternative_arguments, Mapping):
+                continue
+            recovery_key = scoped_assertion_recovery_key(
+                tool_name,
+                alternative_arguments,
+            )
+            if recovery_key is None:
+                continue
+            recoverable_effect_ids.setdefault(recovery_key, []).append(
+                effect_id
+            )
+
+    def reconcile_successful_recovery(
+        *,
+        recovery_effect_id: str,
+        capability_name: str,
+        arguments: Mapping[str, Any],
+        effect_status: str,
+    ) -> None:
+        nonlocal effect_state_generation
+        if effect_status != "succeeded":
+            return
+        recovery_key = scoped_assertion_recovery_key(
+            capability_name,
+            arguments,
+        )
+        if recovery_key is None:
+            return
+        pending_effect_ids = recoverable_effect_ids.get(recovery_key)
+        if not pending_effect_ids:
+            return
+        failed_effect_id = pending_effect_ids.pop(0)
+        if not pending_effect_ids:
+            recoverable_effect_ids.pop(recovery_key, None)
+        with effect_state_lock:
+            failed_state = effect_states.get(failed_effect_id)
+            if (
+                failed_state is None
+                or failed_state.get("effect_status") != "failed"
+            ):
+                return
+            failed_state["recovered_by_effect_id"] = recovery_effect_id
+            failed_state["recovery_status"] = "succeeded"
+            effect_state_generation += 1
 
     def remember_effect_state(
         effect_id: str,
@@ -2076,6 +2286,13 @@ def execute_adaptive_turn(
                     )
                     if key in late_observation
                 }
+            if existing is not None:
+                for recovery_field in (
+                    "recovered_by_effect_id",
+                    "recovery_status",
+                ):
+                    if recovery_field in existing:
+                        state[recovery_field] = existing[recovery_field]
             effect_states[effect_id] = state
             effect_state_generation += 1
 
@@ -2211,6 +2428,11 @@ def execute_adaptive_turn(
             for state in effect_snapshot.values()
             if state.get("effect_status")
             in {"failed", "partial", "indeterminate", "not_started"}
+            and not (
+                state.get("effect_status") == "failed"
+                and state.get("recovery_status") == "succeeded"
+                and state.get("recovered_by_effect_id")
+            )
         ]
         if status == "completed" and incomplete_effects:
             incomplete_statuses = {
@@ -2238,6 +2460,13 @@ def execute_adaptive_turn(
                     invocation["execution_id"] = state.get("execution_id")
                 if state.get("evidence_id"):
                     invocation["late_evidence_id"] = state.get("evidence_id")
+                if state.get("recovered_by_effect_id"):
+                    invocation["recovered_by_effect_id"] = state.get(
+                        "recovered_by_effect_id"
+                    )
+                    invocation["recovery_status"] = state.get(
+                        "recovery_status"
+                    )
                 if isinstance(state.get("late_observation"), Mapping):
                     invocation["late_completion"] = dict(state["late_observation"])
             reconciled_invocations.append(invocation)
@@ -3286,10 +3515,15 @@ def execute_adaptive_turn(
                     scope,
                 ):
                     return index, contained(
-                        _error_payload(
-                            "effect_subject_not_authorised",
-                            "The effect subject is not scoped to the authenticated "
-                            "actor or organisation.",
+                        _effect_subject_authority_denial(
+                            capability_name=canonical_name,
+                            arguments=arguments,
+                            scoped_assertion_available=(
+                                gateway.get_method_definition(
+                                    "upsert_scoped_assertion"
+                                )
+                                is not None
+                            ),
                         )
                     )
 
@@ -3745,6 +3979,16 @@ def execute_adaptive_turn(
                             ).strip()
                             or None
                         ),
+                    )
+                    remember_recovery_affordance(
+                        effect_id=effect_identifier,
+                        payload=raw_payload,
+                    )
+                    reconcile_successful_recovery(
+                        recovery_effect_id=effect_identifier,
+                        capability_name=canonical_name,
+                        arguments=arguments,
+                        effect_status=effect_status,
                     )
                     envelope_payload.update(
                         {
