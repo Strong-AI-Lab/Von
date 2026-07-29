@@ -67,6 +67,7 @@ _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
 _CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_capabilities.v1"
 
+
 @dataclass(frozen=True)
 class AdaptiveTurnResult:
     """Route-compatible result from one ordinary adaptive turn."""
@@ -263,9 +264,7 @@ def _compact_evidence_index(
             removed = compacted.pop()
             total_bytes -= len(_json_bytes(removed)) + (1 if compacted else 0)
             omission["next_offset"] = base_offset + len(compacted)
-            omission["omitted_count"] = complete_count - int(
-                omission["next_offset"]
-            )
+            omission["omitted_count"] = complete_count - int(omission["next_offset"])
             omission_size = len(_json_bytes(omission)) + (1 if compacted else 0)
         if total_bytes + omission_size <= max_bytes:
             compacted.append(omission)
@@ -299,11 +298,7 @@ def _capability_schema_reference(
             "minimum_effect_window_seconds",
         )
     )
-    compact = {
-        key: capability.get(key)
-        for key in projected_keys
-        if key in capability
-    }
+    compact = {key: capability.get(key) for key in projected_keys if key in capability}
     name = str(capability.get("name") or "").strip()
     if not include_metadata:
         compact["capability_metadata_omitted_for_model_context"] = True
@@ -401,9 +396,7 @@ def _bounded_capability_catalogue_output(
     ) -> dict[str, Any]:
         omitted_page_entry_count = max(0, len(capabilities) - len(entries))
         next_offset = (
-            offset + len(entries)
-            if omitted_page_entry_count
-            else raw_next_offset
+            offset + len(entries) if omitted_page_entry_count else raw_next_offset
         )
         projection: dict[str, Any] = {
             "schema_version": "adaptive_turn_capability_page_projection.v1",
@@ -507,9 +500,7 @@ def _bounded_capability_catalogue_output(
         name_only = {
             "name": str(capability.get("name") or "").strip(),
             "capability_metadata_omitted_for_model_context": True,
-            "input_schema_omitted_for_model_context": (
-                "input_schema" in capability
-            ),
+            "input_schema_omitted_for_model_context": ("input_schema" in capability),
         }
         name_only_candidate = assemble(
             [*included, name_only],
@@ -600,9 +591,7 @@ def _bound_tool_results_for_model(
 
     if not results:
         return []
-    receipt_outputs = [
-        _model_tool_output_receipt(result.output) for result in results
-    ]
+    receipt_outputs = [_model_tool_output_receipt(result.output) for result in results]
     serialisable_shells = [
         {
             "call_id": result.call_id,
@@ -713,9 +702,7 @@ def _evidence_context_message(
     )
     evidence_view_projection: dict[str, Any] = {
         "schema_version": "adaptive_turn_evidence_view_projection.v1",
-        "order": (
-            "content_bearing_evidence_slices_first_stable_within_class"
-        ),
+        "order": ("content_bearing_evidence_slices_first_stable_within_class"),
         "deduplication": "exact_canonical_output",
         "total_count": total_view_count,
         "included_count": len(included_views),
@@ -760,15 +747,10 @@ def _ordered_unique_evidence_views(
             continue
         evidence_id = item.get("evidence_id")
         is_index_page = (
-            item.get("schema_version")
-            == "adaptive_turn_evidence_index_page.v1"
+            item.get("schema_version") == "adaptive_turn_evidence_index_page.v1"
         )
-        if (
-            not is_index_page
-            and (
-                not isinstance(evidence_id, str)
-                or not evidence_id.strip()
-            )
+        if not is_index_page and (
+            not isinstance(evidence_id, str) or not evidence_id.strip()
         ):
             continue
         view = dict(item)
@@ -909,15 +891,9 @@ def _bounded_evidence_context_message(
     # it must never displace a hydrated slice that already fits.
     expanded_projection = largest_index_projection(
         included_views,
-        preview_max_chars=(
-            0 if included_views else _MODEL_EVIDENCE_PREVIEW_MAX_CHARS
-        ),
+        preview_max_chars=(0 if included_views else _MODEL_EVIDENCE_PREVIEW_MAX_CHARS),
     )
-    return (
-        expanded_projection[1]
-        if expanded_projection is not None
-        else best_message
-    )
+    return expanded_projection[1] if expanded_projection is not None else best_message
 
 
 def _final_synthesis_context(
@@ -1215,8 +1191,7 @@ def _registered_capability_names(
         if definition is None:
             continue
         if definition.category == "read" or (
-            definition.category == "write"
-            and definition.ordinary_turn_effect
+            definition.category == "write" and definition.ordinary_turn_effect
         ):
             allowed.append(name)
     return tuple(allowed)
@@ -1242,9 +1217,7 @@ def ordinary_turn_capability_delegation(
 
     if gateway is None or not gateway.enabled:
         return ()
-    authenticated = bool(
-        isinstance(user_concept_id, str) and user_concept_id.strip()
-    )
+    authenticated = bool(isinstance(user_concept_id, str) and user_concept_id.strip())
     trusted_values = {
         str(key): value
         for key, value in (trusted_argument_values or {}).items()
@@ -1299,13 +1272,16 @@ def _capability_catalogue(
 ) -> dict[str, Any]:
     query = str(payload.get("query") or "").strip().lower()
     requested_names = payload.get("names")
-    exact_names = {
-        str(item).strip().lower()
-        for item in requested_names
-        if isinstance(item, str) and item.strip()
-    } if isinstance(requested_names, Sequence) and not isinstance(
-        requested_names, (str, bytes, bytearray)
-    ) else set()
+    exact_names = (
+        {
+            str(item).strip().lower()
+            for item in requested_names
+            if isinstance(item, str) and item.strip()
+        }
+        if isinstance(requested_names, Sequence)
+        and not isinstance(requested_names, (str, bytes, bytearray))
+        else set()
+    )
     try:
         offset = max(0, int(payload.get("offset", 0)))
     except (TypeError, ValueError):
@@ -1316,9 +1292,7 @@ def _capability_catalogue(
         limit = 20
 
     query_tokens = {
-        token
-        for token in re.findall(r"[a-z0-9_]+", query)
-        if len(token) > 1
+        token for token in re.findall(r"[a-z0-9_]+", query) if len(token) > 1
     }
     ranked: list[tuple[int, str, dict[str, Any]]] = []
     matched_total = 0
@@ -1416,9 +1390,7 @@ def _capability_catalogue(
                     "evidence_surface_family": (
                         surface_metadata.evidence_surface_family
                     ),
-                    "external_surface": bool(
-                        surface_metadata.external_surface
-                    ),
+                    "external_surface": bool(surface_metadata.external_surface),
                 }
             )
         ranked.append(
@@ -1456,12 +1428,9 @@ def _capability_catalogue(
             f"{description.lower()}"
         )
         if query_tokens:
-            literal_matches = sum(
-                1 for token in query_tokens if token in searchable
-            )
+            literal_matches = sum(1 for token in query_tokens if token in searchable)
             query_match = bool(
-                literal_matches
-                or float(capability.get("relevance_score") or 0.0) > 0.0
+                literal_matches or float(capability.get("relevance_score") or 0.0) > 0.0
             )
             semantic_score = int(
                 max(
@@ -1499,9 +1468,7 @@ def _capability_catalogue(
         "success": True,
         "delegation": "bounded_capabilities",
         "total": len(selected),
-        "delegated_total": (
-            registered_delegated_total + represented_workflow_total
-        ),
+        "delegated_total": (registered_delegated_total + represented_workflow_total),
         "registered_tool_total": registered_delegated_total,
         "represented_workflow_total": represented_workflow_total,
         "matched_total": matched_total,
@@ -1550,16 +1517,10 @@ def _model_visible_input_schema(definition: Any) -> dict[str, Any]:
 
     schema = dict(schema_to_json_schema(definition.input_schema))
     raw_properties = schema.get("properties")
-    properties = (
-        dict(raw_properties) if isinstance(raw_properties, Mapping) else {}
-    )
+    properties = dict(raw_properties) if isinstance(raw_properties, Mapping) else {}
     raw_required = schema.get("required")
     required = (
-        [
-            str(field_name)
-            for field_name in raw_required
-            if isinstance(field_name, str)
-        ]
+        [str(field_name) for field_name in raw_required if isinstance(field_name, str)]
         if isinstance(raw_required, Sequence)
         and not isinstance(raw_required, (str, bytes, bytearray))
         else []
@@ -1570,15 +1531,11 @@ def _model_visible_input_schema(definition: Any) -> dict[str, Any]:
         hidden_arguments.update(str(argument_name) for argument_name in bindings)
     fixed_arguments = definition.ordinary_turn_fixed_arguments
     if isinstance(fixed_arguments, Mapping):
-        hidden_arguments.update(
-            str(argument_name) for argument_name in fixed_arguments
-        )
+        hidden_arguments.update(str(argument_name) for argument_name in fixed_arguments)
     for argument_name in hidden_arguments:
         properties.pop(str(argument_name), None)
         required = [
-            field_name
-            for field_name in required
-            if field_name != str(argument_name)
+            field_name for field_name in required if field_name != str(argument_name)
         ]
     aliases = schema.get("x-von-argument-aliases")
     if isinstance(aliases, Mapping):
@@ -1830,9 +1787,13 @@ def _effect_result_target_ids(raw_payload: Any) -> list[str]:
                 key = str(raw_key).strip().lower()
                 if key in scalar_fields:
                     append_value(item)
-                elif key in sequence_fields and isinstance(item, Sequence) and not isinstance(
-                    item,
-                    (str, bytes, bytearray),
+                elif (
+                    key in sequence_fields
+                    and isinstance(item, Sequence)
+                    and not isinstance(
+                        item,
+                        (str, bytes, bytearray),
+                    )
                 ):
                     for nested in list(item)[:50]:
                         append_value(nested)
@@ -1877,7 +1838,9 @@ def _effect_status(
             return explicit
     if isinstance(raw_payload, Mapping) and raw_payload.get("success") is False:
         return "failed"
-    return "failed" if bool(getattr(transport_result, "timed_out", False)) else "succeeded"
+    return (
+        "failed" if bool(getattr(transport_result, "timed_out", False)) else "succeeded"
+    )
 
 
 def _late_effect_observation_state(
@@ -1895,20 +1858,120 @@ def _late_effect_observation_state(
     effect_status = _effect_status(payload, transport_result=None)
     changed = (
         payload.get("changed")
-        if isinstance(payload, Mapping)
-        and isinstance(payload.get("changed"), bool)
+        if isinstance(payload, Mapping) and isinstance(payload.get("changed"), bool)
         else (False if effect_status in {"failed", "not_started"} else None)
     )
     return effect_status, changed
 
 
-def _error_payload(code: str, message: str, *, retryable: bool = False) -> dict[str, Any]:
+def _error_payload(
+    code: str, message: str, *, retryable: bool = False
+) -> dict[str, Any]:
     return {
         "success": False,
         "error_code": code,
         "error": message,
         "retryable": retryable,
     }
+
+
+def _exact_represented_concept_id(value: Any) -> str | None:
+    """Return an explicit represented ID without resolving or canonicalising it."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if (
+        not cleaned.startswith("#V#")
+        or len(cleaned) == len("#V#")
+        or any(character.isspace() for character in cleaned)
+    ):
+        return None
+    return cleaned
+
+
+def _exact_scoped_relationship_predicate(
+    arguments: Mapping[str, Any],
+) -> str | None:
+    """Extract only a concept-valued predicate that needs no semantic resolution."""
+
+    if arguments.get("predicate_if_missing") is not None:
+        return None
+
+    predicate = arguments.get("predicate")
+    predicate_ref = arguments.get("predicate_ref")
+    if isinstance(predicate, str) and predicate.strip():
+        if predicate_ref is not None:
+            return None
+        return _exact_represented_concept_id(predicate)
+
+    if not isinstance(predicate_ref, Mapping):
+        return None
+    if isinstance(predicate_ref.get("name"), str) and predicate_ref["name"].strip():
+        return None
+    if str(predicate_ref.get("on_missing") or "fail").strip().lower() != "fail":
+        return None
+    if str(predicate_ref.get("value_kind") or "concept").strip().lower() != "concept":
+        return None
+    return _exact_represented_concept_id(predicate_ref.get("concept_id"))
+
+
+def _effect_subject_authority_denial(
+    *,
+    capability_name: str,
+    arguments: Mapping[str, Any],
+    scoped_assertion_available: bool,
+) -> dict[str, Any]:
+    """Return a bounded denial while preserving a semantically distinct path."""
+
+    payload = _error_payload(
+        "effect_subject_not_authorised",
+        "The effect subject is not scoped to the authenticated actor or organisation.",
+    )
+    if not scoped_assertion_available:
+        return payload
+
+    if capability_name == "upsert_text_relation":
+        alternative_arguments = {
+            "subject_concept_id": arguments.get("concept_id"),
+            "predicate": arguments.get("predicate"),
+            "target_text": arguments.get("text"),
+        }
+        language = arguments.get("language")
+        if isinstance(language, str) and language.strip():
+            alternative_arguments["language"] = language
+        semantic_effect = (
+            "if the subject is visible, create a provenance-bearing "
+            "actor-scoped assertion without publishing or mutating it"
+        )
+    elif capability_name == "add_relationship":
+        source_id = _exact_represented_concept_id(arguments.get("source_id"))
+        target_id = _exact_represented_concept_id(arguments.get("target"))
+        predicate_id = _exact_scoped_relationship_predicate(arguments)
+        if source_id is None or predicate_id is None or target_id is None:
+            return payload
+        alternative_arguments = {
+            "subject_concept_id": source_id,
+            "predicate": predicate_id,
+            "target_concept_id": target_id,
+        }
+        semantic_effect = (
+            "if the subject, predicate, and target are visible, create a "
+            "provenance-bearing actor-scoped assertion without publishing "
+            "or mutating the canonical relationship"
+        )
+    else:
+        return payload
+
+    payload["recovery_affordances"] = [
+        {
+            "action_type": "assert_in_actor_scope",
+            "tool": "upsert_scoped_assertion",
+            "arguments": alternative_arguments,
+            "semantic_effect": semantic_effect,
+        }
+    ]
+    return payload
 
 
 def _emit(progress_tracker: Any, payload: Mapping[str, Any]) -> None:
@@ -2014,6 +2077,7 @@ def execute_adaptive_turn(
             "turn_namespace": scope.namespace,
             "actor_user_concept_id": scope.user_concept_id,
             "actor_organisation_concept_id": scope.organisation_concept_id,
+            "turn_id": turn_id or "ordinary-turn",
         }
     )
     delegated_names = ordinary_turn_capability_delegation(
@@ -2044,9 +2108,7 @@ def execute_adaptive_turn(
             "schema_version": "adaptive_turn_budget_allocation.v1",
             "turn_budget_seconds": turn_budget,
             "final_synthesis_reserve_seconds": final_reserve,
-            "requested_final_answer_reserve_seconds": (
-                requested_final_answer_reserve
-            ),
+            "requested_final_answer_reserve_seconds": (requested_final_answer_reserve),
             "effective_final_answer_reserve_seconds": final_answer_reserve,
             "final_answer_reserve_source": (
                 "caller"
@@ -2074,6 +2136,117 @@ def execute_adaptive_turn(
     last_partial_effect_generation = 0
     successful_effect_mutation_generation = 0
     terminal_failed_effect_requests: dict[str, tuple[int, str | None]] = {}
+    recoverable_effect_ids: dict[str, list[str]] = {}
+
+    def scoped_assertion_recovery_key(
+        capability_name: str,
+        arguments: Mapping[str, Any],
+    ) -> str | None:
+        """Identify one exact scoped assertion independently of trusted bindings."""
+
+        if capability_name != "upsert_scoped_assertion":
+            return None
+        subject_id = str(arguments.get("subject_concept_id") or "").strip()
+        predicate = str(arguments.get("predicate") or "").strip()
+        if not subject_id or not predicate:
+            return None
+        try:
+            from .text_relation_predicate_validation_service import (
+                predicate_concept_id_for_storage,
+            )
+
+            predicate = predicate_concept_id_for_storage(predicate) or predicate
+        except Exception:
+            pass
+        target_text = arguments.get("target_text")
+        target_concept_id = str(
+            arguments.get("target_concept_id") or ""
+        ).strip()
+        has_text = isinstance(target_text, str) and bool(target_text.strip())
+        has_concept = bool(target_concept_id)
+        if has_text == has_concept:
+            return None
+        semantic_identity = {
+            "subject_concept_id": subject_id,
+            "predicate": predicate,
+            "target_kind": "text" if has_text else "concept",
+            "target": (
+                str(target_text).strip() if has_text else target_concept_id
+            ),
+            "language": (
+                str(arguments.get("language") or "en-NZ").strip() or "en-NZ"
+                if has_text
+                else None
+            ),
+            "scope_mode": (
+                str(arguments.get("scope_mode") or "user").strip().lower()
+                or "user"
+            ),
+        }
+        return hashlib.sha256(_json_bytes(semantic_identity)).hexdigest()
+
+    def remember_recovery_affordance(
+        *,
+        effect_id: str,
+        payload: Any,
+    ) -> None:
+        if not isinstance(payload, Mapping):
+            return
+        affordances = payload.get("recovery_affordances")
+        if not isinstance(affordances, Sequence) or isinstance(
+            affordances,
+            (str, bytes, bytearray),
+        ):
+            return
+        for affordance in affordances:
+            if not isinstance(affordance, Mapping):
+                continue
+            tool_name = str(affordance.get("tool") or "").strip()
+            alternative_arguments = affordance.get("arguments")
+            if not isinstance(alternative_arguments, Mapping):
+                continue
+            recovery_key = scoped_assertion_recovery_key(
+                tool_name,
+                alternative_arguments,
+            )
+            if recovery_key is None:
+                continue
+            recoverable_effect_ids.setdefault(recovery_key, []).append(
+                effect_id
+            )
+
+    def reconcile_successful_recovery(
+        *,
+        recovery_effect_id: str,
+        capability_name: str,
+        arguments: Mapping[str, Any],
+        effect_status: str,
+    ) -> None:
+        nonlocal effect_state_generation
+        if effect_status != "succeeded":
+            return
+        recovery_key = scoped_assertion_recovery_key(
+            capability_name,
+            arguments,
+        )
+        if recovery_key is None:
+            return
+        pending_effect_ids = recoverable_effect_ids.get(recovery_key)
+        if not pending_effect_ids:
+            return
+        failed_effect_id = pending_effect_ids.pop(0)
+        if not pending_effect_ids:
+            recoverable_effect_ids.pop(recovery_key, None)
+        with effect_state_lock:
+            failed_state = effect_states.get(failed_effect_id)
+            if (
+                failed_state is None
+                or failed_state.get("effect_status") != "failed"
+            ):
+                return
+            failed_state["recovered_by_effect_id"] = recovery_effect_id
+            failed_state["recovery_status"] = "succeeded"
+            effect_state_generation += 1
 
     def remember_effect_state(
         effect_id: str,
@@ -2113,6 +2286,13 @@ def execute_adaptive_turn(
                     )
                     if key in late_observation
                 }
+            if existing is not None:
+                for recovery_field in (
+                    "recovered_by_effect_id",
+                    "recovery_status",
+                ):
+                    if recovery_field in existing:
+                        state[recovery_field] = existing[recovery_field]
             effect_states[effect_id] = state
             effect_state_generation += 1
 
@@ -2227,12 +2407,8 @@ def execute_adaptive_turn(
                 result.output.get("schema_version")
                 == "adaptive_turn_evidence_index_page.v1"
             )
-            if (
-                not is_index_page
-                and (
-                    not isinstance(evidence_id, str)
-                    or not evidence_id.strip()
-                )
+            if not is_index_page and (
+                not isinstance(evidence_id, str) or not evidence_id.strip()
             ):
                 continue
             view = dict(result.output)
@@ -2245,19 +2421,22 @@ def execute_adaptive_turn(
     def finish(text: str, *, status: str = "completed") -> AdaptiveTurnResult:
         with effect_state_lock:
             effect_snapshot = {
-                effect_id: dict(state)
-                for effect_id, state in effect_states.items()
+                effect_id: dict(state) for effect_id, state in effect_states.items()
             }
         incomplete_effects = [
             state
             for state in effect_snapshot.values()
             if state.get("effect_status")
             in {"failed", "partial", "indeterminate", "not_started"}
+            and not (
+                state.get("effect_status") == "failed"
+                and state.get("recovery_status") == "succeeded"
+                and state.get("recovered_by_effect_id")
+            )
         ]
         if status == "completed" and incomplete_effects:
             incomplete_statuses = {
-                str(state.get("effect_status") or "")
-                for state in incomplete_effects
+                str(state.get("effect_status") or "") for state in incomplete_effects
             }
             if "indeterminate" in incomplete_statuses:
                 status = "effect_outcome_indeterminate"
@@ -2272,9 +2451,7 @@ def execute_adaptive_turn(
             invocation = dict(raw_invocation)
             effect_id = invocation.get("effect_id")
             state = (
-                effect_snapshot.get(effect_id)
-                if isinstance(effect_id, str)
-                else None
+                effect_snapshot.get(effect_id) if isinstance(effect_id, str) else None
             )
             if isinstance(state, Mapping):
                 invocation["effect_status"] = state.get("effect_status")
@@ -2283,10 +2460,15 @@ def execute_adaptive_turn(
                     invocation["execution_id"] = state.get("execution_id")
                 if state.get("evidence_id"):
                     invocation["late_evidence_id"] = state.get("evidence_id")
-                if isinstance(state.get("late_observation"), Mapping):
-                    invocation["late_completion"] = dict(
-                        state["late_observation"]
+                if state.get("recovered_by_effect_id"):
+                    invocation["recovered_by_effect_id"] = state.get(
+                        "recovered_by_effect_id"
                     )
+                    invocation["recovery_status"] = state.get(
+                        "recovery_status"
+                    )
+                if isinstance(state.get("late_observation"), Mapping):
+                    invocation["late_completion"] = dict(state["late_observation"])
             reconciled_invocations.append(invocation)
 
         relevant_effects = [
@@ -2367,9 +2549,7 @@ def execute_adaptive_turn(
             aux_calls.append(
                 {
                     "type": "adaptive_turn_effect_finality_fallback",
-                    "schema_version": (
-                        "adaptive_turn_effect_finality_fallback.v1"
-                    ),
+                    "schema_version": ("adaptive_turn_effect_finality_fallback.v1"),
                     "terminal_status": status,
                     "effect_count": len(relevant_effects),
                     "status_counts": status_counts,
@@ -2466,21 +2646,16 @@ def execute_adaptive_turn(
         aux_calls.append(
             {
                 "type": "adaptive_turn_final_answer_reserve_entered",
-                "schema_version": (
-                    "adaptive_turn_final_answer_reserve_entered.v1"
-                ),
+                "schema_version": ("adaptive_turn_final_answer_reserve_entered.v1"),
                 "reason": reason,
-                "requested_answer_reserve_seconds": (
-                    requested_final_answer_reserve
-                ),
+                "requested_answer_reserve_seconds": (requested_final_answer_reserve),
                 "effective_answer_reserve_seconds": final_answer_reserve,
                 "final_synthesis_reserve_seconds": final_reserve,
                 "evidence_capable_reserve_seconds": (
                     final_reserve - final_answer_reserve
                 ),
                 "reserve_clamped": (
-                    final_answer_reserve
-                    < requested_final_answer_reserve
+                    final_answer_reserve < requested_final_answer_reserve
                 ),
                 "remaining_ms": max(
                     0.0,
@@ -2544,11 +2719,7 @@ def execute_adaptive_turn(
         stage_deadline = (
             turn_deadline
             if answer_only
-            else (
-                final_answer_deadline
-                if final_synthesis
-                else research_deadline
-            )
+            else (final_answer_deadline if final_synthesis else research_deadline)
         )
         effective_params = dict(model_parameters or {})
         effective_params["request_timeout_seconds"] = max(
@@ -2560,11 +2731,7 @@ def execute_adaptive_turn(
         request_tools = (
             []
             if answer_only
-            else (
-                final_synthesis_tools
-                if final_synthesis
-                else available_tools
-            )
+            else (final_synthesis_tools if final_synthesis else available_tools)
         )
         try:
             response: LLMResponse = llm_client.generate_with_tools(
@@ -2575,8 +2742,7 @@ def execute_adaptive_turn(
                 system_message=_scope_message(
                     scope,
                     delegated_count=(
-                        len(delegated_names)
-                        + len(workflow_capabilities_by_name)
+                        len(delegated_names) + len(workflow_capabilities_by_name)
                     ),
                     final_synthesis=final_synthesis,
                     answer_only=answer_only,
@@ -2785,9 +2951,7 @@ def execute_adaptive_turn(
                 "stage": stage,
                 "mode": mode,
                 "model": response.model or model,
-                "request_timeout_seconds": effective_params[
-                    "request_timeout_seconds"
-                ],
+                "request_timeout_seconds": effective_params["request_timeout_seconds"],
                 "duration_ms": call_duration_ms,
                 "usage": dict(response.usage) if response.usage else None,
                 "status": "completed",
@@ -2824,9 +2988,7 @@ def execute_adaptive_turn(
             aux_calls.append(
                 {
                     "type": "adaptive_turn_expired_final_evidence_calls",
-                    "schema_version": (
-                        "adaptive_turn_expired_final_evidence_calls.v1"
-                    ),
+                    "schema_version": ("adaptive_turn_expired_final_evidence_calls.v1"),
                     "discarded_tool_call_count": len(calls),
                 }
             )
@@ -2911,9 +3073,7 @@ def execute_adaptive_turn(
                     "total": len(complete_index),
                     "offset": offset,
                     "next_offset": (
-                        next_offset
-                        if next_offset < len(complete_index)
-                        else None
+                        next_offset if next_offset < len(complete_index) else None
                     ),
                     "evidence": compact_page,
                 }
@@ -3114,9 +3274,7 @@ def execute_adaptive_turn(
                 else str(workflow_capability.name)
             )
             execution_method_name = (
-                canonical_name
-                if canonical_name is not None
-                else "workflow_execute"
+                canonical_name if canonical_name is not None else "workflow_execute"
             )
             definition = gateway.get_method_definition(execution_method_name)
             is_workflow_capability = workflow_capability is not None
@@ -3169,9 +3327,7 @@ def execute_adaptive_turn(
                         is_effect=True,
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
-                        represented_workflow_id=str(
-                            workflow_capability.workflow_id
-                        ),
+                        represented_workflow_id=str(workflow_capability.workflow_id),
                     )
                     continue
                 if not scope.user_concept_id or not scope.namespace:
@@ -3189,9 +3345,7 @@ def execute_adaptive_turn(
                         is_effect=True,
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
-                        represented_workflow_id=str(
-                            workflow_capability.workflow_id
-                        ),
+                        represented_workflow_id=str(workflow_capability.workflow_id),
                     )
                     continue
                 from src.backend.services.workflow_turn_capability_service import (
@@ -3228,15 +3382,11 @@ def execute_adaptive_turn(
                         is_effect=True,
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
-                        represented_workflow_id=str(
-                            workflow_capability.workflow_id
-                        ),
+                        represented_workflow_id=str(workflow_capability.workflow_id),
                     )
                     continue
                 if turn_id:
-                    stable_launch_inputs = dict(
-                        trusted_arguments.get("inputs") or {}
-                    )
+                    stable_launch_inputs = dict(trusted_arguments.get("inputs") or {})
                     # Tool results appended to the adaptive context must not
                     # change the identity of an otherwise identical retry.
                     stable_launch_inputs.pop("augmented_context", None)
@@ -3260,9 +3410,7 @@ def execute_adaptive_turn(
                     binding_diagnostics = {
                         **dict(binding_diagnostics or {}),
                         "durable_idempotency": {
-                            "schema_version": (
-                                "workflow_turn_durable_idempotency.v1"
-                            ),
+                            "schema_version": ("workflow_turn_durable_idempotency.v1"),
                             "source_event_type": "conversation_turn",
                             "source_event_id": turn_id,
                             "event_idempotency_key_source": (
@@ -3367,10 +3515,15 @@ def execute_adaptive_turn(
                     scope,
                 ):
                     return index, contained(
-                        _error_payload(
-                            "effect_subject_not_authorised",
-                            "The effect subject is not scoped to the authenticated "
-                            "actor or organisation.",
+                        _effect_subject_authority_denial(
+                            capability_name=canonical_name,
+                            arguments=arguments,
+                            scoped_assertion_available=(
+                                gateway.get_method_definition(
+                                    "upsert_scoped_assertion"
+                                )
+                                is not None
+                            ),
                         )
                     )
 
@@ -3386,8 +3539,7 @@ def execute_adaptive_turn(
             )
             if (
                 prior_terminal_failure is not None
-                and prior_terminal_failure[0]
-                == successful_effect_mutation_generation
+                and prior_terminal_failure[0] == successful_effect_mutation_generation
             ):
                 return index, contained(
                     {
@@ -3405,12 +3557,8 @@ def execute_adaptive_turn(
                         "prior_error_code": prior_terminal_failure[1],
                         "changed": False,
                         "recovery_affordances": [
-                            {
-                                "action_type": "change_arguments_or_use_typed_recovery"
-                            },
-                            {
-                                "action_type": "inspect_canonical_state_before_retry"
-                            },
+                            {"action_type": "change_arguments_or_use_typed_recovery"},
+                            {"action_type": "inspect_canonical_state_before_retry"},
                         ],
                     }
                 )
@@ -3450,8 +3598,7 @@ def execute_adaptive_turn(
                             "mutation_outcome": "not_started",
                             "outcome_finality": "terminal_for_turn",
                             "persistence_reason": (
-                                dispatch_outcome.get("reason")
-                                or "not_acknowledged"
+                                dispatch_outcome.get("reason") or "not_acknowledged"
                             ),
                             "recovery_affordances": [
                                 {
@@ -3600,9 +3747,7 @@ def execute_adaptive_turn(
                     None,
                 )
                 transport_metadata = (
-                    transport_metadata_fn()
-                    if callable(transport_metadata_fn)
-                    else {}
+                    transport_metadata_fn() if callable(transport_metadata_fn) else {}
                 )
                 assert terminal_effect_status is not None
                 changed = (
@@ -3641,16 +3786,13 @@ def execute_adaptive_turn(
                             "effect_id": effect_identifier,
                             "phase": "turn_terminal",
                             "reason": (
-                                terminal_outcome.get("reason")
-                                or "not_acknowledged"
+                                terminal_outcome.get("reason") or "not_acknowledged"
                             ),
                         }
                     )
             return index, contained(raw_payload, transport_result)
 
-        if actual_capabilities and any(
-            item.is_effect for item in actual_capabilities
-        ):
+        if actual_capabilities and any(item.is_effect for item in actual_capabilities):
             # Preserve model-call order whenever the batch contains an effect.
             # Each effect receives an independent admission decision in model
             # order. One invalid or oversized call therefore cannot deny an
@@ -3680,11 +3822,7 @@ def execute_adaptive_turn(
                         "prior_effect_id": prior_indeterminate_effect_id,
                         "capability_name": canonical_name,
                         "recovery_affordances": [
-                            {
-                                "action_type": (
-                                    "inspect_canonical_state_before_retry"
-                                )
-                            }
+                            {"action_type": ("inspect_canonical_state_before_retry")}
                         ],
                     }
                 result_index, contained = invoke_and_contain(
@@ -3759,9 +3897,7 @@ def execute_adaptive_turn(
                     None,
                 )
                 transport_metadata = (
-                    transport_metadata_fn()
-                    if callable(transport_metadata_fn)
-                    else {}
+                    transport_metadata_fn() if callable(transport_metadata_fn) else {}
                 )
                 effect_status = (
                     _effect_status(
@@ -3843,6 +3979,16 @@ def execute_adaptive_turn(
                             ).strip()
                             or None
                         ),
+                    )
+                    remember_recovery_affordance(
+                        effect_id=effect_identifier,
+                        payload=raw_payload,
+                    )
+                    reconcile_successful_recovery(
+                        recovery_effect_id=effect_identifier,
+                        capability_name=canonical_name,
+                        arguments=arguments,
+                        effect_status=effect_status,
                     )
                     envelope_payload.update(
                         {
@@ -3946,9 +4092,7 @@ def execute_adaptive_turn(
                 )
 
         correlated_results = [
-            result
-            for result in batch_results
-            if isinstance(result, ToolResult)
+            result for result in batch_results if isinstance(result, ToolResult)
         ]
         if len(correlated_results) != len(calls):
             terminal_status = "tool_result_correlation_error"
@@ -3962,9 +4106,7 @@ def execute_adaptive_turn(
             aux_calls.append(
                 {
                     "type": "adaptive_turn_tool_result_batch_overflow",
-                    "schema_version": (
-                        "adaptive_turn_tool_result_batch_overflow.v1"
-                    ),
+                    "schema_version": ("adaptive_turn_tool_result_batch_overflow.v1"),
                     "tool_call_count": len(correlated_results),
                     "max_bytes": _MODEL_TOOL_RESULT_BATCH_MAX_BYTES,
                     "action": (

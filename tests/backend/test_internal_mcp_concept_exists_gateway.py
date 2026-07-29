@@ -61,7 +61,6 @@ def test_concept_exists_binds_namespace_actor_for_access_decision(
         "src.backend.security.access_control.get_concepts_collection",
         lambda: collection,
     )
-
     allowed = gateway.invoke(
         "concept_exists",
         {"concept_id": "#V#team_only_concept", "namespace": "#V#member@sail"},
@@ -98,6 +97,14 @@ def test_fetch_concept_returns_access_denied_without_leaking_payload(
     monkeypatch.setattr(
         "src.backend.security.access_control.get_concepts_collection",
         lambda: collection,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.describe_concept_access",
+        lambda _concept_id: {
+            "exists": True,
+            "accessible": False,
+            "restriction_families_present": ["specific_to_user"],
+        },
     )
 
     result = gateway.invoke(

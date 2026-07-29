@@ -3,8 +3,58 @@ import os
 import shutil
 
 import pytest
+from bson import ObjectId
 from unittest.mock import MagicMock, patch
 from src.backend.services.rag_service import get_rag_service
+
+
+def test_base_rag_candidate_rechecks_subject_and_predicate_visibility(
+    monkeypatch,
+):
+    from src.backend.services import scoped_rag_authority_service as authority
+
+    relation_id = ObjectId()
+    monkeypatch.setattr(
+        authority.TextRelationsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {
+                "_id": relation_id,
+                "subject_concept_id": "#V#subject",
+                "predicate": "hasDescription",
+            }
+        ],
+    )
+    visible = {"#V#subject", "#V#hasDescription"}
+    monkeypatch.setattr(
+        authority,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids) & visible,
+    )
+    metadata = [
+        {
+            "type": "text_relation",
+            "relation_id": str(relation_id),
+            "subject_concept_id": "#V#subject",
+            "predicate": "hasDescription",
+        }
+    ]
+
+    assert authority.current_authorised_rag_candidate_keys(
+        metadata,
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+    ) == {("text_relation", str(relation_id))}
+
+    visible.remove("#V#hasDescription")
+    assert (
+        authority.current_authorised_rag_candidate_keys(
+            metadata,
+            user_concept_id="#V#user",
+            organisation_concept_id="#V#org",
+        )
+        == set()
+    )
 
 
 # Mock LlamaIndex components to avoid real API calls and dependencies during unit tests
@@ -161,6 +211,201 @@ def test_query_honours_workflow_capability_retrieval_candidate_limit(
     )
 
     mock_llamaindex["index"].as_retriever.assert_called_with(similarity_top_k=7)
+
+
+def test_concepts_mode_includes_current_scoped_assertion_candidates(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+    from src.backend.services import scoped_rag_authority_service
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    rag.upsert_documents(
+        [
+            {
+                "id": "scoped_assertion:ska_1",
+                "text": "Scoped programme context",
+                "metadata": {"type": "scoped_knowledge_assertion"},
+            }
+        ],
+        namespace="#V#user@org",
+    )
+    node = mock_llamaindex["index"].as_retriever.return_value.retrieve.return_value[0]
+    node.node.ref_doc_id = "scoped_assertion:ska_1"
+    node.node.metadata = {
+        "type": "scoped_knowledge_assertion",
+        "assertion_id": "ska_1",
+        "subject_concept_id": "#V#subject",
+        "predicate": "hasDescription",
+        "user_id": "#V#user",
+        "organisation_concept_id": "#V#org",
+    }
+    authority_calls = []
+    monkeypatch.setattr(
+        scoped_rag_authority_service,
+        "current_authorised_rag_candidate_keys",
+        lambda rows, **kwargs: authority_calls.append((rows, kwargs))
+        or {("scoped_knowledge_assertion", "ska_1")},
+    )
+
+    results = rag.query(
+        "programme context",
+        namespace="#V#user@org",
+        permissions_context={
+            "mode": "concepts",
+            "user_id": "#V#user",
+            "organisation_concept_id": "#V#org",
+        },
+    )
+
+    assert [row["id"] for row in results] == ["scoped_assertion:ska_1"]
+    assert authority_calls == [
+        (
+            [node.node.metadata],
+            {
+                "user_concept_id": "#V#user",
+                "organisation_concept_id": "#V#org",
+            },
+        )
+    ]
+
+
+def test_scoped_rag_hit_is_live_filtered_after_assertion_revocation(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    import mongomock
+
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+    from src.backend.services import scoped_rag_authority_service
+
+    collection = mongomock.MongoClient()["von_test"][
+        "scoped_knowledge_assertions"
+    ]
+    collection.insert_one(
+        {
+            "assertion_id": "ska_live",
+            "status": "asserted",
+            "object_kind": "text",
+            "scope": {"audience_keys": ["org:#V#org"]},
+            "subject_concept_id": "#V#subject",
+            "predicate": "hasDescription",
+        }
+    )
+    monkeypatch.setattr(
+        scoped_rag_authority_service,
+        "get_scoped_knowledge_assertions_collection",
+        lambda: collection,
+    )
+    visible_concepts = {"#V#subject", "#V#hasDescription"}
+    monkeypatch.setattr(
+        scoped_rag_authority_service,
+        "filter_accessible_concept_ids",
+        lambda concept_ids: set(concept_ids) & visible_concepts,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    rag.upsert_documents(
+        [
+            {
+                "id": "scoped_assertion:ska_live",
+                "text": "Scoped programme context",
+                "metadata": {"type": "scoped_knowledge_assertion"},
+            }
+        ],
+        namespace="#V#user@org",
+    )
+    node = mock_llamaindex["index"].as_retriever.return_value.retrieve.return_value[0]
+    node.node.ref_doc_id = "scoped_assertion:ska_live"
+    node.node.metadata = {
+        "type": "scoped_knowledge_assertion",
+        "assertion_id": "ska_live",
+        "subject_concept_id": "#V#subject",
+        "predicate": "hasDescription",
+        "user_id": "#V#user",
+        "organisation_concept_id": "#V#org",
+    }
+    permissions = {
+        "mode": "concepts",
+        "user_id": "#V#user",
+        "organisation_concept_id": "#V#org",
+    }
+
+    assert len(
+        rag.query(
+            "programme context",
+            namespace="#V#user@org",
+            permissions_context=permissions,
+        )
+    ) == 1
+
+    collection.update_one(
+        {"assertion_id": "ska_live"},
+        {"$set": {"status": "retracted"}},
+    )
+    assert (
+        rag.query(
+            "programme context",
+            namespace="#V#user@org",
+            permissions_context=permissions,
+        )
+        == []
+    )
+
+    collection.update_one(
+        {"assertion_id": "ska_live"},
+        {"$set": {"status": "asserted"}},
+    )
+    visible_concepts.remove("#V#hasDescription")
+    assert (
+        rag.query(
+            "programme context",
+            namespace="#V#user@org",
+            permissions_context=permissions,
+        )
+        == []
+    )
+
+    visible_concepts.add("#V#hasDescription")
+    collection.update_one(
+        {"assertion_id": "ska_live"},
+        {"$set": {"scope.audience_keys": ["org:#V#other"]}},
+    )
+    assert (
+        rag.query(
+            "programme context",
+            namespace="#V#user@org",
+            permissions_context=permissions,
+        )
+        == []
+    )
+
+    collection.update_one(
+        {"assertion_id": "ska_live"},
+        {"$set": {"scope.audience_keys": ["org:#V#org"]}},
+    )
+    visible_concepts.remove("#V#subject")
+    assert (
+        rag.query(
+            "programme context",
+            namespace="#V#user@org",
+            permissions_context=permissions,
+        )
+        == []
+    )
 
 
 def test_delete_documents(mock_llamaindex):

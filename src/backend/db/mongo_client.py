@@ -514,6 +514,7 @@ TEXT_VALUES_COLLECTION_NAME = (
 TEXT_RELATIONS_COLLECTION_NAME = (
     "text_relations"  # New collection linking concepts to text values
 )
+SCOPED_KNOWLEDGE_ASSERTIONS_COLLECTION_NAME = "scoped_knowledge_assertions"
 META_RELATIONS_COLLECTION_NAME = "meta_relations"  # New collection for relation elicitation meta-data (JVNAUTOSCI-371)
 RELATIONSHIP_EXTENT_INDEX_COLLECTION_NAME = "relationship_extent_index"
 
@@ -644,7 +645,9 @@ def _try_preferred_dns_fallback_first() -> bool:
         _using_fallback_real = True
         return True
     except Exception as exc:
-        logger.warning("[mongo_fallback] Preferred DNS fallback connection failed: %s", exc)
+        logger.warning(
+            "[mongo_fallback] Preferred DNS fallback connection failed: %s", exc
+        )
         _mongo_client_real = None
         _clear_dns_fallback_preference()
         return False
@@ -790,9 +793,7 @@ def get_db() -> Database | None:
                         and MONGO_DNS_FALLBACK_URI
                         and fallback_uri == MONGO_DNS_FALLBACK_URI
                     ):
-                        _mark_dns_fallback_preferred(
-                            "primary connection failure"
-                        )
+                        _mark_dns_fallback_preferred("primary connection failure")
                     _effective_uri_real = fallback_uri
                     _using_fallback_real = True
                     _last_auto_recovery_check_at = time.monotonic()
@@ -1141,6 +1142,27 @@ def _ensure_text_relations_indexes(coll: Collection) -> None:
     coll.create_index([("object_text_id", ASCENDING)], name="object_text_id_1")
     coll.create_index(
         [
+            ("subject_concept_id", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="subject_concept_id_id",
+    )
+    coll.create_index(
+        [
+            ("predicate", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="predicate_id",
+    )
+    coll.create_index(
+        [
+            ("updated_at", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="updated_at_id",
+    )
+    coll.create_index(
+        [
             ("object_text_id", ASCENDING),
             ("predicate", ASCENDING),
             ("subject_concept_id", ASCENDING),
@@ -1188,6 +1210,81 @@ def _ensure_text_relations_indexes(coll: Collection) -> None:
     coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 
+def _ensure_scoped_knowledge_assertions_indexes(coll: Collection) -> None:
+    """Ensure actor-scoped assertions stay bounded and cheaply retrievable."""
+
+    coll.create_index(
+        [("assertion_id", ASCENDING)],
+        name="assertion_id_unique",
+        unique=True,
+    )
+    coll.create_index(
+        [
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
+        ],
+        name="audience_status_updated_at_desc_assertion_id",
+    )
+    coll.create_index(
+        [
+            ("subject_concept_id", ASCENDING),
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
+        ],
+        name="subject_audience_status_updated_at_desc_assertion_id",
+    )
+    coll.create_index(
+        [
+            ("object_concept_id", ASCENDING),
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
+        ],
+        name="object_audience_status_updated_at_desc_assertion_id",
+    )
+    coll.create_index(
+        [
+            ("predicate", ASCENDING),
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("updated_at", DESCENDING),
+            ("assertion_id", ASCENDING),
+        ],
+        name="predicate_audience_status_updated_at_desc_assertion_id",
+    )
+    coll.create_index(
+        [
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="audience_status_id",
+    )
+    coll.create_index(
+        [
+            ("subject_concept_id", ASCENDING),
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="subject_audience_status_id",
+    )
+    coll.create_index(
+        [
+            ("predicate", ASCENDING),
+            ("scope.audience_keys", ASCENDING),
+            ("status", ASCENDING),
+            ("_id", ASCENDING),
+        ],
+        name="predicate_audience_status_id",
+    )
+
+
 def _ensure_meta_relations_indexes(coll: Collection) -> None:
     existing_indexes = {idx["name"] for idx in coll.list_indexes()}
     if "type_1_subject_type_id_1" not in existing_indexes:
@@ -1205,12 +1302,8 @@ def _ensure_meta_relations_indexes(coll: Collection) -> None:
 
 
 def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
-    existing = [
-        idx for idx in coll.list_indexes() if isinstance(idx, Mapping)
-    ]
-    existing_names = {
-        str(idx.get("name") or "") for idx in existing if idx.get("name")
-    }
+    existing = [idx for idx in coll.list_indexes() if isinstance(idx, Mapping)]
+    existing_names = {str(idx.get("name") or "") for idx in existing if idx.get("name")}
     if "relation_id_1_unique" not in existing_names:
         coll.create_index(
             [("relation_id", ASCENDING)],
@@ -1470,6 +1563,19 @@ def get_text_relations_collection() -> Collection | None:
             db,
             TEXT_RELATIONS_COLLECTION_NAME,
             _ensure_text_relations_indexes,
+        )
+    return None
+
+
+def get_scoped_knowledge_assertions_collection() -> Collection | None:
+    """Return the non-canonical, actor-scoped knowledge assertion collection."""
+
+    db = get_db()
+    if db is not None:
+        return _ensure_collection_indexes_once(
+            db,
+            SCOPED_KNOWLEDGE_ASSERTIONS_COLLECTION_NAME,
+            _ensure_scoped_knowledge_assertions_indexes,
         )
     return None
 

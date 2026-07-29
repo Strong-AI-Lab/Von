@@ -470,7 +470,12 @@ def _canonical_text_exists(
     predicate: str,
     target_text: str,
 ) -> bool:
-    rows = get_texts_for_concept(source_id, predicate=predicate, limit=100)
+    rows = get_texts_for_concept(
+        source_id,
+        predicate=predicate,
+        limit=100,
+        context_view="base_publication",
+    )
     expected = target_text.strip()
     return any(_safe_str(row.get("text")) == expected for row in rows if isinstance(row, Mapping))
 

@@ -5,7 +5,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import (
@@ -30,6 +41,8 @@ from .relationship_extent_index_service import query_relationship_extent_index
 from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 RelationValue = Dict[str, Any]
+RelationContextView = Literal["base_publication", "actor_effective"]
+_RELATION_CONTEXT_VIEWS = frozenset({"base_publication", "actor_effective"})
 
 _ARG_INDEX_SUBJECT = 1  # Align with example payloads (1-based indexing)
 _ARG_INDEX_FIRST_OBJECT = 2
@@ -293,6 +306,7 @@ def find_relations_with_argument(
     include_uncertain: bool = False,
     uncertainty_mode: Optional[str] = None,
     uncertainty_statuses: Optional[Sequence[str]] = None,
+    context_view: RelationContextView = "base_publication",
 ) -> Dict[str, Any]:
     """Find relation hits where ``concept_id`` appears in any argument position.
 
@@ -305,6 +319,10 @@ def find_relations_with_argument(
     resolved_concept_id = str(concept_id or "").strip()
     if not resolved_concept_id:
         raise ValueError("concept_id is required")
+    if context_view not in _RELATION_CONTEXT_VIEWS:
+        raise ValueError(
+            "context_view must be 'base_publication' or 'actor_effective'"
+        )
 
     _ = scope  # Scope is enforced by repository-level access control.
     resolved_limit = _coerce_limit(limit)
@@ -329,6 +347,7 @@ def find_relations_with_argument(
         "sort_by": sort_by,
         "include_text_snippets": bool(include_text_snippets),
         "include_concept_preview": bool(include_concept_preview),
+        "context_view": context_view,
     }
 
     include_structural = relation_filter in {"any", "binary"}
@@ -348,9 +367,7 @@ def find_relations_with_argument(
     )
     incoming_asserted_binary_diagnostics = {
         "requested": bool(
-            include_asserted_rows
-            and include_structural
-            and include_arg2_or_later
+            include_asserted_rows and include_structural and include_arg2_or_later
         ),
         "path": "not_requested",
         "used_relationship_extent_index": False,
@@ -362,6 +379,8 @@ def find_relations_with_argument(
 
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     hits: List[Dict[str, Any]] = []
+    scoped_concept_query_truncated = False
+    actor_effective_text_query_truncated = False
 
     subject_doc = _load_accessible_relation_subject_document(
         resolved_concept_id,
@@ -479,9 +498,7 @@ def find_relations_with_argument(
             )
             for candidate in candidate_rows:
                 if candidate[0] not in accessible_source_ids:
-                    incoming_asserted_binary_diagnostics[
-                        "rows_filtered_by_access"
-                    ] += 1
+                    incoming_asserted_binary_diagnostics["rows_filtered_by_access"] += 1
                     continue
                 incoming_candidates.append(candidate)
         else:
@@ -492,18 +509,12 @@ def find_relations_with_argument(
                 incoming_asserted_binary_diagnostics.update(
                     {
                         "path": "canonical_exact_predicate_query",
-                        "fallback_reason": (
-                            "relationship_extent_index_unavailable"
-                        ),
+                        "fallback_reason": ("relationship_extent_index_unavailable"),
                     }
                 )
                 exact_query = {
                     "$or": [
-                        {
-                            f"relationships.{predicate_id}": (
-                                resolved_concept_id
-                            )
-                        }
+                        {f"relationships.{predicate_id}": (resolved_concept_id)}
                         for predicate_id in exact_predicate_ids
                     ]
                 }
@@ -519,9 +530,7 @@ def find_relations_with_argument(
                 exact_documents = ConceptsRepository.find(
                     exact_query,
                     exact_projection,
-                    max_time_ms=(
-                        _CANONICAL_EXACT_PREDICATE_FALLBACK_MAX_TIME_MS
-                    ),
+                    max_time_ms=(_CANONICAL_EXACT_PREDICATE_FALLBACK_MAX_TIME_MS),
                 )
                 for document in exact_documents:
                     source_id = document.get("concept_id")
@@ -555,9 +564,7 @@ def find_relations_with_argument(
                 incoming_asserted_binary_diagnostics.update(
                     {
                         "path": "canonical_aggregation",
-                        "fallback_reason": (
-                            "relationship_extent_index_unavailable"
-                        ),
+                        "fallback_reason": ("relationship_extent_index_unavailable"),
                     }
                 )
                 incoming_pipeline = [
@@ -566,9 +573,7 @@ def find_relations_with_argument(
                         "$project": {
                             "concept_id": 1,
                             "updated_at": 1,
-                            "relationship_items": {
-                                "$objectToArray": "$relationships"
-                            },
+                            "relationship_items": {"$objectToArray": "$relationships"},
                         }
                     },
                     {"$unwind": "$relationship_items"},
@@ -583,16 +588,12 @@ def find_relations_with_argument(
                     {"$match": {"targets": resolved_concept_id}},
                 ]
                 for row in ConceptsRepository.aggregate(incoming_pipeline):
-                    incoming_asserted_binary_diagnostics[
-                        "canonical_rows_returned"
-                    ] += 1
+                    incoming_asserted_binary_diagnostics["canonical_rows_returned"] += 1
                     source_id = row.get("concept_id")
                     if not isinstance(source_id, str) or not source_id.strip():
                         continue
                     source_id = source_id.strip()
-                    targets = _normalise_relationship_targets(
-                        row.get("targets")
-                    )
+                    targets = _normalise_relationship_targets(row.get("targets"))
                     if not targets:
                         continue
                     for target_index, target_value in enumerate(targets):
@@ -615,9 +616,12 @@ def find_relations_with_argument(
             include_preview=include_concept_preview,
             preview_cache=preview_cache,
         )
-        for source_id, predicate_id, target_index, source_updated_at in (
-            incoming_candidates
-        ):
+        for (
+            source_id,
+            predicate_id,
+            target_index,
+            source_updated_at,
+        ) in incoming_candidates:
             if not _predicate_matches_terms(predicate_id, predicate_terms):
                 continue
             matched_indexes = [_ARG_INDEX_FIRST_OBJECT + target_index]
@@ -662,20 +666,119 @@ def find_relations_with_argument(
                 hit["source_concept_preview"] = source_preview
             hits.append(hit)
 
+    if (
+        context_view == "actor_effective"
+        and include_asserted_rows
+        and include_structural
+    ):
+        from .scoped_assertion_service import (
+            list_visible_scoped_assertions_page,
+        )
+
+        scoped_concept_page = list_visible_scoped_assertions_page(
+            argument_concept_id=resolved_concept_id,
+            predicates=predicate_display_terms or None,
+            object_kind="concept",
+            limit=_MAX_LIMIT + 1,
+        )
+        scoped_concept_assertions = scoped_concept_page["items"]
+        scoped_concept_query_truncated = bool(
+            scoped_concept_page.get("has_more")
+            or scoped_concept_page.get("counts_are_lower_bounds")
+            or len(scoped_concept_assertions) > _MAX_LIMIT
+        )
+        for assertion in scoped_concept_assertions[:_MAX_LIMIT]:
+            source_id = str(assertion.get("subject_concept_id") or "")
+            target_id = str(assertion.get("object_concept_id") or "")
+            predicate_id = assertion.get("predicate")
+            if not source_id or not target_id:
+                continue
+            matched_indexes: List[int] = []
+            if source_id == resolved_concept_id:
+                matched_indexes.append(_ARG_INDEX_SUBJECT)
+            if target_id == resolved_concept_id:
+                matched_indexes.append(_ARG_INDEX_FIRST_OBJECT)
+            if not _argument_indexes_match(matched_indexes, argument_filter):
+                continue
+            if not _predicate_matches_terms(predicate_id, predicate_terms):
+                continue
+            source_preview = _resolve_concept_preview(
+                source_id,
+                include_concept_preview,
+                preview_cache,
+            )
+            hit = {
+                "source_concept_id": source_id,
+                "predicate_concept_id": predicate_id,
+                "relation_kind": "binary",
+                "argument_indexes": matched_indexes,
+                "target_value": target_id,
+                "target_concept_preview": (
+                    _resolve_concept_preview(
+                        target_id,
+                        True,
+                        preview_cache,
+                    )
+                    if include_concept_preview
+                    else None
+                ),
+                "relation_metadata": {
+                    "relation_id": None,
+                    "assertion_id": assertion.get("assertion_id"),
+                    "row_kind": "scoped_assertion",
+                    "updated_at": assertion.get("updated_at"),
+                    "match_type": "exact",
+                    "assertion_scope": assertion.get("scope"),
+                    "canonical_publication": False,
+                    "storage_surface": "scoped_knowledge_assertions",
+                    "provenance": assertion.get("provenance"),
+                },
+                "access_granted": source_preview is not None
+                or not include_concept_preview,
+                "follow_up_actions": _build_follow_up_actions(
+                    [source_id, target_id],
+                    exclude={resolved_concept_id},
+                ),
+                "score": 1.0,
+                "is_asserted": True,
+                "relation_state": "scoped_asserted",
+                "canonical_publication": False,
+            }
+            if include_concept_preview:
+                hit["source_concept_preview"] = source_preview
+            hits.append(hit)
+
     if include_asserted_rows and include_text and include_arg1:
         source_preview = _resolve_concept_preview(
             resolved_concept_id,
             include_concept_preview,
             preview_cache,
         )
-        for rel in get_texts_for_concept(
-            subject_concept_id=resolved_concept_id,
-            limit=_MAX_LIMIT,
-        ):
+        text_query_metadata: dict[str, Any] = {}
+        actor_effective_text_rows = get_texts_for_concepts(
+            [resolved_concept_id],
+            limit_per_concept=_MAX_LIMIT + 1,
+            context_view=context_view,
+            query_metadata=text_query_metadata,
+        ).get(resolved_concept_id, [])
+        actor_effective_text_query_truncated = bool(
+            len(actor_effective_text_rows) > _MAX_LIMIT
+            or text_query_metadata.get("relation_query_truncated")
+            or text_query_metadata.get("scoped_query_truncated")
+            or text_query_metadata.get("scoped_counts_are_lower_bounds")
+        )
+        for rel in actor_effective_text_rows[:_MAX_LIMIT]:
             predicate_id = rel.get("predicate")
             if not _predicate_matches_terms(predicate_id, predicate_terms):
                 continue
             text_value = rel.get("text")
+            assertion_id = rel.get("assertion_id")
+            row_kind = rel.get("row_kind")
+            relation_id = rel.get("relation_id")
+            if row_kind == "scoped_assertion" or assertion_id:
+                relation_id = None
+            elif not relation_id:
+                relation_id = f"text::{resolved_concept_id}::{predicate_id}"
             hit: Dict[str, Any] = {
                 "source_concept_id": resolved_concept_id,
                 "predicate_concept_id": predicate_id,
@@ -683,20 +786,34 @@ def find_relations_with_argument(
                 "argument_indexes": [_ARG_INDEX_SUBJECT],
                 "target_value": text_value,
                 "relation_metadata": {
-                    "relation_id": str(
-                        rel.get("relation_id")
-                        or f"text::{resolved_concept_id}::{predicate_id}"
+                    "relation_id": (
+                        str(relation_id) if relation_id is not None else None
                     ),
                     "text_value_id": rel.get("text_value_id"),
                     "lang": rel.get("lang"),
                     "match_type": "exact",
+                    "assertion_id": assertion_id,
+                    "row_kind": row_kind,
+                    "assertion_scope": rel.get("assertion_scope"),
+                    "canonical_publication": rel.get(
+                        "canonical_publication",
+                        True,
+                    ),
+                    "storage_surface": rel.get("storage_surface"),
+                    "provenance": rel.get("provenance"),
                 },
                 "access_granted": source_preview is not None
                 or not include_concept_preview,
                 "follow_up_actions": [],
                 "score": 1.0,
                 "is_asserted": True,
-                "relation_state": "asserted",
+                "relation_state": (
+                    "scoped_asserted" if rel.get("assertion_id") else "asserted"
+                ),
+                "canonical_publication": rel.get(
+                    "canonical_publication",
+                    True,
+                ),
             }
             if include_concept_preview:
                 hit["source_concept_preview"] = source_preview
@@ -818,15 +935,29 @@ def find_relations_with_argument(
     deduped_hits = _dedupe_argument_hits(hits)
     sorted_hits = _sort_argument_hits(deduped_hits, sort_by)
     paged_hits = sorted_hits[resolved_offset : resolved_offset + resolved_limit_value]
+    counts_are_lower_bounds = bool(
+        scoped_concept_query_truncated or actor_effective_text_query_truncated
+    )
     return {
         "concept_id": resolved_concept_id,
+        "context_view": context_view,
         "total_hits": len(sorted_hits),
+        **(
+            {"total_hits_is_lower_bound": True}
+            if counts_are_lower_bounds
+            else {}
+        ),
         "hits": paged_hits,
         "paging": {
             "limit": resolved_limit_value,
             "offset": resolved_offset,
             "returned": len(paged_hits),
             "total_available": len(sorted_hits),
+            **(
+                {"total_available_is_lower_bound": True}
+                if counts_are_lower_bounds
+                else {}
+            ),
         },
         "uncertainty_diagnostics": {
             "mode": mode_value,
@@ -840,6 +971,19 @@ def find_relations_with_argument(
             "uncertainty_statuses": status_filter or None,
             "total_hits": len(sorted_hits),
             "returned": len(paged_hits),
+            **(
+                {
+                    "total_hits_is_lower_bound": True,
+                    "scoped_concept_query_truncated": (
+                        scoped_concept_query_truncated
+                    ),
+                    "actor_effective_text_query_truncated": (
+                        actor_effective_text_query_truncated
+                    ),
+                }
+                if counts_are_lower_bounds
+                else {}
+            ),
             "incoming_asserted_binary": incoming_asserted_binary_diagnostics,
         },
     }
@@ -934,9 +1078,7 @@ def get_predicate_incidence(
             uncertainty_statuses=uncertainty_statuses,
         )
         if type_count_options.include:
-            _attach_direct_type_ids_to_fast_incidence_hits(
-                {resolved_concept_id: hits}
-            )
+            _attach_direct_type_ids_to_fast_incidence_hits({resolved_concept_id: hits})
         predicate_rows = _aggregate_predicate_incidence_rows(
             hits=hits,
             include_concept_preview=include_concept_preview,
@@ -1033,8 +1175,10 @@ def get_predicate_incidence(
         uncertainty_mode=uncertainty_mode,
         uncertainty_statuses=uncertainty_statuses,
     )
-    retrieval_strategy = "batched_subject_asserted" if grouped_hits is not None else (
-        "per_instance_relation_lookup"
+    retrieval_strategy = (
+        "batched_subject_asserted"
+        if grouped_hits is not None
+        else ("per_instance_relation_lookup")
     )
     if grouped_hits is not None and type_count_options.include:
         _attach_direct_type_ids_to_fast_incidence_hits(grouped_hits)
@@ -1286,16 +1430,17 @@ def _collect_type_subject_hits_for_incidence_fast(
                 )
             )
         accessible_source_ids = (
-            filter_accessible_concept_ids(grouped)
-            if enforce_access
-            else set(grouped)
+            filter_accessible_concept_ids(grouped) if enforce_access else set(grouped)
         )
         accessible_target_ids: set[str] | None = None
         if enforce_access:
             candidate_target_ids: List[str] = []
             for doc in cursor:
                 source_id = doc.get("concept_id")
-                if not isinstance(source_id, str) or source_id not in accessible_source_ids:
+                if (
+                    not isinstance(source_id, str)
+                    or source_id not in accessible_source_ids
+                ):
                     continue
                 relationships = doc.get("relationships")
                 if not isinstance(relationships, Mapping):
@@ -1303,7 +1448,9 @@ def _collect_type_subject_hits_for_incidence_fast(
                 for predicate_id, raw_targets in relationships.items():
                     if not _predicate_matches_terms(predicate_id, predicate_terms):
                         continue
-                    candidate_target_ids.extend(_normalise_relationship_targets(raw_targets))
+                    candidate_target_ids.extend(
+                        _normalise_relationship_targets(raw_targets)
+                    )
             accessible_target_ids = filter_accessible_concept_ids(candidate_target_ids)
         for doc in cursor:
             source_id = doc.get("concept_id")
@@ -2894,9 +3041,7 @@ def _prime_concept_preview_cache(
         else set(pending_ids)
     )
     accessible_ids = [
-        concept_id
-        for concept_id in pending_ids
-        if concept_id in accessible_id_set
+        concept_id for concept_id in pending_ids if concept_id in accessible_id_set
     ]
     for concept_id in pending_ids:
         if concept_id not in accessible_id_set:
@@ -3053,8 +3198,7 @@ def _filter_accessible_relationships(
         if isinstance(raw_targets, str):
             filtered[predicate_id] = (
                 []
-                if raw_targets.startswith("#")
-                and raw_targets not in accessible_ids
+                if raw_targets.startswith("#") and raw_targets not in accessible_ids
                 else raw_targets
             )
             continue
@@ -3544,10 +3688,7 @@ def _canonical_exact_predicate_filter_ids(
 
     tokens = _iter_predicate_filter_tokens(predicate_filter)
     if not tokens or any(
-        not token.startswith("#V#")
-        or "." in token
-        or "$" in token
-        or "\x00" in token
+        not token.startswith("#V#") or "." in token or "$" in token or "\x00" in token
         for token in tokens
     ):
         return []
@@ -3655,6 +3796,7 @@ def _dedupe_argument_hits(hits: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
             tuple(hit.get("argument_indexes") or []),
             hit.get("target_value"),
             metadata.get("relation_id"),
+            metadata.get("assertion_id"),
         )
         existing = deduped.get(key)
         if existing is None:
