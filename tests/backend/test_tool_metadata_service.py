@@ -238,6 +238,28 @@ def test_vontology_concept_search_alias_inherits_schema_discovery_metadata(
         service.invalidate_cache()
 
 
+def test_relation_read_hints_preserve_direction_neutral_completeness(
+    monkeypatch,
+):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", dict)
+    service.invalidate_cache()
+    try:
+        incidence = service.get_tool_metadata("get_predicate_incidence")
+        relation_read = service.get_tool_metadata("find_relations_with_argument")
+
+        assert "argument_index='any'" in (incidence.planner_hint or "")
+        assert "exact predicate IDs" in (incidence.planner_hint or "")
+        assert "one-direction" in (incidence.planner_hint or "")
+        assert "argument_index='any'" in (relation_read.planner_hint or "")
+        assert "complete negative" in (relation_read.planner_hint or "")
+        assert "PhD" not in (incidence.planner_hint or "")
+        assert "student" not in (relation_read.planner_hint or "").lower()
+    finally:
+        service.invalidate_cache()
+
+
 def test_vontology_concept_search_alias_inherits_represented_metadata(
     monkeypatch,
 ):

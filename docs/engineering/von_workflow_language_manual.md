@@ -516,6 +516,12 @@ model may use it to retrieve predicates, types, inverse directions, or reified
 relationship shapes before a relation-bearing read. A typed unavailable or
 degraded retrieval index falls back to the bounded catalogue; it must not be
 reported as authoritative evidence that no suitable capability exists.
+Direction-neutral relation capability hints are similarly local to the
+retrieved capability: when the exact represented predicate and argument
+direction are unknown, they advise incidence or relation reads across any
+argument position before a complete negative is claimed. This is not a global
+conversation-stage requirement and does not activate on unrelated uses of
+words such as “list” or “find”.
 
 Mechanical dominance is deliberately narrower. A read-only workflow may be
 removed from the active frontier only when its authoritative routing profile

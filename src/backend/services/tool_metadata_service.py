@@ -701,7 +701,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "default_payload": {"limit": 20},
         "planner_hint": (
             "Use for entity-relative relationship lookup after resolving the anchor "
-            "concept. This is relation-bearing evidence, not mere inventory."
+            "concept. This is relation-bearing evidence, not mere inventory. When "
+            "the represented predicate and direction have not been established, "
+            "inspect predicate incidence with argument_index='any' first, or keep "
+            "this lookup direction-neutral with argument_index='any'. A one-direction "
+            "or lexical-predicate probe cannot support a complete negative result."
         ),
     },
     "find_concepts_by_name": {
@@ -773,6 +777,13 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "include_concept_preview": False,
             "limit": 12,
         },
+        "planner_hint": (
+            "Use before a filtered entity-relative lookup when the represented "
+            "predicate, inverse form, or argument direction is not established. "
+            "Set argument_index='any' to inspect both directions, then use the "
+            "returned exact predicate IDs and type counts for the relation read. "
+            "Do not infer a complete negative from a one-direction incidence probe."
+        ),
     },
     "get_concept_usage_profile": {
         "salience": "medium",
