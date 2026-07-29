@@ -42,6 +42,11 @@ def test_discovery_exposes_only_executable_routing_eligible_workflows(
                             "fetch_concept",
                             "find_relations_with_argument",
                         ],
+                        "component_tools": [
+                            "fetch_concept",
+                            "get_predicate_incidence",
+                            "find_relations_with_argument",
+                        ],
                         "compact_executability": {
                             "step_count": 3,
                         },
@@ -99,6 +104,7 @@ def test_discovery_exposes_only_executable_routing_eligible_workflows(
         turn_id="turn-123",
         registered_capability_categories={
             "fetch_concept": "read",
+            "get_predicate_incidence": "read",
             "find_relations_with_argument": "read",
         },
     )
@@ -125,6 +131,7 @@ def test_discovery_exposes_only_executable_routing_eligible_workflows(
     }
     assert catalogue_entry["plan_profile"]["component_capability_names"] == [
         "fetch_concept",
+        "get_predicate_incidence",
         "find_relations_with_argument",
     ]
     assert catalogue_entry["plan_profile"]["cost_profile"]["declared_step_count"] == 3

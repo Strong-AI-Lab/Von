@@ -146,7 +146,8 @@ def _workflow_plan_metadata(
         if str(name).strip() and str(category).strip()
     }
     declared_components = _bounded_text_tuple(
-        index_metadata.get("required_tools"),
+        index_metadata.get("component_tools")
+        or index_metadata.get("required_tools"),
     )
     visible_components = tuple(
         name for name in declared_components if name in visible_categories
@@ -532,6 +533,7 @@ def discover_turn_workflow_capabilities(
                                 for key in (
                                     "authority_source",
                                     "compact_executability",
+                                    "component_tools_source",
                                     "description_source",
                                     "publication_lifecycle",
                                     "required_tools_source",

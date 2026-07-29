@@ -3180,6 +3180,105 @@ def test_capability_frontier_promotes_direct_components_without_hiding_workflow(
     assert result["dominated_total"] == 0
 
 
+def test_workflow_components_remain_visible_ahead_of_unrelated_tool_rag_hits(
+    monkeypatch,
+) -> None:
+    from src.backend.services import (
+        registered_tool_capability_retrieval_service,
+        tool_metadata_service,
+    )
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    component_names = (
+        "fetch_concept",
+        "find_relations_with_argument",
+        "get_predicate_incidence",
+    )
+    catalogue = MethodCatalogue()
+    for name in (*component_names, "workflow_list_instances"):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda **_kwargs: {"success": True},
+                input_schema=Schema(optional={}, allow_unknown=True),
+                category="read",
+                description=f"Use {name}.",
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=2.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda _name, *, fallback_description=None: fallback_description,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_planner_hint",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        registered_tool_capability_retrieval_service,
+        "retrieve_registered_tool_capability_scores",
+        lambda _query, _candidates, **_kwargs: (
+            {"workflow_list_instances": 0.9},
+            {
+                "schema_version": "registered_tool_capability_retrieval.v1",
+                "status": "results_available",
+                "result_count": 1,
+            },
+        ),
+    )
+    workflow = WorkflowTurnCapability(
+        name="represented_workflow_entity_lookup",
+        workflow_id="#V#entity_lookup_workflow",
+        display_name="Entity lookup workflow",
+        description="Retrieve represented relationships for an entity.",
+        relevance_score=0.96,
+        input_schema={"type": "object", "properties": {}},
+        component_capability_names=component_names,
+        declared_component_count=3,
+        declared_step_count=3,
+        semantic_effect=False,
+        semantic_effect_source="declared_registered_read_components",
+    )
+
+    result = _capability_catalogue(
+        gateway,
+        (*component_names, "workflow_list_instances"),
+        {"query": "who is supervised by this person", "limit": 4},
+        workflow_capabilities=(workflow,),
+    )
+
+    assert [item["name"] for item in result["capabilities"]] == [
+        "fetch_concept",
+        "represented_workflow_entity_lookup",
+        "find_relations_with_argument",
+        "get_predicate_incidence",
+    ]
+    assert all(
+        any(
+            evidence["source"] == "declared_component_of_matched_workflow"
+            for evidence in item["selection"]["adequacy_evidence"]
+        )
+        for item in (
+            result["capabilities"][0],
+            result["capabilities"][2],
+            result["capabilities"][3],
+        )
+    )
+
+
 def test_semantic_tool_retrieval_puts_cheaper_schema_plan_in_visible_frontier(
     monkeypatch,
 ) -> None:

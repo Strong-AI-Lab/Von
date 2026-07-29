@@ -39,6 +39,7 @@ from .subworkflow_contracts import (
 from .workflow_launch_input_contracts import (
     normalise_workflow_launch_input_contract,
 )
+from .workflow_mcp_tool_actions import WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID
 from .mcp_tool_bridge import candidate_internal_mcp_tool_names
 from .workflow_action_contracts import resolve_workflow_action_target
 from .workflow_state_contracts import has_actionless_pre_action_contract
@@ -1101,6 +1102,66 @@ def _parse_step_input_map(step_relationships: Mapping[str, Any]) -> Dict[str, An
             if parsed_value is not None:
                 input_map[key] = parsed_value
     return input_map
+
+
+def _normalise_declared_mcp_tool_names(value: Any) -> list[str]:
+    """Project represented tool identifiers to bounded MCP name candidates."""
+
+    raw_values: Sequence[Any]
+    if isinstance(value, str):
+        raw_values = (value,)
+    elif isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        raw_values = value
+    else:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        tool_name = _normalise_non_empty_text(raw_value)
+        if tool_name is None or tool_name == "*":
+            continue
+        for candidate in candidate_internal_mcp_tool_names(tool_name):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            names.append(candidate)
+            if len(names) >= 100:
+                return names
+    return names
+
+
+def _step_declared_llm_tool_names(
+    step_relationships: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return required and allowed component tools from represented LLM policy."""
+
+    input_map = _parse_step_input_map(step_relationships)
+    llm_policy = _extract_step_llm_policy(
+        input_map=input_map,
+        prompt_contract=None,
+    )
+    required = _normalise_declared_mcp_tool_names(
+        llm_policy.get("required_tools"),
+    )
+    components: list[str] = []
+    seen: set[str] = set()
+    for field_name in (
+        "required_tools",
+        "conditional_required_tools",
+        "allowed_tools",
+    ):
+        for tool_name in _normalise_declared_mcp_tool_names(
+            llm_policy.get(field_name),
+        ):
+            if tool_name in seen:
+                continue
+            seen.add(tool_name)
+            components.append(tool_name)
+    return required, components
 
 
 def _extract_step_prompt_resolution_config(
@@ -4489,8 +4550,10 @@ def batch_fetch_workflow_routing_metadata(
         # turn contracts against represented workflow capability structurally.
         workflow_action_ids: list[str] = []
         required_tool_names: list[str] = []
+        component_tool_names: list[str] = []
         seen_action_ids: set[str] = set()
         seen_tool_names: set[str] = set()
+        seen_component_tool_names: set[str] = set()
         invokes_action_predicates = (
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepInvokesTool"],
@@ -4516,12 +4579,32 @@ def batch_fetch_workflow_routing_metadata(
                 # tool invocations; everything else maps to internal MCP tool
                 # name candidates by the same structural rule the runtime
                 # bridge uses (identity plus dots-to-underscores).
-                if action_id.startswith("workflow_control."):
+                if (
+                    action_id.startswith("workflow_control.")
+                    or action_id == "llm.action"
+                    or action_id == WORKFLOW_SUBWORKFLOW_ACTION_ID
+                    or action_id == WORKFLOW_MCP_INVOKE_TOOL_ACTION_ID
+                ):
                     continue
                 for tool_name in candidate_internal_mcp_tool_names(action_id):
                     if tool_name and tool_name not in seen_tool_names:
                         seen_tool_names.add(tool_name)
                         required_tool_names.append(tool_name)
+                    if tool_name and tool_name not in seen_component_tool_names:
+                        seen_component_tool_names.add(tool_name)
+                        component_tool_names.append(tool_name)
+
+            llm_required_tools, llm_component_tools = (
+                _step_declared_llm_tool_names(step_relationships)
+            )
+            for tool_name in llm_required_tools:
+                if tool_name not in seen_tool_names:
+                    seen_tool_names.add(tool_name)
+                    required_tool_names.append(tool_name)
+            for tool_name in llm_component_tools:
+                if tool_name not in seen_component_tool_names:
+                    seen_component_tool_names.add(tool_name)
+                    component_tool_names.append(tool_name)
         if workflow_action_ids:
             workflow_metadata["workflow_action_ids"] = sorted(workflow_action_ids)
             workflow_metadata["workflow_action_ids_source"] = (
@@ -4530,7 +4613,12 @@ def batch_fetch_workflow_routing_metadata(
         if required_tool_names:
             workflow_metadata["required_tools"] = sorted(required_tool_names)
             workflow_metadata["required_tools_source"] = (
-                "vontology_workflow_graph:invokesAction:internal_mcp_tool_name_candidates"
+                "vontology_workflow_graph:invokesAction_or_llm_policy_required_tools"
+            )
+        if component_tool_names:
+            workflow_metadata["component_tools"] = sorted(component_tool_names)
+            workflow_metadata["component_tools_source"] = (
+                "vontology_workflow_graph:invokesAction_or_llm_policy_tool_scope"
             )
 
         metadata_by_workflow_id[workflow_id] = workflow_metadata

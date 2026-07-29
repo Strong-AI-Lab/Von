@@ -490,6 +490,17 @@ Only capabilities already delegated to the current actor are unified into the
 turn frontier. Retrieval similarity is evidence of possible adequacy, not an
 invocation permission or a proof that two plans are equivalent.
 
+Workflow component projection includes actor-visible MCP tools named by
+represented step actions and by represented LLM-step tool policy
+(`required_tools`, `conditional_required_tools`, and `allowed_tools`). Engine
+actions such as `llm.action`, workflow control, generic workflow MCP dispatch,
+and subworkflow invocation are not themselves projected as direct MCP
+alternatives. Required-tool metadata retains its stricter execution-contract
+meaning; the broader component set is only a set of plausible simpler plans.
+Component candidates inherit evidence from the matched workflow and are kept
+visible ahead of unrelated direct retrieval hits so pagination cannot erase
+the cheaper path.
+
 Within each plan shape, semantic retrieval ranks plausible candidates before
 the lower-cost direct and higher-cost workflow alternatives are interleaved.
 This ensures that a semantically relevant direct path is present in the

@@ -28,6 +28,7 @@ _WORKFLOW_DOCS = {
                 f"{_WORKFLOW_ID}_step_fetch",
                 f"{_WORKFLOW_ID}_step_control",
                 f"{_WORKFLOW_ID}_step_tool_link",
+                f"{_WORKFLOW_ID}_step_llm",
                 f"{_WORKFLOW_ID}_step_missing_doc",
             ],
         },
@@ -48,13 +49,32 @@ _STEP_DOCS = {
     f"{_WORKFLOW_ID}_step_control": {
         "concept_id": f"{_WORKFLOW_ID}_step_control",
         "relationships": {
-            "#V#invokesAction": ["workflow_control.context_set"]
+            "#V#invokesAction": [
+                "workflow_control.context_set",
+                "workflow_mcp.invoke_tool",
+            ]
         },
     },
     f"{_WORKFLOW_ID}_step_tool_link": {
         "concept_id": f"{_WORKFLOW_ID}_step_tool_link",
         "relationships": {
             "#V#workflow_step_invokes_tool": ["download_paper"]
+        },
+    },
+    f"{_WORKFLOW_ID}_step_llm": {
+        "concept_id": f"{_WORKFLOW_ID}_step_llm",
+        "relationships": {
+            "#V#invokesAction": ["llm.action"],
+            "#V#hasInputMap": [
+                "workflow_step_execution_mode=llm",
+                (
+                    "workflow_step_llm_policy="
+                    '{"allowed_tools":["fetch_concept",'
+                    '"find_relations_with_argument"],'
+                    '"conditional_required_tools":["search_concepts"],'
+                    '"required_tools":["fetch_concept"]}'
+                ),
+            ],
         },
     },
 }
@@ -92,7 +112,9 @@ def test_projects_action_ids_and_tools_from_represented_steps():
     assert workflow_metadata["workflow_action_ids"] == [
         "arxiv.fetch_metadata",
         "download_paper",
+        "llm.action",
         "workflow_control.context_set",
+        "workflow_mcp.invoke_tool",
     ]
     assert workflow_metadata["workflow_action_ids_source"] == (
         "vontology_workflow_graph:invokesAction"
@@ -104,9 +126,21 @@ def test_projects_action_ids_and_tools_from_represented_steps():
         "arxiv.fetch_metadata",
         "arxiv_fetch_metadata",
         "download_paper",
+        "fetch_concept",
     ]
     assert workflow_metadata["required_tools_source"] == (
-        "vontology_workflow_graph:invokesAction:internal_mcp_tool_name_candidates"
+        "vontology_workflow_graph:invokesAction_or_llm_policy_required_tools"
+    )
+    assert workflow_metadata["component_tools"] == [
+        "arxiv.fetch_metadata",
+        "arxiv_fetch_metadata",
+        "download_paper",
+        "fetch_concept",
+        "find_relations_with_argument",
+        "search_concepts",
+    ]
+    assert workflow_metadata["component_tools_source"] == (
+        "vontology_workflow_graph:invokesAction_or_llm_policy_tool_scope"
     )
 
 
@@ -115,6 +149,7 @@ def test_workflow_without_steps_gets_no_tool_claims():
     bare_metadata = metadata[_BARE_WORKFLOW_ID]
     assert "workflow_action_ids" not in bare_metadata
     assert "required_tools" not in bare_metadata
+    assert "component_tools" not in bare_metadata
 
 
 def test_projection_supports_selector_fast_path_coverage():

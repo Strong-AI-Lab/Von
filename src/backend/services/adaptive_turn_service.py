@@ -2064,6 +2064,13 @@ def _capability_catalogue(
             component["_ranking_component_match_count"] = (
                 int(component.get("_ranking_component_match_count") or 0) + 1
             )
+            component["_ranking_component_workflow_relevance"] = max(
+                float(
+                    component.get("_ranking_component_workflow_relevance")
+                    or 0.0
+                ),
+                float(workflow.get("_ranking_semantic_relevance") or 0.0),
+            )
             component_selection = component.get("selection")
             selection = (
                 dict(component_selection)
@@ -2163,8 +2170,9 @@ def _capability_catalogue(
     def direct_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
         return (
             -int(bool(item.get("_ranking_literal_phrase_match"))),
-            -float(item.get("_ranking_semantic_relevance") or 0.0),
             -int(item.get("_ranking_component_match_count") or 0),
+            -float(item.get("_ranking_component_workflow_relevance") or 0.0),
+            -float(item.get("_ranking_semantic_relevance") or 0.0),
             -int(item.get("_ranking_literal_match_count") or 0),
             str(item.get("name") or "").lower(),
         )
