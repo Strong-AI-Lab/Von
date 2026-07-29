@@ -234,6 +234,8 @@ def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch
     fake_coll = _FakeChatHistoryCollection()
     added_entries: list[str] = []
     skip_rag_indexing_flags: list[bool | None] = []
+    situation_updates: list[dict] = []
+    observation_updates: list[str] = []
 
     def _fake_create_chat_session(
         *,
@@ -282,6 +284,29 @@ def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch
         added_entries.append(message["fixture_entry_id"])
         skip_rag_indexing_flags.append(skip_rag_indexing)
 
+    def _fake_set_conversation_situation(**kwargs):
+        doc = fake_coll.docs[(kwargs["user_id"], kwargs["session_id"])]
+        revision = kwargs["expected_revision"] + 1
+        doc["conversation_situation"] = {
+            "text": kwargs["text"],
+            "revision": revision,
+            "source": kwargs["source"],
+            "updated_by": kwargs["updated_by"],
+            "source_request_id": kwargs["source_request_id"],
+        }
+        situation_updates.append(dict(kwargs))
+        return {"updated": True, "current_revision": revision}
+
+    def _fake_append_conversation_observation(**kwargs):
+        doc = fake_coll.docs[(kwargs["user_id"], kwargs["session_id"])]
+        observations = doc.setdefault("conversation_observations", [])
+        observation_id = kwargs["observation"]["observation_id"]
+        if any(item.get("observation_id") == observation_id for item in observations):
+            return {"updated": False, "duplicate": True}
+        observations.append(dict(kwargs["observation"]))
+        observation_updates.append(observation_id)
+        return {"updated": True, "duplicate": False}
+
     monkeypatch.setattr(
         service.chat_history_service,
         "create_chat_session",
@@ -297,10 +322,31 @@ def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch
         "add_message_to_history",
         _fake_add_message_to_history,
     )
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "set_chat_history_conversation_situation",
+        _fake_set_conversation_situation,
+    )
+    monkeypatch.setattr(
+        service.chat_history_service,
+        "append_chat_history_conversation_observation",
+        _fake_append_conversation_observation,
+    )
 
     spec = {
         "session_id": "browser-fixture-user-view-state",
         "session_name": "Authenticated user-view fixture sanity check",
+        "conversation_situation": {
+            "text": "The fixture situation is inspectable.",
+            "source_request_id": "browser-fixture-request",
+        },
+        "conversation_observations": (
+            {
+                "observation_id": "browser-fixture-ready",
+                "kind": "fixture_state",
+                "terminal_status": "ready",
+            },
+        ),
         "history": (
             {
                 "fixture_entry_id": "entry-1",
@@ -333,15 +379,27 @@ def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch
     )
 
     assert first["created_entries"] == 2
+    assert first["situation_updated"] is True
+    assert first["observations_added"] == 1
     assert second["created_entries"] == 0
+    assert second["situation_updated"] is False
+    assert second["observations_added"] == 0
     assert added_entries == ["entry-1", "entry-2"]
     assert skip_rag_indexing_flags == [True, True]
+    assert len(situation_updates) == 1
+    assert situation_updates[0]["expected_revision"] == 0
+    assert situation_updates[0]["include_legacy"] is False
+    assert observation_updates == ["browser-fixture-ready"]
     stored_doc = fake_coll.docs[
         ("#V#zhan_von_witbrock", "browser-fixture-user-view-state")
     ]
     assert stored_doc["origin_kind"] == "browser_test_fixture"
     assert stored_doc["is_agent_created"] is True
     assert stored_doc["test_artifact_kind"] == "browser_test_fixture_chat_session"
+    assert stored_doc["conversation_situation"]["text"] == (
+        "The fixture situation is inspectable."
+    )
+    assert stored_doc["conversation_observations"][0]["terminal_status"] == "ready"
 
 
 def test_login_browser_test_user_handles_existing_counterpart_name_variants(

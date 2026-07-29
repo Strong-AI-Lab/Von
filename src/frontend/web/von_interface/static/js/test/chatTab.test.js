@@ -6,6 +6,11 @@ import {
     __testOnly_buildWorkflowMonitorExportPayload,
     __testOnly_buildWorkflowMonitorLocatorPayload,
     __testOnly_loadChatHistory,
+    __testOnly_initializeConversationSituationPanel,
+    __testOnly_applyConversationSituationPayload,
+    __testOnly_buildConversationSituationExportPayload,
+    __testOnly_refreshConversationSituation,
+    __testOnly_resetConversationSituationState,
     __testOnly_refreshChatSessionTabs,
     __testOnly_refreshAvailableWorkflowDefinitions,
     __testOnly_refreshWorkflowCapabilityIndexStatus,
@@ -1712,6 +1717,426 @@ describe('workflow monitor active snapshot degradation handling', () => {
         const payload = __testOnly_buildWorkflowMonitorExportPayload();
         expect(payload.active_instances_snapshot.items[0].created_at).toBe('2026-03-22T10:00:00.000Z');
         expect(payload.active_instances_snapshot.items[0].progress.updated_at).toBe('2026-03-22T10:00:01.000Z');
+    });
+});
+
+describe('conversation situation affordance', () => {
+    const situationPayload = (overrides = {}) => ({
+        history: [],
+        segments_returned: 0,
+        total_segments: 0,
+        has_more_history: false,
+        conversation_situation: {
+            text: 'The user and Von are planning <img src=x onerror="alert(1)"> together.',
+            revision: 3,
+            source: 'adaptive_turn',
+            updated_by: '#V#user',
+            updated_at: '2026-07-29T09:00:00+00:00',
+            source_request_id: 'request-situation-3'
+        },
+        conversation_observations: [
+            {
+                schema_version: 'conversation_observation.v1',
+                observation_id: 'effect:paper-representation',
+                kind: 'durable_effect_terminal',
+                observed_at_utc: '2026-07-29T09:01:00Z',
+                capability_name: 'represent_paper',
+                terminal_status: 'completed',
+                changed: true
+            }
+        ],
+        conversation_observation_state: {
+            schema_version: 'conversation_observation_state.v1',
+            retained_count: 1,
+            total_count: 4,
+            omitted_count: 3,
+            retention_limit: 12
+        },
+        ...overrides
+    });
+
+    beforeEach(() => {
+        const { getUserContext, postJson } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: '#V#user',
+            org_id: '#V#org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+        postJson.mockResolvedValue({ status: 'updated' });
+        document.body.innerHTML = `
+            <button id="conversationSituationToggleBtn" type="button"
+                aria-expanded="false" aria-controls="conversationSituationPanel">
+                Situation
+                <span id="conversationSituationBadge" class="hidden"></span>
+            </button>
+            <section id="conversationSituationPanel" class="hidden" role="dialog">
+                <button id="conversationSituationRefreshBtn" type="button">Refresh</button>
+                <button id="conversationSituationCopyBtn" type="button" data-copy-json-role="copy-json">Copy JSON</button>
+                <button id="conversationSituationCloseBtn" type="button">Close</button>
+                <p id="conversationSituationStatus" role="status" aria-live="polite"></p>
+                <div id="conversationSituationBody" aria-busy="false"></div>
+            </section>
+            <div id="scrollableField"><div class="message-container">Old transcript</div></div>
+            <div id="historyBanner" class="history-banner hidden">
+                <span id="historyBannerText"></span>
+                <button id="loadOlderHistoryBtn" type="button"></button>
+            </div>
+            <div id="chat-history-length"></div>
+        `;
+        __testOnly_resetHistoryUiState();
+        __testOnly_resetConversationSituationState();
+        __testOnly_setActiveChatSession('session-1', 'Session 1');
+        __testOnly_initializeConversationSituationPanel();
+    });
+
+    afterEach(() => {
+        delete global.fetch;
+        __testOnly_resetHistoryUiState();
+        __testOnly_resetConversationSituationState();
+        __testOnly_setActiveChatSession(null, null);
+    });
+
+    test('shows inspectable situation, provenance, retention, and safe exact observations even with an empty transcript', async () => {
+        let historyFetchCount = 0;
+        let resolvePanelRefresh;
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                historyFetchCount += 1;
+                const historyResponse = {
+                    ok: true,
+                    status: 200,
+                    json: async () => situationPayload()
+                };
+                if (historyFetchCount > 1) {
+                    return new Promise((resolve) => {
+                        resolvePanelRefresh = () => resolve(historyResponse);
+                    });
+                }
+                return Promise.resolve(historyResponse);
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const loaded = await __testOnly_loadChatHistory({ segments: 1 });
+        document.getElementById('conversationSituationToggleBtn').click();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const panel = document.getElementById('conversationSituationPanel');
+        const body = document.getElementById('conversationSituationBody');
+        const panelText = panel.textContent;
+        expect(loaded).toBe(true);
+        expect(panel.classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('conversationSituationToggleBtn').getAttribute('aria-expanded')).toBe('true');
+        expect(document.getElementById('conversationSituationBadge').textContent).toBe('r3');
+        expect(panelText).toContain('The user and Von are planning <img src=x onerror="alert(1)"> together.');
+        expect(panel.querySelector('img')).toBeNull();
+        expect(panel.hasAttribute('aria-live')).toBe(false);
+        expect(document.getElementById('conversationSituationStatus').textContent).toBe(
+            'Refreshing the shared situation…'
+        );
+        expect(document.getElementById('conversationSituationStatus').textContent).not.toContain(
+            'planning <img'
+        );
+        expect(body.getAttribute('aria-busy')).toBe('true');
+        expect(panelText).toContain('Revision');
+        expect(panelText).toContain('request-situation-3');
+        expect(panelText).toContain('Recent exact observations (1)');
+        expect(panelText).toContain('4 total · limit 12');
+        expect(panelText).toContain('3 older observations were omitted by retention.');
+        expect(panelText).toContain('Durable effect terminal');
+        expect(panelText).toContain('represent_paper');
+
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(typeof resolvePanelRefresh).toBe('function');
+        resolvePanelRefresh();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(document.getElementById('conversationSituationStatus').textContent).toBe(
+            'Conversation situation refreshed.'
+        );
+        expect(body.getAttribute('aria-busy')).toBe('false');
+    });
+
+    test('replaces the visible carrier immediately when the active session changes', () => {
+        __testOnly_applyConversationSituationPayload(situationPayload(), 'session-1');
+        expect(document.getElementById('conversationSituationBody').textContent).toContain(
+            'planning <img'
+        );
+
+        __testOnly_setActiveChatSession('session-2', 'Session 2');
+
+        const bodyText = document.getElementById('conversationSituationBody').textContent;
+        expect(bodyText).toContain('Loading the selected conversation situation');
+        expect(bodyText).not.toContain('planning <img');
+        expect(document.getElementById('conversationSituationBadge').classList.contains('hidden')).toBe(true);
+    });
+
+    test('merges situation revisions and observation totals without regressing either', () => {
+        __testOnly_applyConversationSituationPayload(situationPayload(), 'session-1');
+        __testOnly_applyConversationSituationPayload(situationPayload({
+            conversation_situation: {
+                text: 'A newer situation with an older observation snapshot.',
+                revision: 4,
+                source: 'adaptive_turn',
+                updated_by: '#V#user',
+                updated_at: '2026-07-29T09:05:00+00:00'
+            },
+            conversation_observations: [],
+            conversation_observation_state: {
+                retained_count: 0,
+                total_count: 2,
+                omitted_count: 2,
+                retention_limit: 12
+            }
+        }), 'session-1');
+        __testOnly_applyConversationSituationPayload(situationPayload({
+            conversation_situation: {
+                text: 'A stale situation attached to newer observations.',
+                revision: 2,
+                source: 'adaptive_turn',
+                updated_by: '#V#user',
+                updated_at: '2026-07-29T09:06:00+00:00'
+            },
+            conversation_observation_state: {
+                retained_count: 1,
+                total_count: 5,
+                omitted_count: 4,
+                retention_limit: 12
+            }
+        }), 'session-1');
+
+        const exported = __testOnly_buildConversationSituationExportPayload('session-1');
+        expect(exported.conversation_situation.text).toBe(
+            'A newer situation with an older observation snapshot.'
+        );
+        expect(exported.conversation_situation.revision).toBe(4);
+        expect(exported.conversation_observation_state.total_count).toBe(5);
+        expect(exported.conversation_observations).toHaveLength(1);
+    });
+
+    test('a canonical history read replaces the carrier after a reset lowers its revision and total', async () => {
+        __testOnly_applyConversationSituationPayload(situationPayload(), 'session-1');
+        const resetPayload = situationPayload({
+            conversation_situation: {
+                text: null,
+                revision: 1,
+                source: 'conversation_reset',
+                updated_by: '#V#user',
+                updated_at: '2026-07-29T09:10:00+00:00',
+                source_request_id: 'request-reset-1'
+            },
+            conversation_observations: [],
+            conversation_observation_state: {
+                retained_count: 0,
+                total_count: 0,
+                omitted_count: 0,
+                retention_limit: 12
+            }
+        });
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => resetPayload
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const loaded = await __testOnly_loadChatHistory({ segments: 1 });
+        const exported = __testOnly_buildConversationSituationExportPayload('session-1');
+        const body = document.getElementById('conversationSituationBody');
+
+        expect(loaded).toBe(true);
+        expect(exported.availability).toBe('ready');
+        expect(exported.conversation_situation.text).toBeNull();
+        expect(exported.conversation_situation.revision).toBe(1);
+        expect(exported.conversation_situation.source).toBe('conversation_reset');
+        expect(exported.conversation_observation_state.total_count).toBe(0);
+        expect(exported.conversation_observations).toEqual([]);
+        expect(body.textContent).toContain('the prior description was cleared');
+        expect(body.textContent).toContain('No exact observations are currently retained.');
+        expect(body.textContent).not.toContain('represent_paper');
+        expect(body.getAttribute('aria-busy')).toBe('false');
+    });
+
+    test('a late pre-reset generate payload cannot repopulate a canonical reset', () => {
+        __testOnly_applyConversationSituationPayload(situationPayload({
+            conversation_situation: {
+                text: null,
+                revision: 4,
+                source: 'conversation_reset',
+                updated_by: '#V#user',
+                updated_at: '2026-07-29T09:10:00+00:00',
+                source_request_id: 'request-reset-4'
+            },
+            conversation_observations: [],
+            conversation_observation_state: {
+                retained_count: 0,
+                total_count: 0,
+                omitted_count: 0,
+                retention_limit: 12
+            }
+        }), 'session-1', { authoritativeSnapshot: true });
+
+        __testOnly_applyConversationSituationPayload(situationPayload({
+            conversation_situation: {
+                text: 'The pre-reset situation.',
+                revision: 3,
+                source: 'adaptive_turn',
+                updated_by: '#V#user',
+                updated_at: '2026-07-29T09:09:00+00:00',
+                source_request_id: 'request-situation-3'
+            },
+            conversation_observation_state: {
+                retained_count: 1,
+                total_count: 5,
+                omitted_count: 4,
+                retention_limit: 12
+            }
+        }), 'session-1');
+
+        const exported = __testOnly_buildConversationSituationExportPayload('session-1');
+        expect(exported.conversation_situation.text).toBeNull();
+        expect(exported.conversation_situation.revision).toBe(4);
+        expect(exported.conversation_situation.source).toBe('conversation_reset');
+        expect(exported.conversation_observation_state.total_count).toBe(0);
+        expect(exported.conversation_observations).toEqual([]);
+    });
+
+    test('a successful refresh without carrier fields exits refreshing as typed unavailable state', async () => {
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [],
+                        segments_returned: 0,
+                        total_segments: 0,
+                        has_more_history: false,
+                        conversation_situation: null
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const refreshed = await __testOnly_refreshConversationSituation('session-1');
+        const exported = __testOnly_buildConversationSituationExportPayload('session-1');
+        const refreshButton = document.getElementById('conversationSituationRefreshBtn');
+        const body = document.getElementById('conversationSituationBody');
+
+        expect(refreshed).toBe(false);
+        expect(exported.availability).toBe('unavailable');
+        expect(refreshButton.disabled).toBe(false);
+        expect(body.getAttribute('aria-busy')).toBe('false');
+        expect(body.textContent).toContain('did not return conversation situation state');
+        expect(document.getElementById('conversationSituationStatus').textContent).toBe(
+            'The server did not return conversation situation state; try refreshing again.'
+        );
+    });
+
+    test('refreshes only the bounded carrier projection and copies the exact cached state', async () => {
+        __testOnly_applyConversationSituationPayload(situationPayload({
+            conversation_situation: {
+                text: 'A superseded local snapshot.',
+                revision: 8,
+                source: 'adaptive_turn',
+                updated_by: '#V#user',
+                updated_at: '2026-07-29T09:04:00+00:00'
+            },
+            conversation_observation_state: {
+                retained_count: 1,
+                total_count: 8,
+                omitted_count: 7,
+                retention_limit: 12
+            }
+        }), 'session-1');
+        const updatedPayload = situationPayload({
+            conversation_situation: {
+                text: 'The refreshed shared situation.',
+                revision: 4,
+                source: 'adaptive_turn',
+                updated_by: '#V#user',
+                updated_at: '2026-07-29T09:05:00+00:00',
+                source_request_id: 'request-situation-4'
+            }
+        });
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => updatedPayload
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const refreshed = await __testOnly_refreshConversationSituation('session-1');
+        const historyUrl = global.fetch.mock.calls
+            .map(([url]) => url)
+            .find(url => typeof url === 'string' && url.startsWith('/von/history?'));
+        const exported = __testOnly_buildConversationSituationExportPayload('session-1');
+
+        expect(refreshed).toBe(true);
+        expect(historyUrl).toContain('segment_size=1');
+        expect(historyUrl).toContain('tail_limit=1');
+        expect(historyUrl).toContain('include_debug=0');
+        expect(exported.schema_version).toBe('conversation_situation_export.v1');
+        expect(exported.conversation_situation.text).toBe('The refreshed shared situation.');
+        expect(exported.conversation_situation.revision).toBe(4);
+        expect(exported.conversation_observation_state.total_count).toBe(4);
+        expect(exported.conversation_observation_state.omitted_count).toBe(3);
+        expect(document.getElementById('conversationSituationStatus').textContent).toBe(
+            'Conversation situation refreshed.'
+        );
+        expect(document.getElementById('conversationSituationStatus').textContent).not.toContain(
+            'The refreshed shared situation.'
+        );
     });
 });
 

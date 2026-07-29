@@ -111,6 +111,7 @@ const CONVERSATION_INFO_EXPORT_SCHEMA_VERSION = 'conversation_info_export.v1';
 const CONVERSATION_TELEMETRY_ACCESS_SCHEMA_VERSION = 'conversation_telemetry_access.v1';
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
+const CONVERSATION_SITUATION_EXPORT_SCHEMA_VERSION = 'conversation_situation_export.v1';
 const CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS = 4000;
 const TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION = 'turn_telemetry_mcp_access.v1';
 const TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'turn_telemetry_locator.v1';
@@ -148,6 +149,8 @@ const historyMetricsState = {
     lastHealthy: null
 };
 const sessionHistoryCache = new Map();
+const conversationSituationStateBySession = new Map();
+let conversationSituationRefreshRequestCounter = 0;
 let loadingChatSessionId = null;
 const SESSION_TABS_REFRESH_COOLDOWN_MS = 15_000;
 let lastSessionTabsRefreshMs = 0;
@@ -3988,6 +3991,682 @@ function createClientRequestId() {
         // Ignore.
     }
     return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function _normaliseConversationSituationInteger(value, fallback = 0) {
+    return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function _normaliseConversationSituationDescriptor(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+    const descriptor = {
+        text: (typeof value.text === 'string' && value.text.trim()) ? value.text : null,
+        revision: _normaliseConversationSituationInteger(value.revision),
+        source: (typeof value.source === 'string' && value.source.trim()) ? value.source.trim() : null,
+        updated_by: (typeof value.updated_by === 'string' && value.updated_by.trim())
+            ? value.updated_by.trim()
+            : null,
+        updated_at: (typeof value.updated_at === 'string' && value.updated_at.trim())
+            ? value.updated_at.trim()
+            : null
+    };
+    if (typeof value.source_request_id === 'string' && value.source_request_id.trim()) {
+        descriptor.source_request_id = value.source_request_id.trim();
+    }
+    return descriptor;
+}
+
+function _normaliseConversationObservation(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+    const observation = {};
+    Object.entries(value).forEach(([key, rawValue]) => {
+        if (
+            typeof rawValue === 'string'
+            || typeof rawValue === 'boolean'
+            || (typeof rawValue === 'number' && Number.isFinite(rawValue))
+            || rawValue === null
+        ) {
+            observation[key] = rawValue;
+        }
+    });
+    const observationId = typeof observation.observation_id === 'string'
+        ? observation.observation_id.trim()
+        : '';
+    const kind = typeof observation.kind === 'string' ? observation.kind.trim() : '';
+    if (!observationId || !kind) {
+        return null;
+    }
+    observation.observation_id = observationId;
+    observation.kind = kind;
+    return observation;
+}
+
+function _normaliseConversationObservationState(value, retainedCount) {
+    const fallbackRetained = _normaliseConversationSituationInteger(retainedCount);
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const retained = _normaliseConversationSituationInteger(
+        source.retained_count,
+        fallbackRetained
+    );
+    const total = Math.max(
+        retained,
+        _normaliseConversationSituationInteger(source.total_count, retained)
+    );
+    return {
+        schema_version: (
+            typeof source.schema_version === 'string'
+            && source.schema_version.trim()
+        )
+            ? source.schema_version.trim()
+            : 'conversation_observation_state.v1',
+        retained_count: retained,
+        total_count: total,
+        omitted_count: Math.max(
+            0,
+            _normaliseConversationSituationInteger(
+                source.omitted_count,
+                total - retained
+            )
+        ),
+        retention_limit: _normaliseConversationSituationInteger(
+            source.retention_limit,
+            Math.max(retained, 12)
+        )
+    };
+}
+
+function _conversationSituationPayloadHasCarrierState(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return false;
+    }
+    return Object.prototype.hasOwnProperty.call(payload, 'conversation_situation')
+        || Object.prototype.hasOwnProperty.call(payload, 'conversation_observations')
+        || Object.prototype.hasOwnProperty.call(payload, 'conversation_observation_state');
+}
+
+function _conversationSituationPayloadHasCompleteCarrierState(payload) {
+    return _conversationSituationPayloadHasCarrierState(payload)
+        && Object.prototype.hasOwnProperty.call(payload, 'conversation_situation')
+        && Object.prototype.hasOwnProperty.call(payload, 'conversation_observations')
+        && Object.prototype.hasOwnProperty.call(payload, 'conversation_observation_state');
+}
+
+function _acceptConversationSituationPayload(payload, sessionId, options = {}) {
+    const sid = normaliseHistorySessionId(sessionId);
+    if (!sid || !_conversationSituationPayloadHasCarrierState(payload)) {
+        return null;
+    }
+    const authoritativeSnapshot = options.authoritativeSnapshot === true;
+
+    const incomingSituation = _normaliseConversationSituationDescriptor(
+        payload.conversation_situation
+    );
+    const incomingObservations = Array.isArray(payload.conversation_observations)
+        ? payload.conversation_observations
+            .map(_normaliseConversationObservation)
+            .filter(Boolean)
+        : [];
+    const incomingObservationState = _normaliseConversationObservationState(
+        payload.conversation_observation_state,
+        incomingObservations.length
+    );
+    const existing = conversationSituationStateBySession.get(sid);
+    const existingRevision = _normaliseConversationSituationInteger(
+        existing?.situation?.revision
+    );
+    const incomingRevision = _normaliseConversationSituationInteger(
+        incomingSituation?.revision
+    );
+    const existingObservationTotal = _normaliseConversationSituationInteger(
+        existing?.observationState?.total_count
+    );
+    const canonicalSituationRevision = Number.isInteger(
+        existing?.canonicalSituationRevision
+    )
+        ? existing.canonicalSituationRevision
+        : null;
+    const incomingPredatesCanonicalSituation = (
+        !authoritativeSnapshot
+        && canonicalSituationRevision !== null
+        && incomingRevision < canonicalSituationRevision
+    );
+    const useIncomingSituation = (
+        authoritativeSnapshot
+        || !existing
+        || incomingRevision >= existingRevision
+    );
+    const useIncomingObservations = (
+        !incomingPredatesCanonicalSituation
+        && (
+            authoritativeSnapshot
+            || !existing
+            || incomingObservationState.total_count >= existingObservationTotal
+        )
+    );
+
+    const accepted = {
+        sessionId: sid,
+        // Asynchronous generate responses merge their monotonic dimensions
+        // independently so a slow response cannot regress either half of the
+        // carrier. Guarded canonical history reads replace the whole snapshot,
+        // including deliberate resets to a lower revision or total.
+        situation: useIncomingSituation
+            ? incomingSituation
+            : existing.situation,
+        observations: useIncomingObservations
+            ? incomingObservations
+            : existing.observations,
+        observationState: useIncomingObservations
+            ? incomingObservationState
+            : existing.observationState,
+        canonicalSituationRevision: authoritativeSnapshot
+            ? incomingRevision
+            : canonicalSituationRevision,
+        availability: 'ready',
+        notice: typeof options.notice === 'string' ? options.notice : '',
+        loadedAtMs: Date.now()
+    };
+    conversationSituationStateBySession.set(sid, accepted);
+    if (sid === activeChatSessionId) {
+        _renderConversationSituationForActiveSession();
+    }
+    return accepted;
+}
+
+function _markConversationSituationLoading(sessionId, message = 'Loading the shared situation…') {
+    const sid = normaliseHistorySessionId(sessionId);
+    if (!sid) {
+        return null;
+    }
+    const existing = conversationSituationStateBySession.get(sid);
+    const nextState = existing
+        ? {
+            ...existing,
+            availability: 'refreshing',
+            notice: message
+        }
+        : {
+            sessionId: sid,
+            situation: null,
+            observations: [],
+            observationState: _normaliseConversationObservationState(null, 0),
+            availability: 'loading',
+            notice: message,
+            loadedAtMs: null
+        };
+    conversationSituationStateBySession.set(sid, nextState);
+    if (sid === activeChatSessionId) {
+        _renderConversationSituationForActiveSession();
+    }
+    return nextState;
+}
+
+function _markConversationSituationUnavailable(sessionId, message) {
+    const sid = normaliseHistorySessionId(sessionId);
+    if (!sid) {
+        return null;
+    }
+    const existing = conversationSituationStateBySession.get(sid);
+    const hasRetainedState = Boolean(
+        existing?.situation
+        || (Array.isArray(existing?.observations) && existing.observations.length > 0)
+    );
+    const nextState = {
+        sessionId: sid,
+        situation: existing?.situation || null,
+        observations: Array.isArray(existing?.observations) ? existing.observations : [],
+        observationState: existing?.observationState
+            || _normaliseConversationObservationState(null, 0),
+        canonicalSituationRevision: Number.isInteger(
+            existing?.canonicalSituationRevision
+        )
+            ? existing.canonicalSituationRevision
+            : null,
+        availability: hasRetainedState ? 'stale' : 'unavailable',
+        notice: message || 'The shared situation is temporarily unavailable.',
+        loadedAtMs: existing?.loadedAtMs || null
+    };
+    conversationSituationStateBySession.set(sid, nextState);
+    if (sid === activeChatSessionId) {
+        _renderConversationSituationForActiveSession();
+    }
+    return nextState;
+}
+
+function _setConversationSituationPanelOpen(isOpen) {
+    const panel = document.getElementById('conversationSituationPanel');
+    const toggle = document.getElementById('conversationSituationToggleBtn');
+    const open = Boolean(isOpen);
+    if (panel) {
+        panel.classList.toggle('hidden', !open);
+    }
+    if (toggle) {
+        toggle.setAttribute('aria-expanded', String(open));
+    }
+}
+
+function _humaniseConversationSituationField(value) {
+    const cleaned = String(value || '').trim().replace(/[_-]+/g, ' ');
+    if (!cleaned) {
+        return 'Observation';
+    }
+    return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+function _formatConversationSituationValue(key, value) {
+    if (typeof value === 'boolean') {
+        return value ? 'Yes' : 'No';
+    }
+    if (value === null || value === undefined || value === '') {
+        return '—';
+    }
+    if (
+        typeof value === 'string'
+        && (
+            key.endsWith('_at')
+            || key.endsWith('_at_utc')
+            || key === 'updated_at'
+            || key === 'completed_at'
+        )
+    ) {
+        return formatAbsoluteTimestamp(value) || value;
+    }
+    return String(value);
+}
+
+function _appendConversationSituationDefinitionRow(list, label, value, key = '') {
+    if (!list || value === null || value === undefined || value === '') {
+        return;
+    }
+    const term = document.createElement('dt');
+    term.textContent = label;
+    const description = document.createElement('dd');
+    description.textContent = _formatConversationSituationValue(key, value);
+    if (typeof value === 'string' && description.textContent !== value) {
+        description.title = value;
+    }
+    list.appendChild(term);
+    list.appendChild(description);
+}
+
+function _renderConversationObservation(observation) {
+    const card = document.createElement('article');
+    card.className = 'chat-situation-observation';
+
+    const title = document.createElement('h4');
+    title.className = 'chat-situation-observation-title';
+    title.textContent = _humaniseConversationSituationField(observation.kind);
+    card.appendChild(title);
+
+    const fields = document.createElement('dl');
+    fields.className = 'chat-situation-observation-fields';
+    const preferredKeys = [
+        'observation_id',
+        'observed_at_utc',
+        'terminal_status',
+        'effect_status',
+        'outcome_finality',
+        'final_state',
+        'capability_name',
+        'workflow_id',
+        'execution_id',
+        'instance_id',
+        'request_id',
+        'effect_id',
+        'call_id',
+        'completed_at',
+        'execution_trace_id',
+        'changed',
+        'failure_detail_available'
+    ];
+    const excludedKeys = new Set(['schema_version', 'kind']);
+    const orderedKeys = [
+        ...preferredKeys.filter(key => Object.prototype.hasOwnProperty.call(observation, key)),
+        ...Object.keys(observation)
+            .filter(key => !preferredKeys.includes(key) && !excludedKeys.has(key))
+            .sort()
+    ];
+    orderedKeys.forEach((key) => {
+        _appendConversationSituationDefinitionRow(
+            fields,
+            _humaniseConversationSituationField(key),
+            observation[key],
+            key
+        );
+    });
+    card.appendChild(fields);
+    return card;
+}
+
+function _renderConversationSituationForActiveSession() {
+    const body = document.getElementById('conversationSituationBody');
+    const status = document.getElementById('conversationSituationStatus');
+    const badge = document.getElementById('conversationSituationBadge');
+    const refreshButton = document.getElementById('conversationSituationRefreshBtn');
+    const copyButton = document.getElementById('conversationSituationCopyBtn');
+    if (!body) {
+        return;
+    }
+    body.textContent = '';
+
+    const sid = normaliseHistorySessionId(activeChatSessionId);
+    const state = sid ? conversationSituationStateBySession.get(sid) : null;
+    const revision = _normaliseConversationSituationInteger(state?.situation?.revision);
+    const retainedCount = _normaliseConversationSituationInteger(
+        state?.observationState?.retained_count,
+        state?.observations?.length || 0
+    );
+    const hasCarrierContent = Boolean(state?.situation || retainedCount > 0);
+    const isBusy = Boolean(
+        sid
+        && (!state || ['loading', 'refreshing'].includes(state.availability))
+    );
+
+    body.setAttribute('aria-busy', String(isBusy));
+    if (status) {
+        if (!sid) {
+            status.textContent = '';
+        } else if (!state || state.availability === 'loading') {
+            status.textContent = state?.notice || 'Loading the shared situation…';
+        } else if (state.availability === 'refreshing') {
+            status.textContent = state.notice || 'Refreshing the shared situation…';
+        } else if (
+            state.availability === 'stale'
+            || state.availability === 'unavailable'
+        ) {
+            status.textContent = (
+                state.notice
+                || 'The shared situation is temporarily unavailable.'
+            );
+        } else {
+            status.textContent = state.notice || '';
+        }
+    }
+
+    if (badge) {
+        if (hasCarrierContent) {
+            badge.textContent = revision > 0 ? `r${revision}` : String(retainedCount);
+            badge.classList.remove('hidden');
+            badge.title = revision > 0
+                ? `Conversation situation revision ${revision}`
+                : `${retainedCount} retained observations`;
+        } else {
+            badge.textContent = '';
+            badge.classList.add('hidden');
+            badge.removeAttribute('title');
+        }
+    }
+    if (refreshButton) {
+        refreshButton.disabled = !sid || ['loading', 'refreshing'].includes(state?.availability);
+    }
+    if (copyButton) {
+        copyButton.disabled = !sid || !state || state.availability === 'loading';
+    }
+
+    if (!sid) {
+        const empty = document.createElement('p');
+        empty.className = 'chat-situation-empty';
+        empty.textContent = 'Select or start a conversation to inspect its shared situation.';
+        body.appendChild(empty);
+        return;
+    }
+
+    if (!state || state.availability === 'loading') {
+        const loading = document.createElement('p');
+        loading.className = 'chat-situation-notice';
+        loading.textContent = state?.notice || 'Loading the shared situation…';
+        body.appendChild(loading);
+        return;
+    }
+
+    if (state.availability === 'refreshing') {
+        const refreshing = document.createElement('p');
+        refreshing.className = 'chat-situation-notice';
+        refreshing.textContent = state.notice || 'Refreshing the shared situation…';
+        body.appendChild(refreshing);
+    } else if (state.availability === 'stale' || state.availability === 'unavailable') {
+        const warning = document.createElement('p');
+        warning.className = 'chat-situation-notice is-warning';
+        warning.textContent = state.notice || 'The shared situation is temporarily unavailable.';
+        body.appendChild(warning);
+    }
+
+    const situation = state.situation;
+    if (situation?.text) {
+        const textSection = document.createElement('section');
+        const label = document.createElement('h4');
+        label.className = 'chat-situation-section-label';
+        label.textContent = 'Current description';
+        const text = document.createElement('pre');
+        text.className = 'chat-situation-text';
+        text.textContent = situation.text;
+        textSection.appendChild(label);
+        textSection.appendChild(text);
+        body.appendChild(textSection);
+    } else {
+        const empty = document.createElement('p');
+        empty.className = 'chat-situation-empty';
+        empty.textContent = revision > 0
+            ? 'This conversation currently has no situation description; the prior description was cleared.'
+            : 'No shared situation description has been recorded for this conversation yet.';
+        body.appendChild(empty);
+    }
+
+    if (situation) {
+        const metadataSection = document.createElement('section');
+        const label = document.createElement('h4');
+        label.className = 'chat-situation-section-label';
+        label.textContent = 'Revision and provenance';
+        const metadata = document.createElement('dl');
+        metadata.className = 'chat-situation-metadata';
+        _appendConversationSituationDefinitionRow(
+            metadata,
+            'Revision',
+            situation.revision,
+            'revision'
+        );
+        _appendConversationSituationDefinitionRow(metadata, 'Source', situation.source, 'source');
+        _appendConversationSituationDefinitionRow(
+            metadata,
+            'Updated by',
+            situation.updated_by,
+            'updated_by'
+        );
+        _appendConversationSituationDefinitionRow(
+            metadata,
+            'Updated',
+            situation.updated_at,
+            'updated_at'
+        );
+        _appendConversationSituationDefinitionRow(
+            metadata,
+            'Source request',
+            situation.source_request_id,
+            'source_request_id'
+        );
+        metadataSection.appendChild(label);
+        metadataSection.appendChild(metadata);
+        body.appendChild(metadataSection);
+    }
+
+    const observations = Array.isArray(state.observations) ? state.observations : [];
+    const observationState = state.observationState
+        || _normaliseConversationObservationState(null, observations.length);
+    const details = document.createElement('details');
+    details.className = 'chat-situation-observations';
+    const summary = document.createElement('summary');
+    summary.textContent = `Recent exact observations (${observationState.retained_count})`;
+    const summaryMeta = document.createElement('span');
+    summaryMeta.className = 'chat-situation-observation-summary-meta';
+    summaryMeta.textContent = `${observationState.total_count} total · limit ${observationState.retention_limit}`;
+    summary.appendChild(summaryMeta);
+    details.appendChild(summary);
+
+    const observationList = document.createElement('div');
+    observationList.className = 'chat-situation-observation-list';
+    if (observationState.omitted_count > 0) {
+        const omission = document.createElement('p');
+        omission.className = 'chat-situation-observation-omission';
+        omission.textContent = `${observationState.omitted_count} older observation${observationState.omitted_count === 1 ? ' was' : 's were'} omitted by retention.`;
+        observationList.appendChild(omission);
+    }
+    if (observations.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'chat-situation-empty';
+        empty.textContent = 'No exact observations are currently retained.';
+        observationList.appendChild(empty);
+    } else {
+        observations.forEach(observation => {
+            observationList.appendChild(_renderConversationObservation(observation));
+        });
+    }
+    details.appendChild(observationList);
+    body.appendChild(details);
+}
+
+function _buildConversationSituationExportPayload(sessionId = activeChatSessionId) {
+    const sid = normaliseHistorySessionId(sessionId);
+    const state = sid ? conversationSituationStateBySession.get(sid) : null;
+    return {
+        schema_version: CONVERSATION_SITUATION_EXPORT_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        session_id: sid,
+        session_name: sid === activeChatSessionId ? activeChatSessionName : null,
+        availability: state?.availability || 'unavailable',
+        conversation_situation: state?.situation || null,
+        conversation_observations: state?.observations || [],
+        conversation_observation_state: state?.observationState || null
+    };
+}
+
+async function _copyActiveConversationSituation(button) {
+    if (!(button instanceof HTMLButtonElement)) {
+        return false;
+    }
+    const payload = _buildConversationSituationExportPayload();
+    return copyJsonTextWithButtonFeedback(
+        button,
+        JSON.stringify(payload, null, 2),
+        { fallbackLabel: 'Copy JSON' }
+    );
+}
+
+async function refreshConversationSituationForSession(sessionId = activeChatSessionId) {
+    const sid = normaliseHistorySessionId(sessionId);
+    if (!sid) {
+        _renderConversationSituationForActiveSession();
+        return false;
+    }
+
+    const requestId = ++conversationSituationRefreshRequestCounter;
+    _markConversationSituationLoading(sid, 'Refreshing the shared situation…');
+    try {
+        await _ensureInviteSessionContext();
+        const userContext = getUserContext();
+        const params = new URLSearchParams({
+            session_id: sid,
+            segments: '1',
+            segment_size: '1',
+            tail_limit: '1',
+            include_debug: '0'
+        });
+        if (userContext?.user_id) {
+            params.append('user_id', userContext.user_id);
+        }
+        const response = await fetch(`/von/history?${params.toString()}`, {
+            headers: buildChatFetchHeaders()
+        });
+        const data = await response.json().catch(() => ({}));
+        if (requestId !== conversationSituationRefreshRequestCounter) {
+            return false;
+        }
+        if (!response.ok || data?.degraded === true || data?.authenticated === false) {
+            const message = data?.authenticated === false
+                ? 'Sign in to inspect this conversation situation.'
+                : describeHistoryUnavailable(data);
+            _markConversationSituationUnavailable(sid, message);
+            return false;
+        }
+        if (!_conversationSituationPayloadHasCompleteCarrierState(data)) {
+            _markConversationSituationUnavailable(
+                sid,
+                'The server did not return conversation situation state; try refreshing again.'
+            );
+            return false;
+        }
+        return Boolean(_acceptConversationSituationPayload(data, sid, {
+            authoritativeSnapshot: true,
+            notice: 'Conversation situation refreshed.'
+        }));
+    } catch (error) {
+        if (requestId !== conversationSituationRefreshRequestCounter) {
+            return false;
+        }
+        _markConversationSituationUnavailable(
+            sid,
+            'The shared situation could not be refreshed; try again.'
+        );
+        console.warn('[chatTab] Unable to refresh conversation situation:', error);
+        return false;
+    }
+}
+
+function _clearConversationSituationState(options = {}) {
+    conversationSituationRefreshRequestCounter += 1;
+    conversationSituationStateBySession.clear();
+    if (options.closePanel === true) {
+        _setConversationSituationPanelOpen(false);
+    }
+    _renderConversationSituationForActiveSession();
+}
+
+function initializeConversationSituationPanel() {
+    const toggle = document.getElementById('conversationSituationToggleBtn');
+    const closeButton = document.getElementById('conversationSituationCloseBtn');
+    const refreshButton = document.getElementById('conversationSituationRefreshBtn');
+    const copyButton = document.getElementById('conversationSituationCopyBtn');
+    if (!toggle || toggle.dataset.situationPanelWired === 'true') {
+        _renderConversationSituationForActiveSession();
+        return;
+    }
+    toggle.dataset.situationPanelWired = 'true';
+    toggle.addEventListener('click', () => {
+        const willOpen = toggle.getAttribute('aria-expanded') !== 'true';
+        _setConversationSituationPanelOpen(willOpen);
+        _renderConversationSituationForActiveSession();
+        if (willOpen && activeChatSessionId) {
+            void refreshConversationSituationForSession(activeChatSessionId);
+        }
+        if (willOpen) {
+            document.getElementById('conversationSituationPanel')?.focus({
+                preventScroll: true
+            });
+        }
+    });
+    closeButton?.addEventListener('click', () => {
+        _setConversationSituationPanelOpen(false);
+        toggle.focus();
+    });
+    refreshButton?.addEventListener('click', () => {
+        void refreshConversationSituationForSession(activeChatSessionId);
+    });
+    copyButton?.addEventListener('click', () => {
+        void _copyActiveConversationSituation(copyButton);
+    });
+    document.addEventListener('keydown', (event) => {
+        if (
+            event.key === 'Escape'
+            && toggle.getAttribute('aria-expanded') === 'true'
+        ) {
+            _setConversationSituationPanelOpen(false);
+            toggle.focus();
+        }
+    });
+    _renderConversationSituationForActiveSession();
 }
 
 function updateSessionHistoryCache(sessionId, history, meta = {}) {
@@ -21622,6 +22301,18 @@ function setActiveChatSession(sessionId, sessionName) {
 
     if (previousSessionId !== activeChatSessionId) {
         synchroniseLlmExecutionContext({ reason: 'conversation_session_changed' });
+        if (activeChatSessionId) {
+            if (conversationSituationStateBySession.has(activeChatSessionId)) {
+                _renderConversationSituationForActiveSession();
+            } else {
+                _markConversationSituationLoading(
+                    activeChatSessionId,
+                    'Loading the selected conversation situation…'
+                );
+            }
+        } else {
+            _renderConversationSituationForActiveSession();
+        }
     }
 
     if (activeChatSessionId) {
@@ -24094,6 +24785,23 @@ async function createChatSession(sessionName) {
     }
 
     setActiveChatSession(data?.session_id, data?.session_name);
+    _acceptConversationSituationPayload(
+        _conversationSituationPayloadHasCarrierState(data)
+            ? data
+            : {
+                conversation_situation: null,
+                conversation_observations: [],
+                conversation_observation_state: {
+                    schema_version: 'conversation_observation_state.v1',
+                    retained_count: 0,
+                    total_count: 0,
+                    omitted_count: 0,
+                    retention_limit: 12
+                }
+            },
+        data?.session_id,
+        { authoritativeSnapshot: true }
+    );
     syncActiveChatSessionThinkingState();
 
     const nowIso = new Date().toISOString();
@@ -24963,6 +25671,7 @@ async function loadChatHistory(options = {}) {
 
         if (data?.degraded === true) {
             const degradedMessage = describeHistoryUnavailable(data);
+            _markConversationSituationUnavailable(targetSessionId, degradedMessage);
             setHistoryLoadState({
                 sessionId: targetSessionId,
                 message: degradedMessage,
@@ -24984,6 +25693,18 @@ async function loadChatHistory(options = {}) {
                 activeHistoryRequest = null;
             }
             return false;
+        }
+
+        if (response.ok && _conversationSituationPayloadHasCompleteCarrierState(data)) {
+            _acceptConversationSituationPayload(data, targetSessionId, {
+                authoritativeSnapshot: true,
+                notice: 'Conversation situation loaded.'
+            });
+        } else if (response.ok) {
+            _markConversationSituationUnavailable(
+                targetSessionId,
+                'The server did not return conversation situation state; try refreshing again.'
+            );
         }
 
         if (response.ok && Array.isArray(data?.history)) {
@@ -25029,6 +25750,7 @@ async function loadChatHistory(options = {}) {
             const fallbackMessage = (typeof data?.error === 'string' && data.error.trim())
                 ? data.error.trim()
                 : 'Conversation history request failed; please retry.';
+            _markConversationSituationUnavailable(targetSessionId, fallbackMessage);
             setHistoryLoadState({
                 sessionId: targetSessionId,
                 message: fallbackMessage,
@@ -25068,6 +25790,7 @@ async function loadChatHistory(options = {}) {
         }
         const targetSessionId = normaliseHistorySessionId(requestedSessionId || activeChatSessionId);
         const fallbackMessage = 'Conversation history request failed; please retry.';
+        _markConversationSituationUnavailable(targetSessionId, fallbackMessage);
         setHistoryLoadState({
             sessionId: targetSessionId,
             message: fallbackMessage,
@@ -28827,6 +29550,7 @@ async function handleOrgSwitchForChatTab(_detail) {
     lastRenderedSessionCount = 0;
     chatSessionMetadataOpenKey = null;
     _clearChatSessionMetadata();
+    _clearConversationSituationState({ closePanel: true });
 
     // JVNAUTOSCI-1011: Clear the active session and chat display on org switch
     // to prevent showing data from the previous org
@@ -28903,6 +29627,7 @@ function handleAuthStatusChangeForChatTab(detail) {
     lastRenderedSessionCount = 0;
     chatSessionMetadataOpenKey = null;
     _clearChatSessionMetadata();
+    _clearConversationSituationState({ closePanel: true });
 
     if (container) {
         renderChatSessionTabsPlaceholder(detail?.authenticated ? 'loading' : 'unauthenticated');
@@ -29180,6 +29905,7 @@ export function initializeChatTab() {
     initializeLlmDebugPopup();
     bindDiagnosticsExportShortcut();
     initializeHistoryControls();
+    initializeConversationSituationPanel();
     updateHistoryBanner();
     setupChatTabContextMenu();
 
@@ -31259,6 +31985,7 @@ async function handleSendPrompt(options = {}) {
         if (!claimForegroundDelivery()) {
             return false;
         }
+        _acceptConversationSituationPayload(data, request.sessionId);
         const responsePresenterState = resolveResponsePresenterState(data);
         const responseChannels = responsePresenterState.presenterChannels;
         const screenText = responsePresenterState.screenText;
@@ -33879,7 +34606,11 @@ function buildConversationTelemetryAccessPayload({ locatorPayload = null } = {})
             steps: retrievalStatus === 'server_delegation_available'
                 ? [
                     'Call conversation_telemetry_get_locator first to fetch the authoritative per-turn locator for this session.',
-                    'Call chat_history_get_segments for the bounded transcript projection.',
+                    (
+                        'Call chat_history_get_segments for the bounded conversation-carrier '
+                        + 'projection, including the shared situation, retained exact observations, '
+                        + 'observation state, and transcript segments.'
+                    ),
                     'Use each returned turn descriptor to fetch the exact bounded debug or diagnostics artefact.'
                 ]
                 : [
@@ -34270,6 +35001,21 @@ export function __testOnly_buildWorkflowMonitorLocatorPayload() {
 export async function __testOnly_loadChatHistory(options = {}) {
     return loadChatHistory(options);
 }
+export function __testOnly_initializeConversationSituationPanel() {
+    initializeConversationSituationPanel();
+}
+export function __testOnly_applyConversationSituationPayload(payload, sessionId, options = {}) {
+    return _acceptConversationSituationPayload(payload, sessionId, options);
+}
+export function __testOnly_buildConversationSituationExportPayload(sessionId = null) {
+    return _buildConversationSituationExportPayload(sessionId || activeChatSessionId);
+}
+export async function __testOnly_refreshConversationSituation(sessionId = null) {
+    return refreshConversationSituationForSession(sessionId || activeChatSessionId);
+}
+export function __testOnly_resetConversationSituationState() {
+    _clearConversationSituationState({ closePanel: true });
+}
 export async function __testOnly_refreshChatSessionTabs() {
     return refreshChatSessionTabs();
 }
@@ -34351,6 +35097,7 @@ export function __testOnly_resetChatRequestState() {
     activeChatSessionId = null;
     activeChatSessionName = null;
     activeChatSessionOwnerId = null;
+    _clearConversationSituationState({ closePanel: true });
     renderChatTaskQueuePanel();
     updateSendButtonForCurrentChatState();
 }

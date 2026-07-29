@@ -409,9 +409,11 @@ def test_get_chat_history_telemetry_locator_projection_keeps_debug_payloads_out(
     class _CompactProjectionCollection:
         def __init__(self):
             self.pipeline = None
+            self.aggregate_calls = 0
 
         def aggregate(self, pipeline):
             self.pipeline = pipeline
+            self.aggregate_calls += 1
             return iter(
                 [
                     {
@@ -419,6 +421,17 @@ def test_get_chat_history_telemetry_locator_projection_keeps_debug_payloads_out(
                         "session_id": "s1",
                         "session_name": "Compact locator",
                         "namespace": "#V#u@org",
+                        "conversation_situation_state": {
+                            "available": True,
+                            "revision": 4,
+                            "updated_at": datetime(
+                                2026, 7, 29, 9, 0, tzinfo=timezone.utc
+                            ),
+                        },
+                        "conversation_observation_state": {
+                            "retained_count": 2,
+                            "total_count": 5,
+                        },
                         "history": [
                             {
                                 "role": "assistant",
@@ -455,10 +468,107 @@ def test_get_chat_history_telemetry_locator_projection_keeps_debug_payloads_out(
     }
     assert collection.pipeline is not None
     history_projection = collection.pipeline[-1]["$project"]["history"]
-    projected_debug = history_projection["$map"]["in"]["llm_debug_data"][
-        "$cond"
-    ][1]
+    projected_debug = history_projection["$map"]["in"]["llm_debug_data"]["$cond"][1]
     assert set(projected_debug) == {"request_id", "turn_id", "timestamp_utc"}
+    assert result["conversation_situation_state"] == {
+        "available": True,
+        "revision": 4,
+        "updated_at": "2026-07-29T09:00:00+00:00",
+    }
+    assert result["conversation_observation_state"] == {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 2,
+        "total_count": 5,
+        "omitted_count": 3,
+        "retention_limit": 12,
+    }
+    assert "conversation_situation" not in result
+    assert "conversation_observations" not in result
+    compact_projection = collection.pipeline[-1]["$project"]
+    assert "conversation_situation_state" in compact_projection
+    assert "conversation_observation_state" in compact_projection
+    assert "conversation_situation" not in compact_projection
+    assert "conversation_observations" not in compact_projection
+    assert collection.aggregate_calls == 1
+
+
+def test_get_chat_history_segments_can_return_carried_state_with_empty_history_in_one_read(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    situation = {
+        "text": "Waiting for a durable workflow outcome.",
+        "revision": 2,
+        "source": "adaptive_turn",
+        "updated_by": "#V#u",
+        "updated_at": datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc),
+    }
+    observations = [
+        {
+            "schema_version": "conversation_observation.v1",
+            "observation_id": "late-effect-1",
+            "kind": "late_terminal_effect",
+            "terminal_status": "completed",
+        }
+    ]
+
+    class _EmptyHistoryStateCollection:
+        def __init__(self):
+            self.aggregate_calls = 0
+            self.pipeline = None
+
+        def aggregate(self, pipeline, **_kwargs):
+            self.aggregate_calls += 1
+            self.pipeline = pipeline
+            return iter(
+                [
+                    {
+                        "history": [],
+                        "history_length": 0,
+                        "conversation_situation": situation,
+                        "conversation_observations": observations,
+                        "conversation_observation_total": 3,
+                    }
+                ]
+            )
+
+        def find_one(self, *_args, **_kwargs):
+            raise AssertionError("state must not require a second DB read")
+
+    collection = _EmptyHistoryStateCollection()
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **_kwargs: collection,
+    )
+
+    result = chat_history_service.get_chat_history_segments(
+        "#V#u",
+        "s1",
+        history_tail_limit=100,
+        return_meta=True,
+        include_conversation_state=True,
+    )
+
+    assert isinstance(result, tuple)
+    segments, meta = result
+    assert segments == []
+    assert meta["conversation_situation"]["text"] == situation["text"]
+    assert meta["conversation_situation"]["revision"] == 2
+    assert meta["conversation_observations"] == observations
+    assert meta["conversation_observation_state"] == {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 1,
+        "total_count": 3,
+        "omitted_count": 2,
+        "retention_limit": 12,
+    }
+    projected = collection.pipeline[-1]["$project"]
+    assert projected["conversation_situation"] == 1
+    assert projected["conversation_observations"] == 1
+    assert projected["conversation_observation_total"] == 1
+    assert collection.aggregate_calls == 1
 
 
 def test_get_chat_history_segments_keeps_debug_blob_refs_compact_by_default(

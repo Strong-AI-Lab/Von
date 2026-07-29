@@ -1,28 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 from src.backend.services.conversation_scope_binding_service import (
+    build_conversation_scope_binding,
     build_history_location_binding,
     build_turn_telemetry_binding,
 )
 
 
-def _stdio_payload(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def _stdio_text_and_payload(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
     from src.backend.mcp_server import mcp_stdio_server
 
-    async def run() -> dict[str, Any]:
+    async def run() -> str:
         result = await mcp_stdio_server.call_tool(tool_name, arguments)
         first = cast(list[Any], result)[0]
-        return cast(
-            dict[str, Any],
-            json.loads(cast(str, getattr(first, "text"))),
-        )
+        return cast(str, getattr(first, "text"))
 
-    return asyncio.run(run())
+    text = asyncio.run(run())
+    return text, cast(dict[str, Any], json.loads(text))
+
+
+def _stdio_payload(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return _stdio_text_and_payload(tool_name, arguments)[1]
 
 
 def test_real_stdio_handler_path_accepts_exact_actor_bound_reads(monkeypatch) -> None:
@@ -119,6 +126,316 @@ def test_real_stdio_handler_path_accepts_exact_actor_bound_reads(monkeypatch) ->
         "#V#actor_a"
     )
     assert diagnostics_result["source_system"] == "mongo.chat_history"
+
+
+def test_actor_bound_conversation_carrier_is_paged_and_locator_stays_compact(
+    monkeypatch,
+) -> None:
+    conversation_ref = build_conversation_scope_binding(
+        chat_session_id="chat-shared-carrier",
+        history_owner_user_id="#V#owner",
+        read_namespace="#V#owner@org",
+        organisation_concept_id="#V#org",
+        delegated_actor_user_id="#V#invitee",
+        delegated_actor_namespace="#V#invitee@org",
+    )
+    situation = {
+        "text": "Inspectable shared situation",
+        "revision": 5,
+        "source": "adaptive_turn",
+        "updated_by": "#V#invitee",
+        "updated_at": "2026-07-29T10:00:00+00:00",
+    }
+    observation_state = {
+        "schema_version": "conversation_observation_state.v1",
+        "retained_count": 1,
+        "total_count": 3,
+        "omitted_count": 2,
+        "retention_limit": 12,
+    }
+    observations = [
+        {
+            "schema_version": "conversation_observation.v1",
+            "observation_id": "late-1",
+            "kind": "late_terminal_effect",
+        }
+    ]
+    message_timestamp = datetime(2026, 7, 29, 9, 59, tzinfo=timezone.utc)
+    captured_segments: dict[str, Any] = {}
+    captured_locator: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#owner",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.get_accepted_invite_for_user_session",
+        lambda **_kwargs: {"organisation_concept_id": "#V#org"},
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._is_user_member_of_organisation",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#owner"
+            and session_id == "chat-shared-carrier"
+            and namespace == "#V#owner@org"
+        ),
+    )
+
+    def get_segments(*_args, **kwargs):
+        captured_segments.update(kwargs)
+        return (
+            [
+                [
+                    {
+                        "role": "assistant",
+                        "content": "x" * 80_000,
+                        "timestamp": message_timestamp,
+                    }
+                ]
+            ],
+            {
+                "history_truncated": False,
+                "conversation_situation": situation,
+                "conversation_observations": observations,
+                "conversation_observation_state": observation_state,
+            },
+        )
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        get_segments,
+    )
+
+    def build_locator(**kwargs):
+        captured_locator.update(kwargs)
+        return {
+            "schema_version": "conversation_llm_telemetry_locator.v1",
+            "generated_at_utc": "2026-07-29T10:01:00Z",
+            "session_id": "chat-shared-carrier",
+            "namespace_context": {
+                "namespace": "#V#owner@org",
+                "user_id": "#V#owner",
+                "org_id": "#V#org",
+            },
+            "conversation_situation_state": {
+                "available": True,
+                "revision": 5,
+                "updated_at": "2026-07-29T10:00:00+00:00",
+            },
+            "conversation_observation_state": observation_state,
+            "metadata": {"total_turns": 0},
+            "mcp_access": {},
+            "turns": [],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.conversation_telemetry_locator_service.build_conversation_llm_telemetry_locator",
+        build_locator,
+    )
+
+    authority_args = {
+        "conversation_ref": conversation_ref,
+        "namespace": "#V#invitee@org",
+        "user_concept_id": "#V#invitee",
+        "organisation_concept_id": "#V#org",
+    }
+    carrier = _stdio_payload(
+        "chat_history_get_segments",
+        {**authority_args, "limit": 20_000},
+    )
+    carrier_pages = [carrier]
+    while carrier_pages[-1]["bounded_read"]["has_more"]:
+        next_offset = carrier_pages[-1]["bounded_read"]["next_offset"]
+        assert isinstance(next_offset, int)
+        assert len(carrier_pages) < 20
+        carrier_pages.append(
+            _stdio_payload(
+                "chat_history_get_segments",
+                {
+                    **authority_args,
+                    "offset": next_offset,
+                    "limit": 20_000,
+                },
+            )
+        )
+    locator = _stdio_payload(
+        "conversation_telemetry_get_locator",
+        authority_args,
+    )
+
+    assert carrier["success"] is True
+    assert "segments" not in carrier
+    assert carrier["bounded_read"]["returned_chars"] == 20_000
+    assert carrier["bounded_read"]["has_more"] is True
+    assert carrier["history_owner_user_id"] == "#V#owner"
+    assert carrier["requested_user_id"] == "#V#invitee"
+    assert carrier["namespace"] == "#V#owner@org"
+    assert carrier["identifier_binding"]["validation_status"] == "verified"
+    assert carrier["read_delegation"]["delegated_actor_user_id"] == "#V#invitee"
+    assert captured_segments["namespace"] == "#V#owner@org"
+    assert captured_segments["include_conversation_state"] is True
+
+    page_metadata = [page["bounded_read"] for page in carrier_pages]
+    assert len({page["sha256"] for page in page_metadata}) == 1
+    assert len({page["total_chars"] for page in page_metadata}) == 1
+    assert [page["offset"] for page in page_metadata] == [
+        index * 20_000 for index in range(len(page_metadata))
+    ]
+    canonical_json = "".join(page["json_chunk"] for page in page_metadata)
+    assert len(canonical_json) == page_metadata[0]["total_chars"]
+    assert (
+        hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+        == (page_metadata[0]["sha256"])
+    )
+    reconstructed_carrier = json.loads(canonical_json)
+    assert reconstructed_carrier["conversation_situation"] == situation
+    assert reconstructed_carrier["conversation_observations"] == observations
+    assert reconstructed_carrier["conversation_observation_state"] == (
+        observation_state
+    )
+    assert reconstructed_carrier["history_owner_user_id"] == "#V#owner"
+    assert reconstructed_carrier["requested_user_id"] == "#V#invitee"
+    assert reconstructed_carrier["segments"][0][0]["timestamp"] == (
+        message_timestamp.isoformat()
+    )
+    for page in carrier_pages:
+        assert page["history_owner_user_id"] == "#V#owner"
+        assert page["requested_user_id"] == "#V#invitee"
+        assert page["namespace"] == "#V#owner@org"
+        assert page["read_delegation"]["delegated_actor_user_id"] == "#V#invitee"
+
+    assert locator["conversation_situation_state"]["revision"] == 5
+    assert locator["conversation_observation_state"] == observation_state
+    assert "conversation_situation" not in locator
+    assert "conversation_observations" not in locator
+    assert locator["history_owner_user_id"] == "#V#owner"
+    assert locator["requested_user_id"] == "#V#invitee"
+    assert locator["read_delegation"]["delegated_actor_user_id"] == "#V#invitee"
+    assert captured_locator["user_id"] == "#V#owner"
+    assert captured_locator["requested_user_id"] == "#V#invitee"
+
+
+def test_escape_heavy_carrier_pages_remain_under_real_stdio_guard(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_MCP_STDIO_MAX_RESPONSE_CHARS", "10000")
+    conversation_ref = build_conversation_scope_binding(
+        chat_session_id="chat-escape-heavy-carrier",
+        history_owner_user_id="#V#actor",
+        read_namespace="#V#actor@org",
+        organisation_concept_id="#V#org",
+        delegated_actor_user_id="#V#actor",
+        delegated_actor_namespace="#V#actor@org",
+    )
+    message_timestamp = datetime(2026, 7, 29, 12, 34, 56, tzinfo=timezone.utc)
+    escape_heavy_content = '\\"' * 6_000
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#actor",
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._is_user_member_of_organisation",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#actor"
+            and session_id == "chat-escape-heavy-carrier"
+            and namespace == "#V#actor@org"
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        lambda *_args, **_kwargs: (
+            [
+                [
+                    {
+                        "role": "assistant",
+                        "content": escape_heavy_content,
+                        "timestamp": message_timestamp,
+                    }
+                ]
+            ],
+            {
+                "history_truncated": False,
+                "conversation_situation": None,
+                "conversation_observations": [],
+                "conversation_observation_state": {
+                    "schema_version": "conversation_observation_state.v1",
+                    "retained_count": 0,
+                    "total_count": 0,
+                    "omitted_count": 0,
+                    "retention_limit": 12,
+                },
+            },
+        ),
+    )
+
+    authority_args = {
+        "conversation_ref": conversation_ref,
+        "namespace": "#V#actor@org",
+        "user_concept_id": "#V#actor",
+        "organisation_concept_id": "#V#org",
+    }
+    response_text, first_page = _stdio_text_and_payload(
+        "chat_history_get_segments",
+        {**authority_args, "limit": 20_000},
+    )
+    response_texts = [response_text]
+    pages = [first_page]
+    while pages[-1]["bounded_read"]["has_more"]:
+        next_offset = pages[-1]["bounded_read"]["next_offset"]
+        assert isinstance(next_offset, int)
+        assert next_offset > pages[-1]["bounded_read"]["offset"]
+        assert len(pages) < 30
+        response_text, page = _stdio_text_and_payload(
+            "chat_history_get_segments",
+            {
+                **authority_args,
+                "offset": next_offset,
+                "limit": 20_000,
+            },
+        )
+        response_texts.append(response_text)
+        pages.append(page)
+
+    assert all(len(text) <= 10_000 for text in response_texts)
+    assert all(page.get("error_code") != "payload_too_large" for page in pages)
+    assert pages[0]["bounded_read"]["returned_chars"] < 20_000
+    page_metadata = [page["bounded_read"] for page in pages]
+    assert len({page["sha256"] for page in page_metadata}) == 1
+    assert len({page["total_chars"] for page in page_metadata}) == 1
+    canonical_json = "".join(page["json_chunk"] for page in page_metadata)
+    assert len(canonical_json) == page_metadata[0]["total_chars"]
+    assert (
+        hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+        == (page_metadata[0]["sha256"])
+    )
+    reconstructed = json.loads(canonical_json)
+    assert reconstructed["segments"][0][0]["content"] == escape_heavy_content
+    assert reconstructed["segments"][0][0]["timestamp"] == (
+        message_timestamp.isoformat()
+    )
+    for page in pages:
+        assert page["history_owner_user_id"] == "#V#actor"
+        assert page["requested_user_id"] == "#V#actor"
+        assert page["namespace"] == "#V#actor@org"
+        assert page["identifier_binding"]["validation_status"] == "verified"
+        assert page["read_delegation"]["delegated_actor_user_id"] == "#V#actor"
 
 
 def test_stdio_raw_ids_retain_original_denials_and_actor_b_fails_closed() -> None:

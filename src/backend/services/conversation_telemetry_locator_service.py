@@ -425,6 +425,30 @@ def build_conversation_llm_telemetry_locator(
         user_id=user_id_value,
         organisation_concept_id=resolved_org_id,
     )
+    raw_situation_state = session_projection.get("conversation_situation_state")
+    conversation_situation_state = (
+        dict(raw_situation_state)
+        if isinstance(raw_situation_state, Mapping)
+        else {
+            "available": False,
+            "revision": None,
+            "updated_at": None,
+        }
+    )
+    raw_observation_state = session_projection.get("conversation_observation_state")
+    conversation_observation_state = (
+        dict(raw_observation_state)
+        if isinstance(raw_observation_state, Mapping)
+        else {
+            "schema_version": "conversation_observation_state.v1",
+            "retained_count": 0,
+            "total_count": 0,
+            "omitted_count": 0,
+            "retention_limit": (
+                chat_history_service.CONVERSATION_OBSERVATION_MAX_ITEMS
+            ),
+        }
+    )
 
     return {
         "schema_version": CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION,
@@ -432,6 +456,8 @@ def build_conversation_llm_telemetry_locator(
         "session_id": session_id_value,
         "session_name": _safe_str(session_projection.get("session_name")),
         "namespace_context": namespace_context,
+        "conversation_situation_state": conversation_situation_state,
+        "conversation_observation_state": conversation_observation_state,
         "metadata": metadata,
         "mcp_access": {
             "conversation_telemetry_get_locator": _build_tool_call_descriptor(
@@ -449,8 +475,9 @@ def build_conversation_llm_telemetry_locator(
                     "history_tail_limit": 100,
                 },
                 purpose=(
-                    "Fetch a bounded transcript projection; use each turn's exact "
-                    "debug-entry descriptor for persisted debug payloads."
+                    "Fetch the bounded conversation carrier: transcript segments, "
+                    "inspectable situation text, and exact observations. Use each "
+                    "turn's debug-entry descriptor for persisted debug payloads."
                 ),
             ),
         },

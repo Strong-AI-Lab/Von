@@ -5,6 +5,12 @@
     <div class="chat-header">
       <h2 class="main-title">Talk to Von Neumarkt</h2>
       <div class="chat-header-controls" role="group" aria-label="Conversation tools">
+        <button id="conversationSituationToggleBtn" class="chat-export-btn chat-situation-toggle" type="button"
+          title="Inspect this conversation's shared situation" aria-label="Inspect conversation situation"
+          aria-expanded="false" aria-controls="conversationSituationPanel" data-keep-title="true">
+          <span class="chat-situation-toggle-label">Situation</span>
+          <span id="conversationSituationBadge" class="chat-situation-badge hidden" aria-hidden="true"></span>
+        </button>
         <button id="taskPanelToggleBtn" class="chat-export-btn" type="button"
           title="Open tasks panel" aria-label="Tasks" data-keep-title="true">
           <span class="btn-icon">📋</span>
@@ -44,6 +50,35 @@
     </div>
 
     <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
+
+    <section id="conversationSituationPanel" class="chat-situation-panel hidden" role="dialog"
+      aria-modal="false" aria-labelledby="conversationSituationTitle" tabindex="-1">
+      <div class="chat-situation-header">
+        <div>
+          <div class="chat-situation-eyebrow">Shared conversation context</div>
+          <h3 id="conversationSituationTitle" class="chat-situation-title">Situation</h3>
+        </div>
+        <div class="chat-situation-actions">
+          <button id="conversationSituationRefreshBtn" class="btn-mini" type="button">
+            Refresh
+          </button>
+          <button id="conversationSituationCopyBtn" class="btn-mini" type="button"
+            data-copy-json-role="copy-json">
+            Copy JSON
+          </button>
+          <button id="conversationSituationCloseBtn" class="btn-mini" type="button"
+            aria-label="Close conversation situation">
+            Close
+          </button>
+        </div>
+      </div>
+      <p class="chat-situation-explanation">
+        This is the conversation's provisional, revisable account of the shared situation. It is not canonical
+        domain knowledge or an authority grant.
+      </p>
+      <p id="conversationSituationStatus" class="visually-hidden" role="status" aria-live="polite"></p>
+      <div id="conversationSituationBody" class="chat-situation-body" aria-busy="false"></div>
+    </section>
 
     <div id="workflowStatusPanel" class="workflow-status-panel" aria-live="polite" aria-label="Workflow status">
       <div class="workflow-status-header">
