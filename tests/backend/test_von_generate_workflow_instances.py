@@ -119,8 +119,11 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
-        "get_chat_history",
-        lambda *_args, **_kwargs: [],
+        "get_chat_history_session_state",
+        lambda **kwargs: {
+            "session_id": kwargs["session_id"],
+            "history": [],
+        },
     )
     monkeypatch.setattr(
         von_routes,
@@ -308,14 +311,17 @@ def test_generate_threads_actor_namespace_through_history_reads_and_persistence(
     history_reads: list[dict[str, Any]] = []
     history_writes: list[dict[str, Any]] = []
 
-    def _get_chat_history(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-        history_reads.append({"args": args, **kwargs})
-        return []
+    def _get_chat_history_session_state(**kwargs: Any) -> dict[str, Any]:
+        history_reads.append(dict(kwargs))
+        return {
+            "session_id": kwargs["session_id"],
+            "history": [],
+        }
 
     monkeypatch.setattr(
         von_routes.chat_history_service,
-        "get_chat_history",
-        _get_chat_history,
+        "get_chat_history_session_state",
+        _get_chat_history_session_state,
     )
     monkeypatch.setattr(
         von_routes,
