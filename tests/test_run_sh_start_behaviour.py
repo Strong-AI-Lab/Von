@@ -40,6 +40,19 @@ def shlex_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+def test_run_sh_default_health_timeout_covers_slow_startup() -> None:
+    payload = _run_bash_probe(
+        r"""
+python3 - <<PY
+import json
+print(json.dumps({"health_timeout_seconds": int("$HEALTH_TIMEOUT_SEC")}))
+PY
+"""
+    )
+
+    assert payload == {"health_timeout_seconds": 180}
+
+
 def _prepare_backup_launcher(
     tmp_path: Path,
     *,

@@ -39,7 +39,7 @@ FOLLOW=0
 LOG_RETENTION=20
 ADMIN_TOKEN=""
 SKIP_HEALTH=0
-HEALTH_TIMEOUT_SEC=60
+HEALTH_TIMEOUT_SEC=180
 HEALTH_GRACE_SEC=45
 BACKUP_DRY_RUN=0
 BACKUP_TAG="manual"
@@ -3511,7 +3511,7 @@ Von Launcher Help
         -LogRetention <n>
         -AdminToken <token>
         -SkipHealth
-        -HealthTimeoutSec <n>
+        -HealthTimeoutSec <n>  Initial health wait in seconds (default 180)
         -HealthGraceSec <n>
         -ReadyLogPatterns <p>
         -DisableLogReady
