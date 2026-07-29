@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
 _WORKFLOW_CAPABILITY_MANIFEST_FILENAME = "workflow_capability_manifest.json"
 _WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION = "workflow_capability_manifest.v2"
-WORKFLOW_ROUTING_INDEX_ENTRY_SCHEMA_VERSION = "workflow_routing_index_entry.v1"
+WORKFLOW_ROUTING_INDEX_ENTRY_SCHEMA_VERSION = "workflow_routing_index_entry.v2"
 
 
 def _get_positive_float_env(name: str, default: float) -> float:
@@ -888,6 +888,10 @@ class WorkflowCapabilityIndex:
             compact_executability = None
             workflow_action_ids: list[str] | None = None
             required_tools: list[str] | None = None
+            component_tools: list[str] | None = None
+            workflow_action_ids_source = ""
+            required_tools_source = ""
+            component_tools_source = ""
             if isinstance(routing_metadata, Mapping):
                 raw_discovery_exemplars = routing_metadata.get("discovery_exemplars")
                 if isinstance(raw_discovery_exemplars, Mapping):
@@ -923,6 +927,9 @@ class WorkflowCapabilityIndex:
                     workflow_action_ids = _dedupe_capability_strings(
                         raw_workflow_action_ids
                     )
+                workflow_action_ids_source = str(
+                    routing_metadata.get("workflow_action_ids_source") or ""
+                ).strip()
 
                 raw_required_tools = routing_metadata.get("required_tools")
                 if isinstance(raw_required_tools, Sequence) and not isinstance(
@@ -930,6 +937,19 @@ class WorkflowCapabilityIndex:
                     (str, bytes, bytearray),
                 ):
                     required_tools = _dedupe_capability_strings(raw_required_tools)
+                required_tools_source = str(
+                    routing_metadata.get("required_tools_source") or ""
+                ).strip()
+
+                raw_component_tools = routing_metadata.get("component_tools")
+                if isinstance(raw_component_tools, Sequence) and not isinstance(
+                    raw_component_tools,
+                    (str, bytes, bytearray),
+                ):
+                    component_tools = _dedupe_capability_strings(raw_component_tools)
+                component_tools_source = str(
+                    routing_metadata.get("component_tools_source") or ""
+                ).strip()
 
             pending_entries[workflow_id] = _CapabilityEntry(
                 workflow_id=workflow_id,
@@ -956,7 +976,11 @@ class WorkflowCapabilityIndex:
                     "publication_lifecycle_source": publication_lifecycle_source,
                     "compact_executability": compact_executability,
                     "workflow_action_ids": workflow_action_ids,
+                    "workflow_action_ids_source": workflow_action_ids_source,
                     "required_tools": required_tools,
+                    "required_tools_source": required_tools_source,
+                    "component_tools": component_tools,
+                    "component_tools_source": component_tools_source,
                 },
             )
 
@@ -1196,6 +1220,31 @@ class WorkflowCapabilityIndex:
                 "(manifest=%s current=%s); rebuilding namespace.",
                 manifest_digest,
                 manifest_entry_digest,
+            )
+            return False
+
+        incompatible_routing_entries = sorted(
+            workflow_id
+            for workflow_id, entry in manifest_entries.items()
+            if str(
+                entry.metadata.get("routing_index_schema_version") or ""
+            ).strip()
+            != WORKFLOW_ROUTING_INDEX_ENTRY_SCHEMA_VERSION
+        )
+        if incompatible_routing_entries:
+            _set_workflow_capability_manifest_state(
+                status="routing_projection_schema_mismatch",
+                detail=(
+                    "Workflow capability manifest contains routing projections "
+                    "from an incompatible producer schema."
+                ),
+                path=manifest_path,
+                digest=manifest_entry_digest,
+            )
+            logger.info(
+                "[workflow_capability_index] Persisted routing projection schema "
+                "mismatch for %d workflows; rebuilding namespace.",
+                len(incompatible_routing_entries),
             )
             return False
 

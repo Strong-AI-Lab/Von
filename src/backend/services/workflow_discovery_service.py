@@ -1649,7 +1649,10 @@ def _routing_index_metadata(match: WorkflowMatch) -> Mapping[str, Any] | None:
     metadata = getattr(match, "routing_index_metadata", None)
     if isinstance(metadata, Mapping):
         schema = str(metadata.get("routing_index_schema_version") or "").strip()
-        if schema == "workflow_routing_index_entry.v1":
+        if schema in {
+            "workflow_routing_index_entry.v1",
+            "workflow_routing_index_entry.v2",
+        }:
             return metadata
     return None
 

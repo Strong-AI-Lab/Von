@@ -499,7 +499,9 @@ alternatives. Required-tool metadata retains its stricter execution-contract
 meaning; the broader component set is only a set of plausible simpler plans.
 Component candidates inherit evidence from the matched workflow and are kept
 visible ahead of unrelated direct retrieval hits so pagination cannot erase
-the cheaper path.
+the cheaper path. Persisted workflow-capability manifests carry the routing
+projection producer schema; a schema change invalidates and rebuilds the
+namespace instead of silently serving the previous metadata shape.
 
 Within each plan shape, semantic retrieval ranks plausible candidates before
 the lower-cost direct and higher-cost workflow alternatives are interleaved.

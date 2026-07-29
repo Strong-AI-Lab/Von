@@ -757,6 +757,19 @@ class TestIndexFromRegistry:
                     "discovery_exemplars_source": (
                         "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
                     ),
+                    "required_tools": ["fetch_concept"],
+                    "required_tools_source": (
+                        "vontology_workflow_graph:"
+                        "invokesAction_or_llm_policy_required_tools"
+                    ),
+                    "component_tools": [
+                        "fetch_concept",
+                        "find_relations_with_argument",
+                    ],
+                    "component_tools_source": (
+                        "vontology_workflow_graph:"
+                        "invokesAction_or_llm_policy_tool_scope"
+                    ),
                 }
             },
         )
@@ -779,6 +792,15 @@ class TestIndexFromRegistry:
         results = index.search("Create a workflow from this description request.")
         assert results
         assert results[0].workflow_id == "#V#workflow_repair_or_create_workflow"
+        assert results[0].metadata["required_tools"] == ["fetch_concept"]
+        assert results[0].metadata["component_tools"] == [
+            "fetch_concept",
+            "find_relations_with_argument",
+        ]
+        assert results[0].metadata["component_tools_source"] == (
+            "vontology_workflow_graph:"
+            "invokesAction_or_llm_policy_tool_scope"
+        )
 
     def test_agent_test_repo_seed_metadata_supplies_discovery_exemplars(
         self,
@@ -1054,6 +1076,59 @@ class TestIndexFromRegistry:
         readiness = get_workflow_capability_index_readiness_report()
         assert readiness["last_manifest_status"] == "loaded"
         assert readiness["ready"] is True
+
+    def test_blocking_build_rebuilds_incompatible_routing_projection_schema(
+        self,
+        tmp_path: Any,
+        _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import src.backend.services.workflow_capability_service as capability_service
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        _enable_fake_backend_persistence(_fake_retrieval_backend, tmp_path)
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Repair workflows from requests.",
+                source="vontology",
+            )
+        )
+
+        monkeypatch.setattr(
+            capability_service,
+            "WORKFLOW_ROUTING_INDEX_ENTRY_SCHEMA_VERSION",
+            "workflow_routing_index_entry.v1",
+        )
+        first_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=registry,
+        )
+        assert first_index.size == 1
+
+        reset_workflow_capability_index()
+        monkeypatch.setattr(
+            capability_service,
+            "WORKFLOW_ROUTING_INDEX_ENTRY_SCHEMA_VERSION",
+            "workflow_routing_index_entry.v2",
+        )
+        second_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=registry,
+        )
+
+        assert second_index.size == 1
+        assert _fake_retrieval_backend.reset_calls == [
+            "workflow_capabilities",
+            "workflow_capabilities",
+        ]
+        assert len(_fake_retrieval_backend.upsert_calls) == 2
+        results = second_index.search("repair workflows")
+        assert results[0].metadata["routing_index_schema_version"] == (
+            "workflow_routing_index_entry.v2"
+        )
 
     def test_manifest_reuse_allows_intentionally_unindexed_registry_workflows(
         self,
