@@ -14,12 +14,16 @@ The cache is refreshed periodically (default 5 minutes) to support eventual cons
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
-import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
+
+from src.backend.services.required_tool_identity_service import (
+    preferred_tool_metadata_surface_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +215,20 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "vontology",
         "display_template": "Found {count} concepts for {query}",
+        "description": (
+            "Search Vontology concept names and descriptions, including "
+            "predicates and types. Use as schema discovery when a represented "
+            "entity or relationship is relevant but its exact concept, "
+            "predicate, direction, or reified shape is not yet known."
+        ),
+        "planner_hint": (
+            "Schema discovery for represented knowledge. Use before a "
+            "relation-specific read when the relevant entity, predicate, type, "
+            "inverse direction, or reified relationship shape is uncertain; "
+            "then use the discovered schema with a relation-bearing lookup. "
+            "Skip when the exact schema is already known or the task is not "
+            "about represented knowledge."
+        ),
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
         "external_surface": False,
@@ -1709,7 +1727,46 @@ def get_tool_metadata(tool_name: str) -> ToolMetadata:
     _refresh_cache_if_needed()
 
     if tool_name in _tool_metadata_cache:
-        return _tool_metadata_cache[tool_name]
+        metadata = _tool_metadata_cache[tool_name]
+        metadata_surface_name = preferred_tool_metadata_surface_name(tool_name)
+        canonical_metadata = _tool_metadata_cache.get(metadata_surface_name)
+        if (
+            metadata_surface_name != tool_name
+            and isinstance(canonical_metadata, ToolMetadata)
+        ):
+            inherited_fields = (
+                "concept_id",
+                "description",
+                "planner_hint",
+                "dispatch_surface_family",
+                "evidence_surface_family",
+                "external_surface",
+                "operation_category",
+                "evidence_role",
+                "evidence_kind",
+                "required_tool_operation_class",
+                "required_tool_target_closure",
+                "required_tool_target_argument_names",
+                "required_tool_target_payload_field_names",
+                "target_concept_argument_name",
+                "target_concept_source",
+                "target_concept_max_count",
+                "default_payload",
+                "identifier_argument_name",
+                "identifier_pattern",
+                "identifier_source",
+                "identifier_max_count",
+                "identifier_normalise",
+                "identifier_default_payload",
+            )
+            inherited_values: dict[str, Any] = {}
+            for field_name in inherited_fields:
+                canonical_value = getattr(canonical_metadata, field_name)
+                if canonical_value not in (None, (), {}):
+                    inherited_values[field_name] = canonical_value
+            if inherited_values:
+                metadata = replace(metadata, **inherited_values)
+        return metadata
 
     # Return default for unknown tools
     return ToolMetadata(

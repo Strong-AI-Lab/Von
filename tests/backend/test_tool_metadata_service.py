@@ -212,3 +212,57 @@ def test_jira_get_issue_identifier_binding_metadata_is_discoverable(monkeypatch)
         assert re.search(binding.identifier_pattern, "Tell me about JVNAUTOSCI-150")
     finally:
         service.invalidate_cache()
+
+
+def test_vontology_concept_search_alias_inherits_schema_discovery_metadata(
+    monkeypatch,
+):
+    from src.backend.services import tool_metadata_service as service
+
+    monkeypatch.setattr(service, "_load_from_vontology", dict)
+    service.invalidate_cache()
+    try:
+        canonical = service.get_tool_metadata("search_concepts")
+        alias = service.get_tool_metadata("vontology_concept_search")
+
+        assert alias.tool_name == "vontology_concept_search"
+        assert alias.description == canonical.description
+        assert alias.planner_hint == canonical.planner_hint
+        assert alias.operation_category == "read"
+        assert alias.evidence_role == "search"
+        assert "schema discovery" in (alias.planner_hint or "").lower()
+        assert "relation-bearing lookup" in (alias.planner_hint or "")
+        assert "PhD" not in (alias.description or "")
+        assert "student" not in (alias.planner_hint or "").lower()
+    finally:
+        service.invalidate_cache()
+
+
+def test_vontology_concept_search_alias_inherits_represented_metadata(
+    monkeypatch,
+):
+    from src.backend.services import tool_metadata_service as service
+
+    represented = service.ToolMetadata(
+        tool_name="search_concepts",
+        concept_id="#V#search_concepts_tool",
+        description="Represented schema discovery description.",
+        planner_hint="Represented schema discovery planner hint.",
+        category="vontology",
+        operation_category="read",
+        evidence_role="search",
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_from_vontology",
+        lambda: {"search_concepts": represented},
+    )
+    service.invalidate_cache()
+    try:
+        alias = service.get_tool_metadata("vontology_concept_search")
+
+        assert alias.concept_id == "#V#search_concepts_tool"
+        assert alias.description == "Represented schema discovery description."
+        assert alias.planner_hint == "Represented schema discovery planner hint."
+    finally:
+        service.invalidate_cache()

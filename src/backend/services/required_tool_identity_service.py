@@ -23,6 +23,10 @@ _LEGACY_OPERATION_ALIASES: Mapping[str, str] = {
     "get_predicates_for_class": "get_predicate_incidence",
 }
 
+_PREFERRED_METADATA_SURFACE_BY_CANONICAL_KEY: Mapping[str, str] = {
+    "concept_search": "search_concepts",
+}
+
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
@@ -168,6 +172,25 @@ def canonical_required_tool_key(
     ).canonical_key
 
 
+def preferred_tool_metadata_surface_name(tool_name: Any) -> str:
+    """Return the represented metadata surface shared by an operation alias.
+
+    Execution aliases remain separately callable, but descriptive metadata
+    should not fork merely because a transport exposes another spelling of the
+    same operation.
+    """
+
+    operation_name = _clean(tool_name).lower()
+    canonical_key = _LEGACY_OPERATION_ALIASES.get(
+        operation_name,
+        operation_name,
+    )
+    return _PREFERRED_METADATA_SURFACE_BY_CANONICAL_KEY.get(
+        canonical_key,
+        operation_name,
+    )
+
+
 def canonical_required_tool_keys(
     tool_names: Iterable[Any] | None,
     *,
@@ -206,6 +229,7 @@ __all__ = [
     "RequiredToolIdentity",
     "canonical_required_tool_key",
     "canonical_required_tool_keys",
+    "preferred_tool_metadata_surface_name",
     "required_tool_names_match",
     "resolve_required_tool_identity",
 ]

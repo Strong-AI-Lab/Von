@@ -6,6 +6,7 @@ import pytest
 
 from src.backend.services.required_tool_identity_service import (
     canonical_required_tool_key,
+    preferred_tool_metadata_surface_name,
     required_tool_names_match,
     resolve_required_tool_identity,
 )
@@ -231,6 +232,14 @@ def test_turn_record_requirement_key_delegates_to_shared_identity() -> None:
     assert _tool_requirement_key("vontology:fetch_concept") == "fetch_concept"
     assert _tool_requirement_key("fetch_concept") == "fetch_concept"
     assert canonical_required_tool_key("arxiv:download_paper") == "download_paper"
+
+
+def test_transport_alias_uses_canonical_represented_metadata_surface() -> None:
+    assert (
+        preferred_tool_metadata_surface_name("vontology_concept_search")
+        == "search_concepts"
+    )
+    assert preferred_tool_metadata_surface_name("fetch_concept") == "fetch_concept"
 
 
 def test_distinct_predicate_tools_do_not_close_each_others_obligations() -> None:

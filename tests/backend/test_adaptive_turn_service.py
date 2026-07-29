@@ -2985,6 +2985,52 @@ def test_capability_query_ranks_without_eliminating_the_delegated_set(
     assert "actor_id" not in internal["input_schema"]["properties"]
 
 
+def test_schema_discovery_metadata_is_retrievable_without_list_word_trigger(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="vontology_concept_search",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(
+                required={"query": str},
+                optional={"filter_kind": list},
+                allow_unknown=False,
+            ),
+            category="read",
+            description="Namespaced concept-search alias.",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(tool_metadata_service, "_load_from_vontology", dict)
+    tool_metadata_service.invalidate_cache()
+    try:
+        positive = _capability_catalogue(
+            gateway,
+            ("vontology_concept_search",),
+            {"query": "schema discovery for represented relationships"},
+        )
+        negative = _capability_catalogue(
+            gateway,
+            ("vontology_concept_search",),
+            {"query": "list more concise alternatives"},
+        )
+
+        capability = positive["capabilities"][0]
+        assert capability["query_match"] is True
+        assert "schema discovery" in capability["planner_hint"].lower()
+        assert negative["capabilities"][0]["query_match"] is False
+    finally:
+        tool_metadata_service.invalidate_cache()
+
+
 def test_capability_metadata_failure_does_not_remove_delegated_reads(
     monkeypatch,
 ) -> None:

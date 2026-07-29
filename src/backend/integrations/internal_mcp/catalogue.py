@@ -33989,7 +33989,14 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=concept_search_input_schema,
             output_schema=concept_search_output_schema,
             category="read",
-            description="Namespaced alias for concept search used by the MCP orchestrator. Same parameters as search_concepts (query required; pass empty string when using instance_of filters).",
+            description=(
+                "Search Vontology concept names and descriptions, including "
+                "predicates and types. Use as schema discovery when a represented "
+                "entity or relationship is relevant but its exact concept, "
+                "predicate, direction, or reified shape is not yet known. This is "
+                "the namespaced search_concepts alias; query is required and may "
+                "be empty when instance_of supplies the search."
+            ),
         ),
         MethodDefinition(
             name="resolve_concept_by_name",
