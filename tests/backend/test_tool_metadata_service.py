@@ -293,3 +293,58 @@ def test_vontology_concept_search_alias_inherits_represented_metadata(
         assert alias.planner_hint == "Represented schema discovery planner hint."
     finally:
         service.invalidate_cache()
+
+
+def test_placeholder_description_cannot_override_registered_contract(
+    monkeypatch,
+):
+    from src.backend.services import tool_metadata_service as service
+
+    represented = service.ToolMetadata(
+        tool_name="direct_read",
+        concept_id="#V#direct_read_tool",
+        description="Internal MCP metadata concept for direct_read.",
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_from_vontology",
+        lambda: {"direct_read": represented},
+    )
+    service.invalidate_cache()
+    try:
+        assert service.get_tool_description(
+            "direct_read",
+            fallback_description=(
+                "Read grounded records for one anchor and return bounded evidence."
+            ),
+        ) == "Read grounded records for one anchor and return bounded evidence."
+    finally:
+        service.invalidate_cache()
+
+
+def test_substantive_represented_description_remains_model_visible(
+    monkeypatch,
+):
+    from src.backend.services import tool_metadata_service as service
+
+    represented = service.ToolMetadata(
+        tool_name="direct_read",
+        concept_id="#V#direct_read_tool",
+        description=(
+            "Read grounded records for one anchor. Use for a bounded direct "
+            "answer before escalating to a broader workflow."
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_from_vontology",
+        lambda: {"direct_read": represented},
+    )
+    service.invalidate_cache()
+    try:
+        assert service.get_tool_description(
+            "direct_read",
+            fallback_description="Read records.",
+        ) == represented.description
+    finally:
+        service.invalidate_cache()

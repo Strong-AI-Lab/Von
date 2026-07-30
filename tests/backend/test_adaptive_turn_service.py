@@ -1221,6 +1221,58 @@ def test_server_bound_capability_argument_is_not_model_visible() -> None:
     assert "x-von-argument-aliases" not in input_schema
 
 
+def test_capability_catalogue_rejects_placeholder_description_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="grounded_direct_read",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(optional={"query": str}),
+            description=(
+                "Read grounded records for one anchor and return bounded "
+                "content-bearing evidence."
+            ),
+            ordinary_turn_public=True,
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "_load_from_vontology",
+        lambda: {
+            "grounded_direct_read": tool_metadata_service.ToolMetadata(
+                tool_name="grounded_direct_read",
+                concept_id="#V#grounded_direct_read_tool",
+                description=(
+                    "Internal MCP metadata concept for grounded_direct_read."
+                ),
+            )
+        },
+    )
+    tool_metadata_service.invalidate_cache()
+    try:
+        capability = _capability_catalogue(
+            gateway,
+            ("grounded_direct_read",),
+            {"names": ["grounded_direct_read"]},
+        )["capabilities"][0]
+    finally:
+        tool_metadata_service.invalidate_cache()
+
+    assert capability["description"] == (
+        "Read grounded records for one anchor and return bounded "
+        "content-bearing evidence."
+    )
+
+
 def test_effect_delegation_is_authenticated_and_exactly_metadata_marked() -> None:
     gateway = _effect_gateway(lambda _name, _arguments: {"success": True})
     trusted = {

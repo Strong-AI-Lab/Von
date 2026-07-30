@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -1812,13 +1813,66 @@ def get_display_template(tool_name: str) -> str | None:
 def get_tool_description(
     tool_name: str, *, fallback_description: str | None = None
 ) -> str | None:
-    """Get the authoritative tool description when available."""
+    """Get the best model-visible description for a registered tool.
+
+    Represented descriptions remain authoritative when they carry useful
+    capability semantics.  Legacy materialisation placeholders must not
+    override the registered interface contract merely because they are
+    non-empty.
+    """
     metadata = get_tool_metadata(tool_name)
     description = str(metadata.description or "").strip()
-    if description:
+    if is_usable_tool_capability_description(description, tool_name=tool_name):
         return description
     cleaned_fallback = str(fallback_description or "").strip()
-    return cleaned_fallback or None
+    if is_usable_tool_capability_description(
+        cleaned_fallback,
+        tool_name=tool_name,
+    ):
+        return cleaned_fallback
+    return None
+
+
+def is_usable_tool_capability_description(
+    description: str | None,
+    *,
+    tool_name: str | None = None,
+) -> bool:
+    """Return whether text tells a model something substantive about a tool.
+
+    This deliberately recognises only structural failure modes.  It is not a
+    semantic router and does not try to score prose style or prescribe when a
+    capability must be selected.
+    """
+
+    cleaned = str(description or "").strip()
+    if not cleaned:
+        return False
+    normalised = " ".join(cleaned.lower().split())
+    if re.fullmatch(
+        r"(?:built-in )?internal mcp metadata concept for [a-z0-9_.-]+\.?",
+        normalised,
+    ):
+        return False
+    if normalised.startswith(("tool metadata for ", "metadata concept for ")):
+        return False
+    cleaned_name = str(tool_name or "").strip().lower()
+    if cleaned_name:
+        generic_forms = {
+            f"use {cleaned_name}.",
+            f"execute {cleaned_name}.",
+            f"run {cleaned_name}.",
+        }
+        if normalised in generic_forms:
+            return False
+        if normalised.startswith(
+            (
+                f"{cleaned_name} input:",
+                f"{cleaned_name} output:",
+            )
+        ):
+            return False
+    return bool(re.search(r"[a-z]{3}", normalised))
 
 
 def get_tool_planner_hint(tool_name: str) -> str | None:
