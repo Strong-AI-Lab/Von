@@ -37,7 +37,10 @@ from ..vontology.utils_vontology import (
     is_type,
 )
 from .concept_predicate_metadata_service import get_relationship_kinds_set
-from .relationship_extent_index_service import query_relationship_extent_index
+from .relationship_extent_index_service import (
+    incoming_dynamic_extent_rows_page_for_target,
+    query_relationship_extent_index,
+)
 from .text_value_service import get_texts_for_concept, get_texts_for_concepts
 
 RelationValue = Dict[str, Any]
@@ -375,6 +378,8 @@ def find_relations_with_argument(
         "index_rows_examined": 0,
         "canonical_rows_returned": 0,
         "rows_filtered_by_access": 0,
+        "bounded": False,
+        "complete": True,
     }
 
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
@@ -449,25 +454,116 @@ def find_relations_with_argument(
 
     if include_asserted_rows and include_structural and include_arg2_or_later:
         incoming_candidates: List[Tuple[str, Any, int, Any]] = []
-        index_rows, index_total = query_relationship_extent_index(
-            target_value=resolved_concept_id,
-            count_total=False,
-            projection={
-                "_id": 0,
-                "source_concept_id": 1,
-                "predicate_id": 1,
-                "target_value": 1,
-                "target_index": 1,
-                "source_updated_at": 1,
-            },
-            batch_size=20_000,
+        exact_predicate_ids = _canonical_exact_predicate_filter_ids(
+            predicate_filter
         )
+        index_rows: List[Dict[str, Any]] = []
+        index_total = -1
+        bounded_index_diagnostics: Dict[str, Any] = {}
+        if not predicate_terms:
+            bounded_rows, index_used, bounded_index_diagnostics = (
+                incoming_dynamic_extent_rows_page_for_target(
+                    resolved_concept_id,
+                    exclude_structural_predicates=False,
+                    visible_offset=0,
+                    visible_limit=min(
+                        _MAX_LIMIT,
+                        resolved_offset + resolved_limit_value + 1,
+                    ),
+                )
+            )
+            if index_used:
+                index_total = len(bounded_rows)
+                index_rows = [
+                    {
+                        "source_concept_id": row.get("source_concept_id"),
+                        "predicate_id": row.get("predicate_id"),
+                        "target_value": row.get("target_value"),
+                        "target_index": max(
+                            0,
+                            int(row.get("arg2_index") or _ARG_INDEX_FIRST_OBJECT)
+                            - _ARG_INDEX_FIRST_OBJECT,
+                        ),
+                        "source_updated_at": row.get("updated_at"),
+                    }
+                    for row in bounded_rows
+                ]
+            elif (
+                bounded_index_diagnostics.get("reason")
+                == "extent_index_query_failed"
+            ):
+                # A broad canonical aggregation is not a safe recovery from a
+                # bounded support-index read timing out: it repeats the same
+                # high-cardinality job on the canonical collection and can
+                # consume the entire tool deadline. Return an explicit lower
+                # bound so the caller can narrow by represented predicate.
+                index_total = 0
+        else:
+            exact_index_filter = (
+                {"predicate_id": exact_predicate_ids[0]}
+                if len(exact_predicate_ids) == 1
+                else {}
+            )
+            index_rows, index_total = query_relationship_extent_index(
+                **exact_index_filter,
+                target_value=resolved_concept_id,
+                count_total=False,
+                projection={
+                    "_id": 0,
+                    "source_concept_id": 1,
+                    "predicate_id": 1,
+                    "target_value": 1,
+                    "target_index": 1,
+                    "source_updated_at": 1,
+                },
+                batch_size=20_000,
+            )
         if index_total >= 0:
+            bounded = bool(
+                bounded_index_diagnostics.get("bounded")
+                or bounded_index_diagnostics.get("reason")
+                == "extent_index_query_failed"
+            )
+            complete = bool(
+                bounded_index_diagnostics.get("complete", not bounded)
+            )
+            extent_index_used = bool(
+                bounded_index_diagnostics.get("used_extent_index", True)
+            )
             incoming_asserted_binary_diagnostics.update(
                 {
-                    "path": "relationship_extent_index",
-                    "used_relationship_extent_index": True,
-                    "index_rows_examined": len(index_rows),
+                    "path": (
+                        "relationship_extent_index"
+                        if extent_index_used
+                        else "relationship_extent_index_bounded_failure"
+                    ),
+                    "used_relationship_extent_index": extent_index_used,
+                    "index_rows_examined": int(
+                        bounded_index_diagnostics.get(
+                            "index_rows_scanned",
+                            len(index_rows),
+                        )
+                    ),
+                    "rows_filtered_by_access": int(
+                        bounded_index_diagnostics.get(
+                            "rows_filtered_by_access",
+                            0,
+                        )
+                    ),
+                    "bounded": bounded,
+                    "complete": complete,
+                    **(
+                        {
+                            "stop_reason": bounded_index_diagnostics.get(
+                                "stop_reason"
+                            ),
+                            "has_more": bool(
+                                bounded_index_diagnostics.get("has_more")
+                            ),
+                        }
+                        if bounded_index_diagnostics
+                        else {}
+                    ),
                 }
             )
             candidate_rows: List[Tuple[str, Any, int, Any]] = []
@@ -493,8 +589,12 @@ def find_relations_with_argument(
                         row.get("source_updated_at"),
                     )
                 )
-            accessible_source_ids = filter_accessible_concept_ids(
-                source_id for source_id, _, _, _ in candidate_rows
+            accessible_source_ids = (
+                {source_id for source_id, _, _, _ in candidate_rows}
+                if bounded_index_diagnostics
+                else filter_accessible_concept_ids(
+                    source_id for source_id, _, _, _ in candidate_rows
+                )
             )
             for candidate in candidate_rows:
                 if candidate[0] not in accessible_source_ids:
@@ -502,9 +602,6 @@ def find_relations_with_argument(
                     continue
                 incoming_candidates.append(candidate)
         else:
-            exact_predicate_ids = _canonical_exact_predicate_filter_ids(
-                predicate_filter
-            )
             if exact_predicate_ids:
                 incoming_asserted_binary_diagnostics.update(
                     {
@@ -936,7 +1033,12 @@ def find_relations_with_argument(
     sorted_hits = _sort_argument_hits(deduped_hits, sort_by)
     paged_hits = sorted_hits[resolved_offset : resolved_offset + resolved_limit_value]
     counts_are_lower_bounds = bool(
-        scoped_concept_query_truncated or actor_effective_text_query_truncated
+        scoped_concept_query_truncated
+        or actor_effective_text_query_truncated
+        or (
+            incoming_asserted_binary_diagnostics.get("requested")
+            and not incoming_asserted_binary_diagnostics.get("complete", True)
+        )
     )
     return {
         "concept_id": resolved_concept_id,

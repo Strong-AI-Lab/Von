@@ -701,11 +701,15 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "default_payload": {"limit": 20},
         "planner_hint": (
             "Use for entity-relative relationship lookup after resolving the anchor "
-            "concept. This is relation-bearing evidence, not mere inventory. When "
-            "the represented predicate and direction have not been established, "
-            "inspect predicate incidence with argument_index='any' first, or keep "
-            "this lookup direction-neutral with argument_index='any'. A one-direction "
-            "or lexical-predicate probe cannot support a complete negative result."
+            "concept. This is relation-bearing evidence, not mere inventory. Choose "
+            "the cheapest adequate query shape: use relation_kind='binary' for "
+            "entity-to-entity relations and request text relations or snippets only "
+            "when the user asks about text content. When the represented predicate "
+            "is unknown, retrieve schema candidates with vontology_concept_search or "
+            "inspect predicate incidence, then pass the returned exact predicate IDs "
+            "in predicate_filter; do not start with a broad unfiltered relation page. "
+            "Keep argument_index='any' when direction is unknown. A one-direction or "
+            "lexical-predicate probe cannot support a complete negative result."
         ),
     },
     "find_concepts_by_name": {

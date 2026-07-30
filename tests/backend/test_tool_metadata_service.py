@@ -254,6 +254,11 @@ def test_relation_read_hints_preserve_direction_neutral_completeness(
         assert "one-direction" in (incidence.planner_hint or "")
         assert "argument_index='any'" in (relation_read.planner_hint or "")
         assert "complete negative" in (relation_read.planner_hint or "")
+        assert "relation_kind='binary'" in (relation_read.planner_hint or "")
+        assert "vontology_concept_search" in (relation_read.planner_hint or "")
+        assert "broad unfiltered relation page" in (
+            relation_read.planner_hint or ""
+        )
         assert "PhD" not in (incidence.planner_hint or "")
         assert "student" not in (relation_read.planner_hint or "").lower()
     finally:

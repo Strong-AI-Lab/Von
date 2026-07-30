@@ -200,6 +200,8 @@ def test_incoming_asserted_binary_uses_extent_index_without_changing_results(
         "index_rows_examined": 6,
         "canonical_rows_returned": 0,
         "rows_filtered_by_access": 1,
+        "bounded": False,
+        "complete": True,
     }
 
 
@@ -289,19 +291,27 @@ def test_incoming_relation_previews_batch_uncached_sources(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         service,
-        "query_relationship_extent_index",
-        lambda **_kwargs: (
+        "incoming_dynamic_extent_rows_page_for_target",
+        lambda *_args, **_kwargs: (
             [
                 {
                     "source_concept_id": source_id,
                     "predicate_id": "#V#relation",
                     "target_value": target_id,
-                    "target_index": 0,
-                    "source_updated_at": None,
+                    "arg2_index": 2,
+                    "updated_at": None,
                 }
                 for source_id in ("#V#source_a", "#V#source_b")
             ],
-            2,
+            True,
+            {
+                "used_extent_index": True,
+                "complete": True,
+                "bounded": False,
+                "has_more": False,
+                "index_rows_scanned": 2,
+                "rows_filtered_by_access": 0,
+            },
         ),
     )
     monkeypatch.setattr(
@@ -443,6 +453,8 @@ def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
         "index_rows_examined": 0,
         "canonical_rows_returned": 1,
         "rows_filtered_by_access": 0,
+        "bounded": False,
+        "complete": True,
     }
 
 
@@ -505,8 +517,19 @@ def test_empty_available_extent_index_does_not_trigger_canonical_fallback(
     )
     monkeypatch.setattr(
         service,
-        "query_relationship_extent_index",
-        lambda **_kwargs: ([], 0),
+        "incoming_dynamic_extent_rows_page_for_target",
+        lambda *_args, **_kwargs: (
+            [],
+            True,
+            {
+                "used_extent_index": True,
+                "complete": True,
+                "bounded": False,
+                "has_more": False,
+                "index_rows_scanned": 0,
+                "rows_filtered_by_access": 0,
+            },
+        ),
     )
     monkeypatch.setattr(
         service,
@@ -532,3 +555,126 @@ def test_empty_available_extent_index_does_not_trigger_canonical_fallback(
     assert diagnostics["path"] == "relationship_extent_index"
     assert diagnostics["used_relationship_extent_index"] is True
     assert diagnostics["fallback_reason"] is None
+
+
+def test_unfiltered_incoming_extent_is_bounded_and_labelled_as_lower_bound(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    target_id = "#V#target"
+    page_query: dict[str, Any] = {}
+
+    def fake_page(concept_id: str, **kwargs: Any):
+        page_query["concept_id"] = concept_id
+        page_query.update(kwargs)
+        return (
+            [
+                {
+                    "source_concept_id": "#V#source",
+                    "predicate_id": "#V#related_to",
+                    "target_value": target_id,
+                    "arg2_index": 2,
+                    "updated_at": None,
+                }
+            ],
+            True,
+            {
+                "used_extent_index": True,
+                "complete": False,
+                "bounded": True,
+                "has_more": True,
+                "index_rows_scanned": 128,
+                "rows_filtered_by_access": 3,
+                "stop_reason": "scan_cap_exhausted",
+            },
+        )
+
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "incoming_dynamic_extent_rows_page_for_target",
+        fake_page,
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "aggregate",
+        staticmethod(_fail_if_aggregated),
+    )
+
+    payload = service.find_relations_with_argument(
+        target_id,
+        relation_kind="binary",
+        include_concept_preview=False,
+        limit=20,
+    )
+
+    assert page_query == {
+        "concept_id": target_id,
+        "exclude_structural_predicates": False,
+        "visible_offset": 0,
+        "visible_limit": 21,
+    }
+    assert payload["total_hits"] == 1
+    assert payload["total_hits_is_lower_bound"] is True
+    assert payload["paging"]["total_available_is_lower_bound"] is True
+    diagnostics = payload["relation_query_diagnostics"][
+        "incoming_asserted_binary"
+    ]
+    assert diagnostics["bounded"] is True
+    assert diagnostics["complete"] is False
+    assert diagnostics["has_more"] is True
+    assert diagnostics["index_rows_examined"] == 128
+    assert diagnostics["rows_filtered_by_access"] == 3
+
+
+def test_unfiltered_extent_timeout_does_not_start_canonical_full_scan(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "incoming_dynamic_extent_rows_page_for_target",
+        lambda *_args, **_kwargs: (
+            [],
+            False,
+            {
+                "used_extent_index": False,
+                "complete": False,
+                "bounded": False,
+                "reason": "extent_index_query_failed",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "aggregate",
+        staticmethod(_fail_if_aggregated),
+    )
+
+    payload = service.find_relations_with_argument(
+        "#V#target",
+        relation_kind="binary",
+        include_concept_preview=False,
+        limit=20,
+    )
+
+    assert payload["total_hits"] == 0
+    assert payload["total_hits_is_lower_bound"] is True
+    diagnostics = payload["relation_query_diagnostics"][
+        "incoming_asserted_binary"
+    ]
+    assert diagnostics["path"] == "relationship_extent_index_bounded_failure"
+    assert diagnostics["used_relationship_extent_index"] is False
+    assert diagnostics["bounded"] is True
+    assert diagnostics["complete"] is False
