@@ -106,10 +106,12 @@ from ...db.mongo_client import (
     DATABASE_NAME,
     get_db,
     get_effective_mongo_uri,
+    get_mongo_fallback_policy_state,
     is_using_fallback_uri,
     assert_destructive_db_operation_allowed,
 )
 from ...db.mongo_uri_redaction import (
+    build_safe_mongo_connection_location,
     classify_mongo_connection_location,
     sanitize_mongo_uri_for_display,
 )
@@ -674,10 +676,22 @@ def get_db_location_info():
             error_message = str(e)
             ping_ok = False
 
-        classification = _classify_mongo_sanitized_uri(sanitized_uri)
+        # get_db()/ping may have switched between the primary and a fallback.
+        # Snapshot route identity only after that recovery opportunity.
+        effective_uri = get_effective_mongo_uri()
+        sanitized_uri = _sanitize_mongo_uri_for_display(effective_uri)
         using_fallback = is_using_fallback_uri()
+        fallback_policy = get_mongo_fallback_policy_state()
+        fallback_kind = fallback_policy.get("active_fallback_kind")
+        connection_location = build_safe_mongo_connection_location(
+            effective_uri,
+            using_fallback=using_fallback,
+            fallback_kind=fallback_kind,
+            fallback_target_uri=MONGO_URI,
+        )
+        classification = connection_location["classification"]
         public_ip = None
-        if using_fallback:
+        if using_fallback and fallback_kind != "ssh_tunnel":
             # Try to discover outward-facing IP (best-effort, short timeout). Avoid blocking failures.
             try:
                 import urllib.request
@@ -698,7 +712,9 @@ def get_db_location_info():
             "ping_ok": ping_ok,
             "error": error_message,
             "classification": classification,
+            "connection_location": connection_location,
             "using_fallback": using_fallback,
+            "fallback_kind": fallback_kind,
             "primary_uri_sanitized": (
                 _sanitize_mongo_uri_for_display(MONGO_URI) if using_fallback else None
             ),
@@ -724,11 +740,18 @@ def get_db_guardrails():
     try:
         effective_uri = get_effective_mongo_uri()
         sanitized_uri = _sanitize_mongo_uri_for_display(effective_uri)
-        classification = _classify_mongo_sanitized_uri(sanitized_uri)
+        fallback_policy = get_mongo_fallback_policy_state()
+        connection_location = build_safe_mongo_connection_location(
+            effective_uri,
+            using_fallback=is_using_fallback_uri(),
+            fallback_kind=fallback_policy.get("active_fallback_kind"),
+            fallback_target_uri=MONGO_URI,
+        )
+        classification = connection_location["classification"]
         reset = request.args.get("reset") in {"1", "true", "yes", "on"}
         report = build_mongo_cost_guardrail_report(
             mongo_classification=classification,
-            sanitized_uri=sanitized_uri,
+            sanitized_uri=connection_location["logical_sanitized_uri"],
             using_fallback=is_using_fallback_uri(),
             reset=reset,
         )

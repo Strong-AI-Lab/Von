@@ -1487,6 +1487,7 @@ start_server() {
         echo "To fix: export VON_DB_NAME='von_db'" >&2
         return 1
     fi
+    log_mongo_ssh_tunnel_status
 
     local existing
     existing="$(get_pid || true)"
@@ -1936,16 +1937,24 @@ try:
 except Exception:
     sys.exit(1)
 using_fallback=data.get("using_fallback")
+fallback_kind=data.get("fallback_kind")
 atlas=data.get("atlas_detected")
 host=data.get("effective_host")
 if using_fallback:
-    label="Mongo: local fallback"
+    if fallback_kind == "ssh_tunnel":
+        label="Mongo: Atlas via SSH tunnel"
+    elif fallback_kind == "dns":
+        label="Mongo: Atlas direct-host fallback"
+    elif fallback_kind == "local":
+        label="Mongo: local fallback"
+    else:
+        label="Mongo: fallback"
 elif atlas:
     label="Mongo: Atlas"
 else:
     label="Mongo: "+(host or "unknown")
-if host and label.startswith("Mongo: local fallback"):
-    label=f"Mongo: local fallback ({host})"
+if host and using_fallback:
+    label=f"{label} ({host})"
 elif host and label.startswith("Mongo: Atlas"):
     label=f"Mongo: Atlas ({host})"
 elif host and label.startswith("Mongo: "):
@@ -1958,6 +1967,41 @@ print(label)' 2>/dev/null)"
         return 0
     fi
     log "$line"
+}
+
+log_mongo_ssh_tunnel_status() {
+    local endpoints="${MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS:-}"
+    if [ -z "$endpoints" ]; then
+        return 0
+    fi
+    if ! command -v lsof >/dev/null 2>&1; then
+        log "Mongo SSH tunnel: configured; listener status unavailable"
+        return 0
+    fi
+    local ready=0
+    local total=0
+    local value=""
+    local port=""
+    local values=()
+    IFS=',' read -r -a values <<<"$endpoints"
+    for value in "${values[@]}"; do
+        port="${value##*:}"
+        port="${port//[[:space:]]/}"
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            continue
+        fi
+        total=$((total + 1))
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            ready=$((ready + 1))
+        fi
+    done
+    if [ "$total" -eq 0 ]; then
+        log "Mongo SSH tunnel: configured; listener status unavailable"
+    elif [ "$ready" -eq "$total" ]; then
+        log "Mongo SSH tunnel: listeners present (${ready}/${total}); Mongo route not probed"
+    else
+        log "Mongo SSH tunnel: listener coverage incomplete (${ready}/${total}); inspect live Mongo route"
+    fi
 }
 
 parse_scan_counts() {
@@ -3215,6 +3259,7 @@ run_relation_alias_cleanup() {
 status_server() {
     # Match run.ps1: if PID file stale, try to sync from current listener.
     sync_pidfile_to_listener
+    log_mongo_ssh_tunnel_status
     local run_maintenance=0
     if [ "$STATUS_RUN_MAINTENANCE" -eq 1 ] || is_truthy "${VON_STATUS_RUN_MAINTENANCE:-}"; then
         run_maintenance=1

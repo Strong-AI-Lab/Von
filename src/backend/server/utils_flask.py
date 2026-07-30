@@ -2822,15 +2822,20 @@ def _build_health_runtime_authority_projection(app: Flask) -> dict[str, object]:
 
     try:
         from ..db.mongo_client import (
+            MONGO_URI,
             get_configured_database_name,
             get_effective_mongo_uri,
+            get_mongo_fallback_policy_state,
             is_using_fallback_uri,
         )
         from ..db.mongo_uri_redaction import build_safe_mongo_connection_location
 
+        fallback_policy = get_mongo_fallback_policy_state()
         location = build_safe_mongo_connection_location(
             get_effective_mongo_uri(),
             using_fallback=is_using_fallback_uri(),
+            fallback_kind=fallback_policy.get("active_fallback_kind"),
+            fallback_target_uri=MONGO_URI,
         )
         encoded_location = json.dumps(
             location,
@@ -3652,8 +3657,10 @@ def _build_diagnostics_response(app: Flask):
         import hashlib
 
         from ..db.mongo_client import (  # type: ignore
+            MONGO_URI,
             get_configured_database_name,
             get_effective_mongo_uri,
+            get_mongo_fallback_policy_state,
             is_using_fallback_uri,
         )
         from ..db.mongo_uri_redaction import (
@@ -3663,9 +3670,12 @@ def _build_diagnostics_response(app: Flask):
 
         effective_uri = get_effective_mongo_uri()
         using_fallback = is_using_fallback_uri()
+        fallback_policy = get_mongo_fallback_policy_state()
         connection_location = build_safe_mongo_connection_location(
             effective_uri,
             using_fallback=using_fallback,
+            fallback_kind=fallback_policy.get("active_fallback_kind"),
+            fallback_target_uri=MONGO_URI,
         )
         mongo_diag = {
             "effective_mongo_uri": sanitize_mongo_uri_for_display(effective_uri),
@@ -3902,15 +3912,25 @@ def _build_db_status_response():
     using_fallback = None
     atlas_detected = None
     host_only = None
+    fallback_kind = None
     try:
-        from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
+        from ..db.mongo_client import (  # type: ignore
+            MONGO_URI,
+            get_effective_mongo_uri,
+            get_mongo_fallback_policy_state,
+            is_using_fallback_uri,
+        )
         from ..db.mongo_uri_redaction import build_safe_mongo_connection_location
 
         effective_uri = get_effective_mongo_uri()
         using_fallback = is_using_fallback_uri()
+        fallback_policy = get_mongo_fallback_policy_state()
+        fallback_kind = fallback_policy.get("active_fallback_kind")
         connection_location = build_safe_mongo_connection_location(
             effective_uri,
             using_fallback=using_fallback,
+            fallback_kind=(fallback_kind if isinstance(fallback_kind, str) else None),
+            fallback_target_uri=MONGO_URI,
         )
         host_only = connection_location.get("host")
         atlas_detected = connection_location.get("is_atlas")
@@ -3918,6 +3938,7 @@ def _build_db_status_response():
         pass
     return jsonify(
         using_fallback=using_fallback,
+        fallback_kind=fallback_kind,
         atlas_detected=atlas_detected,
         effective_host=host_only,
         timestamp=datetime.now(_tz.utc).isoformat().replace("+00:00", "Z"),

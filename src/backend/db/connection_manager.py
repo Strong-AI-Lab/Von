@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 from pymongo.errors import ConnectionFailure
 
 from . import mongo_client as _mc
+from .mongo_error_classification import is_mongo_transport_error
 from .mongo_uri_redaction import build_safe_mongo_connection_location
 
 logger = logging.getLogger(__name__)
@@ -40,13 +41,17 @@ def get_db():
 def health_summary() -> Dict[str, Any]:
     db = get_db()
     connected = False
+    route_degraded = False
+    health_error_type = None
     if db is not None:
         try:
             # Use lightweight ping; ignore actual response object
             db.command("ping")  # type: ignore[call-arg]
             connected = True
-        except Exception:
+        except Exception as exc:
             connected = False
+            route_degraded = is_mongo_transport_error(exc)
+            health_error_type = type(exc).__name__
     uptime = None
     if connected and _state["last_connected_at"]:
         uptime = _now() - _state["last_connected_at"]
@@ -78,19 +83,26 @@ def health_summary() -> Dict[str, Any]:
         effective_uri = str(eff_uri_raw) if eff_uri_raw is not None else None
     except Exception:
         effective_uri = None
+    try:
+        fallback_policy = getattr(_mc, "get_mongo_fallback_policy_state", lambda: {})()
+    except Exception:
+        fallback_policy = {}
+    fallback_kind = (
+        fallback_policy.get("active_fallback_kind")
+        if isinstance(fallback_policy, dict)
+        else None
+    )
     connection_location = build_safe_mongo_connection_location(
         effective_uri,
         using_fallback=using_fallback,
+        fallback_kind=fallback_kind if isinstance(fallback_kind, str) else None,
+        fallback_target_uri=getattr(_mc, "MONGO_URI", None),
     )
     effective_uri_sanitized = connection_location.get("sanitized_uri")
-    try:
-        fallback_policy = getattr(
-            _mc, "get_mongo_fallback_policy_state", lambda: {}
-        )()
-    except Exception:
-        fallback_policy = {}
     return {
         "connected": connected,
+        "route_degraded": route_degraded,
+        "health_error_type": health_error_type,
         "using_fallback": using_fallback,
         # Backwards-compatible key. This is intentionally sanitized only.
         "effective_uri": effective_uri_sanitized,
@@ -109,7 +121,12 @@ def _exponential_backoff(base_ms: int, attempt: int, max_ms: int) -> float:
 
 
 def attempt_reconnect(
-    force: bool = False, max_attempts: int = 5, base_ms: int = 1000, max_ms: int = 30000
+    force: bool = False,
+    max_attempts: int = 5,
+    base_ms: int = 1000,
+    max_ms: int = 30000,
+    route_degraded: bool = False,
+    degradation_reason: str | None = None,
 ) -> Dict[str, Any]:
     with _lock:
         # If already healthy and not forced, short circuit
@@ -125,6 +142,13 @@ def attempt_reconnect(
             _state["reconnect_attempts_total"] += 1
             _state["last_attempt_started_at"] = _now()
         try:
+            if route_degraded:
+                prefer_alternate = getattr(
+                    _mc, "prefer_alternate_mongo_route", lambda _reason: None
+                )
+                prefer_alternate(
+                    degradation_reason or "transient operation transport failure"
+                )
             _mc.invalidate_connection()
             db = _mc.get_db()
             if db is None:
@@ -143,6 +167,9 @@ def attempt_reconnect(
             }
         except Exception as e:  # Broad catch; we classify as failure
             last_err = str(e)
+            if is_mongo_transport_error(e):
+                route_degraded = True
+                degradation_reason = f"reconnect ping {type(e).__name__}"
             with _lock:
                 _state["reconnect_failure_total"] += 1
                 _state["consecutive_failures"] += 1
@@ -169,6 +196,12 @@ def _monitor_loop(interval_sec: int, base_ms: int, max_ms: int, max_attempts: in
                     max_attempts=max_attempts,
                     base_ms=base_ms,
                     max_ms=max_ms,
+                    route_degraded=bool(h.get("route_degraded")),
+                    degradation_reason=(
+                        f"monitor ping {h.get('health_error_type')}"
+                        if h.get("route_degraded")
+                        else None
+                    ),
                 )
         except Exception as exc:
             with _lock:

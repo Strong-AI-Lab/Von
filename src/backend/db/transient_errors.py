@@ -8,34 +8,13 @@ import time
 from collections.abc import Callable
 from typing import TypeVar
 
-from pymongo.errors import (
-    AutoReconnect,
-    ConnectionFailure,
-    NetworkTimeout,
-    PyMongoError,
-    ServerSelectionTimeoutError,
-)
-
 from .connection_manager import attempt_reconnect
+from .mongo_error_classification import (
+    is_mongo_transport_error,
+    is_transient_mongo_error,
+)
 
 T = TypeVar("T")
-
-_TRANSIENT_MONGO_ERROR_TYPES = (
-    NetworkTimeout,
-    ServerSelectionTimeoutError,
-    AutoReconnect,
-    ConnectionFailure,
-    PyMongoError,
-)
-_TRANSIENT_MONGO_ERROR_MARKERS = (
-    "timed out",
-    "no primary",
-    "replicasetnoprimary",
-    "connection pool paused",
-    "server selection timeout",
-    "networktimeout",
-    "temporarily unavailable",
-)
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -58,17 +37,6 @@ def _positive_float_env(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
-
-
-def is_transient_mongo_error(exc: Exception | str | None) -> bool:
-    """Return True when ``exc`` looks like a retryable Mongo transport failure."""
-
-    if exc is None:
-        return False
-    if isinstance(exc, _TRANSIENT_MONGO_ERROR_TYPES):
-        return True
-    message = str(exc).lower()
-    return any(marker in message for marker in _TRANSIENT_MONGO_ERROR_MARKERS)
 
 
 def run_with_transient_mongo_retry(
@@ -131,7 +99,12 @@ def run_with_transient_mongo_retry(
                     delay_seconds,
                 )
             try:
-                attempt_reconnect(force=True, max_attempts=1)
+                attempt_reconnect(
+                    force=True,
+                    max_attempts=1,
+                    route_degraded=is_mongo_transport_error(exc),
+                    degradation_reason=f"transient operation {type(exc).__name__}",
+                )
             except Exception:
                 if logger_obj is not None:
                     logger_obj.debug(

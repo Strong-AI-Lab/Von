@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from src.backend.db import mongo_client as mc
+
+
+@pytest.fixture(autouse=True)
+def _disable_machine_specific_tunnel_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(mc, "MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS", ())
+    monkeypatch.setattr(mc, "MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET", None)
 
 
 class _FakeAdmin:

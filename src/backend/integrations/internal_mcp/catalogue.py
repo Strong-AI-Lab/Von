@@ -22613,21 +22613,29 @@ def _mongo_cost_guardrails_report(**kwargs):
 
     if denial := _internal_mcp_operator_control_plane_denial("Mongo diagnostics"):
         return denial
-    from ...db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri
-    from ...db.mongo_uri_redaction import (
-        classify_mongo_connection_location,
-        sanitize_mongo_uri_for_display,
+    from ...db.mongo_client import (
+        MONGO_URI,
+        get_effective_mongo_uri,
+        get_mongo_fallback_policy_state,
+        is_using_fallback_uri,
     )
+    from ...db.mongo_uri_redaction import build_safe_mongo_connection_location
     from ...services.mongo_observability_service import (
         build_mongo_cost_guardrail_report,
     )
 
     try:
-        sanitized_uri = sanitize_mongo_uri_for_display(get_effective_mongo_uri())
-        return build_mongo_cost_guardrail_report(
-            mongo_classification=classify_mongo_connection_location(sanitized_uri),
-            sanitized_uri=sanitized_uri,
+        fallback_policy = get_mongo_fallback_policy_state()
+        connection_location = build_safe_mongo_connection_location(
+            get_effective_mongo_uri(),
             using_fallback=is_using_fallback_uri(),
+            fallback_kind=fallback_policy.get("active_fallback_kind"),
+            fallback_target_uri=MONGO_URI,
+        )
+        return build_mongo_cost_guardrail_report(
+            mongo_classification=connection_location["classification"],
+            sanitized_uri=connection_location["logical_sanitized_uri"],
+            using_fallback=connection_location["using_fallback"],
             local_development=kwargs.get("local_development"),
             reset=bool(kwargs.get("reset")),
         )
