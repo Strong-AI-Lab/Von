@@ -11,6 +11,7 @@ from src.backend.db.mongo_uri_redaction import (
     sanitize_mongo_uri_for_display,
 )
 from src.backend.server import utils_flask
+from src.backend.server.routes import settings_routes
 from src.backend.server.routes.settings_routes import (
     _classify_mongo_sanitized_uri,
     _sanitize_mongo_uri_for_display,
@@ -65,6 +66,24 @@ def test_safe_mongo_location_classifies_without_retaining_raw_uri() -> None:
     _assert_no_secret_fragments(payload)
 
 
+def test_safe_mongo_location_identifies_atlas_through_ssh_tunnel() -> None:
+    payload = build_safe_mongo_connection_location(
+        "mongodb://appuser:s3cr3t-pass@127.0.0.1:27018/" "?directConnection=true",
+        using_fallback=True,
+        fallback_kind="ssh_tunnel",
+        fallback_target_uri=FAKE_SECRET_URI,
+    )
+
+    assert payload["classification"] == "atlas"
+    assert payload["endpoint_classification"] == "local"
+    assert payload["upstream_classification"] == "atlas"
+    assert payload["transport"] == "ssh_tunnel"
+    assert payload["is_atlas"] is True
+    assert payload["is_local"] is False
+    assert payload["fallback_kind"] == "ssh_tunnel"
+    _assert_no_secret_fragments(payload)
+
+
 def test_safe_mongo_location_fails_closed_for_malformed_credential_uri() -> None:
     malformed_uri = (
         "mongodb+srv://appuser:s3cr3t/pass@cluster0.example.mongodb.net/"
@@ -94,6 +113,11 @@ def test_health_summary_exposes_only_sanitized_effective_uri(monkeypatch) -> Non
         lambda: FAKE_SECRET_URI,
     )
     monkeypatch.setattr(conn_mgr._mc, "is_using_fallback_uri", lambda: False)
+    monkeypatch.setattr(
+        conn_mgr._mc,
+        "get_mongo_fallback_policy_state",
+        lambda: {"active_fallback_kind": None},
+    )
 
     payload = conn_mgr.health_summary()
 
@@ -108,6 +132,11 @@ def test_admin_diag_mongo_payload_redacts_effective_uri(monkeypatch) -> None:
     app = Flask(__name__)
     monkeypatch.setattr(mongo_client, "get_effective_mongo_uri", lambda: FAKE_SECRET_URI)
     monkeypatch.setattr(mongo_client, "is_using_fallback_uri", lambda: False)
+    monkeypatch.setattr(
+        mongo_client,
+        "get_mongo_fallback_policy_state",
+        lambda: {"active_fallback_kind": None},
+    )
 
     with app.test_request_context("/diag"):
         response = utils_flask._build_diagnostics_response(app)
@@ -122,6 +151,11 @@ def test_system_db_status_uses_safe_effective_host(monkeypatch) -> None:
     app = Flask(__name__)
     monkeypatch.setattr(mongo_client, "get_effective_mongo_uri", lambda: FAKE_SECRET_URI)
     monkeypatch.setattr(mongo_client, "is_using_fallback_uri", lambda: False)
+    monkeypatch.setattr(
+        mongo_client,
+        "get_mongo_fallback_policy_state",
+        lambda: {"active_fallback_kind": None},
+    )
 
     with app.test_request_context("/api/system/db_status"):
         response = utils_flask._build_db_status_response()
@@ -129,4 +163,56 @@ def test_system_db_status_uses_safe_effective_host(monkeypatch) -> None:
     payload = response.get_json()
     assert payload["effective_host"] == "cluster0.example.mongodb.net"
     assert payload["atlas_detected"] is True
+    assert payload["fallback_kind"] is None
+    _assert_no_secret_fragments(payload)
+
+
+def test_db_info_snapshots_route_after_ping_recovery(monkeypatch) -> None:
+    app = Flask(__name__)
+    state = {
+        "uri": FAKE_SECRET_URI,
+        "using_fallback": False,
+        "kind": None,
+    }
+
+    def _get_db_after_route_switch():
+        state.update(
+            {
+                "uri": (
+                    "mongodb://appuser:s3cr3t-pass@127.0.0.1:27019/"
+                    "?directConnection=true"
+                ),
+                "using_fallback": True,
+                "kind": "ssh_tunnel",
+            }
+        )
+        return _FakeDb()
+
+    monkeypatch.setattr(settings_routes, "_read_cached_db_info", lambda **_kwargs: None)
+    monkeypatch.setattr(settings_routes, "_write_cached_db_info", lambda _payload: None)
+    monkeypatch.setattr(settings_routes, "get_db", _get_db_after_route_switch)
+    monkeypatch.setattr(
+        settings_routes, "get_effective_mongo_uri", lambda: state["uri"]
+    )
+    monkeypatch.setattr(
+        settings_routes, "is_using_fallback_uri", lambda: state["using_fallback"]
+    )
+    monkeypatch.setattr(
+        settings_routes,
+        "get_mongo_fallback_policy_state",
+        lambda: {"active_fallback_kind": state["kind"]},
+    )
+    monkeypatch.setattr(settings_routes, "MONGO_URI", FAKE_SECRET_URI)
+    monkeypatch.setattr(settings_routes, "DATABASE_NAME", "test_database")
+
+    with app.test_request_context("/api/settings/db/info?nocache=1"):
+        response, status = settings_routes.get_db_location_info()
+
+    payload = response.get_json()
+    assert status == 200
+    assert payload["sanitized_uri"] == "mongodb://127.0.0.1:27019"
+    assert payload["using_fallback"] is True
+    assert payload["fallback_kind"] == "ssh_tunnel"
+    assert payload["classification"] == "atlas"
+    assert payload["connection_location"]["upstream_sanitized_uri"] == SAFE_URI
     _assert_no_secret_fragments(payload)

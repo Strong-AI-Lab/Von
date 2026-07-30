@@ -133,7 +133,7 @@ def collect_mongo_startup_errors() -> list[str]:
                 + ", ".join(invalid_hosts)
             )
 
-    if get_env_bool("MONGO_ALLOW_LOCAL_FALLBACK", True):
+    if get_env_bool("MONGO_ALLOW_LOCAL_FALLBACK", False):
         errors.append(
             "MONGO_ALLOW_LOCAL_FALLBACK must be disabled when VON_MONGO_STRICT_STARTUP is enabled."
         )

@@ -348,7 +348,7 @@ ensure_env_file() {
 MONGO_URI=mongodb://localhost:27017/
 VON_DB_NAME=von_db
 MONGO_LOCAL_URI=mongodb://127.0.0.1:27017/?directConnection=true
-MONGO_ALLOW_LOCAL_FALLBACK=1
+MONGO_ALLOW_LOCAL_FALLBACK=0
 OLLAMA_HOSTS_LIST=127.0.0.1
 EOF
             echo -e "${GREEN}✓ Created minimal .env file${NC}"

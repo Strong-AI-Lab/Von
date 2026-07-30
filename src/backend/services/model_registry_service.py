@@ -178,18 +178,23 @@ def _model_registry_authority_fingerprint() -> str:
     namespace = str(os.getenv("VON_DEFAULT_NAMESPACE") or "").strip()
     try:
         from ..db.mongo_client import (
+            MONGO_URI,
             get_configured_database_name,
             get_effective_mongo_uri,
+            get_mongo_fallback_policy_state,
             is_using_fallback_uri,
         )
         from ..db.mongo_uri_redaction import build_safe_mongo_connection_location
 
         effective_mongo_uri = get_effective_mongo_uri()
+        fallback_policy = get_mongo_fallback_policy_state()
         authority = {
             "database_name": get_configured_database_name(),
             "mongo_location": build_safe_mongo_connection_location(
                 effective_mongo_uri,
                 using_fallback=is_using_fallback_uri(),
+                fallback_kind=fallback_policy.get("active_fallback_kind"),
+                fallback_target_uri=MONGO_URI,
             ),
             "mongo_principal_fingerprint": _mongo_principal_fingerprint(
                 effective_mongo_uri

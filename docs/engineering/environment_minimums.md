@@ -11,6 +11,7 @@ Ollama path, Von can start without any explicit environment variables because:
 
 - `MONGO_URI` defaults to `mongodb://localhost:27017/`
 - `VON_DB_NAME` defaults to `von_db`
+- fallback to a different local Mongo instance is disabled by default
 - the active LLM provider falls back to Ollama when no explicit remote provider
   is configured
 
@@ -81,11 +82,103 @@ Why these matter:
 
 - `MONGO_ALLOW_LOCAL_FALLBACK=0` prevents Atlas failures from silently falling
   back to localhost
+- `MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS=<loopback host:port list>` enables a
+  secret-free, supervised SSH transport fallback. Von derives credentials from
+  the primary URI in memory, validates the expected replica set when configured,
+  and selects only the writable forwarded member. The SSH process itself must
+  be supervised separately; on macOS use
+  `scripts/install_macos_mongo_ssh_tunnel.py`.
+- `MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET=<set name>` pins the forwarded members
+  when the set name cannot be derived from an existing URI
 - `MONGO_DNS_FALLBACK_URI=<direct-host Atlas URI>` can still be used as a
   non-local recovery path when SRV/DNS resolution is flaky
+- `VON_MONGO_FALLBACK_STICKY_SECONDS=300` controls how long a working fallback
+  is reused before Von probes the direct primary route again
 - `VON_SKIP_BROWSER_LAUNCH=1` avoids remote hosts trying to open a local browser
 - `FLASK_SECRET_KEY` is required for sane hosted session handling and is
   mandatory when strict hosted OAuth startup is enabled
+
+### macOS supervised Atlas SSH fallback
+
+Use a per-user launchd agent to own a persistent tunnel independently of the
+Von process. It starts within that user's GUI login domain, restarts after SSH
+or network failures, and is not a pre-login system daemon. Supply one forward
+for every Atlas replica-set member so Von can select the current writable
+primary after an election. The installer writes no Mongo credentials to the
+LaunchAgent; it accepts SSH transport details only.
+
+```sh
+.venv/bin/python scripts/install_macos_mongo_ssh_tunnel.py install \
+  --ssh-destination operator@relay.example \
+  --identity-file /absolute/path/to/private-key \
+  --known-hosts-file /absolute/path/to/known_hosts \
+  --forward 27018:atlas-member-00.example:27017 \
+  --forward 27019:atlas-member-01.example:27017 \
+  --forward 27020:atlas-member-02.example:27017
+```
+
+The SSH identity must be owner-only, the relay must already have a pinned host
+key in the selected known-hosts file, and the local ports must not be owned by
+another process. The generated service uses strict host-key checking and
+isolates itself from ambient SSH configuration. Then configure Von and restart
+it, because these values are loaded when the backend module starts:
+
+```dotenv
+MONGO_ALLOW_LOCAL_FALLBACK=0
+MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS=127.0.0.1:27018,127.0.0.1:27019,127.0.0.1:27020
+MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET=atlas-example-shard-0
+```
+
+Explicitly pinning the actual replica-set name is strongly recommended,
+especially for an SRV primary URI that does not carry a `replicaSet` option.
+Check launchd and listener ownership without repeating the forward list:
+
+```sh
+.venv/bin/python scripts/install_macos_mongo_ssh_tunnel.py status
+./run.sh restart -NoBrowser -HealthTimeoutSec 180
+./run.sh status
+```
+
+Installer status proves only that the launchd-managed SSH PID owns each
+configured loopback listener; it does not probe Mongo. While the primary route
+is healthy, `./run.sh status` should continue to report `Mongo: Atlas`. A
+functional fallback test must report `Mongo: Atlas via SSH tunnel (...)` and
+complete a Mongo ping or canonical read through that route.
+
+The status command exits successfully when the query itself completed, even
+when the service is absent or degraded. For a healthy listener layer, require
+`configuration_status="configured"`, `plist_valid=true`,
+`label_matches=true`, `installed=true`, `loaded=true`,
+`listeners_checked=true`, and `listener_coverage_complete=true`.
+`mongo_route_probed=false` is expected until a separate Mongo operation is
+performed.
+
+Before removal, delete or disable
+`MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS`, restart Von, and verify that its live
+Mongo route no longer depends on the tunnel. Removal is then explicit:
+
+```sh
+.venv/bin/python scripts/install_macos_mongo_ssh_tunnel.py uninstall \
+  --confirm-uninstall
+.venv/bin/python scripts/install_macos_mongo_ssh_tunnel.py status
+```
+
+Uninstall removes the LaunchAgent plist, but retains the SSH key,
+known-hosts file, and `~/Library/Logs/Von` tunnel logs.
+
+Mongo still validates the remote certificate chain. Because a forwarded Atlas
+member is contacted at a loopback hostname, only hostname matching is relaxed
+for URIs derived from syntactically validated loopback endpoints. The
+authenticated SSH tunnel, strict relay host-key check, writable-primary check,
+and expected replica-set check when configured bound that exception. Do not
+expose these ports on a non-loopback interface.
+
+Fallback selection is failure-sensitive: a pure DNS/SRV failure tries the
+direct-host Atlas URI first; TLS, TCP, periodic health-check transport failures,
+and operation failures handled by the shared retry path try the SSH route
+first. An explicitly enabled local-development Mongo fallback is always last.
+A working remote fallback is reused for a bounded window and Von then probes
+the direct primary again.
 
 For stricter hosted Mongo startup, also set:
 

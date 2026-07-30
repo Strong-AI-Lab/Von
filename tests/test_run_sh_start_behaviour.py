@@ -36,6 +36,28 @@ cd {shlex_quote(str(REPO_ROOT))}
     return json.loads(result.stdout)
 
 
+def _run_bash_text_probe(script: str) -> str:
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required for run.sh launcher-path tests")
+
+    wrapped = f"""
+set -euo pipefail
+cd {shlex_quote(str(REPO_ROOT))}
+. ./run.sh help -NoBackupMigrate >/dev/null
+{script}
+""".strip()
+    result = subprocess.run(
+        [bash, "-c", wrapped],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=True,
+    )
+    return result.stdout
+
+
 def shlex_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -51,6 +73,47 @@ PY
     )
 
     assert payload == {"health_timeout_seconds": 180}
+
+
+def test_run_sh_labels_ssh_tunnel_fallback_as_remote_atlas() -> None:
+    output = _run_bash_text_probe(r"""
+curl() {
+    printf '%s' '{"using_fallback":true,"fallback_kind":"ssh_tunnel","atlas_detected":true,"effective_host":"127.0.0.1:27019"}'
+}
+log_mongo_status
+""")
+
+    assert "Mongo: Atlas via SSH tunnel (127.0.0.1:27019)" in output
+    assert "Mongo: local fallback" not in output
+
+
+def test_run_sh_reports_listener_presence_without_claiming_mongo_readiness() -> None:
+    output = _run_bash_text_probe(r"""
+MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS="127.0.0.1:27018,127.0.0.1:27019"
+lsof() {
+    return 0
+}
+log_mongo_ssh_tunnel_status
+""")
+
+    assert "listeners present (2/2); Mongo route not probed" in output
+    assert "ready" not in output
+
+
+def test_run_sh_does_not_claim_direct_atlas_for_incomplete_listeners() -> None:
+    output = _run_bash_text_probe(r"""
+MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS="127.0.0.1:27018,127.0.0.1:27019"
+lsof() {
+    case "$*" in
+        *27018*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+log_mongo_ssh_tunnel_status
+""")
+
+    assert "listener coverage incomplete (1/2); inspect live Mongo route" in output
+    assert "direct Atlas remains primary" not in output
 
 
 def _prepare_backup_launcher(
@@ -947,6 +1010,7 @@ SH
 	start_rag_worker_bg() { :; }
 	start_concept_index_worker_bg() { :; }
 	log_von_version() { :; }
+	log_mongo_ssh_tunnel_status() { :; }
 
 	PORT=5124
 	AGENT_TEST_INSTANCE=0

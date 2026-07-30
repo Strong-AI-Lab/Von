@@ -111,10 +111,18 @@ MongoDB will be automatically installed during the setup process (via `setup_py.
      MONGO_PROJECT=Your Project Name
      ```
 
-     For hosted/cloud development, also set `MONGO_ALLOW_LOCAL_FALLBACK=0` so
-     Atlas failures do not silently fall back to localhost. Once connectivity is
-     stable, prefer `VON_MONGO_STRICT_STARTUP=1` and
-     `VON_MONGO_STARTUP_PROBE=1`.
+     Keep the default `MONGO_ALLOW_LOCAL_FALLBACK=0` so Atlas failures do not
+     silently fall back to an old localhost database. After installing a
+     separately supervised SSH tunnel, expose its loopback listeners through
+     `MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS`; Von derives its Mongo credentials in
+     memory, discovers the writable forwarded replica member, and probes the
+     direct primary again on later database use after a bounded recovery
+     window. Once connectivity is stable, prefer `VON_MONGO_STRICT_STARTUP=1`
+     and `VON_MONGO_STARTUP_PROBE=1`.
+
+     On macOS, the persistent per-user launchd tunnel and its install, status,
+     and uninstall commands are documented in
+     [`docs/engineering/environment_minimums.md`](docs/engineering/environment_minimums.md#macos-supervised-atlas-ssh-fallback).
 
 Von decides local versus remote MongoDB from the effective `MONGO_URI` host and
 logs either `[Von Database] Connecting to LOCAL MongoDB ...` or

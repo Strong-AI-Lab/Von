@@ -1,16 +1,20 @@
+import datetime  # Added for type hinting and __main__ example
+import ipaddress
+import logging
 import os
 import sys
-import logging
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from pymongo import MongoClient, ASCENDING, DESCENDING, monitoring
+from urllib.parse import parse_qsl, urlencode, urlsplit
+
+from pymongo import ASCENDING, DESCENDING, MongoClient, monitoring
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import ConnectionFailure, OperationFailure
-import datetime  # Added for type hinting and __main__ example
-from ..utils.runtime_env import get_env_bool, load_secret_from_env_or_file
+
 from ..services.mongo_observability_service import (
     build_mongo_command_shape,
     extract_n_returned_from_reply,
@@ -18,6 +22,8 @@ from ..services.mongo_observability_service import (
     record_mongo_command_observation,
     record_mongo_operation,
 )
+from ..utils.runtime_env import get_env_bool, load_secret_from_env_or_file
+from .mongo_error_classification import is_mongo_transport_error
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +356,66 @@ def _get_nonempty_env_value(name: str) -> str | None:
     return value if value else None
 
 
+def _normalise_loopback_tunnel_endpoint(value: str) -> str:
+    """Validate and normalise a loopback host:port tunnel endpoint.
+
+    Tunnel-derived Mongo URIs deliberately relax TLS hostname matching because
+    the client connects to loopback while the certificate names the remote
+    Atlas member. Restricting these endpoints to loopback keeps that exception
+    inside the authenticated SSH transport.
+    """
+
+    candidate = value.strip()
+    parsed = urlsplit(f"//{candidate}")
+    try:
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("endpoint must contain a valid TCP port") from exc
+    if (
+        not host
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("endpoint must be a loopback host and TCP port")
+    is_loopback = host.lower() == "localhost"
+    if not is_loopback:
+        try:
+            is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            is_loopback = False
+    if not is_loopback:
+        raise ValueError("endpoint must resolve syntactically to loopback")
+    normalised_host = f"[{host}]" if ":" in host else host
+    return f"{normalised_host}:{port}"
+
+
+def _parse_ssh_tunnel_fallback_endpoints(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    endpoints: list[str] = []
+    for index, value in enumerate(raw.split(","), start=1):
+        if not value.strip():
+            continue
+        try:
+            endpoint = _normalise_loopback_tunnel_endpoint(value)
+        except ValueError as exc:
+            logger.warning(
+                "[mongo_fallback] Ignoring invalid SSH tunnel endpoint #%s: %s",
+                index,
+                exc,
+            )
+            continue
+        if endpoint not in endpoints:
+            endpoints.append(endpoint)
+    return tuple(endpoints)
+
+
 MONGO_URI = (
     load_secret_from_env_or_file("MONGO_URI", "MONGO_URI_FILE")
     or _get_nonempty_env_value("MONGO_URI")
@@ -361,7 +427,22 @@ MONGO_LOCAL_URI = (
     or "mongodb://127.0.0.1:27017/?directConnection=true"
 )
 MONGO_DNS_FALLBACK_URI = _get_nonempty_env_value("MONGO_DNS_FALLBACK_URI")
-MONGO_ALLOW_LOCAL_FALLBACK = get_env_bool("MONGO_ALLOW_LOCAL_FALLBACK", True)
+MONGO_ALLOW_LOCAL_FALLBACK = get_env_bool("MONGO_ALLOW_LOCAL_FALLBACK", False)
+MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS = _parse_ssh_tunnel_fallback_endpoints(
+    _get_nonempty_env_value("MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS")
+)
+MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET = _get_nonempty_env_value(
+    "MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET"
+)
+
+
+@dataclass(frozen=True)
+class _MongoFallbackTarget:
+    uri: str
+    kind: str
+    label: str
+    require_writable_primary: bool = False
+    expected_replica_set: str | None = None
 
 
 def _get_positive_int_env(name: str, default: int) -> int:
@@ -401,6 +482,15 @@ def _mongo_auto_recovery_ping_timeout_ms() -> int:
 
 
 def _mongo_dns_fallback_sticky_seconds() -> float:
+    """Return the fallback retry window, retaining the legacy setting name."""
+
+    generic_value = _get_nonempty_env_value("VON_MONGO_FALLBACK_STICKY_SECONDS")
+    if generic_value is not None:
+        try:
+            parsed = float(generic_value)
+        except ValueError:
+            parsed = 300.0
+        return parsed if parsed > 0 else 300.0
     return _get_positive_float_env("VON_MONGO_DNS_FALLBACK_STICKY_SECONDS", 300.0)
 
 
@@ -416,23 +506,153 @@ def _mongo_socket_timeout_ms() -> int:
     return _get_positive_int_env("MONGO_SOCKET_TIMEOUT_MS", 5000)
 
 
+def _build_ssh_tunnel_mongo_uri(primary_uri: str, endpoint: str) -> str:
+    """Derive a direct loopback Mongo URI without decoding URI credentials.
+
+    The SSH process owns transport and authentication to the relay host. Mongo
+    credentials remain sourced from ``MONGO_URI`` and are only carried in this
+    in-memory derived URI. Certificate-chain validation stays enabled, while
+    hostname validation is relaxed solely for the validated loopback endpoint.
+    """
+
+    endpoint = _normalise_loopback_tunnel_endpoint(endpoint)
+    scheme_separator = primary_uri.find("://")
+    if scheme_separator < 0:
+        raise ValueError("primary Mongo URI has no recognised scheme")
+    scheme = primary_uri[:scheme_separator].lower()
+    if scheme not in {"mongodb", "mongodb+srv"}:
+        raise ValueError("primary Mongo URI must use mongodb or mongodb+srv")
+
+    remainder = primary_uri[scheme_separator + 3 :]
+    tail_positions = [
+        position
+        for position in (remainder.find("/"), remainder.find("?"))
+        if position >= 0
+    ]
+    tail_start = min(tail_positions) if tail_positions else len(remainder)
+    authority = remainder[:tail_start]
+    tail = remainder[tail_start:]
+    userinfo_prefix = f"{authority.rsplit('@', 1)[0]}@" if "@" in authority else ""
+
+    if tail.startswith("?"):
+        path = "/"
+        raw_query = tail[1:]
+    else:
+        path, separator, raw_query = tail.partition("?")
+        if not separator:
+            raw_query = ""
+        path = path or "/"
+
+    controlled_options = {
+        "directconnection",
+        "loadbalanced",
+        "maxstalenessseconds",
+        "readpreference",
+        "readpreferencetags",
+        "replicaset",
+        "ssl",
+        "srvmaxhosts",
+        "srvservicename",
+        "tls",
+        "tlsallowinvalidcertificates",
+        "tlsallowinvalidhostnames",
+        "tlsinsecure",
+    }
+    options = [
+        (key, value)
+        for key, value in parse_qsl(raw_query, keep_blank_values=True)
+        if key.lower() not in controlled_options
+    ]
+    if not any(key.lower() == "authsource" for key, _ in options):
+        options.append(("authSource", "admin"))
+    options.extend(
+        [
+            ("directConnection", "true"),
+            ("tls", "true"),
+            ("tlsAllowInvalidCertificates", "false"),
+            ("tlsAllowInvalidHostnames", "true"),
+        ]
+    )
+    return f"mongodb://{userinfo_prefix}{endpoint}{path}?{urlencode(options)}"
+
+
+def _configured_replica_set_name() -> str | None:
+    """Read the expected replica-set identity from existing Mongo URI options."""
+
+    if MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET:
+        return MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET
+    for uri in (MONGO_DNS_FALLBACK_URI, MONGO_URI):
+        if not uri or "?" not in uri:
+            continue
+        raw_query = uri.split("?", 1)[1]
+        for key, value in parse_qsl(raw_query, keep_blank_values=True):
+            if key.lower() == "replicaset" and value.strip():
+                return value.strip()
+    return None
+
+
+def _connection_fallback_targets(
+    *,
+    prefer_dns: bool,
+) -> list[_MongoFallbackTarget]:
+    """Return configured recovery candidates in decreasing preference order."""
+
+    tunnel_targets: list[_MongoFallbackTarget] = []
+    expected_replica_set = _configured_replica_set_name()
+    for endpoint in MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS:
+        try:
+            uri = _build_ssh_tunnel_mongo_uri(MONGO_URI, endpoint)
+        except ValueError as exc:
+            logger.warning(
+                "[mongo_fallback] Cannot derive SSH tunnel Mongo URI: %s", exc
+            )
+            break
+        tunnel_targets.append(
+            _MongoFallbackTarget(
+                uri=uri,
+                kind="ssh_tunnel",
+                label="SSH tunnel",
+                require_writable_primary=True,
+                expected_replica_set=expected_replica_set,
+            )
+        )
+    dns_target = (
+        _MongoFallbackTarget(
+            uri=MONGO_DNS_FALLBACK_URI,
+            kind="dns",
+            label="direct-host Atlas",
+        )
+        if MONGO_DNS_FALLBACK_URI
+        else None
+    )
+    targets: list[_MongoFallbackTarget] = []
+    if prefer_dns and dns_target is not None:
+        targets.append(dns_target)
+    targets.extend(tunnel_targets)
+    if not prefer_dns and dns_target is not None:
+        targets.append(dns_target)
+    if MONGO_ALLOW_LOCAL_FALLBACK:
+        targets.append(
+            _MongoFallbackTarget(
+                uri=MONGO_LOCAL_URI,
+                kind="local",
+                label="local",
+            )
+        )
+    return targets
+
+
 def _resolve_connection_fallback_target(
     *,
     prefer_dns: bool,
 ) -> tuple[str, str] | None:
-    """Return the best configured fallback URI for Mongo recovery.
+    """Compatibility wrapper returning the first configured fallback."""
 
-    Hosted guidance uses ``MONGO_ALLOW_LOCAL_FALLBACK=0`` to block a silent
-    downgrade to localhost. That flag should not suppress a separately
-    configured direct-host Atlas fallback URI because that remains a
-    non-local recovery path.
-    """
-
-    if prefer_dns and MONGO_DNS_FALLBACK_URI:
-        return (MONGO_DNS_FALLBACK_URI, "dns fallback")
-    if MONGO_ALLOW_LOCAL_FALLBACK:
-        return (MONGO_LOCAL_URI, "local fallback")
-    return None
+    targets = _connection_fallback_targets(prefer_dns=prefer_dns)
+    if not targets:
+        return None
+    target = targets[0]
+    return (target.uri, f"{target.kind} fallback")
 
 
 def _is_running_under_pytest() -> bool:
@@ -534,12 +754,14 @@ CHAT_PROMPT_QUEUE_COLLECTION_NAME = "chat_prompt_queue"
 _mongo_client_real: MongoClient | None = None
 _mongo_client_mock = None
 
-# Track whether we are using a fallback URI (local) rather than the primary MONGO_URI
+# Track whether we are using a fallback URI rather than the primary MONGO_URI.
 _using_fallback_real = False
+_active_fallback_kind_real: str | None = None
 _effective_uri_real = MONGO_URI  # The URI actually used to create the real client
 _last_auto_recovery_check_at = 0.0
 _dns_fallback_preferred_until_monotonic = 0.0
 _dns_fallback_preference_reason: str | None = None
+_preferred_fallback_kind: str | None = None
 _COLLECTION_INDEXES_LOCK = threading.Lock()
 _COLLECTION_INDEXES_READY: set[tuple[int, str, str]] = set()
 
@@ -580,28 +802,78 @@ def _dns_fallback_is_preferred() -> bool:
     return bool(
         MONGO_DNS_FALLBACK_URI
         and _dns_fallback_preferred_until_monotonic > time.monotonic()
+        and _preferred_fallback_kind in {None, "dns"}
     )
+
+
+def _fallback_is_preferred() -> bool:
+    return bool(
+        _preferred_fallback_kind
+        and _dns_fallback_preferred_until_monotonic > time.monotonic()
+    )
+
+
+def _mark_fallback_preferred(kind: str, reason: str) -> None:
+    """Prefer a successful fallback kind for a bounded recovery window."""
+
+    global _dns_fallback_preferred_until_monotonic
+    global _dns_fallback_preference_reason
+    global _preferred_fallback_kind
+    sticky_seconds = _mongo_dns_fallback_sticky_seconds()
+    if sticky_seconds <= 0:
+        _dns_fallback_preferred_until_monotonic = 0.0
+        _dns_fallback_preference_reason = None
+        _preferred_fallback_kind = None
+        return
+    _dns_fallback_preferred_until_monotonic = time.monotonic() + sticky_seconds
+    _dns_fallback_preference_reason = reason
+    _preferred_fallback_kind = kind
 
 
 def _mark_dns_fallback_preferred(reason: str) -> None:
     """Prefer the configured direct-host Atlas fallback for a bounded window."""
 
-    global _dns_fallback_preferred_until_monotonic
-    global _dns_fallback_preference_reason
-    sticky_seconds = _mongo_dns_fallback_sticky_seconds()
-    if not MONGO_DNS_FALLBACK_URI or sticky_seconds <= 0:
-        _dns_fallback_preferred_until_monotonic = 0.0
-        _dns_fallback_preference_reason = None
-        return
-    _dns_fallback_preferred_until_monotonic = time.monotonic() + sticky_seconds
-    _dns_fallback_preference_reason = reason
+    if MONGO_DNS_FALLBACK_URI:
+        _mark_fallback_preferred("dns", reason)
 
 
 def _clear_dns_fallback_preference() -> None:
     global _dns_fallback_preferred_until_monotonic
     global _dns_fallback_preference_reason
+    global _preferred_fallback_kind
     _dns_fallback_preferred_until_monotonic = 0.0
     _dns_fallback_preference_reason = None
+    _preferred_fallback_kind = None
+
+
+def prefer_alternate_mongo_route(reason: str) -> str | None:
+    """Prefer a different configured route after an operation transport failure.
+
+    A route may still answer ``hello`` while real operations are timing out or
+    being reset. This bounded hint lets the normal reconnect path try the next
+    remote transport rather than repeatedly selecting the superficially
+    healthy route.
+    """
+
+    current_kind = _active_fallback_kind_real if _using_fallback_real else None
+    seen_kinds: set[str] = set()
+    for target in _connection_fallback_targets(prefer_dns=False):
+        if target.kind in seen_kinds or target.kind == current_kind:
+            continue
+        seen_kinds.add(target.kind)
+        _mark_fallback_preferred(target.kind, reason)
+        logger.warning(
+            "[mongo_recovery] Marked current Mongo route degraded; next reconnect will try %s.",
+            target.label,
+        )
+        return target.kind
+    if current_kind is not None:
+        _clear_dns_fallback_preference()
+        logger.warning(
+            "[mongo_recovery] No alternate fallback route is configured; "
+            "next reconnect will probe the direct primary."
+        )
+    return None
 
 
 def _try_connect_uri(
@@ -609,12 +881,28 @@ def _try_connect_uri(
     *,
     fallback_label: str | None = None,
     server_selection_timeout_ms: int | None = None,
+    require_writable_primary: bool = False,
+    expected_replica_set: str | None = None,
 ) -> MongoClient:
     client = _new_mongo_client(
         uri,
         server_selection_timeout_ms=server_selection_timeout_ms,
     )
-    client.admin.command("ismaster")
+    try:
+        hello = client.admin.command("hello")
+        if require_writable_primary and not bool(
+            hello.get("isWritablePrimary", hello.get("ismaster", False))
+        ):
+            raise ConnectionFailure(
+                "SSH tunnel endpoint reached a replica member that is not writable"
+            )
+        if expected_replica_set and hello.get("setName") != expected_replica_set:
+            raise ConnectionFailure(
+                "SSH tunnel endpoint reached an unexpected Mongo replica set"
+            )
+    except Exception:
+        client.close()
+        raise
     if (
         fallback_label == "dns fallback"
         and MONGO_DNS_FALLBACK_URI
@@ -626,31 +914,114 @@ def _try_connect_uri(
     return client
 
 
-def _try_preferred_dns_fallback_first() -> bool:
-    """Connect to the direct-host Atlas fallback while the sticky window is active."""
+def _try_preferred_fallback_first() -> bool:
+    """Reconnect through the recent fallback kind during its recovery window."""
 
     global _mongo_client_real, _effective_uri_real, _using_fallback_real
-    if not _dns_fallback_is_preferred() or not MONGO_DNS_FALLBACK_URI:
+    global _active_fallback_kind_real, _preferred_fallback_kind
+
+    preferred_kind = _preferred_fallback_kind
+    # Preserve compatibility with an already-established legacy DNS sticky
+    # window created before the fallback kind was recorded.
+    if preferred_kind is None and _dns_fallback_is_preferred():
+        preferred_kind = "dns"
+        _preferred_fallback_kind = preferred_kind
+    if not preferred_kind or (
+        _dns_fallback_preferred_until_monotonic <= time.monotonic()
+    ):
         return False
-    try:
+
+    targets = [
+        target
+        for target in _connection_fallback_targets(prefer_dns=True)
+        if target.kind == preferred_kind
+    ]
+    for target in targets:
+        try:
+            logger.warning(
+                "[mongo_fallback] Preferring recent %s route during fallback recovery window.",
+                target.label,
+            )
+            _mongo_client_real = _try_connect_uri(
+                target.uri,
+                fallback_label=f"{target.kind} fallback",
+                server_selection_timeout_ms=3000,
+                require_writable_primary=target.require_writable_primary,
+                expected_replica_set=target.expected_replica_set,
+            )
+            _effective_uri_real = target.uri
+            _using_fallback_real = True
+            _active_fallback_kind_real = target.kind
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[mongo_fallback] Preferred %s connection failed: %s",
+                target.label,
+                exc,
+            )
+            _mongo_client_real = None
+
+    _clear_dns_fallback_preference()
+    return False
+
+
+def _try_preferred_dns_fallback_first() -> bool:
+    """Compatibility alias for the general preferred-fallback recovery path."""
+
+    return _try_preferred_fallback_first()
+
+
+def _try_configured_fallbacks(*, reason: str, prefer_dns: bool) -> bool:
+    """Try each configured fallback, selecting a writable tunneled member."""
+
+    global _mongo_client_real, _effective_uri_real, _using_fallback_real
+    global _active_fallback_kind_real, _last_auto_recovery_check_at
+
+    for target in _connection_fallback_targets(prefer_dns=prefer_dns):
         logger.warning(
-            "[mongo_fallback] Preferring configured direct-host Mongo URI during DNS fallback recovery window."
+            "[mongo_fallback] Attempting %s MongoDB fallback due to %s.",
+            target.label,
+            reason,
         )
-        _mongo_client_real = _try_connect_uri(
-            MONGO_DNS_FALLBACK_URI,
-            fallback_label="dns fallback",
-            server_selection_timeout_ms=3000,
-        )
-        _effective_uri_real = MONGO_DNS_FALLBACK_URI
+        try:
+            client = _try_connect_uri(
+                target.uri,
+                fallback_label=f"{target.kind} fallback",
+                server_selection_timeout_ms=3000,
+                require_writable_primary=target.require_writable_primary,
+                expected_replica_set=target.expected_replica_set,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[mongo_fallback] %s connection failed: %s",
+                target.label,
+                exc,
+            )
+            continue
+
+        _mongo_client_real = client
+        _effective_uri_real = target.uri
         _using_fallback_real = True
-        return True
-    except Exception as exc:
+        _active_fallback_kind_real = target.kind
+        _last_auto_recovery_check_at = time.monotonic()
+        _mark_fallback_preferred(target.kind, f"primary {reason}")
         logger.warning(
-            "[mongo_fallback] Preferred DNS fallback connection failed: %s", exc
+            "[mongo_fallback] Using %s Mongo URI instead of primary.",
+            target.label,
         )
-        _mongo_client_real = None
-        _clear_dns_fallback_preference()
-        return False
+        if _debug_mongo_enabled():
+            logger.debug(
+                "[MongoConnect] %s fallback host: %s",
+                target.kind,
+                _host_display_from_uri(target.uri),
+            )
+        return True
+
+    _mongo_client_real = None
+    _effective_uri_real = MONGO_URI
+    _using_fallback_real = False
+    _active_fallback_kind_real = None
+    return False
 
 
 def _should_run_auto_recovery_check() -> bool:
@@ -669,26 +1040,73 @@ def _should_run_auto_recovery_check() -> bool:
 def _invalidate_real_client_for_recovery(reason: str) -> None:
     """Drop the active client reference so the next get_db() call rebuilds it."""
     global _mongo_client_real, _effective_uri_real, _using_fallback_real
+    global _active_fallback_kind_real
     logger.warning("[mongo_recovery] Invalidating Mongo client: %s", reason)
     _mongo_client_real = None
-    if _dns_fallback_is_preferred() and MONGO_DNS_FALLBACK_URI:
-        _effective_uri_real = MONGO_DNS_FALLBACK_URI
+    if _fallback_is_preferred() and _active_fallback_kind_real:
         _using_fallback_real = True
     else:
         _effective_uri_real = MONGO_URI
         _using_fallback_real = False
+        _active_fallback_kind_real = None
 
 
 def _ensure_active_client_is_healthy() -> None:
-    global _mongo_client_real
+    global _mongo_client_real, _effective_uri_real, _using_fallback_real
+    global _active_fallback_kind_real
     if _mongo_client_real is None:
         return
     if not _should_run_auto_recovery_check():
         return
     timeout_ms = _mongo_auto_recovery_ping_timeout_ms()
+
+    if _using_fallback_real and not _fallback_is_preferred():
+        fallback_kind = _active_fallback_kind_real
+        try:
+            primary_client = _try_connect_uri(
+                MONGO_URI,
+                server_selection_timeout_ms=3000,
+            )
+        except Exception as exc:
+            if fallback_kind:
+                _mark_fallback_preferred(
+                    fallback_kind,
+                    f"primary recovery probe failed: {type(exc).__name__}",
+                )
+        else:
+            _mongo_client_real = primary_client
+            _effective_uri_real = MONGO_URI
+            _using_fallback_real = False
+            _active_fallback_kind_real = None
+            logger.info(
+                "[mongo_recovery] Direct primary Mongo route recovered; leaving fallback."
+            )
+            return
+
     try:
-        _mongo_client_real.admin.command("ping", maxTimeMS=timeout_ms)
+        tunnel_member_reselection_required = False
+        if _active_fallback_kind_real == "ssh_tunnel":
+            hello = _mongo_client_real.admin.command("hello", maxTimeMS=timeout_ms)
+            if not bool(hello.get("isWritablePrimary", hello.get("ismaster", False))):
+                tunnel_member_reselection_required = True
+                raise ConnectionFailure(
+                    "active SSH tunnel member is no longer writable"
+                )
+            expected_replica_set = _configured_replica_set_name()
+            if expected_replica_set and hello.get("setName") != expected_replica_set:
+                raise ConnectionFailure(
+                    "active SSH tunnel member has unexpected replica-set identity"
+                )
+        else:
+            _mongo_client_real.admin.command("ping", maxTimeMS=timeout_ms)
     except Exception as exc:
+        if (
+            not tunnel_member_reselection_required
+            and is_mongo_transport_error(exc)
+        ):
+            prefer_alternate_mongo_route(
+                f"periodic health check {type(exc).__name__}"
+            )
         _invalidate_real_client_for_recovery(f"periodic ping failed: {exc}")
 
 
@@ -699,6 +1117,7 @@ def get_db() -> Database | None:
     """
     global _mongo_client_real, _mongo_client_mock
     global _using_fallback_real, _effective_uri_real, _last_auto_recovery_check_at
+    global _active_fallback_kind_real
     db_name = get_configured_database_name()
     assert_safe_database_name_for_pytest(db_name)
 
@@ -725,6 +1144,7 @@ def get_db() -> Database | None:
             _mongo_client_real = _try_connect_uri(MONGO_URI)
             _effective_uri_real = MONGO_URI
             _using_fallback_real = False
+            _active_fallback_kind_real = None
             _last_auto_recovery_check_at = time.monotonic()
             if _debug_mongo_enabled():
                 try:
@@ -756,6 +1176,10 @@ def get_db() -> Database | None:
             is_ssl_error = (
                 "SSL" in str(e) or "10054" in str(e) or "handshake" in str(e).lower()
             )
+            is_dns_error = any(
+                marker in str(e).lower()
+                for marker in ("dns", "resolution", "name does not exist", "srv")
+            )
 
             # Debug logging for fallback logic
             if _debug_mongo_enabled():
@@ -771,110 +1195,39 @@ def get_db() -> Database | None:
                     MONGO_URI.startswith("mongodb+srv://"),
                 )
 
-            # Prefer a dedicated direct-host Atlas fallback when configured;
-            # only use localhost fallback when it is explicitly allowed.
-            fallback_target = None
-            if MONGO_URI.strip("\"'").startswith("mongodb+srv://") or is_ssl_error:
-                fallback_target = _resolve_connection_fallback_target(prefer_dns=True)
-
-            if fallback_target is not None:
-                try:
-                    fallback_uri, fallback_label = fallback_target
-                    logger.warning(
-                        "[mongo_fallback] Attempting %s MongoDB fallback due to connection failure.",
-                        fallback_label,
-                    )
-                    _mongo_client_real = _new_mongo_client(
-                        fallback_uri, server_selection_timeout_ms=3000
-                    )
-                    _mongo_client_real.admin.command("ismaster")
-                    if (
-                        fallback_label == "dns fallback"
-                        and MONGO_DNS_FALLBACK_URI
-                        and fallback_uri == MONGO_DNS_FALLBACK_URI
-                    ):
-                        _mark_dns_fallback_preferred("primary connection failure")
-                    _effective_uri_real = fallback_uri
-                    _using_fallback_real = True
-                    _last_auto_recovery_check_at = time.monotonic()
-                    try:
-                        logger.warning(
-                            "[mongo_fallback] Using %s Mongo URI instead of primary (connection failure).",
-                            fallback_label,
-                        )
-                    except Exception:
-                        pass
-                    if _debug_mongo_enabled():
-                        try:
-                            logger.debug(
-                                "[MongoConnect] %s host: %s",
-                                fallback_label,
-                                _host_display_from_uri(fallback_uri),
-                            )
-                        except Exception:
-                            pass
-                except Exception as fe:
-                    logger.warning("%s connection failed: %s", fallback_label, fe)
-                    _mongo_client_real = None
-                    return None
-            else:
+            should_try_fallback = (
+                bool(MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS)
+                or bool(MONGO_DNS_FALLBACK_URI)
+                or MONGO_ALLOW_LOCAL_FALLBACK
+                or MONGO_URI.strip("\"'").startswith("mongodb+srv://")
+                or is_ssl_error
+            )
+            if not should_try_fallback or not _try_configured_fallbacks(
+                reason="connection failure",
+                prefer_dns=is_dns_error and not is_ssl_error,
+            ):
                 return None
         except Exception as e:
             logger.warning(
                 "An unexpected error occurred during MongoDB client initialisation: %s",
                 e,
             )
-            # Attempt direct-host DNS fallback first; only use localhost when
-            # it is explicitly allowed.
-            fallback_target = None
-            if (
+            is_dns_error = (
                 "resolution" in str(e).lower()
                 or "dns" in str(e).lower()
-                or MONGO_URI.startswith("mongodb+srv://")
+                or "name does not exist" in str(e).lower()
+                or "srv" in str(e).lower()
+            )
+            should_try_fallback = (
+                bool(MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS)
+                or bool(MONGO_DNS_FALLBACK_URI)
+                or MONGO_ALLOW_LOCAL_FALLBACK
+                or is_dns_error
+            )
+            if not should_try_fallback or not _try_configured_fallbacks(
+                reason=("DNS/SRV error" if is_dns_error else "initialisation failure"),
+                prefer_dns=is_dns_error,
             ):
-                fallback_target = _resolve_connection_fallback_target(prefer_dns=True)
-
-            if fallback_target is not None:
-                try:
-                    fallback_uri, fallback_label = fallback_target
-                    logger.warning(
-                        "[mongo_fallback] Attempting %s MongoDB fallback due to DNS/SRV error.",
-                        fallback_label,
-                    )
-                    _mongo_client_real = _new_mongo_client(
-                        fallback_uri, server_selection_timeout_ms=3000
-                    )
-                    _mongo_client_real.admin.command("ismaster")
-                    if (
-                        fallback_label == "dns fallback"
-                        and MONGO_DNS_FALLBACK_URI
-                        and fallback_uri == MONGO_DNS_FALLBACK_URI
-                    ):
-                        _mark_dns_fallback_preferred("primary DNS/SRV error")
-                    _effective_uri_real = fallback_uri
-                    _using_fallback_real = True
-                    _last_auto_recovery_check_at = time.monotonic()
-                    try:
-                        logger.warning(
-                            "[mongo_fallback] Using %s Mongo URI instead of primary (DNS/SRV error).",
-                            fallback_label,
-                        )
-                    except Exception:
-                        pass
-                    if _debug_mongo_enabled():
-                        try:
-                            logger.debug(
-                                "[MongoConnect] %s host: %s",
-                                fallback_label,
-                                _host_display_from_uri(fallback_uri),
-                            )
-                        except Exception:
-                            pass
-                except Exception as fe:
-                    logger.warning("Local fallback connection failed: %s", fe)
-                    _mongo_client_real = None
-                    return None
-            else:
                 _mongo_client_real = None  # Ensure client is None on failure
                 return None
 
@@ -888,10 +1241,15 @@ def get_db() -> Database | None:
 
 def print_connection_info():
     """Log helpful connection info on startup."""
-    global _effective_uri_real
+    global _effective_uri_real, _active_fallback_kind_real
     uri_to_use = _effective_uri_real if _effective_uri_real else MONGO_URI
     host = _host_display_from_uri(uri_to_use)
-    if "localhost" in host or "127.0.0.1" in host:
+    if _active_fallback_kind_real == "ssh_tunnel":
+        logger.info(
+            "[Von Database] Connecting to REMOTE MongoDB through SSH tunnel at %s",
+            host,
+        )
+    elif "localhost" in host or "127.0.0.1" in host:
         logger.info("[Von Database] Connecting to LOCAL MongoDB at %s", host)
     else:
         logger.info("[Von Database] Connecting to REMOTE MongoDB at %s", host)
@@ -903,7 +1261,7 @@ def get_effective_mongo_uri() -> str:
 
 
 def is_using_fallback_uri() -> bool:
-    """Return True if a local fallback URI is being used instead of the primary MONGO_URI."""
+    """Return True when any fallback URI is used instead of primary MONGO_URI."""
     return _using_fallback_real
 
 
@@ -914,22 +1272,48 @@ def get_mongo_fallback_policy_state() -> dict[str, object]:
         0.0, _dns_fallback_preferred_until_monotonic - time.monotonic()
     )
     return {
+        "active_fallback_kind": _active_fallback_kind_real,
+        "preferred_fallback_kind": _preferred_fallback_kind,
+        "fallback_sticky": bool(remaining_seconds > 0),
+        "fallback_sticky_seconds_remaining": round(remaining_seconds, 3),
+        "fallback_sticky_seconds_configured": _mongo_dns_fallback_sticky_seconds(),
+        "fallback_preference_reason": _dns_fallback_preference_reason,
+        "ssh_tunnel_fallback_configured": bool(MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS),
+        "ssh_tunnel_endpoint_count": len(MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS),
+        "ssh_tunnel_expected_replica_set_configured": bool(
+            _configured_replica_set_name()
+        ),
         "dns_fallback_configured": bool(MONGO_DNS_FALLBACK_URI),
-        "dns_fallback_sticky": bool(remaining_seconds > 0),
-        "dns_fallback_sticky_seconds_remaining": round(remaining_seconds, 3),
+        "dns_fallback_sticky": bool(
+            remaining_seconds > 0 and _preferred_fallback_kind in {None, "dns"}
+        ),
+        "dns_fallback_sticky_seconds_remaining": (
+            round(remaining_seconds, 3)
+            if _preferred_fallback_kind in {None, "dns"}
+            else 0.0
+        ),
         "dns_fallback_sticky_seconds_configured": _mongo_dns_fallback_sticky_seconds(),
-        "dns_fallback_preference_reason": _dns_fallback_preference_reason,
+        "dns_fallback_preference_reason": (
+            _dns_fallback_preference_reason
+            if _preferred_fallback_kind in {None, "dns"}
+            else None
+        ),
+        "local_fallback_allowed": MONGO_ALLOW_LOCAL_FALLBACK,
     }
 
 
 def close_connection():
     """Closes the MongoDB connection."""
     global _mongo_client_real, _mongo_client_mock, _last_auto_recovery_check_at
+    global _using_fallback_real, _effective_uri_real, _active_fallback_kind_real
     if _mongo_client_real:
         _mongo_client_real.close()
         _mongo_client_real = None
     # mongomock doesn't require close(), but clear ref for correctness.
     _mongo_client_mock = None
+    _using_fallback_real = False
+    _effective_uri_real = MONGO_URI
+    _active_fallback_kind_real = None
     _last_auto_recovery_check_at = 0.0
     _clear_dns_fallback_preference()
     with _COLLECTION_INDEXES_LOCK:
@@ -947,8 +1331,12 @@ def invalidate_connection():
     simply drop our reference and let GC clean up.
     """
     global _mongo_client_real, _mongo_client_mock, _last_auto_recovery_check_at
+    global _using_fallback_real, _effective_uri_real, _active_fallback_kind_real
     _mongo_client_real = None
     _mongo_client_mock = None
+    _using_fallback_real = False
+    _effective_uri_real = MONGO_URI
+    _active_fallback_kind_real = None
     _last_auto_recovery_check_at = 0.0
     with _COLLECTION_INDEXES_LOCK:
         _COLLECTION_INDEXES_READY.clear()

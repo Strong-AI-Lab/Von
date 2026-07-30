@@ -673,6 +673,47 @@ def test_internal_mcp_gateway_exposes_mongo_cost_guardrails_report(monkeypatch):
     assert payload["runtime_posture"]["sanitized_uri"] == "mongodb+srv://example.invalid"
 
 
+def test_internal_mcp_guardrails_classify_atlas_through_ssh_tunnel(monkeypatch):
+    from src.backend.db import mongo_client
+
+    monkeypatch.setenv("VON_MONGO_OPERATION_AUDIT_ENABLED", "1")
+    monkeypatch.setattr(
+        mongo_client,
+        "MONGO_URI",
+        "mongodb+srv://user:secret@cluster.mongodb.net/von_db",
+    )
+    monkeypatch.setattr(
+        mongo_client,
+        "get_effective_mongo_uri",
+        lambda: "mongodb://user:secret@127.0.0.1:27019/?directConnection=true",
+    )
+    monkeypatch.setattr(mongo_client, "is_using_fallback_uri", lambda: True)
+    monkeypatch.setattr(
+        mongo_client,
+        "get_mongo_fallback_policy_state",
+        lambda: {"active_fallback_kind": "ssh_tunnel"},
+    )
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+        trusted_actor_payload_fallback=True,
+    )
+
+    payload = gateway.invoke(
+        "mongo_cost_guardrails_report",
+        {"local_development": True},
+    ).payload
+
+    assert payload["runtime_posture"]["remote_mongo"] is True
+    assert payload["runtime_posture"]["mongo_classification"] == "atlas"
+    assert (
+        payload["runtime_posture"]["sanitized_uri"]
+        == "mongodb+srv://cluster.mongodb.net"
+    )
+    assert "user:secret" not in str(payload)
+
+
 def test_settings_db_guardrails_route_returns_redacted_report(monkeypatch):
     from src.backend.server.routes import settings_routes
 

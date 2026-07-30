@@ -110,6 +110,8 @@ def build_safe_mongo_connection_location(
     uri: object,
     *,
     using_fallback: bool | None = None,
+    fallback_kind: str | None = None,
+    fallback_target_uri: object = None,
 ) -> dict[str, Any]:
     text = _coerce_uri(uri)
     scheme = None
@@ -123,8 +125,28 @@ def build_safe_mongo_connection_location(
         if sanitized_uri is None:
             hosts = []
 
-    classification = classify_mongo_connection_location(
+    endpoint_classification = classify_mongo_connection_location(
         sanitized_uri, scheme=scheme, hosts=hosts
+    )
+    upstream_sanitized_uri = None
+    upstream_classification = None
+    if fallback_kind == "ssh_tunnel":
+        upstream_sanitized_uri = sanitize_mongo_uri_for_display(fallback_target_uri)
+        upstream_classification = classify_mongo_connection_location(
+            upstream_sanitized_uri
+        )
+    if fallback_kind == "ssh_tunnel":
+        classification = (
+            upstream_classification
+            if upstream_classification not in {None, "unknown"}
+            else "remote"
+        )
+    else:
+        classification = endpoint_classification
+    logical_sanitized_uri = (
+        upstream_sanitized_uri
+        if fallback_kind == "ssh_tunnel" and upstream_sanitized_uri
+        else sanitized_uri
     )
     return {
         "available": sanitized_uri is not None,
@@ -133,8 +155,14 @@ def build_safe_mongo_connection_location(
         "hosts": hosts,
         "host_count": len(hosts),
         "sanitized_uri": sanitized_uri,
+        "logical_sanitized_uri": logical_sanitized_uri,
         "classification": classification,
+        "endpoint_classification": endpoint_classification,
+        "upstream_classification": upstream_classification,
+        "upstream_sanitized_uri": upstream_sanitized_uri,
+        "transport": "ssh_tunnel" if fallback_kind == "ssh_tunnel" else "direct",
         "is_atlas": classification == "atlas",
         "is_local": classification == "local",
         "using_fallback": using_fallback,
+        "fallback_kind": fallback_kind,
     }

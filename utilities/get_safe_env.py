@@ -18,16 +18,25 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 from typing import Dict, Optional
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.backend.db.mongo_uri_redaction import sanitize_mongo_uri_for_display
 
 SAFE_KEYS = {
     # Database config
     "VON_DB_NAME",
     "MONGO_PROJECT",
     "MONGO_ALLOW_LOCAL_FALLBACK",
+    "MONGO_DNS_FALLBACK_URI",
     "MONGO_LOCAL_URI",
+    "MONGO_SSH_TUNNEL_EXPECTED_REPLICA_SET",
+    "MONGO_SSH_TUNNEL_FALLBACK_ENDPOINTS",
     "MONGO_URI",
     # Non-secret feature toggles
     "VON_INTERNAL_MCP_ENABLE",
@@ -87,9 +96,8 @@ def _redact_value(key: str, value: str) -> str:
         return "[REDACTED]"
 
     # Redact credentials in Mongo-style URIs.
-    if key in {"MONGO_URI", "MONGO_LOCAL_URI"}:
-        # mongodb+srv://user:pass@host/...  -> mongodb+srv://user:[REDACTED]@host/...
-        return re.sub(r"(mongodb\+srv://[^:]+:)([^@]+)(@)", r"\1[REDACTED]\3", value)
+    if key in {"MONGO_URI", "MONGO_LOCAL_URI", "MONGO_DNS_FALLBACK_URI"}:
+        return sanitize_mongo_uri_for_display(value) or "[REDACTED]"
 
     # Heuristic: long opaque values are probably secrets.
     if len(value) >= 40 and re.fullmatch(r"[A-Za-z0-9_\-\.]+", value):
