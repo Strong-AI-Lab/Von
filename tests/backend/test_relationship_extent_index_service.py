@@ -185,6 +185,69 @@ def test_relationship_extent_readiness_requires_explicit_complete_state(
     assert service.relationship_extent_index_ready() is True
 
 
+def test_relationship_extent_rebuild_enforces_batch_size_for_dense_source(
+    monkeypatch,
+):
+    from src.backend.services import relationship_extent_index_service as service
+
+    client = mongomock.MongoClient()
+    coll = client.db.relationship_extent_index
+    settings = client.db.application_settings
+    batch_sizes: list[int] = []
+    real_replace_one = coll.replace_one
+
+    def tracked_bulk_write(operations, *, ordered):
+        operation_list = list(operations)
+        batch_sizes.append(len(operation_list))
+        for operation in operation_list:
+            real_replace_one(
+                operation._filter,
+                operation._doc,
+                upsert=operation._upsert,
+            )
+
+    monkeypatch.setattr(
+        service,
+        "get_relationship_extent_index_collection",
+        lambda: coll,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_application_settings_collection",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {
+                "concept_id": "#V#dense_source",
+                "relationships": {
+                    "#V#mentions": [
+                        f"#V#target_{index}" for index in range(7)
+                    ]
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(coll, "bulk_write", tracked_bulk_write)
+
+    result = service.rebuild_relationship_extent_index(
+        batch_size=3,
+        reason="dense_source_test",
+    )
+
+    assert result["success"] is True
+    assert result["source_count"] == 1
+    assert result["edge_count"] == 7
+    assert batch_sizes == [3, 3, 1]
+    assert coll.count_documents({}) == 7
+    state = settings.find_one(
+        {"setting_name": service.RELATIONSHIP_EXTENT_INDEX_STATE_SETTING}
+    )
+    assert state["value"]["status"] == "ready"
+
+
 def test_relationship_extent_query_cursor_and_count_share_total_deadline(
     monkeypatch,
 ):

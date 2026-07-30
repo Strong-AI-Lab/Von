@@ -627,9 +627,9 @@ def rebuild_relationship_extent_index(
                 docs = _index_docs_for_concept(concept_doc)
                 total_edges += len(docs)
                 pending_docs.extend(docs)
-                if batch_size > 0 and len(pending_docs) >= batch_size:
-                    _flush_pending_docs(pending_docs)
-                    pending_docs = []
+                while batch_size > 0 and len(pending_docs) >= batch_size:
+                    _flush_pending_docs(pending_docs[:batch_size])
+                    del pending_docs[:batch_size]
                 if batch_size > 0 and total_sources % batch_size == 0:
                     logger.info(
                         "[relationship_extent_index] rebuilt %s source concepts",
