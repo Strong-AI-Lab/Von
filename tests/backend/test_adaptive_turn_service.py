@@ -44,6 +44,7 @@ from src.backend.services.adaptive_turn_service import (
     _extract_conversation_situation_sidecar,
     _final_synthesis_context,
     _json_bytes,
+    _scope_message,
     _trusted_tool_payload,
     execute_adaptive_turn,
     ordinary_turn_capability_delegation,
@@ -170,6 +171,23 @@ def _gateway(handler: Any) -> InternalMCPGateway:
         transport=InternalMCPTransport(read_timeout_sec=1.0),
         enabled=True,
     )
+
+
+def test_scope_message_prefers_progressive_low_cost_read_plans() -> None:
+    message = _scope_message(
+        TrustedTurnScope(
+            user_concept_id="#V#person",
+            organisation_concept_id="#V#org",
+            namespace="#V#person@org",
+        ),
+        delegated_count=12,
+        final_synthesis=False,
+    )
+
+    assert "start with the least costly observable plan" in message
+    assert "escalate only if its returned evidence exposes a material gap" in message
+    assert "one schema-discovery read followed by one content-bearing read" in message
+    assert "merely to hedge uncertainty" in message
 
 
 def _gmail_gateway(handler: Any) -> InternalMCPGateway:
