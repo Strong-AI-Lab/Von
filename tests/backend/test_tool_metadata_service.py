@@ -238,7 +238,7 @@ def test_vontology_concept_search_alias_inherits_schema_discovery_metadata(
         service.invalidate_cache()
 
 
-def test_relation_read_hints_preserve_direction_neutral_completeness(
+def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
     monkeypatch,
 ):
     from src.backend.services import tool_metadata_service as service
@@ -248,16 +248,40 @@ def test_relation_read_hints_preserve_direction_neutral_completeness(
     try:
         incidence = service.get_tool_metadata("get_predicate_incidence")
         relation_read = service.get_tool_metadata("find_relations_with_argument")
+        concept_fetch = service.get_tool_metadata("fetch_concept")
 
-        assert "argument_index='any'" in (incidence.planner_hint or "")
+        assert incidence.default_payload == {
+            "argument_index": "subject",
+            "relation_kind": "binary",
+            "include_argument_type_counts": False,
+            "include_concept_preview": False,
+            "limit": 12,
+        }
+        assert "without previews, snippets, or argument type counts" in (
+            incidence.planner_hint or ""
+        )
+        assert "both directions only when direction is materially unknown" in (
+            incidence.planner_hint or ""
+        )
         assert "exact predicate IDs" in (incidence.planner_hint or "")
         assert "one-direction" in (incidence.planner_hint or "")
+        assert relation_read.default_payload == {
+            "include_concept_preview": False,
+            "limit": 20,
+        }
         assert "argument_index='any'" in (relation_read.planner_hint or "")
+        assert "omit inline previews" in (relation_read.planner_hint or "")
         assert "complete negative" in (relation_read.planner_hint or "")
         assert "relation_kind='binary'" in (relation_read.planner_hint or "")
         assert "vontology_concept_search" in (relation_read.planner_hint or "")
-        assert "broad unfiltered relation page" in (
+        assert "unless broad inventory is itself requested" in (
             relation_read.planner_hint or ""
+        )
+        assert "small predicate-filtered relation read" in (
+            concept_fetch.planner_hint or ""
+        )
+        assert "hydrate only selected related concepts" in (
+            concept_fetch.planner_hint or ""
         )
         assert "PhD" not in (incidence.planner_hint or "")
         assert "student" not in (relation_read.planner_hint or "").lower()

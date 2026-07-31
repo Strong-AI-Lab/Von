@@ -59,6 +59,18 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID
     )
     assert definition is not None
+    assert "multi-faceted profile" in str(definition.purpose)
+    assert "For a single bounded fact or relation extent" in str(definition.purpose)
+    assert "smallest evidence path" not in str(definition.purpose)
+    description_rows = get_texts_for_concept(
+        ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID,
+        predicate="hasDescription",
+        limit=5,
+    )
+    assert any(
+        "broad, multi-source entity profile" in str((row or {}).get("text") or "")
+        for row in description_rows
+    )
 
     routing_profile, routing_source = resolve_workflow_routing_profile(
         ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID
@@ -74,14 +86,13 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     assert discovery_source.startswith("text_relation:")
     discovery_keywords = discovery_exemplars.get("keywords") or []
     discovery_examples = discovery_exemplars.get("examples") or []
-    assert "who am i and list my papers" in discovery_keywords
-    assert "people related to an entity" in discovery_keywords
-    assert (
-        "Which people do I supervise in the represented knowledge?"
-        in discovery_examples
-    )
-    assert "Can you list PhD students supervised by me?" in discovery_examples
-    assert "Which projects are linked to this researcher?" in discovery_examples
+    assert "broad multi-source entity profile" in discovery_keywords
+    assert "bounded entity dossier" in discovery_keywords
+    assert "cross-check asserted and uncertain relationships" in discovery_keywords
+    assert any("multilingual concept dossier" in item for item in discovery_examples)
+    assert any("multi-faceted profile" in item for item in discovery_examples)
+    assert all("PhD students" not in item for item in discovery_examples)
+    assert all("Which people do I supervise" not in item for item in discovery_examples)
 
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID

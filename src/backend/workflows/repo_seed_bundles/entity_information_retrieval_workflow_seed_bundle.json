@@ -2,7 +2,7 @@
   "family_id": "entity_information_retrieval_workflow_seed_bundle",
   "managed_by": "entity_information_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "12",
+  "seed_version": "13",
   "source_tag": "JVNAUTOSCI-2075",
   "supported_action_ids": [
     "llm.action"
@@ -11,8 +11,8 @@
     {
       "workflow_id": "#V#entity_information_retrieval_workflow",
       "display_name": "Entity Information Retrieval Workflow",
-      "description": "Canonical reusable workflow for grounded retrieval of information of a requested kind about a resolved entity, especially authenticated self-relative questions about papers, affiliations, roles, and predicate-filtered extents.",
-      "content": "Resolve the target entity from authenticated or explicit context, identify the requested information kind, prefer predicate-incidence and relation retrieval before broad inventory or lexical search, filter retrieved results by the requested type or extent, and answer directly from grounded represented evidence.",
+      "description": "Canonical reusable workflow for a broad, multi-source entity profile or an explicit comparison of asserted facts with uncertain or proposed relationships. It reconciles focal-concept facts, text, predicate incidence, grounded relations, and uncertainty-bearing assertions.",
+      "content": "Resolve the target entity from authenticated or explicit context and use this workflow when the requested work product needs a multi-faceted profile, cross-checking across distinct evidence surfaces, or an explicit separation of asserted facts from uncertain or proposed relationships. For a single bounded fact or relation extent, prefer an adequate direct read or small composition. Retrieve and reconcile the workflow's required evidence, then answer directly from grounded represented evidence and preserve any material gap.",
       "type_ids": [
         "#V#ai_workflow",
         "#V#durable_workflow"
@@ -40,7 +40,7 @@
         },
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-      "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"entity information retrieval workflow\",\"information about a resolved entity\",\"authenticated self relation lookup\",\"predicate extent lookup\",\"represented relationship lookup\",\"people related to an entity\",\"entities connected by a relation\",\"students supervised by an entity\",\"PhD students supervised by me\",\"represented affiliation role membership and supervision lookup\",\"who am i and list my papers\",\"papers of mine\"],\"examples\":[\"Tell me who I am and list my papers.\",\"What papers of mine do you know about?\",\"Can you list PhD students supervised by me?\",\"Which people do I supervise in the represented knowledge?\",\"Which roles are associated with this person?\",\"Which organisation is Michael Witbrock affiliated with in the represented knowledge?\",\"Which projects are linked to this researcher?\",\"Who is related to this person by the requested predicate?\",\"¿Qué organizaciones están relacionadas con esta persona en el conocimiento representado?\"]}",
+      "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"entity information retrieval workflow\",\"broad multi-source entity profile\",\"bounded entity dossier\",\"multi-faceted represented self profile\",\"reconcile concept text and relationship evidence\",\"cross-check asserted and uncertain relationships\",\"separate represented facts from likely inferences\"],\"examples\":[\"Build a bounded multilingual concept dossier for #V#person from its names, descriptions and incoming/outgoing relationships. Keep it read-only and summarise the evidence.\",\"Give me a multi-faceted profile of this researcher, including descriptions, affiliations, works, and uncertainty-bearing assertions.\",\"Separate established represented facts about this person from uncertain or proposed relationships and cite the evidence.\",\"Tell me who I am, list my papers and affiliations, and distinguish asserted facts from uncertain relationships.\"]}",
           "lang": "en-NZ"
         },
         {

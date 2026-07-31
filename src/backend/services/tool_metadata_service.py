@@ -683,7 +683,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "target_concept_max_count": 5,
         "planner_hint": (
             "Use when you already know the concept ID and need grounded represented "
-            "facts, predicates, or relationships for that specific concept."
+            "facts for that specific concept. For relationship exploration, prefer "
+            "a small predicate-filtered relation read; if relation enrichment is "
+            "needed here, start with a small page without inline previews and hydrate "
+            "only selected related concepts."
         ),
     },
     "find_relations_with_argument": {
@@ -699,7 +702,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "target_concept_argument_name": "concept_id",
         "target_concept_source": "focal_concept",
         "target_concept_max_count": 2,
-        "default_payload": {"limit": 20},
+        "default_payload": {"include_concept_preview": False, "limit": 20},
         "planner_hint": (
             "Use for entity-relative relationship lookup after resolving the anchor "
             "concept. This is relation-bearing evidence, not mere inventory. Choose "
@@ -708,9 +711,12 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "when the user asks about text content. When the represented predicate "
             "is unknown, retrieve schema candidates with vontology_concept_search or "
             "inspect predicate incidence, then pass the returned exact predicate IDs "
-            "in predicate_filter; do not start with a broad unfiltered relation page. "
-            "Keep argument_index='any' when direction is unknown. A one-direction or "
-            "lexical-predicate probe cannot support a complete negative result."
+            "in predicate_filter. Begin with minimally enriched, predicate-filtered "
+            "evidence unless broad inventory is itself requested. "
+            "For an initial or broad page, keep the limit small, omit inline previews, "
+            "and hydrate only selected concept IDs. Keep argument_index='any' when "
+            "direction is materially unknown. A one-direction or lexical-predicate "
+            "probe cannot support a complete negative result."
         ),
     },
     "find_concepts_by_name": {
@@ -778,16 +784,18 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "default_payload": {
             "argument_index": "subject",
             "relation_kind": "binary",
-            "include_argument_type_counts": True,
+            "include_argument_type_counts": False,
             "include_concept_preview": False,
             "limit": 12,
         },
         "planner_hint": (
             "Use before a filtered entity-relative lookup when the represented "
             "predicate, inverse form, or argument direction is not established. "
-            "Set argument_index='any' to inspect both directions, then use the "
-            "returned exact predicate IDs and type counts for the relation read. "
-            "Do not infer a complete negative from a one-direction incidence probe."
+            "Start with a small binary page without previews, snippets, or argument "
+            "type counts. Inspect both directions only when direction is materially "
+            "unknown, then use returned exact predicate IDs for the relation read. "
+            "Request type counts only when they contribute to the requested work "
+            "product. Do not infer a complete negative from a one-direction probe."
         ),
     },
     "get_concept_usage_profile": {
