@@ -69,28 +69,6 @@ def _acknowledge_effect_observation_journal(
     )
 
 
-@pytest.fixture(autouse=True)
-def _disable_live_registered_tool_capability_rag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep unit tests independent of the configured embedding backend."""
-
-    from src.backend.services import registered_tool_capability_retrieval_service
-
-    monkeypatch.setattr(
-        registered_tool_capability_retrieval_service,
-        "retrieve_registered_tool_capability_scores",
-        lambda _query, _candidates, **_kwargs: (
-            {},
-            {
-                "schema_version": "registered_tool_capability_retrieval.v1",
-                "status": "valid_empty",
-                "result_count": 0,
-            },
-        ),
-    )
-
-
 class _SequenceClient:
     def __init__(self, *responses: Any) -> None:
         self.responses = list(responses)
@@ -3332,13 +3310,10 @@ def test_capability_frontier_promotes_direct_components_without_hiding_workflow(
     assert result["dominated_total"] == 0
 
 
-def test_workflow_components_remain_visible_ahead_of_unrelated_tool_rag_hits(
+def test_workflow_components_remain_visible_ahead_of_unrelated_tool_matches(
     monkeypatch,
 ) -> None:
-    from src.backend.services import (
-        registered_tool_capability_retrieval_service,
-        tool_metadata_service,
-    )
+    from src.backend.services import tool_metadata_service
     from src.backend.services.workflow_turn_capability_service import (
         WorkflowTurnCapability,
     )
@@ -3378,18 +3353,6 @@ def test_workflow_components_remain_visible_ahead_of_unrelated_tool_rag_hits(
         tool_metadata_service,
         "get_tool_dispatch_surface_metadata",
         lambda _name: None,
-    )
-    monkeypatch.setattr(
-        registered_tool_capability_retrieval_service,
-        "retrieve_registered_tool_capability_scores",
-        lambda _query, _candidates, **_kwargs: (
-            {"workflow_list_instances": 0.9},
-            {
-                "schema_version": "registered_tool_capability_retrieval.v1",
-                "status": "results_available",
-                "result_count": 1,
-            },
-        ),
     )
     workflow = WorkflowTurnCapability(
         name="represented_workflow_entity_lookup",
@@ -3431,30 +3394,34 @@ def test_workflow_components_remain_visible_ahead_of_unrelated_tool_rag_hits(
     )
 
 
-def test_semantic_tool_retrieval_puts_cheaper_schema_plan_in_visible_frontier(
+def test_descriptions_put_relevant_direct_plan_in_visible_frontier(
     monkeypatch,
 ) -> None:
-    from src.backend.services import (
-        registered_tool_capability_retrieval_service,
-        tool_metadata_service,
-    )
+    from src.backend.services import tool_metadata_service
     from src.backend.services.workflow_turn_capability_service import (
         WorkflowTurnCapability,
     )
 
     catalogue = MethodCatalogue()
-    for name in (
-        "generic_read",
-        "search_concepts",
-        "find_relations_with_argument",
-    ):
+    descriptions = {
+        "generic_read": "Inspect an unrelated operational record.",
+        "search_concepts": (
+            "Search represented concept names, predicates, and types for "
+            "relationship schema discovery."
+        ),
+        "find_relations_with_argument": (
+            "Find represented relationships, including people supervised by "
+            "a concept, where it appears as subject or target."
+        ),
+    }
+    for name, description in descriptions.items():
         catalogue.register(
             MethodDefinition(
                 name=name,
                 handler=lambda **_kwargs: {"success": True},
                 input_schema=Schema(optional={"query": str}, allow_unknown=True),
                 category="read",
-                description=f"Use {name}.",
+                description=description,
             )
         )
     gateway = InternalMCPGateway(
@@ -3477,22 +3444,6 @@ def test_semantic_tool_retrieval_puts_cheaper_schema_plan_in_visible_frontier(
         "get_tool_dispatch_surface_metadata",
         lambda _name: None,
     )
-    monkeypatch.setattr(
-        registered_tool_capability_retrieval_service,
-        "retrieve_registered_tool_capability_scores",
-        lambda _query, _candidates, **_kwargs: (
-            {
-                "search_concepts": 0.97,
-                "find_relations_with_argument": 0.94,
-                "generic_read": 0.2,
-            },
-            {
-                "schema_version": "registered_tool_capability_retrieval.v1",
-                "status": "results_available",
-                "result_count": 3,
-            },
-        ),
-    )
     workflow = WorkflowTurnCapability(
         name="represented_workflow_entity_lookup",
         workflow_id="#V#entity_lookup_workflow",
@@ -3513,21 +3464,15 @@ def test_semantic_tool_retrieval_puts_cheaper_schema_plan_in_visible_frontier(
         workflow_capabilities=(workflow,),
     )
 
-    assert [item["name"] for item in result["capabilities"]] == [
-        "search_concepts",
-        "represented_workflow_entity_lookup",
+    capability_names = [item["name"] for item in result["capabilities"]]
+    assert capability_names[:2] == [
         "find_relations_with_argument",
-        "generic_read",
+        "represented_workflow_entity_lookup",
     ]
-    assert result["capability_retrieval"]["registered_tools"]["status"] == (
-        "results_available"
-    )
-    search_candidate = result["capabilities"][0]
-    assert search_candidate["plan_profile"]["cost_profile"]["durable_runtime"] is False
-    assert any(
-        evidence["source"] == "registered_tool_capability_semantic_relevance"
-        for evidence in search_candidate["selection"]["adequacy_evidence"]
-    )
+    assert set(capability_names[2:]) == {"search_concepts", "generic_read"}
+    direct_candidate = result["capabilities"][0]
+    assert direct_candidate["plan_profile"]["cost_profile"]["durable_runtime"] is False
+    assert direct_candidate["selection"]["semantic_adequacy_owner"] == "adaptive_model"
 
 
 def test_capability_frontier_does_not_prefer_unrelated_direct_tool(
