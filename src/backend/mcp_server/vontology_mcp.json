@@ -2117,7 +2117,7 @@
         },
         {
             "name": "find_relations_with_argument",
-            "description": "Find relation assertions where a concept appears in one or more argument positions. The anchor entity must be supplied in concept_id; use argument_index to choose the relation slot instead of inventing subject/object payload fields. Supports exact graph matching and full-text text-relation matching with optional predicate/kind filters and pagination. Verified actors receive actor_effective results; payload-only identity is ignored and yields base_publication. Truncated actor overlays expose bounded recovery rather than a misleading offset continuation.",
+            "description": "Find relation assertions where a concept appears in one or more argument positions. The anchor entity must be supplied in concept_id; use argument_index to choose the relation slot instead of inventing subject/object payload fields. Supports exact graph matching and full-text text-relation matching with optional predicate/kind filters and pagination. A positive hit proves existence, not that a requested list or count is complete; use small predicate incidence first when the predicates actually used around a known anchor are not established. Verified actors receive actor_effective results; payload-only identity is ignored and yields base_publication. Truncated actor overlays expose bounded recovery rather than a misleading offset continuation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2320,7 +2320,7 @@
         },
         {
             "name": "get_predicate_incidence",
-            "description": "Summarise which predicates are actually observed around a concept or across instances of a type. The anchor entity goes in concept_id; argument_index='subject' means inspect outgoing subject-side relations, not that the payload should contain a subject field. Use when you need distinct predicates plus counts before choosing a predicate-specific extent or filtered relation lookup. Start with bounded minimal incidence (a modest limit, without argument type counts, previews, or text snippets), then request those richer fields only when the initial evidence shows they are needed; avoid concurrent rich incidence probes by default. Set role_expansion_mode='explicit' with represented node-type or role-predicate filters when the immediate neighbour is a reified/event/claim node whose other role fillers are the useful retrieval targets.",
+            "description": "Summarise which predicates are actually observed around a concept or across instances of a type. The anchor entity goes in concept_id; argument_index='subject' means inspect outgoing subject-side relations, not that the payload should contain a subject field. Use when you need distinct predicates plus counts before choosing a predicate-specific extent or filtered relation lookup. Use it early for a requested list, count, broad relationship category, or negative claim around a known entity: unlike lexical schema search, incidence reports predicates actually in use. Start with bounded minimal incidence (a modest limit, without argument type counts, previews, or text snippets), then request those richer fields only when the initial evidence shows they are needed; avoid concurrent rich incidence probes by default. Set role_expansion_mode='explicit' with represented node-type or role-predicate filters when the immediate neighbour is a reified/event/claim node whose other role fillers are the useful retrieval targets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4520,7 +4520,7 @@
         },
         {
             "name": "search_concepts",
-            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known. Begin with a small exact or substring name search; request descriptions, hierarchy paths, similarity, or two-pass search only when the initial lexical result leaves a material gap.",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known. Begin with a small exact or substring name search; request descriptions, hierarchy paths, similarity, or two-pass search only when the initial lexical result leaves a material gap. This finds possible schema; it does not show which predicates are actually used around a known entity, so it cannot by itself establish entity-relative enumeration or cardinality coverage.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6371,7 +6371,7 @@
         },
         {
             "name": "vontology_concept_search",
-            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known. Begin with a small exact or substring name search; request descriptions, hierarchy paths, similarity, or two-pass search only when the initial lexical result leaves a material gap.",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known. Begin with a small exact or substring name search; request descriptions, hierarchy paths, similarity, or two-pass search only when the initial lexical result leaves a material gap. This finds possible schema; it does not show which predicates are actually used around a known entity, so it cannot by itself establish entity-relative enumeration or cardinality coverage.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

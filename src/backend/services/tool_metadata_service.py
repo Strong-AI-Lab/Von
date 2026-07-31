@@ -223,7 +223,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "predicate, direction, or reified shape is not yet known. Begin with "
             "a small exact or substring name search; request descriptions, "
             "hierarchy paths, similarity, or two-pass search only when the "
-            "initial lexical result leaves a material gap."
+            "initial lexical result leaves a material gap. This finds possible "
+            "schema; it does not show which predicates are actually used around "
+            "a known entity, so it cannot by itself establish entity-relative "
+            "enumeration or cardinality coverage."
         ),
         "planner_hint": (
             "Schema discovery for represented knowledge. Use before a "
@@ -233,7 +236,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "with a small exact or substring search without hierarchy expansion "
             "or two-pass similarity; add richer search only if needed. Skip when "
             "the exact schema is already known or the task is not about "
-            "represented knowledge."
+            "represented knowledge. When the anchor entity is known and the work "
+            "product enumerates or quantifies a broad relationship category, "
+            "prefer small predicate incidence first: lexical schema search shows "
+            "possible predicates, not the predicates actually in use around that "
+            "entity."
         ),
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
@@ -721,8 +728,14 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "For an initial single-relationship question, start around limit 20, "
             "omit inline previews, "
             "and hydrate only selected concept IDs. Keep argument_index='any' when "
-            "direction is materially unknown. A one-direction or lexical-predicate "
-            "probe cannot support a complete negative result."
+            "direction is materially unknown. A positive hit proves that relation "
+            "exists, not that a requested list or count is complete. For a list, "
+            "count, broad relationship category, or negative claim around a known "
+            "anchor, inspect small predicate incidence across the materially "
+            "possible directions first when the predicates, directions, or "
+            "represented forms needed for that coverage are not already "
+            "established; then read the exact predicates actually in use. A "
+            "one-direction or lexical-predicate probe cannot establish that coverage."
         ),
     },
     "find_concepts_by_name": {
@@ -797,11 +810,17 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "planner_hint": (
             "Use before a filtered entity-relative lookup when the represented "
             "predicate, inverse form, or argument direction is not established. "
+            "Use it early for a requested list, count, broad relationship category, "
+            "or negative claim around a known entity when the predicates, "
+            "directions, or represented forms needed for that coverage are not "
+            "already established: it reports predicates actually in use, whereas "
+            "lexical schema search reports only possible predicates. "
             "Start with a small binary page without previews, snippets, or argument "
             "type counts. Inspect both directions only when direction is materially "
             "unknown, then use returned exact predicate IDs for the relation read. "
             "Request type counts only when they contribute to the requested work "
-            "product. Do not infer a complete negative from a one-direction probe."
+            "product. A positive hit proves existence, not list completeness; do not "
+            "infer a complete list, count, or negative from a one-direction probe."
         ),
     },
     "get_concept_usage_profile": {

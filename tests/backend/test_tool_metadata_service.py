@@ -236,6 +236,12 @@ def test_vontology_concept_search_alias_inherits_schema_discovery_metadata(
         assert "without hierarchy expansion or two-pass similarity" in (
             alias.planner_hint or ""
         )
+        assert "possible predicates, not the predicates actually in use" in (
+            alias.planner_hint or ""
+        )
+        assert "requested work product is a list" not in (
+            alias.planner_hint or ""
+        )
         assert "PhD" not in (alias.description or "")
         assert "student" not in (alias.planner_hint or "").lower()
     finally:
@@ -268,6 +274,10 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
             incidence.planner_hint or ""
         )
         assert "exact predicate IDs" in (incidence.planner_hint or "")
+        assert "positive hit proves existence, not list completeness" in (
+            incidence.planner_hint or ""
+        )
+        assert "not already established" in (incidence.planner_hint or "")
         assert "one-direction" in (incidence.planner_hint or "")
         assert relation_read.default_payload == {
             "include_concept_preview": False,
@@ -276,7 +286,13 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
         assert "argument_index='any'" in (relation_read.planner_hint or "")
         assert "start around limit 20" in (relation_read.planner_hint or "")
         assert "omit inline previews" in (relation_read.planner_hint or "")
-        assert "complete negative" in (relation_read.planner_hint or "")
+        assert "positive hit proves that relation exists" in (
+            relation_read.planner_hint or ""
+        )
+        assert "cannot establish that coverage" in (
+            relation_read.planner_hint or ""
+        )
+        assert "not already established" in (relation_read.planner_hint or "")
         assert "relation_kind='binary'" in (relation_read.planner_hint or "")
         assert "vontology_concept_search" in (relation_read.planner_hint or "")
         assert "unless broad inventory is itself requested" in (

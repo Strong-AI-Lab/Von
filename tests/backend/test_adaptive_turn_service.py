@@ -166,6 +166,8 @@ def test_scope_message_prefers_progressive_low_cost_read_plans() -> None:
     assert "escalate only if its returned evidence exposes a material gap" in message
     assert "one schema-discovery read followed by one content-bearing read" in message
     assert "merely to hedge uncertainty" in message
+    assert "A positive hit proves existence, not completeness" in message
+    assert "stop once the evidence supports the requested work product" in message
 
 
 def _gmail_gateway(handler: Any) -> InternalMCPGateway:
