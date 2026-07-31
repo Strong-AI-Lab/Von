@@ -220,15 +220,20 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "Search Vontology concept names and descriptions, including "
             "predicates and types. Use as schema discovery when a represented "
             "entity or relationship is relevant but its exact concept, "
-            "predicate, direction, or reified shape is not yet known."
+            "predicate, direction, or reified shape is not yet known. Begin with "
+            "a small exact or substring name search; request descriptions, "
+            "hierarchy paths, similarity, or two-pass search only when the "
+            "initial lexical result leaves a material gap."
         ),
         "planner_hint": (
             "Schema discovery for represented knowledge. Use before a "
             "relation-specific read when the relevant entity, predicate, type, "
             "inverse direction, or reified relationship shape is uncertain; "
-            "then use the discovered schema with a relation-bearing lookup. "
-            "Skip when the exact schema is already known or the task is not "
-            "about represented knowledge."
+            "then use the discovered schema with a relation-bearing lookup. Start "
+            "with a small exact or substring search without hierarchy expansion "
+            "or two-pass similarity; add richer search only if needed. Skip when "
+            "the exact schema is already known or the task is not about "
+            "represented knowledge."
         ),
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
@@ -713,7 +718,8 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "inspect predicate incidence, then pass the returned exact predicate IDs "
             "in predicate_filter. Begin with minimally enriched, predicate-filtered "
             "evidence unless broad inventory is itself requested. "
-            "For an initial or broad page, keep the limit small, omit inline previews, "
+            "For an initial single-relationship question, start around limit 20, "
+            "omit inline previews, "
             "and hydrate only selected concept IDs. Keep argument_index='any' when "
             "direction is materially unknown. A one-direction or lexical-predicate "
             "probe cannot support a complete negative result."

@@ -4520,7 +4520,7 @@
         },
         {
             "name": "search_concepts",
-            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known.",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known. Begin with a small exact or substring name search; request descriptions, hierarchy paths, similarity, or two-pass search only when the initial lexical result leaves a material gap.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6371,7 +6371,7 @@
         },
         {
             "name": "vontology_concept_search",
-            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known.",
+            "description": "Search Vontology concept names and descriptions, including predicates and types. Use as schema discovery when a represented entity or relationship is relevant but its exact concept, predicate, direction, or reified shape is not yet known. Begin with a small exact or substring name search; request descriptions, hierarchy paths, similarity, or two-pass search only when the initial lexical result leaves a material gap.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

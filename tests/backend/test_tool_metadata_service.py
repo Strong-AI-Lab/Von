@@ -232,6 +232,10 @@ def test_vontology_concept_search_alias_inherits_schema_discovery_metadata(
         assert alias.evidence_role == "search"
         assert "schema discovery" in (alias.planner_hint or "").lower()
         assert "relation-bearing lookup" in (alias.planner_hint or "")
+        assert "small exact or substring search" in (alias.planner_hint or "")
+        assert "without hierarchy expansion or two-pass similarity" in (
+            alias.planner_hint or ""
+        )
         assert "PhD" not in (alias.description or "")
         assert "student" not in (alias.planner_hint or "").lower()
     finally:
@@ -270,6 +274,7 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
             "limit": 20,
         }
         assert "argument_index='any'" in (relation_read.planner_hint or "")
+        assert "start around limit 20" in (relation_read.planner_hint or "")
         assert "omit inline previews" in (relation_read.planner_hint or "")
         assert "complete negative" in (relation_read.planner_hint or "")
         assert "relation_kind='binary'" in (relation_read.planner_hint or "")
