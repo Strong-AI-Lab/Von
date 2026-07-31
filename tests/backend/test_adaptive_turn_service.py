@@ -1198,6 +1198,88 @@ def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None
     ) == ("search_arxiv",)
 
 
+def test_agent_test_exact_names_extend_only_registered_read_or_effect_capability() -> None:
+    catalogue = MethodCatalogue()
+    for definition in (
+        MethodDefinition(
+            name="ordinary_read",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(allow_unknown=True),
+            category="read",
+        ),
+        MethodDefinition(
+            name="deployment_read",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(allow_unknown=True),
+            category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
+        ),
+        MethodDefinition(
+            name="unmarked_write",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(allow_unknown=True),
+            category="write",
+        ),
+        MethodDefinition(
+            name="bounded_effect",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(allow_unknown=True),
+            category="write",
+            ordinary_turn_excluded_reason="deployment_global_account",
+            ordinary_turn_effect=True,
+        ),
+        MethodDefinition(
+            name="bound_deployment_read",
+            handler=lambda **_kwargs: {"success": True},
+            input_schema=Schema(allow_unknown=True),
+            category="read",
+            ordinary_turn_excluded_reason="deployment_global_account",
+            ordinary_turn_trusted_argument_bindings={"profile": "profile"},
+        ),
+    ):
+        catalogue.register(definition)
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+
+    default = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+    )
+    assert default == ("ordinary_read",)
+    assert ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        agent_test_trusted_capability_names=(),
+    ) == default
+
+    granted = ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        agent_test_trusted_capability_names=(
+            "deployment_read",
+            "unmarked_write",
+            "bounded_effect",
+            "bound_deployment_read",
+            "unknown_capability",
+        ),
+    )
+    assert granted == ("bounded_effect", "deployment_read", "ordinary_read")
+    assert ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id="#V#person",
+        trusted_argument_values={"profile": "represented-profile"},
+        agent_test_trusted_capability_names=("bound_deployment_read",),
+    ) == ("bound_deployment_read", "ordinary_read")
+    assert ordinary_turn_capability_delegation(
+        gateway,
+        user_concept_id=None,
+        agent_test_trusted_capability_names=("deployment_read", "bounded_effect"),
+    ) == ()
+
+
 def test_server_bound_capability_argument_is_not_model_visible() -> None:
     gateway = _gmail_gateway(lambda **_kwargs: {"success": True})
     delegated = ordinary_turn_capability_delegation(

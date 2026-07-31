@@ -35556,6 +35556,9 @@ def _build_default_catalogue_external_integration_definitions() -> (
             input_schema=_jira_update_issue_input_schema(),
             output_schema=jira_update_issue_output_schema,
             category="write",
+            ordinary_turn_excluded_reason="deployment_global_account",
+            ordinary_turn_fixed_arguments={"execute": False},
+            ordinary_turn_effect=True,
             timeout_sec=20.0,
             description=(
                 "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). "

@@ -1493,6 +1493,7 @@ def ordinary_turn_capability_delegation(
     *,
     user_concept_id: str | None,
     trusted_argument_values: Mapping[str, Any] | None = None,
+    agent_test_trusted_capability_names: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """Project the capabilities authorised for an ordinary turn.
 
@@ -1523,9 +1524,18 @@ def ordinary_turn_capability_delegation(
             and not is_unresolved_tool_argument_placeholder(value)
         )
 
+    def trusted_bindings_are_present(metadata: Mapping[str, Any]) -> bool:
+        return all(
+            trusted_binding_is_present(str(binding_key))
+            for binding_key in (
+                metadata.get("ordinary_turn_trusted_argument_bindings") or {}
+            ).values()
+        )
+
+    methods = gateway.describe_methods()
     requested = [
         name
-        for name, metadata in gateway.describe_methods().items()
+        for name, metadata in methods.items()
         if isinstance(metadata, Mapping)
         and (
             metadata.get("category") == "read"
@@ -1543,13 +1553,20 @@ def ordinary_turn_capability_delegation(
                 and metadata.get("ordinary_turn_public") is True
             )
         )
-        and all(
-            trusted_binding_is_present(str(binding_key))
-            for binding_key in (
-                metadata.get("ordinary_turn_trusted_argument_bindings") or {}
-            ).values()
-        )
+        and trusted_bindings_are_present(metadata)
     ]
+    if authenticated:
+        for name in agent_test_trusted_capability_names or ():
+            metadata = methods.get(name)
+            if not isinstance(metadata, Mapping):
+                continue
+            if metadata.get("category") != "read" and not (
+                metadata.get("category") == "write"
+                and metadata.get("ordinary_turn_effect") is True
+            ):
+                continue
+            if trusted_bindings_are_present(metadata):
+                requested.append(name)
     return _registered_capability_names(gateway, requested)
 
 
@@ -2844,6 +2861,7 @@ def execute_adaptive_turn(
     user_concept_id: str | None = None,
     org_concept_id: str | None = None,
     trusted_argument_values: Mapping[str, Any] | None = None,
+    agent_test_trusted_capability_names: Sequence[str] | None = None,
     workflow_launch_inputs: Mapping[str, Any] | None = None,
     progress_tracker: Any = None,
     turn_id: str | None = None,
@@ -2921,6 +2939,7 @@ def execute_adaptive_turn(
         gateway,
         user_concept_id=user_concept_id,
         trusted_argument_values=trusted_values,
+        agent_test_trusted_capability_names=agent_test_trusted_capability_names,
     )
     delegated_lookup = {name.lower(): name for name in delegated_names}
     workflow_capabilities_by_name: dict[str, Any] = {}
