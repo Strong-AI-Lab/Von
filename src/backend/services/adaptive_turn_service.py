@@ -65,6 +65,7 @@ _DEFAULT_OUTER_TOOL_WORKERS = 8
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
+_CAPABILITY_PURPOSE_MAX_CHARS = 160
 _CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_capabilities.v1"
 _CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION = "capability_plan_profile.v1"
 _CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION = "capability_effect_profile.v1"
@@ -360,6 +361,58 @@ def _compact_capability_selection_profiles(
     return compact
 
 
+def _capability_purpose_index(
+    capabilities: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Expose every candidate's authored purpose without choosing semantics."""
+
+    entries: list[dict[str, Any]] = []
+    for capability in sorted(
+        capabilities,
+        key=lambda item: str(item.get("name") or "").lower(),
+    ):
+        name = str(capability.get("name") or "").strip()
+        if not name:
+            continue
+        purpose = " ".join(str(capability.get("description") or "").split())
+        first_sentence_end = re.search(r"[.!?](?=(?:\s+[A-Z#])|$)", purpose)
+        if first_sentence_end is not None:
+            purpose = purpose[: first_sentence_end.end()]
+        if len(purpose) > _CAPABILITY_PURPOSE_MAX_CHARS:
+            prefix = purpose[: _CAPABILITY_PURPOSE_MAX_CHARS - 3]
+            if not prefix.endswith(" ") and not purpose[len(prefix)].isspace():
+                word_boundary = prefix.rfind(" ")
+                if word_boundary > 0:
+                    prefix = prefix[:word_boundary]
+            purpose = prefix.rstrip() + "..."
+        entry: dict[str, Any] = {"name": name, "purpose": purpose}
+        plan_profile = capability.get("plan_profile")
+        shape = (
+            str(plan_profile.get("shape") or "").strip()
+            if isinstance(plan_profile, Mapping)
+            else ""
+        )
+        if shape and shape != "single_capability":
+            entry["shape"] = shape
+        semantic_effect = capability.get("semantic_effect")
+        if semantic_effect is not False:
+            entry["semantic_effect"] = semantic_effect
+        entries.append(entry)
+    return {
+        "schema_version": "adaptive_turn_capability_purpose_index.v1",
+        "complete": True,
+        "ordering": "name_ascending_unranked",
+        "purpose_projection": "first_authored_sentence",
+        "purpose_max_chars": _CAPABILITY_PURPOSE_MAX_CHARS,
+        "truncation_marker": "...",
+        "exact_schema_hydration": {
+            "tool": _CAPABILITY_TOOL_NAME,
+            "arguments": {"names": ["<capability name>"], "limit": 1},
+        },
+        "entries": entries,
+    }
+
+
 def _capability_schema_reference(
     capability: Mapping[str, Any],
     *,
@@ -480,6 +533,7 @@ def _bounded_capability_catalogue_output(
             "dominated_capabilities",
             "catalogue_scope",
             "offset",
+            "purpose_index",
         )
         if key in value
     }
@@ -519,7 +573,30 @@ def _bounded_capability_catalogue_output(
         schema_reference_count=schema_reference_count,
     )
     if len(_json_bytes(bounded)) > max_bytes:
-        return {}
+        purpose_index = base.get("purpose_index")
+        if not isinstance(purpose_index, Mapping):
+            return {}
+        base = {
+            key: value.get(key)
+            for key in (
+                "schema_version",
+                "success",
+                "delegation",
+                "total",
+                "delegated_total",
+                "catalogue_scope",
+                "offset",
+                "purpose_index",
+            )
+            if key in value
+        }
+        bounded = assemble(
+            included,
+            full_schema_count=full_schema_count,
+            schema_reference_count=schema_reference_count,
+        )
+        if len(_json_bytes(bounded)) > max_bytes:
+            return {}
 
     for capability in capabilities:
         full_candidate = assemble(
@@ -1207,12 +1284,12 @@ def _tool_definitions() -> list[ToolDefinition]:
         ToolDefinition(
             name=_CAPABILITY_TOOL_NAME,
             description=(
-                "Inspect the capabilities delegated to this turn. Search by "
-                "ordinary words, request exact names, or page through the complete "
-                "catalogue. A natural-language query also searches actor-accessible "
-                "represented workflows and returns executable matches as bound "
-                "capabilities. Returns canonical argument schemas. This is "
-                "discovery, not a requirement to use any particular capability."
+                "Inspect the capabilities delegated to this turn. Non-exact "
+                "discovery returns a complete unranked compact purpose index, "
+                "including semantically discovered represented workflows; judge "
+                "semantic adequacy yourself. Request an exact name to hydrate its "
+                "canonical argument schema. This is discovery, not a requirement "
+                "to use any particular capability."
             ),
             input_schema={
                 "type": "object",
@@ -1330,9 +1407,11 @@ def _scope_message(
         "- Remaining effect-capable window before the protected final-answer "
         f"reserve: {max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
         f"- {_CAPABILITY_TOOL_NAME} exposes the complete delegated catalogue "
-        "without interpreting the user's intent; a natural-language query also "
-        "retrieves actor-accessible executable represented workflows as bound "
-        "capabilities.\n"
+        "as an unranked compact purpose index without interpreting the user's "
+        "intent; judge semantic adequacy yourself, then request an exact name to "
+        "hydrate its canonical schema. Natural-language discovery also adds "
+        "actor-accessible executable represented workflows to the same index. "
+        "Detailed-page query labels are hints, never exclusions.\n"
         "- Treat a direct call, a small composition, and a represented workflow "
         "as capability plans in one decision space. Choose the least costly plan "
         "only after judging that it can produce the material work product and "
@@ -2257,6 +2336,11 @@ def _capability_catalogue(
         ),
         "offset": offset,
         "next_offset": next_offset if next_offset < len(selected) else None,
+        **(
+            {"purpose_index": _capability_purpose_index(selected)}
+            if not exact_names
+            else {}
+        ),
         "capabilities": page,
         **(
             {"workflow_discovery": dict(workflow_discovery)}

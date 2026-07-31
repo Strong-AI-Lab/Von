@@ -482,6 +482,13 @@ not a quality signal. Actor-visible registered tools declared by a matched
 workflow are exposed as plausible simpler component plans without claiming that
 one component is equivalent to the whole workflow.
 
+Natural-language capability discovery gives the model a complete alphabetical
+purpose index of the delegated registered tools alongside bounded represented
+workflow matches. The index contains mechanically shortened authored
+descriptions, not code-ranked semantic choices; exact-name discovery hydrates
+the selected canonical schemas. Lexical detail-page labels are hints and cannot
+remove a delegated tool from that model-visible index.
+
 Workflow component projection includes actor-visible MCP tools named by
 represented step actions and by represented LLM-step tool policy
 (`required_tools`, `conditional_required_tools`, and `allowed_tools`). Engine

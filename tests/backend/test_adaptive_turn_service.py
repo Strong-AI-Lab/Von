@@ -3137,6 +3137,181 @@ def test_capability_query_ranks_without_eliminating_the_delegated_set(
     assert "actor_id" not in internal["input_schema"]["properties"]
 
 
+def test_complete_purpose_index_keeps_zero_overlap_direct_tool_visible(
+    monkeypatch,
+) -> None:
+    from src.backend.services import tool_metadata_service
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    target_name = "find_relations_with_argument"
+    target_description = (
+        "Return represented relations containing a supplied entity at a selected "
+        "argument position, with bounded predicate, certainty, direction, preview, "
+        "and pagination controls for direct evidence reads. A second sentence adds "
+        "detail that the compact purpose index must not repeat."
+    )
+    families = (
+        "knowledge_lookup",
+        "mail_search",
+        "project_read",
+        "record_fetch",
+        "task_query",
+        "workflow_status",
+        "web_research",
+        "zotero_search",
+    )
+    filler_names = [
+        f"{family}_{index:02d}"
+        for family in families
+        for index in range(12)
+    ][:95]
+    capability_names = (target_name, *filler_names)
+    catalogue = MethodCatalogue()
+    for name in capability_names:
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda **_kwargs: {"success": True},
+                input_schema=Schema(
+                    required={"query": str},
+                    optional={
+                        f"bounded_field_{index}": str for index in range(8)
+                    },
+                    allow_unknown=False,
+                ),
+                category="read",
+                description=(
+                    target_description
+                    if name == target_name
+                    else (
+                        "Inspect a bounded source and return provenance-bearing "
+                        "records for the requested research operation."
+                    )
+                ),
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_description",
+        lambda name, *, fallback_description=None: (
+            target_description if name == target_name else fallback_description
+        ),
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_planner_hint",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        tool_metadata_service,
+        "get_tool_dispatch_surface_metadata",
+        lambda _name: None,
+    )
+    workflows = tuple(
+        WorkflowTurnCapability(
+            name=f"represented_workflow_academic_profile_{index:02d}",
+            workflow_id=f"#V#academic_profile_workflow_{index:02d}",
+            display_name=f"Academic profile workflow {index:02d}",
+            description=(
+                "Compile and verify a multi-source academic mentorship dossier."
+                if index == 0
+                else "Compile and verify a bounded multi-source research dossier."
+            ),
+            relevance_score=0.97 - (index * 0.01),
+            input_schema={"type": "object", "properties": {}},
+            declared_step_count=5,
+            semantic_effect=False,
+            semantic_effect_source="declared_registered_read_components",
+        )
+        for index in range(10)
+    )
+
+    raw = _capability_catalogue(
+        gateway,
+        capability_names,
+        {"query": "Which scholar mentors Michael?", "limit": 50},
+        workflow_capabilities=workflows,
+    )
+    assert len(_json_bytes(raw)) > 24_000
+
+    target_detail = next(
+        item for item in raw["capabilities"] if item["name"] == target_name
+    )
+    assert target_detail["query_match"] is False
+    purpose_index = raw["purpose_index"]
+    entries = purpose_index["entries"]
+    assert purpose_index["complete"] is True
+    assert purpose_index["ordering"] == "name_ascending_unranked"
+    assert purpose_index["purpose_projection"] == "first_authored_sentence"
+    assert len(entries) == len(capability_names) + len(workflows)
+    assert [entry["name"] for entry in entries] == sorted(
+        (*capability_names, *(workflow.name for workflow in workflows)),
+        key=str.lower,
+    )
+    target_purpose = next(
+        entry for entry in entries if entry["name"] == target_name
+    )
+    assert target_purpose["purpose"].endswith("...")
+    assert len(target_purpose["purpose"]) <= 160
+    assert "second sentence" not in target_purpose["purpose"].lower()
+    assert set(target_purpose) == {"name", "purpose"}
+    workflow_purpose = next(
+        entry for entry in entries if entry["name"] == workflows[0].name
+    )
+    assert workflow_purpose["shape"] == "represented_workflow"
+    assert "query_match" not in workflow_purpose
+    assert "selection" not in workflow_purpose
+
+    non_english = _capability_catalogue(
+        gateway,
+        capability_names,
+        {"query": "Qui Michel encadre-t-il ?", "limit": 50},
+        workflow_capabilities=workflows,
+    )
+    non_english_target = next(
+        item for item in non_english["capabilities"] if item["name"] == target_name
+    )
+    assert non_english_target["query_match"] is False
+    assert non_english["purpose_index"] == purpose_index
+
+    bounded_results = _bound_tool_results_for_model(
+        [
+            ToolResult(
+                call_id="realistic-purpose-index",
+                tool_name="turn_capabilities",
+                output=raw,
+                status="ok",
+            )
+        ]
+    )
+    assert bounded_results is not None
+    bounded = bounded_results[0].output
+    bounded_size = len(_json_bytes(bounded))
+    assert len(_json_bytes(purpose_index)) < 24_000
+    assert bounded_size <= 24_000
+    assert bounded["purpose_index"] == purpose_index
+
+    exact = _capability_catalogue(
+        gateway,
+        capability_names,
+        {"names": [target_name], "limit": 1},
+        workflow_capabilities=workflows,
+    )
+    assert "purpose_index" not in exact
+    assert exact["capabilities"][0]["name"] == target_name
+    assert set(exact["capabilities"][0]["input_schema"]["properties"]) == {
+        "query",
+        *(f"bounded_field_{index}" for index in range(8)),
+    }
+
+
 def test_schema_discovery_metadata_is_retrievable_without_list_word_trigger(
     monkeypatch,
 ) -> None:
