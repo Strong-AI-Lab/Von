@@ -286,6 +286,14 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
         assert "keep them off for entity enumeration" in (
             incidence.planner_hint or ""
         )
+        assert "every incidence row" in (incidence.planner_hint or "")
+        assert "including inverse forms" in (incidence.planner_hint or "")
+        assert "closest wording or preferred direction" in (
+            incidence.planner_hint or ""
+        )
+        assert "inspect that node's represented role fillers" in (
+            incidence.planner_hint or ""
+        )
         assert "one-direction" in (incidence.planner_hint or "")
         assert relation_read.default_payload == {
             "include_concept_preview": False,

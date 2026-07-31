@@ -824,8 +824,15 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "object side. Argument type counts aggregate neighbour types and do not "
             "identify the related entities, so keep them off for entity enumeration "
             "and enable them only when the requested work product needs a type "
-            "distribution. Then use returned exact predicate IDs for the relation "
-            "read. A positive hit proves existence, not list completeness; do not "
+            "distribution. For an enumeration, treat every incidence row whose "
+            "predicate meaning and anchor role fit the requested relationship as a "
+            "coverage candidate, including inverse forms; read all such exact "
+            "predicate IDs and deduplicate overlapping facts rather than choosing "
+            "only the closest wording or preferred direction. When a matching row "
+            "grounds an event, claim, or other reified node instead of the requested "
+            "answer entity, inspect that node's represented role fillers before "
+            "including or excluding it. A positive hit proves "
+            "existence, not list completeness; do not "
             "infer a complete list, count, or negative from a one-direction probe."
         ),
     },
