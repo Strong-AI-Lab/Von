@@ -253,6 +253,18 @@ def test_relation_hits_include_source_previews_for_both_directions(
             "relationships": {"is_an_instance_of": ["#V#requested_type"]},
         },
     }
+    monkeypatch.setattr(service, "should_enforce_access_control", lambda: False)
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find",
+        staticmethod(
+            lambda query, _projection: [
+                preview_docs[concept_id]
+                for concept_id in query["concept_id"]["$in"]
+                if concept_id in preview_docs
+            ]
+        ),
+    )
     monkeypatch.setattr(
         service,
         "_load_accessible_preview_document",
@@ -277,6 +289,69 @@ def test_relation_hits_include_source_previews_for_both_directions(
     assert hits_by_source["#V#incoming_related"]["source_concept_preview"][
         "type_ids"
     ] == ["#V#requested_type"]
+
+
+def test_outgoing_relation_previews_batch_uncached_targets(monkeypatch) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    source_id = "#V#source"
+    target_ids = ("#V#target_a", "#V#target_b")
+    preview_queries: list[tuple[dict[str, Any], dict[str, int]]] = []
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: {
+            "concept_id": source_id,
+            "relationships": {
+                "#V#supervises": list(target_ids),
+                "#V#unrelated": ["#V#not_requested"],
+            },
+        },
+    )
+    monkeypatch.setattr(service, "should_enforce_access_control", lambda: False)
+
+    def fake_find(query, projection):
+        preview_queries.append((query, projection))
+        return [
+            {
+                "concept_id": concept_id,
+                "name": concept_id.removeprefix("#V#"),
+                "relationships": {},
+            }
+            for concept_id in (source_id, *target_ids)
+        ]
+
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find",
+        staticmethod(fake_find),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_preview_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("batched target previews must avoid point reads")
+        ),
+    )
+
+    payload = service.find_relations_with_argument(
+        source_id,
+        argument_index="subject",
+        predicate_filter=["#V#supervises"],
+        relation_kind="binary",
+        include_concept_preview=True,
+        limit=10,
+    )
+
+    assert len(preview_queries) == 1
+    assert preview_queries[0][0] == {
+        "concept_id": {"$in": [source_id, *target_ids]}
+    }
+    assert payload["total_hits"] == 2
+    assert payload["paging"]["returned"] == 2
+    assert {
+        hit["target_concept_preview"]["concept_id"] for hit in payload["hits"]
+    } == set(target_ids)
 
 
 def test_incoming_relation_previews_batch_uncached_sources(monkeypatch) -> None:

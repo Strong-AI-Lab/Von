@@ -394,6 +394,21 @@ def find_relations_with_argument(
 
     if include_asserted_rows and include_structural and subject_doc:
         relationships = (subject_doc.get("relationships") or {}) if subject_doc else {}
+        _prime_concept_preview_cache(
+            [
+                resolved_concept_id,
+                *(
+                    target
+                    for predicate_id, raw_targets in relationships.items()
+                    if include_arg1
+                    and _predicate_matches_terms(predicate_id, predicate_terms)
+                    for target in _normalise_relationship_targets(raw_targets)
+                    if isinstance(target, str) and target.startswith("#V#")
+                ),
+            ],
+            include_preview=include_concept_preview,
+            preview_cache=preview_cache,
+        )
         source_updated_at = (
             _isoformat(subject_doc.get("updated_at")) if subject_doc else None
         )
