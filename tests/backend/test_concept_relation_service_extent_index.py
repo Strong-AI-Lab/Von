@@ -440,6 +440,94 @@ def test_incoming_relation_previews_batch_uncached_sources(monkeypatch) -> None:
     } == {"#V#source_a", "#V#source_b"}
 
 
+def test_incoming_relation_previews_only_hydrate_the_returned_page(monkeypatch) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    target_id = "#V#target"
+    source_ids = ("#V#source_a", "#V#source_b", "#V#source_c")
+    preview_queries: list[tuple[dict[str, Any], dict[str, int]]] = []
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "incoming_dynamic_extent_rows_page_for_target",
+        lambda *_args, **_kwargs: (
+            [
+                {
+                    "source_concept_id": source_id,
+                    "predicate_id": "#V#relation",
+                    "target_value": target_id,
+                    "arg2_index": 2,
+                    "updated_at": None,
+                }
+                for source_id in source_ids
+            ],
+            True,
+            {
+                "used_extent_index": True,
+                "complete": True,
+                "bounded": False,
+                "has_more": False,
+                "index_rows_scanned": 3,
+                "rows_filtered_by_access": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(service, "should_enforce_access_control", lambda: False)
+
+    def fake_find(query, projection):
+        preview_queries.append((query, projection))
+        return [
+            {
+                "concept_id": concept_id,
+                "name": concept_id.removeprefix("#V#"),
+                "relationships": {},
+            }
+            for concept_id in query["concept_id"]["$in"]
+        ]
+
+    monkeypatch.setattr(
+        service.ConceptsRepository, "find", staticmethod(fake_find)
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_preview_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("paged previews must avoid point reads")
+        ),
+    )
+
+    payload = service.find_relations_with_argument(
+        target_id,
+        relation_kind="binary",
+        include_concept_preview=True,
+        sort_by="predicate",
+        offset=1,
+        limit=1,
+    )
+
+    assert payload["total_hits"] == 3
+    assert payload["paging"] == {
+        "limit": 1,
+        "offset": 1,
+        "returned": 1,
+        "total_available": 3,
+    }
+    assert len(preview_queries) == 1
+    assert preview_queries[0][0] == {
+        "concept_id": {"$in": [target_id, "#V#source_b"]}
+    }
+    assert payload["hits"][0]["source_concept_id"] == "#V#source_b"
+    assert payload["hits"][0]["source_concept_preview"]["concept_id"] == (
+        "#V#source_b"
+    )
+    assert payload["hits"][0]["target_concept_preview"]["concept_id"] == target_id
+    assert payload["hits"][0]["access_granted"] is True
+
+
 def test_incoming_asserted_binary_falls_back_only_when_index_is_unavailable(
     monkeypatch,
 ) -> None:
@@ -753,3 +841,60 @@ def test_unfiltered_extent_timeout_does_not_start_canonical_full_scan(
     assert diagnostics["used_relationship_extent_index"] is False
     assert diagnostics["bounded"] is True
     assert diagnostics["complete"] is False
+
+
+def test_predicate_incidence_materialises_incoming_relations_once(
+    monkeypatch,
+) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    target_id = "#V#target"
+    aggregate_calls: list[list[dict[str, Any]]] = []
+    incoming_rows = [
+        {
+            "concept_id": f"#V#source_{index}",
+            "predicate": "#V#related_to",
+            "targets": [target_id],
+            "updated_at": None,
+        }
+        for index in range(1_205)
+    ]
+
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_relation_subject_document",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "incoming_dynamic_extent_rows_page_for_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("complete incidence must not use a bounded relation page")
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "query_relationship_extent_index",
+        lambda **_kwargs: ([], -1),
+    )
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "aggregate",
+        staticmethod(
+            lambda pipeline: aggregate_calls.append(pipeline) or incoming_rows
+        ),
+    )
+
+    payload = service.get_predicate_incidence(
+        concept_id=target_id,
+        argument_index="object",
+        relation_kind="binary",
+        include_concept_preview=False,
+        limit=20,
+    )
+
+    assert len(aggregate_calls) == 1
+    assert payload["total_predicates"] == 1
+    assert payload["predicates"][0]["predicate_concept_id"] == "#V#related_to"
+    assert payload["predicates"][0]["relation_hit_count"] == 1_205
+    assert payload["predicates"][0]["object_argument_hit_count"] == 1_205

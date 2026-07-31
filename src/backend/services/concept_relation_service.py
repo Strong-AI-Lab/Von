@@ -310,6 +310,7 @@ def find_relations_with_argument(
     uncertainty_mode: Optional[str] = None,
     uncertainty_statuses: Optional[Sequence[str]] = None,
     context_view: RelationContextView = "base_publication",
+    _materialise_all_hits: bool = False,
 ) -> Dict[str, Any]:
     """Find relation hits where ``concept_id`` appears in any argument position.
 
@@ -345,8 +346,8 @@ def find_relations_with_argument(
         "predicate_filter": list(predicate_display_terms),
         "relation_kind": relation_kind,
         "resolved_relation_kind": relation_filter,
-        "limit": resolved_limit_value,
-        "offset": resolved_offset,
+        "limit": None if _materialise_all_hits else resolved_limit_value,
+        "offset": 0 if _materialise_all_hits else resolved_offset,
         "sort_by": sort_by,
         "include_text_snippets": bool(include_text_snippets),
         "include_concept_preview": bool(include_concept_preview),
@@ -384,6 +385,7 @@ def find_relations_with_argument(
 
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     hits: List[Dict[str, Any]] = []
+    incoming_asserted_binary_hits: List[Dict[str, Any]] = []
     scoped_concept_query_truncated = False
     actor_effective_text_query_truncated = False
 
@@ -475,7 +477,7 @@ def find_relations_with_argument(
         index_rows: List[Dict[str, Any]] = []
         index_total = -1
         bounded_index_diagnostics: Dict[str, Any] = {}
-        if not predicate_terms:
+        if not predicate_terms and not _materialise_all_hits:
             bounded_rows, index_used, bounded_index_diagnostics = (
                 incoming_dynamic_extent_rows_page_for_target(
                     resolved_concept_id,
@@ -720,14 +722,6 @@ def find_relations_with_argument(
                             )
                         )
 
-        _prime_concept_preview_cache(
-            [
-                resolved_concept_id,
-                *(source_id for source_id, _, _, _ in incoming_candidates),
-            ],
-            include_preview=include_concept_preview,
-            preview_cache=preview_cache,
-        )
         for (
             source_id,
             predicate_id,
@@ -739,33 +733,19 @@ def find_relations_with_argument(
             matched_indexes = [_ARG_INDEX_FIRST_OBJECT + target_index]
             if not _argument_indexes_match(matched_indexes, argument_filter):
                 continue
-            source_preview = _resolve_concept_preview(
-                source_id,
-                include_concept_preview,
-                preview_cache,
-            )
             hit = {
                 "source_concept_id": source_id,
                 "predicate_concept_id": predicate_id,
                 "relation_kind": "binary",
                 "argument_indexes": matched_indexes,
                 "target_value": resolved_concept_id,
-                "target_concept_preview": (
-                    _resolve_concept_preview(
-                        resolved_concept_id,
-                        True,
-                        preview_cache,
-                    )
-                    if include_concept_preview
-                    else None
-                ),
+                "target_concept_preview": None,
                 "relation_metadata": {
                     "relation_id": f"struct::{source_id}::{predicate_id}::incoming::{target_index}",
                     "updated_at": _isoformat(source_updated_at),
                     "match_type": "exact",
                 },
-                "access_granted": source_preview is not None
-                or not include_concept_preview,
+                "access_granted": not include_concept_preview,
                 "follow_up_actions": _build_follow_up_actions(
                     [source_id],
                     exclude={resolved_concept_id},
@@ -774,9 +754,8 @@ def find_relations_with_argument(
                 "is_asserted": True,
                 "relation_state": "asserted",
             }
-            if include_concept_preview:
-                hit["source_concept_preview"] = source_preview
             hits.append(hit)
+            incoming_asserted_binary_hits.append(hit)
 
     if (
         context_view == "actor_effective"
@@ -1046,7 +1025,42 @@ def find_relations_with_argument(
 
     deduped_hits = _dedupe_argument_hits(hits)
     sorted_hits = _sort_argument_hits(deduped_hits, sort_by)
-    paged_hits = sorted_hits[resolved_offset : resolved_offset + resolved_limit_value]
+    paged_hits = (
+        sorted_hits
+        if _materialise_all_hits
+        else sorted_hits[resolved_offset : resolved_offset + resolved_limit_value]
+    )
+    if include_concept_preview:
+        paged_hit_ids = {id(hit) for hit in paged_hits}
+        paged_incoming_hits = [
+            hit for hit in incoming_asserted_binary_hits if id(hit) in paged_hit_ids
+        ]
+        if paged_incoming_hits:
+            _prime_concept_preview_cache(
+                [
+                    resolved_concept_id,
+                    *(
+                        str(hit.get("source_concept_id") or "")
+                        for hit in paged_incoming_hits
+                    ),
+                ],
+                include_preview=True,
+                preview_cache=preview_cache,
+            )
+            target_preview = _resolve_concept_preview(
+                resolved_concept_id,
+                True,
+                preview_cache,
+            )
+            for hit in paged_incoming_hits:
+                source_preview = _resolve_concept_preview(
+                    str(hit.get("source_concept_id") or ""),
+                    True,
+                    preview_cache,
+                )
+                hit["source_concept_preview"] = source_preview
+                hit["target_concept_preview"] = target_preview
+                hit["access_granted"] = source_preview is not None
     counts_are_lower_bounds = bool(
         scoped_concept_query_truncated
         or actor_effective_text_query_truncated
@@ -1066,8 +1080,8 @@ def find_relations_with_argument(
         ),
         "hits": paged_hits,
         "paging": {
-            "limit": resolved_limit_value,
-            "offset": resolved_offset,
+            "limit": None if _materialise_all_hits else resolved_limit_value,
+            "offset": 0 if _materialise_all_hits else resolved_offset,
             "returned": len(paged_hits),
             "total_available": len(sorted_hits),
             **(
@@ -1412,7 +1426,6 @@ def _collect_all_argument_hits_for_incidence(
     uncertainty_mode: Optional[str],
     uncertainty_statuses: Optional[Sequence[str]],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    batch_size = _MAX_LIMIT
     all_hits: List[Dict[str, Any]] = []
     diagnostics: Dict[str, Any] = {
         "mode": (
@@ -1453,45 +1466,27 @@ def _collect_all_argument_hits_for_incidence(
         relation_queries.append((relation_filter, argument_index))
 
     for query_relation_kind, query_argument_index in relation_queries:
-        offset = 0
-        while True:
-            payload = find_relations_with_argument(
-                concept_id=concept_id,
-                argument_index=query_argument_index,
-                predicate_filter=predicate_filter,
-                relation_kind=query_relation_kind,
-                include_text_snippets=include_text_snippets,
-                # Incidence aggregation only exposes bounded sample groundings, so
-                # resolve previews there instead of for every raw relation hit.
-                include_concept_preview=False,
-                limit=batch_size,
-                offset=offset,
-                include_uncertain=include_uncertain,
-                uncertainty_mode=uncertainty_mode,
-                uncertainty_statuses=uncertainty_statuses,
-            )
-            if isinstance(payload.get("uncertainty_diagnostics"), dict):
-                diagnostics = dict(payload["uncertainty_diagnostics"])
-            batch_hits = payload.get("hits")
-            if not isinstance(batch_hits, list) or not batch_hits:
-                break
-            materialised_hits = [
+        payload = find_relations_with_argument(
+            concept_id=concept_id,
+            argument_index=query_argument_index,
+            predicate_filter=predicate_filter,
+            relation_kind=query_relation_kind,
+            include_text_snippets=include_text_snippets,
+            # Incidence aggregation only exposes bounded sample groundings, so
+            # resolve previews there instead of for every raw relation hit.
+            include_concept_preview=False,
+            include_uncertain=include_uncertain,
+            uncertainty_mode=uncertainty_mode,
+            uncertainty_statuses=uncertainty_statuses,
+            _materialise_all_hits=True,
+        )
+        if isinstance(payload.get("uncertainty_diagnostics"), dict):
+            diagnostics = dict(payload["uncertainty_diagnostics"])
+        batch_hits = payload.get("hits")
+        if isinstance(batch_hits, list):
+            all_hits.extend(
                 dict(hit) for hit in batch_hits if isinstance(hit, Mapping)
-            ]
-            all_hits.extend(materialised_hits)
-            paging = payload.get("paging")
-            total_available_value = (
-                paging.get("total_available") if isinstance(paging, Mapping) else None
             )
-            total_available = (
-                int(total_available_value)
-                if isinstance(total_available_value, (int, float))
-                else len(all_hits)
-            )
-            returned = len(materialised_hits)
-            offset += returned
-            if returned <= 0 or offset >= total_available:
-                break
 
     return all_hits, diagnostics
 
