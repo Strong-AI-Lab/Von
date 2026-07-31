@@ -270,7 +270,7 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
         assert "without previews, snippets, or argument type counts" in (
             incidence.planner_hint or ""
         )
-        assert "both directions only when direction is materially unknown" in (
+        assert "one minimal call when the direction or stored object slot" in (
             incidence.planner_hint or ""
         )
         assert "exact predicate IDs" in (incidence.planner_hint or "")
@@ -278,6 +278,14 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
             incidence.planner_hint or ""
         )
         assert "not already established" in (incidence.planner_hint or "")
+        assert "argument_index='any'" in (incidence.planner_hint or "")
+        assert "not the whole object side" in (incidence.planner_hint or "")
+        assert "do not identify the related entities" in (
+            incidence.planner_hint or ""
+        )
+        assert "keep them off for entity enumeration" in (
+            incidence.planner_hint or ""
+        )
         assert "one-direction" in (incidence.planner_hint or "")
         assert relation_read.default_payload == {
             "include_concept_preview": False,
@@ -293,6 +301,9 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
             relation_read.planner_hint or ""
         )
         assert "not already established" in (relation_read.planner_hint or "")
+        assert "not every object-side assertion" in (
+            relation_read.planner_hint or ""
+        )
         assert "relation_kind='binary'" in (relation_read.planner_hint or "")
         assert "vontology_concept_search" in (relation_read.planner_hint or "")
         assert "unless broad inventory is itself requested" in (

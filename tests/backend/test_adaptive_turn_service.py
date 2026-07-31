@@ -168,6 +168,7 @@ def test_scope_message_prefers_progressive_low_cost_read_plans() -> None:
     assert "merely to hedge uncertainty" in message
     assert "A positive hit proves existence, not completeness" in message
     assert "stop once the evidence supports the requested work product" in message
+    assert "Count only items evidenced to satisfy the requested category" in message
 
 
 def _gmail_gateway(handler: Any) -> InternalMCPGateway:
