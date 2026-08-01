@@ -6238,6 +6238,130 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert result.response_text == "The represented work product was completed."
 
 
+def test_read_only_workflow_not_started_preserves_successful_direct_recovery(
+    monkeypatch,
+) -> None:
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_mail_review_test",
+        workflow_id="#V#mail_review_test_workflow",
+        display_name="Mail review test workflow",
+        description="Review recent messages through bounded read capabilities.",
+        relevance_score=0.96,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "inputs": {"type": "object", "properties": {}},
+            },
+            "additionalProperties": False,
+        },
+        component_capability_names=("general_read",),
+        declared_component_count=1,
+        declared_step_count=3,
+        semantic_effect=None,
+        semantic_effect_source="insufficient_declared_component_evidence",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-mail-workflow",
+                    payload={"query": "summarise recent messages"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-mail-workflow",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {"inputs": {}},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="recover-with-direct-read",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "recent messages"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The recent messages were summarised successfully."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_workflow_gateway(
+            lambda **_kwargs: {
+                "success": False,
+                "error_code": "workflow_not_runnable",
+                "status": "rejected_preflight",
+            }
+        ),
+        prompt="Summarise my recent messages.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        turn_id="turn-read-only-workflow-direct-recovery",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.response_text == (
+        "The recent messages were summarised successfully."
+    )
+    assert result.terminal_status == "completed"
+    assert result.effect_finality_fallback is False
+    workflow_invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == workflow_capability.name
+    )
+    assert workflow_invocation["effect_status"] == "not_started"
+    assert workflow_invocation["changed"] is False
+    assert workflow_invocation["semantic_effect"] is None
+    assert workflow_invocation["turn_finality_required"] is False
+    assert "instance_id" not in workflow_invocation
+    assert workflow_invocation["evidence"]["semantic_effect"] is None
+    assert workflow_invocation["evidence"]["turn_finality_required"] is False
+    direct_invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == "general_read"
+    )
+    assert direct_invocation["status"] == "ok"
+
+
 def test_represented_workflow_retry_reuses_same_turn_idempotency_key(
     monkeypatch,
 ) -> None:
