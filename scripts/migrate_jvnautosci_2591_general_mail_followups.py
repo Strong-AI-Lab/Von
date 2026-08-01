@@ -18,6 +18,19 @@ if str(_PROJECT_ROOT) not in sys.path:
 load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 from src.backend.security.access_control import override_current_actor  # noqa: E402
+from src.backend.security.visibility_predicates import (  # noqa: E402
+    get_specific_to_org_values,
+    get_specific_to_user_values,
+    set_specific_to_org_values,
+    set_specific_to_user_values,
+)
+from src.backend.services import concept_service  # noqa: E402
+from src.backend.services.concept_service import (  # noqa: E402
+    _find_raw_concept_by_exact_concept_id,
+)
+from src.backend.workflows.durable.workflow_instance_submission_service import (  # noqa: E402
+    verify_workflow_runnable,
+)
 from src.backend.workflows.vontology_loader import (  # noqa: E402
     load_workflow_definition_from_vontology,
 )
@@ -26,6 +39,7 @@ from src.backend.workflows.workflow_authoring_service import (  # noqa: E402
 )
 from src.backend.workflows.workflow_concept_authority_service import (  # noqa: E402
     build_seed_canonical_workflow_definitions,
+    workflow_child_visibility_covers_parent,
 )
 from src.backend.workflows.workflow_definition_identity_service import (  # noqa: E402
     build_workflow_definition_identity,
@@ -40,7 +54,23 @@ GENERAL_MAIL_WORKFLOW_ID = "#V#general_mail_review_workflow"
 DETAIL_WORKFLOW_ID = "#V#gmail_message_detail_fetch_workflow"
 WORKFLOW_IDS = (GENERAL_MAIL_WORKFLOW_ID, DETAIL_WORKFLOW_ID)
 DEFAULT_ACTOR_USER_ID = "#V#zhan_von_witbrock"
+DEFAULT_VERIFICATION_ACTOR_USER_ID = "#V#michael_witbrock"
 DEFAULT_ACTOR_ORGANISATION_ID = "#V#university_of_auckland_strong_ai_lab"
+VISIBILITY_REPAIR_CHILD_IDS_BY_WORKFLOW = {
+    GENERAL_MAIL_WORKFLOW_ID: (
+        "#V#workflow_step_general_mail_review_workflow_fetch_mail_profile_status",
+        "#V#workflow_step_general_mail_review_workflow_render_mail_profile_status",
+        "#V#workflow_mapping_mail_review_request_kind_to_mail_review_request_kind",
+        "#V#workflow_mapping_mail_review_include_body_to_mail_review_include_body",
+        "#V#workflow_mapping_mail_profile_status_resource_to_concept_id_parameter",
+        "#V#workflow_mapping_mail_profile_status_runtime_alias_to_mail_review_profile_id",
+    ),
+    DETAIL_WORKFLOW_ID: (
+        "#V#workflow_mapping_gmail_message_detail_fetch_workflow_fetch_message_detail_mail_review_include_body_to_include_body_parameter",
+        "#V#workflow_mapping_gmail_message_detail_fetch_result_body_to_message_detail_body",
+        "#V#workflow_mapping_gmail_message_detail_fetch_result_body_truncated_to_message_detail_body_truncated",
+    ),
+}
 
 
 def _step_with_suffix(steps: list[dict[str, Any]], suffix: str) -> dict[str, Any]:
@@ -247,8 +277,76 @@ def _identity(workflow_id: str, definition: Any) -> dict[str, Any]:
     )
 
 
+def repair_mail_visibility_closure(
+    workflow_id: str,
+    *,
+    apply: bool,
+) -> dict[str, Any]:
+    """Align the nine stale mail children with their parent audiences."""
+
+    workflow_doc = _find_raw_concept_by_exact_concept_id(workflow_id)
+    if not isinstance(workflow_doc, Mapping):
+        raise ValueError(f"workflow_not_found:{workflow_id}")
+    workflow_relationships = (
+        dict(workflow_doc.get("relationships") or {})
+        if isinstance(workflow_doc.get("relationships"), Mapping)
+        else {}
+    )
+    parent_users = get_specific_to_user_values(workflow_relationships)
+    parent_orgs = get_specific_to_org_values(workflow_relationships)
+    repair_required_ids: list[str] = []
+    already_covered_ids: list[str] = []
+    for child_id in VISIBILITY_REPAIR_CHILD_IDS_BY_WORKFLOW[workflow_id]:
+        child_doc = _find_raw_concept_by_exact_concept_id(child_id)
+        if not isinstance(child_doc, Mapping):
+            raise ValueError(f"workflow_child_not_found:{child_id}")
+        if workflow_child_visibility_covers_parent(workflow_doc, child_doc):
+            already_covered_ids.append(child_id)
+            continue
+        repair_required_ids.append(child_id)
+        if not apply:
+            continue
+        child_relationships = (
+            dict(child_doc.get("relationships") or {})
+            if isinstance(child_doc.get("relationships"), Mapping)
+            else {}
+        )
+        updated_relationships = set_specific_to_user_values(
+            child_relationships,
+            parent_users,
+        )
+        updated_relationships = set_specific_to_org_values(
+            updated_relationships,
+            parent_orgs,
+        )
+        concept_service.update_concept(
+            child_id,
+            {"relationships": updated_relationships},
+            defer_side_effects=True,
+        )
+        readback = _find_raw_concept_by_exact_concept_id(child_id)
+        if not workflow_child_visibility_covers_parent(workflow_doc, readback):
+            raise ValueError(
+                f"workflow_child_visibility_repair_readback_failed:{child_id}"
+            )
+    return {
+        "schema_version": "workflow_visibility_closure_repair.v1",
+        "apply": apply,
+        "workflow_id": workflow_id,
+        "parent_user_scope": parent_users,
+        "parent_organisation_scope": parent_orgs,
+        "repair_required_ids": repair_required_ids,
+        "already_covered_ids": already_covered_ids,
+        "closure_verified": bool(apply or not repair_required_ids),
+    }
+
+
 def run_migration(
-    *, apply: bool, actor_user_id: str, actor_organisation_id: str
+    *,
+    apply: bool,
+    actor_user_id: str,
+    actor_organisation_id: str,
+    verification_actor_user_id: str = DEFAULT_VERIFICATION_ACTOR_USER_ID,
 ) -> dict[str, Any]:
     with override_current_actor(
         user_concept_id=actor_user_id,
@@ -272,6 +370,10 @@ def run_migration(
                 desired_definitions[workflow_id]
             )
             candidate_spec, changed = rewrite(current_spec, desired_spec)
+            visibility_repair = repair_mail_visibility_closure(
+                workflow_id,
+                apply=False,
+            )
             base_hash = str(
                 _identity(workflow_id, current_definition).get("definition_hash") or ""
             )
@@ -288,10 +390,20 @@ def run_migration(
                 "contract_valid": bool(validation.get("valid")),
                 "contract_errors": validation.get("errors") or [],
                 "diff_summary": preview_body.get("diff_summary"),
+                "visibility_repair": visibility_repair,
             }
-            if apply and changed:
+            publication_required = bool(
+                changed or visibility_repair.get("repair_required_ids")
+            )
+            if apply and publication_required:
                 if not workflow_report["contract_valid"]:
                     raise ValueError(f"workflow_preview_invalid:{workflow_id}")
+                workflow_report["visibility_repair"] = (
+                    repair_mail_visibility_closure(
+                        workflow_id,
+                        apply=True,
+                    )
+                )
                 apply_result = apply_workflow_authoring_spec(
                     workflow_id,
                     authoring_spec=candidate_spec,
@@ -318,10 +430,49 @@ def run_migration(
                     workflow_id, after
                 ).get("definition_hash")
             reports[workflow_id] = workflow_report
+        actor_verification: dict[str, Any] = {}
+        if apply:
+            with override_current_actor(
+                user_concept_id=verification_actor_user_id,
+                organisation_concept_id=actor_organisation_id,
+            ):
+                for workflow_id in WORKFLOW_IDS:
+                    definition = load_workflow_definition_from_vontology(workflow_id)
+                    if definition is None:
+                        raise ValueError(
+                            f"workflow_not_visible_to_verification_actor:{workflow_id}"
+                        )
+                    verification = verify_workflow_runnable(
+                        workflow_id,
+                        actor_user_id=verification_actor_user_id,
+                        actor_org_id=actor_organisation_id,
+                    ).to_dict()
+                    if not verification.get("runnable_verification_success"):
+                        raise ValueError(
+                            "workflow_not_runnable_for_verification_actor:"
+                            + json.dumps(verification, sort_keys=True, default=str)
+                        )
+                    readback_hash = _identity(workflow_id, definition).get(
+                        "definition_hash"
+                    )
+                    publisher_hash = reports[workflow_id].get(
+                        "readback_definition_hash"
+                    ) or reports[workflow_id].get("base_definition_hash")
+                    if readback_hash != publisher_hash:
+                        raise ValueError(
+                            f"workflow_cross_actor_readback_mismatch:{workflow_id}"
+                        )
+                    actor_verification[workflow_id] = {
+                        "runnable": True,
+                        "state_count": len(definition.states),
+                        "definition_hash": readback_hash,
+                    }
         return {
             "mode": "apply" if apply else "preview",
             "actor_user_id": actor_user_id,
             "actor_organisation_id": actor_organisation_id,
+            "verification_actor_user_id": verification_actor_user_id,
+            "verification_actor_readback": actor_verification,
             "workflows": reports,
         }
 

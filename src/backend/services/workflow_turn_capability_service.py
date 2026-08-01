@@ -799,7 +799,7 @@ def normalise_workflow_effect_receipt(
         effect_status = "indeterminate"
         changed = None
     elif receipt.get("success") is False and instance_id is None:
-        effect_status = "failed"
+        effect_status = "not_started"
         changed = False
     elif status_key in _TERMINAL_SUCCESS_STATUSES and not timed_out:
         effect_status = "succeeded"
@@ -824,6 +824,8 @@ def normalise_workflow_effect_receipt(
             "workflow_id": capability.workflow_id,
             "effect_status": effect_status,
             "changed": changed,
+            "semantic_effect": capability.semantic_effect,
+            "operational_state_effect": True,
             "mutation_outcome": (
                 "completed"
                 if effect_status == "succeeded"

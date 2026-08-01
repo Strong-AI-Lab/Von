@@ -112,6 +112,7 @@ class _PreparedCapabilityCall:
     execution_method_name: str
     arguments: Mapping[str, Any]
     is_effect: bool
+    semantic_effect: bool | None
     minimum_effect_window_seconds: float
     capability_kind: str = "registered_tool"
     represented_workflow_id: str | None = None
@@ -127,6 +128,7 @@ class _ContainedCapabilityResult:
     arguments: Mapping[str, Any]
     capability_name: str
     is_effect: bool
+    semantic_effect: bool | None
     execution_method_name: str
     capability_kind: str = "registered_tool"
     represented_workflow_id: str | None = None
@@ -2819,6 +2821,35 @@ def _effect_status(
     )
 
 
+def _effect_requires_turn_finality(
+    *,
+    capability_kind: str,
+    effect_status: str,
+    changed: bool | None,
+    raw_payload: Any,
+) -> bool:
+    """Keep operational workflow bookkeeping from becoming semantic failure.
+
+    Represented workflows always use effect-grade dispatch because invoking one
+    may create or advance a durable instance. An attempt rejected before any
+    instance was created and reporting known no change, however, has no effect
+    whose finality can invalidate a successfully recovered answer.
+    """
+
+    instance_id = (
+        str(raw_payload.get("instance_id") or "").strip()
+        if isinstance(raw_payload, Mapping)
+        else ""
+    )
+    if capability_kind != "represented_workflow":
+        return True
+    return not (
+        effect_status == "not_started"
+        and changed is False
+        and not instance_id
+    )
+
+
 def _late_effect_observation_state(
     observation: Mapping[str, Any],
 ) -> tuple[str, bool | None]:
@@ -3238,6 +3269,7 @@ def execute_adaptive_turn(
         phase: int,
         effect_status: str,
         changed: bool | None,
+        turn_finality_required: bool = True,
         execution_id: str | None = None,
         late_observation: Mapping[str, Any] | None = None,
         evidence_id: str | None = None,
@@ -3251,6 +3283,7 @@ def execute_adaptive_turn(
                 "phase": phase,
                 "effect_status": effect_status,
                 "changed": changed,
+                "turn_finality_required": turn_finality_required,
                 "execution_id": execution_id,
                 "evidence_id": evidence_id,
             }
@@ -3317,11 +3350,19 @@ def execute_adaptive_turn(
         effect_id: str,
         call_id: str,
         capability_name: str,
+        capability_kind: str,
+        semantic_effect: bool | None,
     ):
         def observe(observation: Mapping[str, Any]) -> None:
             observed = dict(observation)
             effect_status, changed = _late_effect_observation_state(observed)
             payload = observed.get("payload")
+            turn_finality_required = _effect_requires_turn_finality(
+                capability_kind=capability_kind,
+                effect_status=effect_status,
+                changed=changed,
+                raw_payload=payload,
+            )
             evidence_value = (
                 payload
                 if observed.get("outcome") == "late_success"
@@ -3341,6 +3382,8 @@ def execute_adaptive_turn(
                     "capability_name": capability_name,
                     "effect_status": effect_status,
                     "changed": changed,
+                    "semantic_effect": semantic_effect,
+                    "turn_finality_required": turn_finality_required,
                 },
             )
             if not _effect_phase_acknowledged(phase_outcome):
@@ -3358,6 +3401,8 @@ def execute_adaptive_turn(
                     "organisation_concept_id": scope.organisation_concept_id,
                     "effect_id": effect_id,
                     "effect_status": effect_status,
+                    "semantic_effect": semantic_effect,
+                    "turn_finality_required": turn_finality_required,
                     "late_completion": True,
                     "execution_id": observed.get("execution_id"),
                     "output_schema_validation": observed.get(
@@ -3372,6 +3417,7 @@ def execute_adaptive_turn(
                 phase=1,
                 effect_status=effect_status,
                 changed=changed,
+                turn_finality_required=turn_finality_required,
                 execution_id=execution_id,
                 late_observation=observed,
                 evidence_id=envelope.evidence_id,
@@ -3426,6 +3472,7 @@ def execute_adaptive_turn(
             for state in effect_snapshot.values()
             if state.get("effect_status")
             in {"failed", "partial", "indeterminate", "not_started"}
+            and state.get("turn_finality_required") is not False
             and not (
                 state.get("effect_status") == "failed"
                 and state.get("recovery_status") == "succeeded"
@@ -3454,6 +3501,9 @@ def execute_adaptive_turn(
             if isinstance(state, Mapping):
                 invocation["effect_status"] = state.get("effect_status")
                 invocation["changed"] = state.get("changed")
+                invocation["turn_finality_required"] = state.get(
+                    "turn_finality_required"
+                )
                 if state.get("execution_id"):
                     invocation["execution_id"] = state.get("execution_id")
                 if state.get("evidence_id"):
@@ -3472,9 +3522,12 @@ def execute_adaptive_turn(
         relevant_effects = [
             state
             for state in effect_snapshot.values()
-            if (
-                state.get("effect_status")
-                in {"failed", "partial", "indeterminate", "not_started"}
+            if state.get("turn_finality_required") is not False
+            and (
+                (
+                    state.get("effect_status")
+                    in {"failed", "partial", "indeterminate", "not_started"}
+                )
                 or state.get("changed") is True
                 or (
                     state.get("effect_status") == "succeeded"
@@ -4317,6 +4370,11 @@ def execute_adaptive_turn(
                     and definition.ordinary_turn_effect
                 )
             )
+            semantic_effect = (
+                workflow_capability.semantic_effect
+                if is_workflow_capability
+                else bool(is_effect)
+            )
             if not isinstance(arguments, Mapping):
                 raw_capability_results[index] = _ContainedCapabilityResult(
                     raw_payload=_error_payload(
@@ -4327,6 +4385,7 @@ def execute_adaptive_turn(
                     arguments={},
                     capability_name=capability_name,
                     is_effect=is_effect,
+                    semantic_effect=semantic_effect,
                     execution_method_name=execution_method_name,
                     capability_kind=(
                         "represented_workflow"
@@ -4356,6 +4415,7 @@ def execute_adaptive_turn(
                         arguments={},
                         capability_name=capability_name,
                         is_effect=True,
+                        semantic_effect=semantic_effect,
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
                         represented_workflow_id=str(workflow_capability.workflow_id),
@@ -4374,6 +4434,7 @@ def execute_adaptive_turn(
                         arguments={},
                         capability_name=capability_name,
                         is_effect=True,
+                        semantic_effect=semantic_effect,
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
                         represented_workflow_id=str(workflow_capability.workflow_id),
@@ -4411,6 +4472,7 @@ def execute_adaptive_turn(
                         arguments={},
                         capability_name=capability_name,
                         is_effect=True,
+                        semantic_effect=semantic_effect,
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
                         represented_workflow_id=str(workflow_capability.workflow_id),
@@ -4481,6 +4543,7 @@ def execute_adaptive_turn(
                     execution_method_name=execution_method_name,
                     arguments=trusted_arguments,
                     is_effect=is_effect,
+                    semantic_effect=semantic_effect,
                     minimum_effect_window_seconds=minimum_effect_window,
                     capability_kind=(
                         "represented_workflow"
@@ -4520,6 +4583,7 @@ def execute_adaptive_turn(
                     arguments=arguments,
                     capability_name=canonical_name,
                     is_effect=is_effect,
+                    semantic_effect=item.semantic_effect,
                     execution_method_name=execution_method_name,
                     capability_kind=item.capability_kind,
                     represented_workflow_id=item.represented_workflow_id,
@@ -4687,6 +4751,8 @@ def execute_adaptive_turn(
                                 effect_id=effect_identifier,
                                 call_id=call.call_id,
                                 capability_name=canonical_name,
+                                capability_kind=item.capability_kind,
+                                semantic_effect=item.semantic_effect,
                             )
                             if effect_identifier is not None
                             else None
@@ -4912,6 +4978,7 @@ def execute_adaptive_turn(
                 arguments = contained_result.arguments
                 canonical_name = contained_result.capability_name
                 is_effect = contained_result.is_effect
+                semantic_effect = contained_result.semantic_effect
                 execution_method_name = contained_result.execution_method_name
                 effect_identifier = (
                     _effect_id(
@@ -4934,6 +5001,30 @@ def execute_adaptive_turn(
                     _effect_status(
                         raw_payload,
                         transport_result=transport_result,
+                    )
+                    if is_effect
+                    else None
+                )
+                changed = (
+                    (
+                        raw_payload.get("changed")
+                        if isinstance(raw_payload, Mapping)
+                        and isinstance(raw_payload.get("changed"), bool)
+                        else (
+                            False
+                            if effect_status in {"failed", "not_started"}
+                            else None
+                        )
+                    )
+                    if is_effect
+                    else None
+                )
+                turn_finality_required = (
+                    _effect_requires_turn_finality(
+                        capability_kind=contained_result.capability_kind,
+                        effect_status=str(effect_status),
+                        changed=changed,
+                        raw_payload=raw_payload,
                     )
                     if is_effect
                     else None
@@ -4972,6 +5063,8 @@ def execute_adaptive_turn(
                             {
                                 "effect_id": effect_identifier,
                                 "effect_status": effect_status,
+                                "semantic_effect": semantic_effect,
+                                "turn_finality_required": turn_finality_required,
                             }
                             if is_effect
                             else {}
@@ -4984,21 +5077,12 @@ def execute_adaptive_turn(
                 if result_target_ids:
                     envelope_payload["result_target_ids"] = result_target_ids
                 if is_effect:
-                    changed = (
-                        raw_payload.get("changed")
-                        if isinstance(raw_payload, Mapping)
-                        and isinstance(raw_payload.get("changed"), bool)
-                        else (
-                            False
-                            if effect_status in {"failed", "not_started"}
-                            else None
-                        )
-                    )
                     remember_effect_state(
                         effect_identifier,
                         phase=0,
                         effect_status=effect_status,
                         changed=changed,
+                        turn_finality_required=bool(turn_finality_required),
                         execution_id=(
                             str(
                                 getattr(
@@ -5026,6 +5110,8 @@ def execute_adaptive_turn(
                             "effect_id": effect_identifier,
                             "effect_status": effect_status,
                             "changed": changed,
+                            "semantic_effect": semantic_effect,
+                            "turn_finality_required": turn_finality_required,
                         }
                     )
                     if isinstance(raw_payload, Mapping):
@@ -5078,6 +5164,8 @@ def execute_adaptive_turn(
                             "effect_id": effect_identifier,
                             "effect_status": effect_status,
                             "changed": envelope_payload.get("changed"),
+                            "semantic_effect": semantic_effect,
+                            "turn_finality_required": turn_finality_required,
                         }
                     )
                     if isinstance(raw_payload, Mapping):

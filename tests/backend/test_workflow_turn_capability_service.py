@@ -360,7 +360,7 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
     assert terminal_failure["recovery_affordances"][0]["arguments"] == {
         "instance_id": "instance-3"
     }
-    assert no_start["effect_status"] == "failed"
+    assert no_start["effect_status"] == "not_started"
     assert no_start["changed"] is False
     assert no_start["mutation_outcome"] == "not_started"
     assert indeterminate["effect_status"] == "indeterminate"
