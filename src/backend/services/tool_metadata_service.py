@@ -788,7 +788,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "planner_hint": (
             "Use before a filtered relation read when coverage is not established. "
             "For a list, count, broad category, or negative, start one small binary "
-            "argument_index='any' page with previews, snippets, and type counts off. "
+            "argument_index='any' page with limit=20, "
+            "include_concept_preview=false, include_text_snippets=false, and "
+            "include_argument_type_counts=false. "
             "Treat every semantically fitting row, including inverse forms, as a "
             "coverage candidate; pass all returned predicate IDs together in one "
             "exact predicate_filter read, do not select only the most obvious label, "

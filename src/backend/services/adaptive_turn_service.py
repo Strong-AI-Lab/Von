@@ -415,7 +415,8 @@ def _capability_purpose_index(
         "truncation_marker": "...",
         "exact_schema_hydration": {
             "tool": _CAPABILITY_TOOL_NAME,
-            "arguments": {"names": ["<capability name>"], "limit": 1},
+            "guidance": "Request all alternatives being compared in one names array.",
+            "arguments": {"names": ["<capability names>"], "limit": 50},
         },
         "entries": entries,
     }
@@ -898,6 +899,17 @@ def _bound_tool_results_for_model(
 
     if not results:
         return []
+    complete_batch = [
+        {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "status": result.status,
+            "output": result.output,
+        }
+        for result in results
+    ]
+    if len(_json_bytes(complete_batch)) <= max_bytes:
+        return list(results)
     receipt_outputs = [_model_tool_output_receipt(result.output) for result in results]
     serialisable_shells = [
         {
@@ -1419,9 +1431,10 @@ def _tool_definitions() -> list[ToolDefinition]:
                 "representedness does not rank a plan. Judge semantic adequacy "
                 "yourself. Prefer the smallest plan that can produce the requested "
                 "work product and evidence; use a workflow when its added composition, "
-                "verification, or recovery is materially needed. Request an exact "
-                "name to hydrate its canonical description, planner guidance, plan "
-                "and effect facts, and argument schema. This is discovery, "
+                "verification, or recovery is materially needed. Request the exact "
+                "names of all alternatives being compared together to hydrate their "
+                "canonical descriptions, planner guidance, plan and effect facts, and "
+                "argument schemas on equal footing. This is discovery, "
                 "not a requirement to use any particular capability."
             ),
             input_schema={

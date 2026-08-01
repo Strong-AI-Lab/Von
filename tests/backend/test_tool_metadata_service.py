@@ -262,7 +262,10 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
             "include_concept_preview": False,
             "limit": 12,
         }
-        assert "previews, snippets, and type counts off" in (
+        assert "limit=20" in (incidence.planner_hint or "")
+        assert "include_concept_preview=false" in (incidence.planner_hint or "")
+        assert "include_text_snippets=false" in (incidence.planner_hint or "")
+        assert "include_argument_type_counts=false" in (
             incidence.planner_hint or ""
         )
         assert "argument_index='any'" in (incidence.planner_hint or "")

@@ -702,6 +702,7 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     assert "represented workflows are peers" in catalogue_tool.description
     assert "representedness does not rank a plan" in catalogue_tool.description
     assert "smallest plan that can produce" in catalogue_tool.description
+    assert "all alternatives being compared together" in catalogue_tool.description
     assert set(catalogue_tool.input_schema["properties"]) == {
         "query",
         "names",
@@ -4040,7 +4041,8 @@ def test_capability_page_budget_preserves_every_alternative_and_cursor(
     assert len(purpose_entry["purpose"]) <= 160
     assert bounded["purpose_index"]["exact_schema_hydration"] == {
         "tool": "turn_capabilities",
-        "arguments": {"names": ["<capability name>"], "limit": 1},
+        "guidance": "Request all alternatives being compared in one names array.",
+        "arguments": {"names": ["<capability names>"], "limit": 50},
     }
 
     exact_page = _capability_catalogue(
@@ -4096,7 +4098,10 @@ def test_bounded_catalogue_compacts_purposes_without_erasing_candidates() -> Non
             "purpose_max_chars": 160,
             "exact_schema_hydration": {
                 "tool": "turn_capabilities",
-                "arguments": {"names": ["<capability name>"], "limit": 1},
+                "guidance": (
+                    "Request all alternatives being compared in one names array."
+                ),
+                "arguments": {"names": ["<capability names>"], "limit": 50},
             },
             "entries": entries,
         },
@@ -4620,6 +4625,42 @@ def test_tool_result_correlation_shell_overflow_has_no_oversized_fallback() -> N
     ]
 
     assert _bound_tool_results_for_model(results) is None
+
+
+def test_tool_result_batch_preserves_full_outputs_when_aggregate_fits() -> None:
+    results = [
+        ToolResult(
+            call_id=f"capability-{index}",
+            tool_name="turn_capabilities",
+            status="ok",
+            output={
+                "name": f"capability-{index}",
+                "description": character * size,
+                "planner_hint": f"planner-{index}",
+            },
+        )
+        for index, (character, size) in enumerate(
+            (("a", 6_700), ("b", 5_100), ("c", 5_400), ("d", 3_300))
+        )
+    ]
+    complete_batch = [
+        {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "status": result.status,
+            "output": result.output,
+        }
+        for result in results
+    ]
+    assert len(_json_bytes(complete_batch)) < 24_000
+
+    bounded = _bound_tool_results_for_model(results)
+
+    assert bounded is not None
+    assert [result.output for result in bounded] == [
+        result.output for result in results
+    ]
+    assert bounded[0].output["planner_hint"] == "planner-0"
 
 
 def test_bounded_effect_result_preserves_exact_partial_receipt() -> None:
