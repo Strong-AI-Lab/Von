@@ -230,15 +230,10 @@ def test_vontology_concept_search_alias_inherits_schema_discovery_metadata(
         assert alias.planner_hint == canonical.planner_hint
         assert alias.operation_category == "read"
         assert alias.evidence_role == "search"
-        assert "schema discovery" in (alias.planner_hint or "").lower()
-        assert "relation-bearing lookup" in (alias.planner_hint or "")
-        assert "small exact or substring search" in (alias.planner_hint or "")
-        assert "without hierarchy expansion or two-pass similarity" in (
-            alias.planner_hint or ""
-        )
-        assert "possible predicates, not the predicates actually in use" in (
-            alias.planner_hint or ""
-        )
+        assert "possible schema" in (alias.description or "").lower()
+        assert "then make a relation-bearing read" in (alias.planner_hint or "")
+        assert "use predicate incidence instead" in (alias.planner_hint or "")
+        assert "possible, not what is actually used" in (alias.planner_hint or "")
         assert "requested work product is a list" not in (
             alias.planner_hint or ""
         )
@@ -267,56 +262,30 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
             "include_concept_preview": False,
             "limit": 12,
         }
-        assert "without previews, snippets, or argument type counts" in (
+        assert "previews, snippets, and type counts off" in (
             incidence.planner_hint or ""
         )
-        assert "one minimal call when the direction or stored object slot" in (
-            incidence.planner_hint or ""
-        )
-        assert "exact predicate IDs" in (incidence.planner_hint or "")
-        assert "positive hit proves existence, not list completeness" in (
-            incidence.planner_hint or ""
-        )
-        assert "not already established" in (incidence.planner_hint or "")
         assert "argument_index='any'" in (incidence.planner_hint or "")
-        assert "not the whole object side" in (incidence.planner_hint or "")
-        assert "do not identify the related entities" in (
-            incidence.planner_hint or ""
-        )
-        assert "keep them off for entity enumeration" in (
-            incidence.planner_hint or ""
-        )
-        assert "every incidence row" in (incidence.planner_hint or "")
+        assert "every semantically fitting row" in (incidence.planner_hint or "")
         assert "including inverse forms" in (incidence.planner_hint or "")
-        assert "closest wording or preferred direction" in (
+        assert "inspect role fillers" in (incidence.planner_hint or "")
+        assert "coverage candidates, not the answer entities" in (
             incidence.planner_hint or ""
         )
-        assert "inspect that node's represented role fillers" in (
-            incidence.planner_hint or ""
-        )
-        assert "one-direction" in (incidence.planner_hint or "")
+        assert "selects only one stored slot" in (incidence.planner_hint or "")
         assert relation_read.default_payload == {
             "include_concept_preview": False,
             "limit": 20,
         }
-        assert "argument_index='any'" in (relation_read.planner_hint or "")
-        assert "start around limit 20" in (relation_read.planner_hint or "")
-        assert "omit inline previews" in (relation_read.planner_hint or "")
-        assert "positive hit proves that relation exists" in (
+        assert "predicate-filtered around limit 20" in (
             relation_read.planner_hint or ""
         )
-        assert "cannot establish that coverage" in (
+        assert "A hit proves existence, not list or count completeness" in (
             relation_read.planner_hint or ""
         )
-        assert "not already established" in (relation_read.planner_hint or "")
-        assert "not every object-side assertion" in (
-            relation_read.planner_hint or ""
-        )
-        assert "relation_kind='binary'" in (relation_read.planner_hint or "")
-        assert "vontology_concept_search" in (relation_read.planner_hint or "")
-        assert "unless broad inventory is itself requested" in (
-            relation_read.planner_hint or ""
-        )
+        assert "small any-direction incidence" in (relation_read.planner_hint or "")
+        assert "every fitting exact predicate" in (relation_read.planner_hint or "")
+        assert "not the whole object side" in (relation_read.planner_hint or "")
         assert "small predicate-filtered relation read" in (
             concept_fetch.planner_hint or ""
         )

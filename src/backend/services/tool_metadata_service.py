@@ -217,30 +217,16 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "Found {count} concepts for {query}",
         "description": (
-            "Search Vontology concept names and descriptions, including "
-            "predicates and types. Use as schema discovery when a represented "
-            "entity or relationship is relevant but its exact concept, "
-            "predicate, direction, or reified shape is not yet known. Begin with "
-            "a small exact or substring name search; request descriptions, "
-            "hierarchy paths, similarity, or two-pass search only when the "
-            "initial lexical result leaves a material gap. This finds possible "
-            "schema; it does not show which predicates are actually used around "
-            "a known entity, so it cannot by itself establish entity-relative "
-            "enumeration or cardinality coverage."
+            "Search Vontology names and descriptions for possible entities, "
+            "predicates, and types. Start with exact or substring search and "
+            "enrich only when needed. This discovers possible schema, not the "
+            "predicates actually used around an anchor or enumeration coverage."
         ),
         "planner_hint": (
-            "Schema discovery for represented knowledge. Use before a "
-            "relation-specific read when the relevant entity, predicate, type, "
-            "inverse direction, or reified relationship shape is uncertain; "
-            "then use the discovered schema with a relation-bearing lookup. Start "
-            "with a small exact or substring search without hierarchy expansion "
-            "or two-pass similarity; add richer search only if needed. Skip when "
-            "the exact schema is already known or the task is not about "
-            "represented knowledge. When the anchor entity is known and the work "
-            "product enumerates or quantifies a broad relationship category, "
-            "prefer small predicate incidence first: lexical schema search shows "
-            "possible predicates, not the predicates actually in use around that "
-            "entity."
+            "Use when the entity, predicate, type, inverse, or reified shape is "
+            "unknown, then make a relation-bearing read. For a broad category "
+            "around a known anchor, use predicate incidence instead: schema search "
+            "shows what is possible, not what is actually used there."
         ),
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
@@ -716,28 +702,13 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "target_concept_max_count": 2,
         "default_payload": {"include_concept_preview": False, "limit": 20},
         "planner_hint": (
-            "Use for entity-relative relationship lookup after resolving the anchor "
-            "concept. This is relation-bearing evidence, not mere inventory. Choose "
-            "the cheapest adequate query shape: use relation_kind='binary' for "
-            "entity-to-entity relations and request text relations or snippets only "
-            "when the user asks about text content. When the represented predicate "
-            "is unknown, retrieve schema candidates with vontology_concept_search or "
-            "inspect predicate incidence, then pass the returned exact predicate IDs "
-            "in predicate_filter. Begin with minimally enriched, predicate-filtered "
-            "evidence unless broad inventory is itself requested. "
-            "For an initial single-relationship question, start around limit 20, "
-            "omit inline previews, "
-            "and hydrate only selected concept IDs. Keep argument_index='any' when "
-            "the direction or stored object slot is materially unknown; a numeric "
-            "object index selects one exact stored slot, not every object-side "
-            "assertion. A positive hit proves that relation "
-            "exists, not that a requested list or count is complete. For a list, "
-            "count, broad relationship category, or negative claim around a known "
-            "anchor, inspect small predicate incidence across the materially "
-            "possible directions first when the predicates, directions, or "
-            "represented forms needed for that coverage are not already "
-            "established; then read the exact predicates actually in use. A "
-            "one-direction or lexical-predicate probe cannot establish that coverage."
+            "Use for content-bearing relationships after resolving the anchor. "
+            "Start predicate-filtered around limit 20 with previews off; hydrate "
+            "selected concepts only when needed. A hit proves existence, not list "
+            "or count completeness. If predicate, direction, or represented-form "
+            "coverage is not established, inspect small any-direction incidence "
+            "first, then read every fitting exact predicate. A numeric object index "
+            "selects one stored slot, not the whole object side."
         ),
     },
     "find_concepts_by_name": {
@@ -810,30 +781,14 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "limit": 12,
         },
         "planner_hint": (
-            "Use before a filtered entity-relative lookup when the represented "
-            "predicate, inverse form, or argument direction is not established. "
-            "Use it early for a requested list, count, broad relationship category, "
-            "or negative claim around a known entity when the predicates, "
-            "directions, or represented forms needed for that coverage are not "
-            "already established: it reports predicates actually in use, whereas "
-            "lexical schema search reports only possible predicates. "
-            "Start with one small binary page without previews, snippets, or "
-            "argument type counts. Use argument_index='any' in that one minimal "
-            "call when the direction or stored object slot is materially unknown; "
-            "a numeric object index selects one exact stored slot, not the whole "
-            "object side. Argument type counts aggregate neighbour types and do not "
-            "identify the related entities, so keep them off for entity enumeration "
-            "and enable them only when the requested work product needs a type "
-            "distribution. For an enumeration, treat every incidence row whose "
-            "predicate meaning and anchor role fit the requested relationship as a "
-            "coverage candidate, including inverse forms; read all such exact "
-            "predicate IDs and deduplicate overlapping facts rather than choosing "
-            "only the closest wording or preferred direction. When a matching row "
-            "grounds an event, claim, or other reified node instead of the requested "
-            "answer entity, inspect that node's represented role fillers before "
-            "including or excluding it. A positive hit proves "
-            "existence, not list completeness; do not "
-            "infer a complete list, count, or negative from a one-direction probe."
+            "Use before a filtered relation read when coverage is not established. "
+            "For a list, count, broad category, or negative, start one small binary "
+            "argument_index='any' page with previews, snippets, and type counts off. "
+            "Treat every semantically fitting row, including inverse forms, as a "
+            "coverage candidate; read all exact predicates, deduplicate overlaps, "
+            "and inspect role fillers when a matching row grounds a reified node. "
+            "Incidence identifies coverage candidates, not the answer entities; a "
+            "numeric object index selects only one stored slot."
         ),
     },
     "get_concept_usage_profile": {

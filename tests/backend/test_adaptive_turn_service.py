@@ -164,11 +164,11 @@ def test_scope_message_prefers_progressive_low_cost_read_plans() -> None:
 
     assert "start with the least costly observable plan" in message
     assert "escalate only if its returned evidence exposes a material gap" in message
-    assert "one schema-discovery read followed by one content-bearing read" in message
+    assert "Several reads alone do not make a workflow necessary" in message
     assert "merely to hedge uncertainty" in message
     assert "A positive hit proves existence, not completeness" in message
-    assert "stop once the evidence supports the requested work product" in message
-    assert "Count only items evidenced to satisfy the requested category" in message
+    assert "one page, predicate, direction, or represented form" in message
+    assert "state status or time qualifiers only when inspected evidence" in message
 
 
 def _gmail_gateway(handler: Any) -> InternalMCPGateway:
@@ -3355,7 +3355,10 @@ def test_schema_discovery_metadata_is_retrievable_without_list_word_trigger(
 
         capability = positive["capabilities"][0]
         assert capability["query_match"] is True
-        assert "schema discovery" in capability["planner_hint"].lower()
+        planner_hint = capability["planner_hint"].lower()
+        assert "unknown" in planner_hint
+        assert "relation-bearing read" in planner_hint
+        assert "what is possible, not what is actually used" in planner_hint
         assert negative["capabilities"][0]["query_match"] is False
     finally:
         tool_metadata_service.invalidate_cache()
