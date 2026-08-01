@@ -6,7 +6,7 @@
   override current user direction, `AGENTS.md`, live represented authority, or
   live evidence
 - **Owner:** Von maintainers
-- **Last reviewed:** 29 July 2026
+- **Last reviewed:** 1 August 2026
 - **Review trigger:** Any change to `AGENTS.md` reading routes, canonical
   document selection, or document supersession
 - **Scope:** Tracked design, engineering, operational, review, and generated
@@ -90,6 +90,7 @@ live.
 | Minimal imposition, elicitation, or write policy | [minimal-imposition principle](engineering/minimal_imposition_design_principle.md) |
 | Frontend or browser acceptance | [Frontend browser validation](engineering/frontend_browser_user_view_validation.md), at the validation tier justified by the claim |
 | Live user-visible behaviour or telemetry diagnosis | Applicable sections of the [real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md), using the risk tier in `AGENTS.md` |
+| Substantial Jira task definition or pull-request merge boundary | The decision discipline in [`AGENTS.md`](../AGENTS.md#5-capability-slice-planning), the practical [Jira guidance](engineering/operational_engineering_guide.md#53-jira) and [merge-decision procedure](engineering/operational_engineering_guide.md#62-make-new-evidence-change-a-decision), and the [pull-request template](../.github/PULL_REQUEST_TEMPLATE.md) |
 | Practical repository operation | [operational engineering guide](engineering/operational_engineering_guide.md), [authority-alignment scan](engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md) |
 
 ## 5. Current governing and routed guidance

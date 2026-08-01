@@ -5,8 +5,8 @@
 - **Authority:** Canonical for recurring local engineering procedures; subordinate
   to `AGENTS.md` and the scoped design guides
 - **Created:** 2026-04-04
-- **Last substantive content update:** 2026-07-18
-- **Last reviewed:** 2026-07-25
+- **Last substantive content update:** 2026-08-01
+- **Last reviewed:** 2026-08-01
 - **Freshness boundary:** Revalidate host-, credential-, launcher-, and
   connector-specific facts before relying on them
 
@@ -182,6 +182,9 @@ Do not claim completion from a local file alone.
 For substantial Jira-backed implementation:
 
 - re-read the live issue and follow its actual decision authority;
+- distinguish minimum ship criteria from stop-ship conditions, non-blocking
+  measurements or limitations, and explicit non-goals as required by
+  `AGENTS.md`;
 - use a task branch when the work is substantial;
 - keep comments, assignee, links, and status aligned with reality where doing
   so helps coordination;
@@ -198,6 +201,14 @@ When creating an issue, assign it to the authenticated user by default unless
 directed otherwise or Jira rejects the assignment. Do not open speculative
 refactor issues based on line count alone; record a concrete capability,
 coherence, authority, reliability, or testability problem.
+
+For a substantial task, write acceptance criteria as the minimum evidence that
+would support the intended delivery decision. Put desirable optimisation,
+research questions, additional model arms, broader task families, and
+non-critical telemetry in a visibly non-blocking section unless the task names
+the material consequence that makes one of them a release gate. Do not turn a
+high-quality task description into a conjunctive programme of every useful
+measurement.
 
 ### 5.4 Git and GitHub
 
@@ -229,15 +240,44 @@ Treat telemetry as evidence about a run, not as the user-facing product.
 Use the validation tiers in `AGENTS.md`:
 
 - Tier 0: static/doc/format validation.
-- Tier 1: targeted automated tests and nearest faithful path.
-- Tier 2: exact user-visible replay with relevant telemetry.
-- Tier 3: broader evaluation, release, migration, or safety evidence.
+- Tier 1: bounded behaviour; targeted tests and the exact or nearest faithful
+  path when user-visible, with enough telemetry to identify the affected path.
+- Tier 2: materially consequential or cross-boundary capability; Tier 1 plus
+  canonical effect read-back and the highest material residual risk.
+- Tier 3: security, authority release, certification, or an explicit
+  comparative research claim.
 
-Escalate when evidence reveals greater risk. Do not start with a browser,
-full-server replay, prompt family, or release campaign unless the claim requires
-it.
+Escalate only when evidence reveals a candidate-caused material risk that could
+change the delivery decision. Do not start with a browser, full-server replay,
+prompt family, or release campaign unless the claim requires it.
 
-### 6.2 Start narrow, then test the real boundary
+### 6.2 Make new evidence change a decision
+
+Before the first implementation change on substantial work, record the current
+merge, release, or handoff decision and the minimum evidence that would make it
+ready. Then, before adding a patch, model arm, prompt family, telemetry surface,
+or delay because of a material new observation, write one plain-language
+sentence in the existing working record stating whether:
+
+- `Merge decision changes — ...`; or
+- `Merge decision does not change — ...`.
+
+These are human-readable examples, not machine fields. Do not introduce a
+separate form, schema, CI check, or runtime gate for them.
+
+Use the equivalent delivery term when there is no merge. A changed decision
+must identify a candidate-caused material regression, an invalidated claim, or
+evidence that the current result cannot be trusted. A decision that does not
+change may justify a note or a later prioritised task, but not expansion of the
+current release boundary. A small cleanup already inside the stated scope may
+still be completed without becoming another ship criterion.
+
+Gather more evidence only while a plausible result could change delivery,
+rollback, or the scope of the claim. Stop when the selected tier supports the
+claim and another check would merely search for unrelated defects or improve
+confidence without changing the decision.
+
+### 6.3 Start narrow, then test the real boundary
 
 Run the smallest relevant test first, then expand to the nearest integration
 boundary. A unit test can establish a local invariant; it cannot establish a
@@ -264,21 +304,21 @@ For a live behaviour claim, follow
 browser-specific claim, also follow
 `docs/engineering/frontend_browser_user_view_validation.md`.
 
-### 6.3 Frontend validation
+### 6.4 Frontend validation
 
 For changed JavaScript, run the repository's static/lint gate and the targeted
 frontend tests. Use browser validation when DOM state, rendering, interaction,
 authentication, live progress, or the authenticated user view is part of the
 claim. A screenshot alone is not evidence that an interaction worked.
 
-### 6.4 Timeouts and optional live services
+### 6.5 Timeouts and optional live services
 
 Bound calls to providers, browsers, MCP servers, and live external services.
 Separate deterministic tests from opt-in live acceptance. A timeout or
 unavailable external dependency should produce a clear limitation, not an
 indefinite wait or a false pass.
 
-### 6.5 Acceptance record
+### 6.6 Acceptance record
 
 Record only the evidence needed to support the claim:
 
@@ -286,7 +326,10 @@ Record only the evidence needed to support the claim:
 - pass/fail/typed-blocker result;
 - relevant identifiers or artefact digest;
 - material limitations;
-- user-visible answer and telemetry reconciliation for Tier 2/3 behaviour work.
+- the current merge or equivalent delivery decision, including only material
+  observations that changed it; and
+- the user-visible answer, canonical effect read-back, or path evidence only
+  when the acceptance claim depends on it.
 
 Do not claim broader coverage than was run.
 

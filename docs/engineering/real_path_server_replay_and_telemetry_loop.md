@@ -5,8 +5,8 @@
 - **Authority:** Canonical replay/telemetry protocol routed by `AGENTS.md`; use
   only the sections and validation depth justified by the claim
 - **Created:** 2026-04-17
-- **Last substantive content update:** 2026-07-25
-- **Last reviewed:** 2026-07-25
+- **Last substantive content update:** 2026-08-01
+- **Last reviewed:** 2026-08-01
 - **Evidence boundary:** Each acceptance claim still requires its own dated
   exact-path evidence
 
@@ -33,8 +33,9 @@ claim needs them.
 
 ## 2. When to Use It
 
-Use the full process for Tier 2 or Tier 3 claims under `AGENTS.md`, and use the
-applicable subset for Tier 1. Typical triggers are:
+Use only the applicable parts for Tier 1 and Tier 2 claims under `AGENTS.md`.
+Use the full process only for Tier 3 or when the specific claim independently
+needs it. Typical triggers are:
 
 - the bug is user-visible or answer-visible;
 - the route, orchestrator, workflow, selector, or response path may be at
@@ -62,12 +63,16 @@ these. Durable semantic policy should not hide in case-specific Python rescue
 logic, but replay evidence must not prescribe a workflow merely to count as
 architecturally valid.
 
-That means every replay should answer two questions:
+An acceptance replay should answer two questions:
 
 1. Did the user-visible behaviour improve?
-2. Does the persisted telemetry show the right reason why it improved?
+2. Is there enough path evidence to attribute that improvement and rule out
+   false success or a point solution?
 
-If those disagree, the task is not done.
+Complete persisted attribution is required when telemetry or provenance is part
+of the claim or is needed to trust the outcome. Otherwise, record a telemetry
+gap separately unless it materially undermines acceptance; missing unrelated
+diagnostics do not automatically make the task unfinished.
 
 ### 3.1 Architecture-neutral sentinel cases
 
@@ -88,10 +93,11 @@ for the claimed capability, not whether it follows the current architecture.
 
 ## 4. Expectation-First Preflight
 
-Before a Tier 2/3 replay, or a Tier 1 case whose answer quality is subjective,
-form a concise expectation for what a reasonable answer would need to achieve.
-Record it in task notes or report it to the user when that helps collaboration;
-do not interrupt the user with a ceremonial preflight for every replay.
+When answer quality is subjective or the acceptance claim needs a stable
+comparison rubric, form a concise expectation for what a reasonable answer
+would need to achieve. Record it in task notes or report it to the user when
+that helps collaboration; do not interrupt the user with a ceremonial preflight
+for every replay.
 
 Do this before seeing the new live answer, not afterwards.
 
@@ -150,29 +156,21 @@ drift and makes the acceptance standard falsifiable.
 
 ## 5. Query-Set Design
 
-When the change claims to repair a general capability class, do not validate
-only the triggering prompt. Use a small prompt family that tests the intended
-generality. A narrowly scoped mechanical defect may need only the exact case
-plus its targeted regression.
+When the change claims to repair a general capability class, use the smallest
+prompt family that distinguishes that claim. Normally this is the exact case
+plus one materially different neighbouring case. Add a named-entity,
+non-user-relative, language, or sampled variant only when it tests a stated
+dimension that could change the delivery decision. A narrowly scoped mechanical
+defect may need only the exact case plus its targeted regression.
 
-Include:
-
-1. The exact triggering prompt.
-2. An explicit named-entity variant.
-3. A nearby relation-query variant that does not use the same noun family.
-4. A non-user-relative variant that should exercise the same retrieval and
-   routing basis.
-5. When useful, one sampled prompt from the maintained live prompt bank that
-   stresses the same or an adjacent capability class.
-
-Example family for entity-relative represented-fact lookup:
+Possible variants for entity-relative represented-fact lookup include:
 
 - `What papers of mine do you know about?`
 - `What papers are associated with Michael Witbrock?`
 - `What students of mine do you know about?`
 - `Which workflows mention episode evaluation?`
 
-The point is not these exact prompts. The point is to test the general
+These are a menu, not a mandatory family. The point is to test the general
 capability class:
 
 - entity-relative KB lookup
@@ -202,10 +200,8 @@ Minimal local command shape:
 pdm run python scripts/run_live_kb_tool_prompt_sampler.py `
   --prompt-text "List my last six email messages." `
   --replay-case-id "mail-listing-failure" `
-  --model "gemma4:26b" `
-  --compare-model "gpt-5.4-mini" `
   --base-prompt-id "#V#mail_answer_prompt" `
-  --prompt-variant-id "#V#gemma_mail_answer_prompt_v2" `
+  --prompt-variant-id "#V#mail_answer_prompt_variant_v2" `
   --workflow-id "#V#general_mail_review_workflow" `
   --workflow-stage-id "turn_answer" `
   --experiment-run-id "#V#experiment_run_mail_prompt_variants"
@@ -228,6 +224,10 @@ diagnostic planning evidence only: it does not run Von workflows, execute tools,
 select represented prompt variants, or prove the user-visible turn is fixed.
 
 ### 5.2 Random Prompt Sampling
+
+Random sampling is optional. Use it only when distributional robustness or
+prompt-bank behaviour is part of the current claim; it does not follow merely
+because the exact case passed.
 
 Von already has a maintained live prompt bank and replay harness for this:
 
@@ -266,8 +266,8 @@ Practical rules:
 3. Record the sampled prompt id, category, bank version, and any random seed so
    the run is reproducible.
 4. Before running a sampled prompt used as acceptance evidence, record the
-   expectation-first preflight when Tier 2/3 or subjective judgement warrants
-   it.
+   expectation-first preflight when subjective judgement or the comparison
+   claim warrants it.
 5. The sampler does not issue a semantic verdict. Its collection status says
    whether the run evidence was captured, not whether the answer was good.
    Compare the real answer and, where relevant, effects, model, timing, and
@@ -277,13 +277,10 @@ Practical rules:
    own task/message state, record whether actual task/message tool use happened.
    A generic "I can help with that" answer is not a pass for a create/update
    prompt.
-7. When the capability spans multiple classes, work up the complexity over
-   time:
-   - start with `direct_context_or_background`;
-   - then move to `vontology_grounded`;
-   - then move to `tool_augmented`.
-   A failure in an easier class should usually be addressed before you put much
-   interpretive weight on a harder-class failure above it.
+7. When an explicit hypothesis spans multiple classes, select the smallest
+   class that can falsify it first. Do not automatically run every complexity
+   class. A failure in an easier selected class should usually be addressed
+   before you put much interpretive weight on a harder-class failure above it.
 
 Useful cases:
 
@@ -324,8 +321,8 @@ Before the first replay:
    or another canonical authenticated route rather than faking user context.
 5. If you are using a sampled prompt, record the prompt id, category, prompt
    bank version, and seed or selection method in your notes.
-6. Record the relevant run-environment features for the replay, not just the
-   prompt text. At minimum, capture:
+6. Record only the run-environment identities material to the claim, choosing
+   as needed from:
    - base URL or server surface used;
    - authenticated user and organisation context;
    - the server-resolved active model/provider for that authenticated context,
@@ -371,13 +368,17 @@ Use the nearest faithful affected surface:
    affected surface or higher-fidelity execution is unsafe/unavailable, with
    the limitation recorded explicitly.
 
-For user-visible answer defects, browser replay is best because it exercises:
+When a user-visible defect depends on browser state, authentication, rendering,
+or live progress, browser replay exercises:
 
 - the actual request shape
 - real auth/session state
 - response rendering
 - narration/screen transforms
 - any live thinking-card or progress telemetry
+
+For a backend answer claim without a browser-only dependency, real
+`/von/generate` may be the nearest faithful path.
 
 For scripted real-route replay against `/von/generate`, prefer the existing live
 sampler harness when it fits the task:
@@ -411,10 +412,13 @@ nearest faithful path.
 
 ## 8. One Replay Cycle
 
-For each replayed prompt:
+Apply only the steps material to the selected validation tier and claim. For a
+Tier 1 backend behaviour claim, a normal pass records the answer, a stable run
+locator, and enough evidence to identify the affected path. The remaining
+steps are a diagnostic menu:
 
-1. Form and record the expectation-first preflight when required by the selected
-   validation tier or subjective answer rubric.
+1. Form and record the expectation-first preflight when subjective answer
+   quality or the comparison claim needs it.
 2. Send the prompt on the real server path.
 3. Record the user-visible answer exactly.
 4. Capture the telemetry locator or the key identifiers:
@@ -423,7 +427,7 @@ For each replayed prompt:
    - `history_location`
    - `chat_session_id`
    - namespace context
-5. Record the relevant environment features for this run:
+5. Record only the environment features material to this run, choosing from:
    - base URL;
    - authenticated user/org;
    - server-resolved active model/provider for that authenticated context, when
@@ -433,10 +437,7 @@ For each replayed prompt:
    - browser-visible model/provider, if a browser pass is part of the run;
    - local branch/commit for the checkout you ran from;
    - server-reported version/branch/commit when the server exposes them.
-   For the current replay programme, the default scripted requested model
-   should normally be Ollama `gemma4:26b`, and the browser pass should be
-   switched to the same visible model where practical before you judge parity.
-6. Fetch the persisted evidence:
+6. Fetch only the persisted evidence needed for the claim, choosing from:
    - `turn_execution_get_diagnostics`
    - `chat_history_get_debug_entry`
    - `conversation_telemetry_get_locator`
@@ -471,18 +472,25 @@ For each replayed prompt:
      would have seen live;
    - failures where the card might reveal useful reasoning/transparency gaps
      even though the final answer was poor.
-12. Read the turn in stage order rather than jumping straight to the answer.
+12. Read the turn in stage order when causal diagnosis requires it rather than
+    fetching every stage by default.
 13. Classify the failure boundary.
 14. Apply the smallest durable fix at the right authority surface.
 15. Replay the same prompt again.
-15. Replay nearby prompt variants when the claimed fix is general rather than
+16. Replay a nearby prompt variant when the claimed fix is general rather than
    mechanical or case-bounded.
-16. If the validation tier or hypothesis warrants it, replay one sampled prompt
+17. If the validation tier or hypothesis warrants it, replay one sampled prompt
    from the live prompt bank.
 
 Do not over-generalise from one improved replay. Conversely, do not require a
 prompt family for a purely mechanical defect whose regression and exact path
 already establish the bounded claim.
+
+Before another fix, wider prompt family, model arm, or release delay prompted by
+a material observation, record whether the merge or equivalent delivery
+decision changes and why, using the rule in `AGENTS.md`. Stop the campaign when
+the selected evidence supports the claim and another replay is unlikely to
+change delivery or rollback.
 
 ## 9. What to Inspect in Telemetry
 
@@ -728,31 +736,29 @@ case-specific production branches, and closure from a synthetic harness alone.
 After each fix, apply the items required by the chosen validation tier:
 
 1. Replay the exact triggering prompt.
-2. Replay the nearby prompt family when generality is claimed.
-3. Replay one sampled live-bank prompt when sampling is part of the hypothesis
-   or Tier 2/3 campaign.
+2. Replay one materially different neighbour when generality is claimed, and
+   add further variants only when each distinguishes a stated dimension.
+3. Replay one sampled live-bank prompt only when sampling is part of the
+   hypothesis or acceptance claim.
 4. Follow a scripted pass with a browser replay when the affected claim includes
    a browser-only surface.
-5. For interesting failures, consider the same browser follow-up when the live
-   card may reveal user-facing transparency gaps.
-6. Re-check the telemetry for the new run.
+5. Use a browser follow-up for a failure only when browser-visible behaviour is
+   part of the claim or could distinguish the current causal hypotheses.
+6. Inspect enough path evidence for the new run to support the claim and rule
+   out false success.
 7. Confirm that the actual reason and path for success changed as intended.
 8. Confirm that the live answer cleared the recorded bar, or exceeded it on its
    own grounded merits, rather than merely improving relative to a bad
    baseline.
-9. For a Tier 2/3 Jira-backed acceptance campaign, prepare a closure record
-   proportionate to the claim:
+9. For a Jira-backed acceptance campaign, record only the closure evidence
+   material to the claim:
    - the exact replayed prompt text;
-   - the exact user-visible answer, or a faithful quoted excerpt if the full
-     answer is too long to quote comfortably in the task;
-   - the key telemetry identifiers for the accepted run;
-   - a short synopsis of what the live Thinking card showed, or would have
-     shown if the browser pass exposed it;
-   - a short note on why that Thinking-card content would or would not have
-     helped a user understand the answering process.
-   If no browser Thinking card or equivalent user-facing progress surface was
-   available, say so explicitly rather than silently omitting that part of the
-   record.
+   - the user-visible answer or a faithful excerpt when answer quality is in
+     the claim;
+   - a stable run or effect identifier when needed to support or reproduce the
+     claim;
+   - material limitations; and
+   - browser or Thinking-card evidence only when that surface is in the claim.
 
 Good signs:
 
@@ -781,12 +787,12 @@ Do not call the behaviour fixed until all applicable items for the selected
 validation tier hold:
 
 1. The exact real-path replay is correct.
-2. A neighbouring prompt family behaves coherently when the change claims a
-   general capability repair.
+2. The smallest selected neighbouring case or cases behave coherently when the
+   change claims a general capability repair.
 3. Where random sampling is part of the acceptance campaign, the sampled replay
    also behaves coherently for its capability class.
-4. The answer clears the expectation-first bar for the prompt, or exceeds it on
-   its own grounded merits.
+4. Where semantic judgement required an expectation-first bar, the answer
+   clears it or exceeds it on its own grounded merits.
 5. Any "no results" or "nothing represented" claim survives post-check against
    the relevant authority surfaces.
 6. The answer is grounded in the relevant evidence and observed effects, with
@@ -797,8 +803,9 @@ validation tier hold:
 8. Where a live Thinking card was part of the affected claim, it also meets a
    user-facing usefulness standard consistent with
    `thinking_card_live_llm_visibility_design.md`.
-9. The persisted telemetry shows the actual successful reason and path,
-   whether direct function/tool, model-led composition, or workflow.
+9. Enough path evidence establishes the actual successful reason, whether
+   direct function/tool, model-led composition, or workflow; complete persisted
+   attribution is required only when the claim depends on it.
 10. Targeted regression tests cover the structural failure, not just the final
    string output.
 
@@ -862,10 +869,8 @@ execution trace visibly ineligible. The workflow may still complete for its
 ordinary user-facing purpose: these checks govern the strong provenance claim,
 not represented recovery or general execution.
 
-For user-visible issues, record both:
-
-- the user-visible acceptance evidence
-- the corresponding telemetry evidence
+For user-visible claims, record the user-visible acceptance evidence and enough
+corresponding path evidence to support the claim and exclude false success.
 
 If a Jira-backed campaign is actually being closed under current decision
 authority, record only the evidence material to its claim: for example the
@@ -875,14 +880,12 @@ the task has a tier or Jira key.
 
 ## 14. Practical Reminder
 
-When a task has gone through several rounds of disappointment, increase the
-burden of proof:
-
-- prefer the exact server path over helper surfaces
-- prefer multiple nearby prompts over one prompt
-- prefer explicit recorded expectations over retrospective generosity
-- prefer telemetry-backed diagnosis over intuition
-- prefer "still not fixed" over premature closure
-
-That is slower than a narrow patch, but it is much faster than reopening the
-same behaviour repeatedly.
+When a task has gone through several disappointing rounds, increase
+discrimination rather than breadth. Choose the smallest next observation that
+can distinguish the suspected causes, state what result would change the merge
+or rollback decision, and stop when the selected tier supports the bounded
+claim. Prefer the exact path and causal evidence over intuition, but do not add
+prompt variants, telemetry surfaces, or another compensating layer merely
+because earlier attempts failed. Repeated disappointment warrants better
+diagnosis, not an unbounded campaign or a presumption that the task remains
+unfixed.
