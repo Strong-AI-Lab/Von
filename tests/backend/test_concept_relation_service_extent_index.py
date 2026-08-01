@@ -961,7 +961,7 @@ def test_predicate_incidence_materialises_large_ready_index_once(
     monkeypatch.setattr(
         service,
         "filter_accessible_concept_ids",
-        lambda concept_ids: set(concept_ids),
+        set,
     )
     monkeypatch.setattr(
         service.ConceptsRepository,

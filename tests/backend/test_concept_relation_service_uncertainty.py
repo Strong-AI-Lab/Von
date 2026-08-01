@@ -769,7 +769,7 @@ def test_get_predicate_incidence_type_mode_explicit_any_includes_incoming(
     monkeypatch.setattr(
         service,
         "filter_accessible_concept_ids",
-        lambda concept_ids: set(concept_ids),
+        set,
     )
 
     payload = service.get_predicate_incidence(
