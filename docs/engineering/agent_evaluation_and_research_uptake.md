@@ -3,7 +3,7 @@
 - **Kind:** Evaluation and research-uptake guide
 - **Lifecycle:** Active
 - **Authority:** Normative only for the evaluation or research claim being made
-- **Last reviewed:** 25 July 2026
+- **Last reviewed:** 1 August 2026
 
 ## 1. When to read this
 
@@ -73,13 +73,15 @@ paralysed agent even when the prose asks for useful autonomy.
 
 ## 6. Literature note requirement
 
-For research-sensitive tasks, write a short note that records:
+When a design or acceptance claim relies materially on literature, write a
+short note containing only what is needed to interpret that claim:
 
 - what recent work was checked
 - which claim from that work actually matters to Von
 - what changed in the design because of it
 - what was rejected and why
-- what follow-up measurement remains open
+- any measurement gap that materially limits the current conclusion; do not
+  invent follow-up work
 
 ## 7. Research uptake rules
 

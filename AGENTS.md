@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Governing instructions for work in this repository, subordinate
   to current explicit user direction and higher-level safety rules
-- **Last reviewed:** 29 July 2026
+- **Last reviewed:** 1 August 2026
 - **Review trigger:** A material change to Von's product focus, authority model,
   security posture, or acceptance doctrine
 
@@ -161,12 +161,21 @@ never be forced onto newer evidence.
     unavailable, or authority is missing. Preserve an unanswered material
     question in the shared situation and continue independent useful work; do
     not turn elicitation into performative confirmation.
-12. **Evidence proportional to the claim.** Do not demand release-grade proof
-    for a mechanical change, and do not claim end-to-end success from a unit
-    test. Match validation cost to risk and asserted scope.
-13. **Measure architectural value.** When a represented layer or extra stage is
-    material, compare it with the best fair simpler baseline and include
-    latency, cost, human burden, failure recovery, and maintenance impact.
+12. **Evidence and stopping rule proportional to the claim.** Choose the
+    bounded claim and lowest adequate validation tier before testing. For a
+    bounded, observable, and recoverable change, proceed when the evidence
+    supports a likely net improvement over the fair baseline and no
+    demonstrated material regression remains on the affected path. Do not
+    require perfect stochastic behaviour or repair of unrelated, pre-existing,
+    or merely possible defects. Bound the claim and report material
+    limitations. Stop gathering evidence when another check is unlikely to
+    change the delivery or rollback decision.
+13. **Measure architectural value.** When claiming that a represented layer or
+    extra stage adds material value, compare it with the best fair simpler
+    baseline using existing evidence or the smallest bounded measurement that
+    distinguishes the claim. Include latency, cost, human burden, failure
+    recovery, and maintenance impact where material; a layer change does not by
+    itself require a live multi-arm campaign.
 14. **Prefer subtraction.** Remove obsolete stages, fallbacks, prompts, tools,
     tests, and documentation when evidence shows they add cost without value.
 15. **Preserve contextual degrees of freedom.** When work changes durable
@@ -223,14 +232,33 @@ job and work product; task authority and any material effect; the simplest fair
 baseline and chosen authority surface; recovery or escalation where genuinely
 material; and evidence proportionate to the claim. Omit irrelevant fields.
 
-This is a short planning aid, not a production schema or an invitation to add
-an orchestration layer. Materialise it only when runtime discovery, execution,
-governance, or repeated evaluation actually consumes it.
+Before substantial implementation, state the current delivery decision and the
+minimum evidence that would change it in the existing working note, Jira task,
+pull request, or user update. Whenever a material new observation would prompt
+another patch, a broader validation campaign, or a delay, state explicitly
+whether:
+
+- `Merge decision changes — ...`
+- `Merge decision does not change — ...`
+
+For work without a merge, use the equivalent release or handoff decision. Name
+the candidate-caused material risk or invalidated claim when the decision
+changes. If it does not change, the observation must not expand the current
+work merely because it was discovered; a small already-in-scope cleanup may
+proceed, but it does not become a new acceptance gate. This classification is
+for material decision points, not every diagnostic fact.
+
+The capability-slice summary is a short planning aid, not an invitation to add
+an orchestration layer. Do not create a separate schema, required artefact, CI
+check, or runtime gate for the decision classification. Materialise other
+capability-slice fields only when runtime discovery, execution, governance, or
+repeated evaluation genuinely consumes them.
 
 ## 6. Validation tiers
 
 Choose the lowest tier that supports the claim. Higher-risk aspects of a change
-may use a higher tier without raising every aspect.
+may use a higher tier without raising every aspect. Discovery of an unrelated
+defect or desirable optimisation does not raise the tier or widen the claim.
 
 ### Tier 0: mechanical or documentation
 
@@ -281,6 +309,21 @@ administrative and scientific tasks should dominate ordinary acceptance
 evidence. Weight mistakes by credible residual consequence; do not give every
 hypothetical danger the same veto.
 
+At a merge decision, freeze the smallest coherent candidate once proportionate
+evidence shows a consequence-weighted improvement over the fair pre-change
+baseline and there is no evidence or clear causal demonstration of a new
+materially unacceptable regression. When merge is within current task
+authority, merge it and state the remaining uncertainty. Do not demand zero
+failures: isolated recoverable stochastic variation or merely imaginable
+further improvement is not evidence for another patch. Further implementation
+or validation must address an observed failure or clear causal mechanism that
+matters to the user job, or resolve a named uncertainty whose possible outcomes
+would change the merge decision; otherwise stop changing the candidate. The
+explicit statement is required at material decision points in substantial
+work, but it remains human judgement in an existing working surface, not a
+score threshold, automated release gate, new persistent schema, runtime
+mechanism, or grant of merge authority.
+
 ## 7. Security and mutations
 
 - Never print or commit secrets and never clobber `.env`.
@@ -319,15 +362,13 @@ hypothetical danger the same veto.
   macOS and Linux, except when deliberately invoking or testing another shell.
 - Search before adding helpers, tools, concepts, predicates, workflows, or
   parallel pathways.
-- Treat Atlas efficiency as a standing engineering priority. Take every
-  practical opportunity exposed by telemetry, profiling, explains, tests, or
-  real-path replays to remove wasteful query shapes, scans, index choices,
-  retries, timeouts, topology churn, and avoidable reads. Complete safe,
-  task-relevant improvements while the evidence is fresh, add proportional
-  regression coverage and observability, and create follow-up work only when
-  the improvement cannot safely be completed in the current task. Do not
-  normalise Atlas inefficiency as incidental slowness: it is a material
-  reliability and development-cost defect.
+- Treat Atlas inefficiency on the affected path as a material reliability and
+  development-cost defect. Fix it in the current task only when it is within
+  the stated user outcome and implementation scope and is required for
+  acceptance or is one small bounded change. Otherwise preserve the evidence
+  and record a limitation; create follow-up work only when a concrete
+  consequence justifies its priority. Telemetry exposing adjacent inefficiency
+  does not widen the task.
 - Preserve user-authored text unless change is requested.
 - Preserve unrelated worktree changes. Do not use `git stash` or destructive
   checkout/reset operations as a routine baseline technique; use a clean
@@ -336,6 +377,23 @@ hypothetical danger the same veto.
   path as a product defect rather than an obligation to block unrelated safe
   progress indefinitely.
 
+When creating or substantially rewriting a Jira task, make the release decision
+legible using only the parts material to that task:
+
+- the intended user outcome and simplest fair baseline;
+- the minimum ship criteria: the smallest evidence that would support delivery;
+- concrete stop-ship conditions tied to a plausible user, authority, security,
+  recovery, or operability consequence;
+- non-blocking measurements, known limitations, and evaluation questions; and
+- explicit non-goals where nearby work could otherwise inherit scope.
+
+Do not make every desirable metric, task class, model, telemetry surface, or
+future research question a conjunctive acceptance criterion. Each release gate
+must say what material consequence makes it blocking. Latency percentiles,
+broad prompt families, multi-model comparisons, effect controls, and full
+telemetry reconciliation are release gates only when the task's actual claim
+requires them.
+
 For substantial Jira implementation work:
 
 1. Re-read the live issue, comments, links, current code, and current validation
@@ -343,8 +401,14 @@ For substantial Jira implementation work:
 2. Use a task branch and keep Jira status aligned with reality.
 3. Name the user outcome, authority surfaces, support-code scope, and validation
    tier in the task notes.
-4. Recover relevant existing branch/PR work before reimplementing.
-5. At the current decision boundary, leave the branch, Jira issue, and any live
+4. State why the merge is not ready and the minimum evidence that would make it
+   ready, or record the equivalent current decision if work is already
+   underway.
+5. Recover relevant existing branch/PR work before reimplementing.
+6. Before another patch, wider campaign, or delay prompted by a material new
+   observation, state explicitly whether it changes the merge decision and act
+   accordingly.
+7. At the current decision boundary, leave the branch, Jira issue, and any live
    state consistent with reality. Commit, publish, merge, release, comment, or
    transition only when current task authority permits it and the action helps
    the work. A provisional branch, experiment, or human-gated Jira programme

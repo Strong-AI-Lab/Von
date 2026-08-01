@@ -287,15 +287,21 @@ def create_concept(name: str, parent_id: str, description: str = "") -> dict:
 - **Feature requests:** Propose new features with clear use cases
 - **Questions:** Ask questions about the codebase or development process
 
-### Issue Template
+### Bug-report template
 
-When creating an issue, include:
+For a bug report, include:
 - **Description:** Clear summary of the issue or request
 - **Steps to reproduce:** For bugs, provide detailed steps
 - **Expected behavior:** What should happen
 - **Actual behavior:** What actually happens
 - **Environment:** OS, Python version, browser (if applicable)
 - **Screenshots:** Visual evidence if relevant
+
+For a substantial implementation or Jira task, use the decision-ready task
+boundary in [`AGENTS.md`](AGENTS.md#8-task-and-repository-discipline): minimum
+ship criteria, concrete stop-ship conditions, non-blocking observations, and
+explicit non-goals. Do not turn every desirable measurement into an acceptance
+gate.
 
 ---
 
