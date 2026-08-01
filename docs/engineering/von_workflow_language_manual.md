@@ -482,13 +482,12 @@ not a quality signal. Actor-visible registered tools declared by a matched
 workflow are exposed as plausible simpler component plans without claiming that
 one component is equivalent to the whole workflow.
 
-Registered tools and represented workflows participate in semantic capability
-retrieval before that frontier is paged for the model. Their physical indexes
-remain partitioned by authority surface: registered interface metadata may use
-a shared tool-capability index, while workflow retrieval remains actor-filtered.
-Only capabilities already delegated to the current actor are unified into the
-turn frontier. Retrieval similarity is evidence of possible adequacy, not an
-invocation permission or a proof that two plans are equivalent.
+Natural-language capability discovery gives the model a complete alphabetical
+purpose index of the delegated registered tools alongside bounded represented
+workflow matches. The index contains mechanically shortened authored
+descriptions, not code-ranked semantic choices; exact-name discovery hydrates
+the selected canonical schemas. Lexical detail-page labels are hints and cannot
+remove a delegated tool from that model-visible index.
 
 Workflow component projection includes actor-visible MCP tools named by
 represented step actions and by represented LLM-step tool policy
@@ -503,19 +502,10 @@ the cheaper path. Persisted workflow-capability manifests carry the routing
 projection producer schema; a schema change invalidates and rebuilds the
 namespace instead of silently serving the previous metadata shape.
 
-Within each plan shape, semantic retrieval ranks plausible candidates before
-the lower-cost direct and higher-cost workflow alternatives are interleaved.
-This ensures that a semantically relevant direct path is present in the
-model-visible page rather than being hidden behind weak lexical matches. The
-model still decides whether a direct call or small composition can produce the
-material work product and evidence.
-
 Schema discovery remains an optional ordinary capability, not a compulsory
-stage. When semantic retrieval surfaces it for represented-knowledge work, the
-model may use it to retrieve predicates, types, inverse directions, or reified
-relationship shapes before a relation-bearing read. A typed unavailable or
-degraded retrieval index falls back to the bounded catalogue; it must not be
-reported as authoritative evidence that no suitable capability exists.
+stage. When the catalogue surfaces it for represented-knowledge work, the model
+may use it to retrieve predicates, types, inverse directions, or reified
+relationship shapes before a relation-bearing read.
 Direction-neutral relation capability hints are similarly local to the
 retrieved capability: when the exact represented predicate and argument
 direction are unknown, they advise incidence or relation reads across any

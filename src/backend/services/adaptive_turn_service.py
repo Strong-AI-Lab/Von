@@ -65,6 +65,7 @@ _DEFAULT_OUTER_TOOL_WORKERS = 8
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
+_CAPABILITY_PURPOSE_MAX_CHARS = 160
 _CAPABILITY_CATALOGUE_SCHEMA_VERSION = "adaptive_turn_capabilities.v1"
 _CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION = "capability_plan_profile.v1"
 _CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION = "capability_effect_profile.v1"
@@ -356,7 +357,121 @@ def _compact_capability_selection_profiles(
             )
             if adequacy_sources:
                 compact_selection["adequacy_sources"] = adequacy_sources
+        existing_adequacy_sources = selection.get("adequacy_sources")
+        if (
+            "adequacy_sources" not in compact_selection
+            and isinstance(existing_adequacy_sources, Sequence)
+            and not isinstance(existing_adequacy_sources, (str, bytes, bytearray))
+        ):
+            compact_selection["adequacy_sources"] = [
+                str(item)
+                for item in existing_adequacy_sources
+                if str(item).strip()
+            ]
         compact["selection"] = compact_selection
+    return compact
+
+
+def _capability_purpose_index(
+    capabilities: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Expose every candidate's authored purpose without choosing semantics."""
+
+    entries: list[dict[str, Any]] = []
+    for capability in sorted(
+        capabilities,
+        key=lambda item: str(item.get("name") or "").lower(),
+    ):
+        name = str(capability.get("name") or "").strip()
+        if not name:
+            continue
+        purpose = " ".join(str(capability.get("description") or "").split())
+        first_sentence_end = re.search(r"[.!?](?=(?:\s+[A-Z#])|$)", purpose)
+        if first_sentence_end is not None:
+            purpose = purpose[: first_sentence_end.end()]
+        purpose = _truncate_capability_purpose(
+            purpose,
+            max_chars=_CAPABILITY_PURPOSE_MAX_CHARS,
+        )
+        entry: dict[str, Any] = {"name": name, "purpose": purpose}
+        plan_profile = capability.get("plan_profile")
+        shape = (
+            str(plan_profile.get("shape") or "").strip()
+            if isinstance(plan_profile, Mapping)
+            else ""
+        )
+        if shape and shape != "single_capability":
+            entry["shape"] = shape
+        semantic_effect = capability.get("semantic_effect")
+        if semantic_effect is not False:
+            entry["semantic_effect"] = semantic_effect
+        entries.append(entry)
+    return {
+        "schema_version": "adaptive_turn_capability_purpose_index.v1",
+        "complete": True,
+        "ordering": "name_ascending_unranked",
+        "purpose_projection": "first_authored_sentence",
+        "purpose_max_chars": _CAPABILITY_PURPOSE_MAX_CHARS,
+        "truncation_marker": "...",
+        "exact_schema_hydration": {
+            "tool": _CAPABILITY_TOOL_NAME,
+            "guidance": "Request all alternatives being compared in one names array.",
+            "arguments": {"names": ["<capability names>"], "limit": 50},
+        },
+        "entries": entries,
+    }
+
+
+def _truncate_capability_purpose(purpose: str, *, max_chars: int) -> str:
+    if len(purpose) <= max_chars:
+        return purpose
+    if max_chars <= 3:
+        return purpose[:max_chars]
+    prefix = purpose[: max_chars - 3]
+    if not prefix.endswith(" ") and not purpose[len(prefix)].isspace():
+        word_boundary = prefix.rfind(" ")
+        if word_boundary > 0:
+            prefix = prefix[:word_boundary]
+    return prefix.rstrip() + "..."
+
+
+def _capability_purpose_index_with_limit(
+    purpose_index: Mapping[str, Any],
+    *,
+    max_chars: int,
+) -> dict[str, Any]:
+    """Keep every purpose entry while compacting only its descriptive text."""
+
+    compact = dict(purpose_index)
+    entries = purpose_index.get("entries")
+    compact_entries: list[dict[str, Any]] = []
+    if isinstance(entries, Sequence) and not isinstance(
+        entries,
+        (str, bytes, bytearray),
+    ):
+        for raw_entry in entries:
+            if not isinstance(raw_entry, Mapping):
+                continue
+            entry = dict(raw_entry)
+            purpose = str(entry.get("purpose") or "")
+            if purpose and max_chars > 0:
+                entry["purpose"] = _truncate_capability_purpose(
+                    purpose,
+                    max_chars=max_chars,
+                )
+            else:
+                entry.pop("purpose", None)
+            compact_entries.append(entry)
+    compact.update(
+        {
+            "entries": compact_entries,
+            "purpose_projection": (
+                "first_authored_sentence_model_context_compacted"
+            ),
+            "purpose_max_chars": max_chars,
+            "purpose_text_compacted_for_model_context": True,
+        }
+    )
     return compact
 
 
@@ -415,6 +530,22 @@ def _capability_schema_reference(
     return compact
 
 
+def _capability_discovery_reference(
+    capability: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose compact selection facts while deferring exact hydration."""
+
+    compact = {
+        key: capability.get(key)
+        for key in ("name", "query_match")
+        if key in capability
+    }
+    selection = _compact_capability_selection_profiles(capability).get("selection")
+    if isinstance(selection, Mapping):
+        compact["selection"] = dict(selection)
+    return compact
+
+
 def _capability_schema_focused_projection(
     capability: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -457,8 +588,9 @@ def _bounded_capability_catalogue_output(
     raw_next_offset = value.get("next_offset")
     if not isinstance(raw_next_offset, int) or isinstance(raw_next_offset, bool):
         raw_next_offset = None
+    exact_name_page = value.get("catalogue_scope") == "requested_exact_names"
     exact_singleton_page = (
-        value.get("catalogue_scope") == "requested_exact_names"
+        exact_name_page
         and value.get("total") == 1
         and len(capabilities) == 1
         and raw_next_offset is None
@@ -477,10 +609,10 @@ def _bounded_capability_catalogue_output(
             "dominated_total",
             "ranking",
             "selection_policy",
-            "capability_retrieval",
             "dominated_capabilities",
             "catalogue_scope",
             "offset",
+            "purpose_index",
         )
         if key in value
     }
@@ -503,7 +635,11 @@ def _bounded_capability_catalogue_output(
             "omitted_page_entry_count": omitted_page_entry_count,
         }
         if omitted_page_entry_count or schema_reference_count:
-            projection["reason"] = "model_context_budget"
+            projection["reason"] = (
+                "exact_name_hydration_required"
+                if not exact_name_page
+                else "model_context_budget"
+            )
         return {
             **base,
             "next_offset": next_offset,
@@ -520,9 +656,78 @@ def _bounded_capability_catalogue_output(
         schema_reference_count=schema_reference_count,
     )
     if len(_json_bytes(bounded)) > max_bytes:
-        return {}
+        purpose_index = base.get("purpose_index")
+        if not isinstance(purpose_index, Mapping):
+            return {}
+        base = {
+            key: value.get(key)
+            for key in (
+                "schema_version",
+                "success",
+                "delegation",
+                "total",
+                "delegated_total",
+                "catalogue_scope",
+                "offset",
+                "purpose_index",
+            )
+            if key in value
+        }
+        bounded = assemble(
+            included,
+            full_schema_count=full_schema_count,
+            schema_reference_count=schema_reference_count,
+        )
+        if len(_json_bytes(bounded)) > max_bytes:
+            try:
+                maximum_purpose_chars = max(
+                    0,
+                    int(purpose_index.get("purpose_max_chars") or 0),
+                )
+            except (TypeError, ValueError):
+                maximum_purpose_chars = 0
+            best_fit: tuple[dict[str, Any], dict[str, Any]] | None = None
+            lower = 0
+            upper = maximum_purpose_chars
+            while lower <= upper:
+                candidate_limit = (lower + upper) // 2
+                candidate_base = {
+                    **base,
+                    "purpose_index": _capability_purpose_index_with_limit(
+                        purpose_index,
+                        max_chars=candidate_limit,
+                    ),
+                }
+                base = candidate_base
+                candidate = assemble(
+                    included,
+                    full_schema_count=full_schema_count,
+                    schema_reference_count=schema_reference_count,
+                )
+                if len(_json_bytes(candidate)) <= max_bytes:
+                    best_fit = candidate_base, candidate
+                    lower = candidate_limit + 1
+                else:
+                    upper = candidate_limit - 1
+            if best_fit is None:
+                return {}
+            base, bounded = best_fit
 
     for capability in capabilities:
+        if not exact_name_page:
+            reference = _capability_discovery_reference(capability)
+            reference_candidate = assemble(
+                [*included, reference],
+                full_schema_count=full_schema_count,
+                schema_reference_count=schema_reference_count + 1,
+            )
+            if len(_json_bytes(reference_candidate)) > max_bytes:
+                break
+            included.append(reference)
+            schema_reference_count += 1
+            bounded = reference_candidate
+            continue
+
         full_candidate = assemble(
             [*included, capability],
             full_schema_count=full_schema_count + 1,
@@ -694,6 +899,17 @@ def _bound_tool_results_for_model(
 
     if not results:
         return []
+    complete_batch = [
+        {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "status": result.status,
+            "output": result.output,
+        }
+        for result in results
+    ]
+    if len(_json_bytes(complete_batch)) <= max_bytes:
+        return list(results)
     receipt_outputs = [_model_tool_output_receipt(result.output) for result in results]
     serialisable_shells = [
         {
@@ -1208,12 +1424,18 @@ def _tool_definitions() -> list[ToolDefinition]:
         ToolDefinition(
             name=_CAPABILITY_TOOL_NAME,
             description=(
-                "Inspect the capabilities delegated to this turn. Search by "
-                "ordinary words, request exact names, or page through the complete "
-                "catalogue. A natural-language query also searches actor-accessible "
-                "represented workflows and returns executable matches as bound "
-                "capabilities. Returns canonical argument schemas. This is "
-                "discovery, not a requirement to use any particular capability."
+                "Inspect the capabilities delegated to this turn. Non-exact "
+                "discovery returns a complete unranked compact purpose index, "
+                "including semantically discovered represented workflows. Direct "
+                "tools, small compositions, and represented workflows are peers; "
+                "representedness does not rank a plan. Judge semantic adequacy "
+                "yourself. Prefer the smallest plan that can produce the requested "
+                "work product and evidence; use a workflow when its added composition, "
+                "verification, or recovery is materially needed. Request the exact "
+                "names of all alternatives being compared together to hydrate their "
+                "canonical descriptions, planner guidance, plan and effect facts, and "
+                "argument schemas on equal footing. This is discovery, "
+                "not a requirement to use any particular capability."
             ),
             input_schema={
                 "type": "object",
@@ -1255,7 +1477,9 @@ def _tool_definitions() -> list[ToolDefinition]:
             name=_EVIDENCE_TOOL_NAME,
             description=(
                 "Read a selected bounded slice of a prior tool result by its "
-                "turn-scoped evidence handle. Select with a JSON pointer, a text "
+                "turn-scoped evidence handle. Evidence IDs are opaque: copy the "
+                "complete evidence_id exactly from the result or evidence index; "
+                "never reconstruct or shorten it. Select with a JSON pointer, a text "
                 "query, an offset, or any combination. Repeated calls may inspect "
                 "different portions; the raw result is not discarded. Omit "
                 "json_pointer, use the RFC root pointer (an empty string), or use "
@@ -1330,29 +1554,6 @@ def _scope_message(
         "all other writes are unavailable.\n"
         "- Remaining effect-capable window before the protected final-answer "
         f"reserve: {max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
-        f"- {_CAPABILITY_TOOL_NAME} exposes the complete delegated catalogue "
-        "without interpreting the user's intent; a natural-language query also "
-        "retrieves actor-accessible executable represented workflows as bound "
-        "capabilities.\n"
-        "- Treat a direct call, a small composition, and a represented workflow "
-        "as capability plans in one decision space. Choose the least costly plan "
-        "only after judging that it can produce the material work product and "
-        "evidence; representedness is not a quality score.\n"
-        "- Use each candidate's plan, effect, cost, and adequacy evidence. A "
-        "workflow is warranted when it adds needed composition, verification, "
-        "durability, governance, or recovery; otherwise prefer an adequate "
-        "observable and recoverable direct path.\n"
-        "- When bounded read-only plans are each plausibly adequate, start with "
-        "the least costly observable plan and escalate only if its returned "
-        "evidence exposes a material gap. Do not launch a durable or multi-step "
-        "workflow merely to hedge uncertainty that a direct read or small "
-        "composition can test within the turn budget.\n"
-        "- Treat one schema-discovery read followed by one content-bearing read "
-        "as a small composition, not as a reason by itself to select a broader "
-        "workflow.\n"
-        "- A matched workflow may expose visible component capabilities as "
-        "simpler alternatives. Their presence does not prove equivalence: inspect "
-        "the request and escalate when a direct result leaves a material gap.\n"
         f"- {_INVOKE_TOOL_NAME} invokes any named delegated capability.\n"
         f"- {_EVIDENCE_INDEX_TOOL_NAME} pages every evidence handle recorded "
         "for this turn.\n"
@@ -1634,6 +1835,7 @@ def _capability_catalogue(
     *,
     workflow_capabilities: Sequence[Any] = (),
     workflow_discovery: Mapping[str, Any] | None = None,
+    capability_details_by_name: MutableMapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     query = str(payload.get("query") or "").strip().lower()
     requested_names = payload.get("names")
@@ -1658,11 +1860,6 @@ def _capability_catalogue(
 
     query_tokens = {
         token for token in re.findall(r"[a-z0-9_]+", query) if len(token) > 1
-    }
-    registered_tool_retrieval: dict[str, Any] = {
-        "schema_version": "registered_tool_capability_retrieval.v1",
-        "status": "not_requested",
-        "result_count": 0,
     }
     registered_candidates: list[dict[str, Any]] = []
     registered_by_name: dict[str, dict[str, Any]] = {}
@@ -1796,7 +1993,6 @@ def _capability_catalogue(
             "_ranking_literal_match_count": literal_match_count,
             "_ranking_literal_phrase_match": literal_phrase_match,
             "_ranking_component_match_count": 0,
-            "_ranking_semantic_relevance": 0.0,
             "_ranking_routing_match_tokens": routing_match_tokens,
             "_ranking_description_literal_match_count": (
                 description_literal_match_count
@@ -1877,54 +2073,6 @@ def _capability_catalogue(
                 )
         candidate_selection["adequacy_evidence"] = adequacy_evidence
         candidate["selection"] = candidate_selection
-
-    if query and not exact_names:
-        try:
-            from src.backend.services.registered_tool_capability_retrieval_service import (
-                retrieve_registered_tool_capability_scores,
-            )
-
-            semantic_scores, registered_tool_retrieval = (
-                retrieve_registered_tool_capability_scores(
-                    query,
-                    registered_candidates,
-                    gateway=gateway,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            semantic_scores = {}
-            registered_tool_retrieval = {
-                "schema_version": "registered_tool_capability_retrieval.v1",
-                "status": "degraded",
-                "result_count": 0,
-                "error_type": type(exc).__name__,
-                "error": str(exc)[:500],
-            }
-        for candidate in registered_candidates:
-            name = str(candidate.get("name") or "").strip()
-            relevance_score = float(semantic_scores.get(name) or 0.0)
-            if relevance_score <= 0.0:
-                continue
-            candidate["query_match"] = True
-            candidate["_ranking_semantic_relevance"] = relevance_score
-            candidate_selection = dict(candidate.get("selection") or {})
-            adequacy_evidence = list(
-                candidate_selection.get("adequacy_evidence") or []
-            )
-            adequacy_evidence.append(
-                {
-                    "source": "registered_tool_capability_semantic_relevance",
-                    "relevance_score": round(relevance_score, 4),
-                }
-            )
-            candidate_selection.update(
-                {
-                    "frontier_status": "candidate",
-                    "adequacy_evidence": adequacy_evidence,
-                    "semantic_adequacy_owner": "adaptive_model",
-                }
-            )
-            candidate["selection"] = candidate_selection
 
     workflow_candidates: list[dict[str, Any]] = []
     represented_workflow_total = 0
@@ -2180,7 +2328,6 @@ def _capability_catalogue(
             -int(bool(item.get("_ranking_literal_phrase_match"))),
             -int(item.get("_ranking_component_match_count") or 0),
             -float(item.get("_ranking_component_workflow_relevance") or 0.0),
-            -float(item.get("_ranking_semantic_relevance") or 0.0),
             -int(item.get("_ranking_literal_match_count") or 0),
             str(item.get("name") or "").lower(),
         )
@@ -2260,8 +2407,18 @@ def _capability_catalogue(
             or item["selection"].get("frontier_status") != "declared_dominated"
         )
     )
-    page = selected[offset : offset + limit]
-    next_offset = offset + len(page)
+    full_page = selected[offset : offset + limit]
+    if capability_details_by_name is not None:
+        for capability in full_page:
+            capability_name = str(capability.get("name") or "").strip().lower()
+            if capability_name:
+                capability_details_by_name[capability_name] = dict(capability)
+    page = (
+        full_page
+        if exact_names
+        else [_capability_discovery_reference(item) for item in full_page]
+    )
+    next_offset = offset + len(full_page)
     return {
         "schema_version": _CAPABILITY_CATALOGUE_SCHEMA_VERSION,
         "success": True,
@@ -2283,27 +2440,10 @@ def _capability_catalogue(
                 "evidence_adequacy"
             ),
             "frontier_order": (
-                "semantically_rank_each_plan_shape_then_interleave_direct_"
-                "and_workflow_candidates_with_lower_orchestration_cost_first"
+                "interleave_direct_and_workflow_candidates_with_lower_"
+                "orchestration_cost_first"
             ),
             "representedness_priority": False,
-        },
-        "capability_retrieval": {
-            "schema_version": "turn_capability_retrieval.v1",
-            "registered_tools": dict(registered_tool_retrieval),
-            "represented_workflows": {
-                "status": (
-                    str(workflow_discovery.get("status") or "available")
-                    if isinstance(workflow_discovery, Mapping)
-                    else "not_requested"
-                ),
-                "result_count": len(workflow_candidates),
-                "source": "represented_workflow_capability_index",
-            },
-            "authority_partitioning": (
-                "retrieval_indexes_are_partitioned_by_authority_surface_and_"
-                "unified_only_after_actor_delegation"
-            ),
         },
         "dominated_capabilities": dominated_capabilities,
         "catalogue_scope": (
@@ -2313,6 +2453,11 @@ def _capability_catalogue(
         ),
         "offset": offset,
         "next_offset": next_offset if next_offset < len(selected) else None,
+        **(
+            {"purpose_index": _capability_purpose_index(selected)}
+            if not exact_names
+            else {}
+        ),
         "capabilities": page,
         **(
             {"workflow_discovery": dict(workflow_discovery)}
@@ -4032,24 +4177,8 @@ def execute_adaptive_turn(
                             workflow_capabilities_by_name.values()
                         ),
                         workflow_discovery=latest_workflow_discovery,
+                        capability_details_by_name=catalogued_capabilities_by_name,
                     )
-                    raw_catalogued_capabilities = output.get("capabilities")
-                    if isinstance(
-                        raw_catalogued_capabilities, Sequence
-                    ) and not isinstance(
-                        raw_catalogued_capabilities,
-                        (str, bytes, bytearray),
-                    ):
-                        for raw_capability in raw_catalogued_capabilities:
-                            if not isinstance(raw_capability, Mapping):
-                                continue
-                            catalogued_name = str(
-                                raw_capability.get("name") or ""
-                            ).strip()
-                            if catalogued_name:
-                                catalogued_capabilities_by_name[
-                                    catalogued_name.lower()
-                                ] = dict(raw_capability)
                     raw_selection_policy = output.get("selection_policy")
                     latest_capability_selection_policy = (
                         dict(raw_selection_policy)

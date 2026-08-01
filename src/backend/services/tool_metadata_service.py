@@ -217,18 +217,16 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "Found {count} concepts for {query}",
         "description": (
-            "Search Vontology concept names and descriptions, including "
-            "predicates and types. Use as schema discovery when a represented "
-            "entity or relationship is relevant but its exact concept, "
-            "predicate, direction, or reified shape is not yet known."
+            "Search Vontology names and descriptions for possible entities, "
+            "predicates, and types. Start with exact or substring search and "
+            "enrich only when needed. This discovers possible schema, not the "
+            "predicates actually used around an anchor or enumeration coverage."
         ),
         "planner_hint": (
-            "Schema discovery for represented knowledge. Use before a "
-            "relation-specific read when the relevant entity, predicate, type, "
-            "inverse direction, or reified relationship shape is uncertain; "
-            "then use the discovered schema with a relation-bearing lookup. "
-            "Skip when the exact schema is already known or the task is not "
-            "about represented knowledge."
+            "Use when the entity, predicate, type, inverse, or reified shape is "
+            "unknown, then make a relation-bearing read. For a broad category "
+            "around a known anchor, use predicate incidence instead: schema search "
+            "shows what is possible, not what is actually used there."
         ),
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
@@ -683,7 +681,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "target_concept_max_count": 5,
         "planner_hint": (
             "Use when you already know the concept ID and need grounded represented "
-            "facts, predicates, or relationships for that specific concept."
+            "facts for that specific concept. For relationship exploration, prefer "
+            "a small predicate-filtered relation read; if relation enrichment is "
+            "needed here, start with a small page without inline previews and hydrate "
+            "only selected related concepts."
         ),
     },
     "find_relations_with_argument": {
@@ -699,18 +700,20 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "target_concept_argument_name": "concept_id",
         "target_concept_source": "focal_concept",
         "target_concept_max_count": 2,
-        "default_payload": {"limit": 20},
+        "default_payload": {"include_concept_preview": False, "limit": 20},
         "planner_hint": (
-            "Use for entity-relative relationship lookup after resolving the anchor "
-            "concept. This is relation-bearing evidence, not mere inventory. Choose "
-            "the cheapest adequate query shape: use relation_kind='binary' for "
-            "entity-to-entity relations and request text relations or snippets only "
-            "when the user asks about text content. When the represented predicate "
-            "is unknown, retrieve schema candidates with vontology_concept_search or "
-            "inspect predicate incidence, then pass the returned exact predicate IDs "
-            "in predicate_filter; do not start with a broad unfiltered relation page. "
-            "Keep argument_index='any' when direction is unknown. A one-direction or "
-            "lexical-predicate probe cannot support a complete negative result."
+            "Use for content-bearing relationships after resolving the anchor. "
+            "Start predicate-filtered around limit 20 with previews off; hydrate "
+            "selected concepts only when needed. A hit proves existence, not list "
+            "or count completeness. If predicate, direction, or represented-form "
+            "coverage is not established, inspect small any-direction incidence "
+            "first, then pass every fitting exact predicate together in one "
+            "predicate_filter read; do not select only the most obvious label. "
+            "When a hit reaches a "
+            "reified, event, claim, or role node, inspect represented role predicates "
+            "before treating another filler as the requested entity; co-participation "
+            "alone does not establish that role. A numeric object index selects one "
+            "stored slot, not the whole object side."
         ),
     },
     "find_concepts_by_name": {
@@ -778,16 +781,25 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "default_payload": {
             "argument_index": "subject",
             "relation_kind": "binary",
-            "include_argument_type_counts": True,
+            "include_argument_type_counts": False,
             "include_concept_preview": False,
             "limit": 12,
         },
         "planner_hint": (
-            "Use before a filtered entity-relative lookup when the represented "
-            "predicate, inverse form, or argument direction is not established. "
-            "Set argument_index='any' to inspect both directions, then use the "
-            "returned exact predicate IDs and type counts for the relation read. "
-            "Do not infer a complete negative from a one-direction incidence probe."
+            "Use before a filtered relation read when coverage is not established. "
+            "For a list, count, broad category, or negative, start one small binary "
+            "argument_index='any' page with limit=20, "
+            "include_concept_preview=false, include_text_snippets=false, and "
+            "include_argument_type_counts=false. "
+            "Treat every semantically fitting row, including inverse forms, as a "
+            "coverage candidate; pass all returned predicate IDs together in one "
+            "exact predicate_filter read, do not select only the most obvious label, "
+            "deduplicate overlaps, "
+            "and inspect role fillers when a matching row grounds a reified node. "
+            "Incidence identifies coverage candidates, not the answer entities. A "
+            "filler qualifies only when its represented role establishes the requested "
+            "relationship; co-participation alone does not. A numeric object index "
+            "selects only one stored slot."
         ),
     },
     "get_concept_usage_profile": {

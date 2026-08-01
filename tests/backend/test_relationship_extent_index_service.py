@@ -185,6 +185,22 @@ def test_relationship_extent_readiness_requires_explicit_complete_state(
     assert service.relationship_extent_index_ready() is True
 
 
+def test_relationship_extent_query_batches_exact_predicates() -> None:
+    from src.backend.services import relationship_extent_index_service as service
+
+    query, should_query = service._build_relationship_extent_index_query(
+        predicate_ids=["#V#supervises", "#V#co_supervises", "#V#supervises"],
+        target_value="#V#person",
+    )
+
+    assert should_query is True
+    assert query == {
+        "schema_version": service.RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
+        "predicate_id": {"$in": ["#V#supervises", "#V#co_supervises"]},
+        "target_value": "#V#person",
+    }
+
+
 def test_relationship_extent_rebuild_enforces_batch_size_for_dense_source(
     monkeypatch,
 ):

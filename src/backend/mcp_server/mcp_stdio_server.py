@@ -2177,7 +2177,7 @@ async def _handle_find_relations_with_argument(
                     arguments.get("include_text_snippets", False)
                 ),
                 include_concept_preview=bool(
-                    arguments.get("include_concept_preview", True)
+                    arguments.get("include_concept_preview", False)
                 ),
                 limit=arguments.get("limit"),
                 offset=arguments.get("offset"),
@@ -2236,7 +2236,7 @@ async def _handle_get_predicate_incidence(
             scope=arguments.get("scope"),
             include_text_snippets=bool(arguments.get("include_text_snippets", False)),
             include_concept_preview=bool(
-                arguments.get("include_concept_preview", True)
+                arguments.get("include_concept_preview", False)
             ),
             limit=arguments.get("limit"),
             offset=arguments.get("offset"),

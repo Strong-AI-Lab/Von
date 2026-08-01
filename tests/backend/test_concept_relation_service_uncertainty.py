@@ -298,6 +298,7 @@ def test_relation_previews_and_predicate_incidence_groundings_include_type_ids()
         concept_id="#V#michael_witbrock",
         argument_index="subject",
         relation_kind="binary",
+        include_concept_preview=True,
     )
     rows = incidence_payload.get("predicates") or []
     author_row = next(
@@ -520,9 +521,11 @@ def test_get_predicate_incidence_entity_mode_batches_argument_type_counts(
     assert target_type_count["concept_count"] == 2
 
 
-def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
+def test_get_predicate_incidence_role_expands_reified_neighbour_roles(
+    monkeypatch,
+) -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
-    from src.backend.services.concept_relation_service import get_predicate_incidence
+    from src.backend.services import concept_relation_service as service
 
     ConceptsRepository.insert_one(
         {"concept_id": "#V#michael_witbrock", "relationships": {}}
@@ -551,8 +554,24 @@ def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
             "relationships": {"is_an_instance_of": ["#V#file_copy"]},
         }
     )
+    monkeypatch.setattr(
+        service,
+        "query_relationship_extent_index",
+        lambda **_kwargs: (
+            [
+                {
+                    "source_concept_id": "#V#authorship_event_one",
+                    "predicate_id": "#V#has_author",
+                    "target_value": "#V#michael_witbrock",
+                    "target_index": 0,
+                    "source_updated_at": None,
+                }
+            ],
+            1,
+        ),
+    )
 
-    payload = get_predicate_incidence(
+    payload = service.get_predicate_incidence(
         concept_id="#V#michael_witbrock",
         argument_index="object",
         relation_kind="binary",
@@ -595,7 +614,7 @@ def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
         payload["role_expansions"][0]["anchor_predicate_concept_id"] == "#V#has_author"
     )
 
-    auto_payload = get_predicate_incidence(
+    auto_payload = service.get_predicate_incidence(
         concept_id="#V#michael_witbrock",
         argument_index="object",
         relation_kind="binary",
@@ -707,6 +726,66 @@ def test_get_predicate_incidence_type_mode_uses_batched_subject_path(
     assert (
         payload["predicate_incidence_query_diagnostics"]["retrieval_strategy"]
         == "batched_subject_asserted"
+    )
+
+
+def test_get_predicate_incidence_type_mode_explicit_any_includes_incoming(
+    monkeypatch,
+) -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services import concept_relation_service as service
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#alice_student",
+            "relationships": {"is_an_instance_of": ["#V#sail_student"]},
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#bob_student",
+            "relationships": {"is_an_instance_of": ["#V#sail_student"]},
+        }
+    )
+
+    def query_index(**kwargs):
+        target_id = kwargs.get("target_value")
+        if target_id != "#V#alice_student":
+            return [], 0
+        return (
+            [
+                {
+                    "source_concept_id": "#V#supervisor",
+                    "predicate_id": "#V#supervises",
+                    "target_value": target_id,
+                    "target_index": 0,
+                    "source_updated_at": None,
+                }
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(service, "query_relationship_extent_index", query_index)
+    monkeypatch.setattr(
+        service,
+        "filter_accessible_concept_ids",
+        set,
+    )
+
+    payload = service.get_predicate_incidence(
+        instance_of="#V#sail_student",
+        direct_instances_only=True,
+        argument_index="any",
+        relation_kind="binary",
+        include_concept_preview=False,
+    )
+
+    rows = {row["predicate_concept_id"]: row for row in payload["predicates"]}
+    assert rows["#V#supervises"]["relation_hit_count"] == 1
+    assert rows["#V#supervises"]["grounded_instance_count"] == 1
+    assert (
+        payload["predicate_incidence_query_diagnostics"]["retrieval_strategy"]
+        == "per_instance_relation_lookup"
     )
 
 

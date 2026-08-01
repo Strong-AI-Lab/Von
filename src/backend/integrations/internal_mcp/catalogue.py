@@ -323,6 +323,16 @@ def _annotate_bounded_relation_lookup(
     result = dict(payload)
     if not bool(result.get("total_hits_is_lower_bound")):
         return result
+    diagnostics = result.get("relation_query_diagnostics")
+    actor_overlay_truncated = bool(
+        isinstance(diagnostics, Mapping)
+        and (
+            diagnostics.get("scoped_concept_query_truncated")
+            or diagnostics.get("actor_effective_text_query_truncated")
+        )
+    )
+    if not actor_overlay_truncated:
+        return result
 
     paging = dict(result.get("paging") or {})
     paging.update(
@@ -504,7 +514,7 @@ def _find_relations_with_argument(**kwargs):
             relation_kind=kwargs.get("relation_kind"),
             scope=kwargs.get("scope"),
             include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
-            include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
+            include_concept_preview=bool(kwargs.get("include_concept_preview", False)),
             limit=kwargs.get("limit"),
             offset=kwargs.get("offset"),
             sort_by=kwargs.get("sort_by"),
@@ -533,7 +543,7 @@ def _get_predicate_incidence(**kwargs):
         relation_kind=kwargs.get("relation_kind"),
         scope=kwargs.get("scope"),
         include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
-        include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
+        include_concept_preview=bool(kwargs.get("include_concept_preview", False)),
         limit=kwargs.get("limit"),
         offset=kwargs.get("offset"),
         sort_by=kwargs.get("sort_by"),
@@ -9729,10 +9739,12 @@ def _find_relations_with_argument_input_schema() -> Schema:
             "predicate_filter (list of predicate IDs or substrings), relation_kind "
             "('any'|'binary'|'text'), scope (optional), include_text_snippets (bool), "
             "include_concept_preview (bool), paging (limit/offset), sort_by, "
-            "uncertainty retrieval controls (include_uncertain, uncertainty_mode, "
+            "uncertainty retrieval controls (include_uncertain, uncertainty_mode "
+            "'asserted_only'|'uncertain_only'|'include_uncertain', and "
             "uncertainty_statuses), and optional namespace passthrough. Do not use "
             "top-level payload keys named subject or object; the anchor entity always "
-            "goes in concept_id."
+            "goes in concept_id. A numeric object argument_index selects one exact "
+            "stored slot; use 'any' when all subject/object slots are relevant."
         ),
     )
 
@@ -9803,12 +9815,18 @@ def _predicate_incidence_input_schema() -> Schema:
             "get_predicate_incidence input: exactly one of concept_id (entity mode; "
             "anchor entity concept ID such as '#V#michael_witbrock') or instance_of "
             "(type mode). Optional direct_instances_only, argument_index "
-            "('subject' inspects outgoing subject-side relations), predicate_filter, "
+            "('subject' inspects outgoing subject-side relations; 'any' inspects "
+            "every stored subject/object slot; a numeric object index selects one "
+            "exact stored slot), predicate_filter, "
             "relation_kind ('any'|'binary'|'text'), include_text_snippets, "
             "include_concept_preview, paging (limit/offset), sort_by "
             "('relation_hit_count'|'grounding_count'|'grounded_instance_count'|'predicate'), "
-            "uncertainty retrieval controls, include_argument_type_counts for direct asserted "
-            "type counts of non-anchor arguments, type_count_mode='direct_asserted', "
+            "uncertainty retrieval controls (include_uncertain, uncertainty_mode "
+            "'asserted_only'|'uncertain_only'|'include_uncertain', and "
+            "uncertainty_statuses), include_argument_type_counts for aggregated direct "
+            "asserted types of non-anchor arguments (not related-entity identities; "
+            "keep false unless a type distribution is requested), "
+            "type_count_mode='direct_asserted', "
             "include_untyped_bucket, max_types_per_predicate, max_sample_concepts_per_type, "
             "and role_expansion_mode ('none'|'explicit'|'auto') with optional explicit "
             "role_node_type_filter, role_predicate_filter, and role_expansion_depth=1. "
@@ -9834,6 +9852,8 @@ def _predicate_incidence_output_schema() -> Schema:
             "type_ids_considered": (list, type(None)),
             "instance_count_considered": (int, type(None)),
             "direct_instances_only": (bool, type(None)),
+            "coverage_complete": (bool, type(None)),
+            "counts_are_lower_bounds": (bool, type(None)),
             "uncertainty_diagnostics": (dict, type(None)),
         },
         allow_unknown=True,
@@ -9845,7 +9865,9 @@ def _predicate_incidence_output_schema() -> Schema:
             "sample_groundings, optional argument_type_counts/untyped/literal/inaccessible "
             "argument counters, optional role_expansion summaries, and in type mode "
             "grounded_instance_count/sample_instances), plus role_expansions, paging metadata, "
-            "and optional typed/uncertainty diagnostics."
+            "and optional typed/uncertainty diagnostics. coverage_complete=false "
+            "and counts_are_lower_bounds=true report an unavailable coverage path "
+            "rather than presenting a partial incidence result as exhaustive."
         ),
     )
 
@@ -33848,7 +33870,18 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "argument_index to choose the relation slot instead of inventing "
                 "subject/object payload fields. Supports exact graph matching and "
                 "full-text text-relation matching with optional predicate/kind filters "
-                "and pagination. Verified actors receive actor_effective results; "
+                "and pagination. A positive hit proves existence, not enumeration "
+                "completeness. When predicate, direction, or represented-form coverage "
+                "is uncertain, inspect predicate incidence first and then read every "
+                "fitting exact predicate. For list, count, broad-category, or negative "
+                "claims, pass all semantically fitting predicate IDs together in one "
+                "predicate_filter read unless the incidence evidence distinguishes "
+                "their coverage; do not choose only the most obvious label. When a hit "
+                "reaches a reified, event, claim, "
+                "or role node, inspect its represented role predicates before treating "
+                "another filler as the requested related entity; co-participation alone "
+                "does not establish that semantic role. "
+                "Verified actors receive actor_effective results; "
                 "payload-only identity is ignored and yields base_publication. "
                 "Truncated actor overlays expose bounded recovery rather than a "
                 "misleading offset continuation."
@@ -33961,16 +33994,23 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             output_schema=_predicate_incidence_output_schema(),
             category="read",
             description=(
-                "Summarise which predicates are actually observed around a concept or across "
-                "instances of a type. The anchor entity goes in concept_id; "
-                "argument_index='subject' means inspect outgoing subject-side relations, "
-                "not that the payload should contain a subject field. Use when you need "
-                "distinct predicates plus counts before choosing a predicate-specific "
-                "extent or filtered relation lookup. Start with bounded minimal incidence "
-                "(a modest limit, without argument type counts, previews, or text snippets), "
-                "then request those richer fields only when the initial evidence shows they "
-                "are needed; avoid concurrent rich incidence probes by default. Set "
-                "role_expansion_mode="
+                "Discover predicates actually used around a known anchor or type when "
+                "relationship coverage is uncertain. The anchor entity goes in concept_id. "
+                "Use before a "
+                "filtered relation read when a list, "
+                "count, broad category, or negative lacks established predicate, "
+                "direction, or represented-form coverage. Start with one "
+                "argument_index='any' binary page using limit=20, "
+                "include_concept_preview=false, include_text_snippets=false, and "
+                "include_argument_type_counts=false. For list, count, broad-category, or "
+                "negative claims, pass every semantically fitting returned "
+                "predicate_concept_id, including inverse forms, together in one exact "
+                "predicate_filter read; do not choose only the most obvious label. "
+                "Deduplicate overlaps and inspect role fillers for matching "
+                "reified nodes. Incidence returns coverage candidates, not answer entities. "
+                "A filler qualifies only when its represented role establishes the requested "
+                "relationship; co-participation alone does not. "
+                "Set role_expansion_mode="
                 "'explicit' with represented node-type or role-predicate filters when "
                 "the immediate neighbour is a reified/event/claim node whose other role "
                 "fillers are the useful retrieval targets."

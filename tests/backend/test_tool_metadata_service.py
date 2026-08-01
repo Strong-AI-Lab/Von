@@ -230,15 +230,20 @@ def test_vontology_concept_search_alias_inherits_schema_discovery_metadata(
         assert alias.planner_hint == canonical.planner_hint
         assert alias.operation_category == "read"
         assert alias.evidence_role == "search"
-        assert "schema discovery" in (alias.planner_hint or "").lower()
-        assert "relation-bearing lookup" in (alias.planner_hint or "")
+        assert "possible schema" in (alias.description or "").lower()
+        assert "then make a relation-bearing read" in (alias.planner_hint or "")
+        assert "use predicate incidence instead" in (alias.planner_hint or "")
+        assert "possible, not what is actually used" in (alias.planner_hint or "")
+        assert "requested work product is a list" not in (
+            alias.planner_hint or ""
+        )
         assert "PhD" not in (alias.description or "")
         assert "student" not in (alias.planner_hint or "").lower()
     finally:
         service.invalidate_cache()
 
 
-def test_relation_read_hints_preserve_direction_neutral_completeness(
+def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
     monkeypatch,
 ):
     from src.backend.services import tool_metadata_service as service
@@ -248,16 +253,51 @@ def test_relation_read_hints_preserve_direction_neutral_completeness(
     try:
         incidence = service.get_tool_metadata("get_predicate_incidence")
         relation_read = service.get_tool_metadata("find_relations_with_argument")
+        concept_fetch = service.get_tool_metadata("fetch_concept")
 
+        assert incidence.default_payload == {
+            "argument_index": "subject",
+            "relation_kind": "binary",
+            "include_argument_type_counts": False,
+            "include_concept_preview": False,
+            "limit": 12,
+        }
+        assert "limit=20" in (incidence.planner_hint or "")
+        assert "include_concept_preview=false" in (incidence.planner_hint or "")
+        assert "include_text_snippets=false" in (incidence.planner_hint or "")
+        assert "include_argument_type_counts=false" in (
+            incidence.planner_hint or ""
+        )
         assert "argument_index='any'" in (incidence.planner_hint or "")
-        assert "exact predicate IDs" in (incidence.planner_hint or "")
-        assert "one-direction" in (incidence.planner_hint or "")
-        assert "argument_index='any'" in (relation_read.planner_hint or "")
-        assert "complete negative" in (relation_read.planner_hint or "")
-        assert "relation_kind='binary'" in (relation_read.planner_hint or "")
-        assert "vontology_concept_search" in (relation_read.planner_hint or "")
-        assert "broad unfiltered relation page" in (
+        assert "every semantically fitting row" in (incidence.planner_hint or "")
+        assert "including inverse forms" in (incidence.planner_hint or "")
+        assert "inspect role fillers" in (incidence.planner_hint or "")
+        assert "coverage candidates, not the answer entities" in (
+            incidence.planner_hint or ""
+        )
+        assert "co-participation alone does not" in (incidence.planner_hint or "")
+        assert "selects only one stored slot" in (incidence.planner_hint or "")
+        assert relation_read.default_payload == {
+            "include_concept_preview": False,
+            "limit": 20,
+        }
+        assert "predicate-filtered around limit 20" in (
             relation_read.planner_hint or ""
+        )
+        assert "A hit proves existence, not list or count completeness" in (
+            relation_read.planner_hint or ""
+        )
+        assert "small any-direction incidence" in (relation_read.planner_hint or "")
+        assert "every fitting exact predicate" in (relation_read.planner_hint or "")
+        assert "co-participation alone does not" in (
+            relation_read.planner_hint or ""
+        )
+        assert "not the whole object side" in (relation_read.planner_hint or "")
+        assert "small predicate-filtered relation read" in (
+            concept_fetch.planner_hint or ""
+        )
+        assert "hydrate only selected related concepts" in (
+            concept_fetch.planner_hint or ""
         )
         assert "PhD" not in (incidence.planner_hint or "")
         assert "student" not in (relation_read.planner_hint or "").lower()

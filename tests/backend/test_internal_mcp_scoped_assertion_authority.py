@@ -577,6 +577,45 @@ def test_truncated_actor_effective_relation_lookup_disables_offset_continuation(
     }
 
 
+def test_index_coverage_lower_bound_is_not_labelled_as_actor_overlay() -> None:
+    from src.backend.integrations.internal_mcp.catalogue import (
+        _annotate_bounded_relation_lookup,
+    )
+
+    payload = {
+        "concept_id": "#V#subject",
+        "context_view": "base_publication",
+        "total_hits": 0,
+        "total_hits_is_lower_bound": True,
+        "hits": [],
+        "paging": {
+            "limit": 50,
+            "offset": 0,
+            "returned": 0,
+            "total_available": 0,
+            "total_available_is_lower_bound": True,
+        },
+        "relation_query_diagnostics": {
+            "scoped_concept_query_truncated": False,
+            "actor_effective_text_query_truncated": False,
+            "incoming_asserted_binary": {
+                "path": "relationship_extent_index_unavailable",
+                "complete": False,
+            },
+        },
+    }
+
+    result = _annotate_bounded_relation_lookup(
+        payload,
+        concept_id="#V#subject",
+        predicate_filter=None,
+        relation_kind="binary",
+    )
+
+    assert result == payload
+    assert "continuation" not in result
+
+
 def test_text_assertion_receipt_includes_derived_maintenance_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ):
