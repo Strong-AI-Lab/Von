@@ -139,12 +139,6 @@ def test_jira_methods_registered_in_catalogue():
         "fields",
         "expand",
     )
-    update_definition = catalogue.get("jira_update_issue")
-    assert update_definition.ordinary_turn_excluded_reason == (
-        "deployment_global_account"
-    )
-    assert update_definition.ordinary_turn_effect is True
-    assert update_definition.ordinary_turn_fixed_arguments == {"execute": False}
 
 
 def test_jira_handlers_require_minimum_fields():

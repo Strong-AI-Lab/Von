@@ -33859,7 +33859,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "and pagination. A positive hit proves existence, not enumeration "
                 "completeness. When predicate, direction, or represented-form coverage "
                 "is uncertain, inspect predicate incidence first and then read every "
-                "fitting exact predicate. "
+                "fitting exact predicate. When a hit reaches a reified, event, claim, "
+                "or role node, inspect its represented role predicates before treating "
+                "another filler as the requested related entity; co-participation alone "
+                "does not establish that semantic role. "
                 "Verified actors receive actor_effective results; "
                 "payload-only identity is ignored and yields base_publication. "
                 "Truncated actor overlays expose bounded recovery rather than a "
@@ -33982,6 +33985,8 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "argument_index='any' binary page; read every fitting predicate including "
                 "inverse forms, deduplicate overlaps, and inspect role fillers for matching "
                 "reified nodes. Incidence returns coverage candidates, not answer entities. "
+                "A filler qualifies only when its represented role establishes the requested "
+                "relationship; co-participation alone does not. "
                 "Set role_expansion_mode="
                 "'explicit' with represented node-type or role-predicate filters when "
                 "the immediate neighbour is a reified/event/claim node whose other role "
@@ -35568,9 +35573,6 @@ def _build_default_catalogue_external_integration_definitions() -> (
             input_schema=_jira_update_issue_input_schema(),
             output_schema=jira_update_issue_output_schema,
             category="write",
-            ordinary_turn_excluded_reason="deployment_global_account",
-            ordinary_turn_fixed_arguments={"execute": False},
-            ordinary_turn_effect=True,
             timeout_sec=20.0,
             description=(
                 "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). "

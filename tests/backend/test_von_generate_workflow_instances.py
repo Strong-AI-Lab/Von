@@ -259,47 +259,6 @@ def test_generate_canonicalises_actor_scope_for_the_adaptive_turn(
     assert adaptive_call["user_namespace"] == "#V#michael_witbrock@sail_lab"
 
 
-def test_generate_resolves_agent_test_capabilities_from_canonical_scope(
-    app: Flask,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VON_AGENT_TEST_INSTANCE", "1")
-    monkeypatch.setenv(
-        "VON_AGENT_TEST_TRUSTED_CAPABILITY_GRANTS",
-        "jira_update_issue,jira_get_issue",
-    )
-    monkeypatch.setenv(
-        "VON_AGENT_TEST_TRUSTED_CAPABILITY_GRANT_USER",
-        "#V#michael_witbrock",
-    )
-    monkeypatch.setenv(
-        "VON_AGENT_TEST_TRUSTED_CAPABILITY_GRANT_ORGANISATION",
-        "#V#sail_lab",
-    )
-    monkeypatch.setenv(
-        "VON_AGENT_TEST_TRUSTED_CAPABILITY_GRANT_NAMESPACE",
-        "#V#michael_witbrock@sail_lab",
-    )
-
-    response = app.test_client().post(
-        "/von/generate",
-        json={
-            "prompt": "Read the authorised Jira issue.",
-            "user_id": "#V#spoofed_user",
-            "org_id": "#V#spoofed_org",
-        },
-    )
-
-    assert response.status_code == 200
-    adaptive_call = app.config["_ADAPTIVE_TURN_CALLS"][-1]
-    assert adaptive_call["agent_test_trusted_capability_names"] == (
-        "jira_get_issue",
-        "jira_update_issue",
-    )
-    assert adaptive_call["user_concept_id"] == "#V#michael_witbrock"
-    assert adaptive_call["org_concept_id"] == "#V#sail_lab"
-
-
 def test_generate_passes_authorised_workflow_inputs_to_adaptive_capabilities(
     app: Flask,
 ) -> None:

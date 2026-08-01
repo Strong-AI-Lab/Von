@@ -1286,10 +1286,14 @@ def _tool_definitions() -> list[ToolDefinition]:
             description=(
                 "Inspect the capabilities delegated to this turn. Non-exact "
                 "discovery returns a complete unranked compact purpose index, "
-                "including semantically discovered represented workflows; judge "
-                "semantic adequacy yourself. Request an exact name to hydrate its "
-                "canonical argument schema. This is discovery, not a requirement "
-                "to use any particular capability."
+                "including semantically discovered represented workflows. Direct "
+                "tools, small compositions, and represented workflows are peers; "
+                "representedness does not rank a plan. Judge semantic adequacy "
+                "yourself. Prefer the smallest plan that can produce the requested "
+                "work product and evidence; use a workflow when its added composition, "
+                "verification, or recovery is materially needed. Request an exact "
+                "name to hydrate its canonical argument schema. This is discovery, "
+                "not a requirement to use any particular capability."
             ),
             input_schema={
                 "type": "object",
@@ -1406,43 +1410,6 @@ def _scope_message(
         "all other writes are unavailable.\n"
         "- Remaining effect-capable window before the protected final-answer "
         f"reserve: {max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
-        f"- {_CAPABILITY_TOOL_NAME} exposes the complete delegated catalogue "
-        "as an unranked compact purpose index without interpreting the user's "
-        "intent; judge semantic adequacy yourself, then request an exact name to "
-        "hydrate its canonical schema. Natural-language discovery also adds "
-        "actor-accessible executable represented workflows to the same index. "
-        "Detailed-page query labels are hints, never exclusions.\n"
-        "- Treat a direct call, a small composition, and a represented workflow "
-        "as capability plans in one decision space. Choose the least costly plan "
-        "only after judging that it can produce the material work product and "
-        "evidence; representedness is not a quality score.\n"
-        "- Use each candidate's plan, effect, cost, and adequacy evidence. A "
-        "workflow is warranted only when it adds needed composition, verification, "
-        "durability, governance, or recovery that a bounded direct call or small "
-        "composition cannot adequately provide. Several reads alone do not make "
-        "a workflow necessary.\n"
-        "- When bounded read-only plans are each plausibly adequate, start with "
-        "the least costly observable plan and escalate only if its returned "
-        "evidence exposes a material gap. Do not launch a durable or multi-step "
-        "workflow merely to hedge uncertainty that a direct read or small "
-        "composition can test within the turn budget.\n"
-        "- Match evidence coverage to the requested claim. A positive hit proves "
-        "existence, not completeness. Do not call a list, count, broad category, "
-        "or negative complete from one page, predicate, direction, or represented "
-        "form unless inspected evidence establishes that coverage; inspect the "
-        "missing scope or state the bound. Stop when the requested work product is "
-        "adequately supported.\n"
-        "- Reconcile summaries with grounded items. Deduplicate overlapping facts, "
-        "separate related artefacts or ambiguous candidates, and state status or "
-        "time qualifiers only when inspected evidence establishes them.\n"
-        "- When a matching relation reaches a reified node or related artefact, "
-        "inspect its roles before including or excluding other participants. "
-        "Include a filler only when inspected represented evidence establishes it "
-        "in the requested semantic role. Co-participation alone is a qualified "
-        "candidate, not the requested relationship.\n"
-        "- A matched workflow may expose visible component capabilities as "
-        "simpler alternatives. Their presence does not prove equivalence: inspect "
-        "the request and escalate when a direct result leaves a material gap.\n"
         f"- {_INVOKE_TOOL_NAME} invokes any named delegated capability.\n"
         f"- {_EVIDENCE_INDEX_TOOL_NAME} pages every evidence handle recorded "
         "for this turn.\n"
@@ -1583,7 +1550,6 @@ def ordinary_turn_capability_delegation(
     *,
     user_concept_id: str | None,
     trusted_argument_values: Mapping[str, Any] | None = None,
-    agent_test_trusted_capability_names: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """Project the capabilities authorised for an ordinary turn.
 
@@ -1614,18 +1580,9 @@ def ordinary_turn_capability_delegation(
             and not is_unresolved_tool_argument_placeholder(value)
         )
 
-    def trusted_bindings_are_present(metadata: Mapping[str, Any]) -> bool:
-        return all(
-            trusted_binding_is_present(str(binding_key))
-            for binding_key in (
-                metadata.get("ordinary_turn_trusted_argument_bindings") or {}
-            ).values()
-        )
-
-    methods = gateway.describe_methods()
     requested = [
         name
-        for name, metadata in methods.items()
+        for name, metadata in gateway.describe_methods().items()
         if isinstance(metadata, Mapping)
         and (
             metadata.get("category") == "read"
@@ -1643,20 +1600,13 @@ def ordinary_turn_capability_delegation(
                 and metadata.get("ordinary_turn_public") is True
             )
         )
-        and trusted_bindings_are_present(metadata)
+        and all(
+            trusted_binding_is_present(str(binding_key))
+            for binding_key in (
+                metadata.get("ordinary_turn_trusted_argument_bindings") or {}
+            ).values()
+        )
     ]
-    if authenticated:
-        for name in agent_test_trusted_capability_names or ():
-            metadata = methods.get(name)
-            if not isinstance(metadata, Mapping):
-                continue
-            if metadata.get("category") != "read" and not (
-                metadata.get("category") == "write"
-                and metadata.get("ordinary_turn_effect") is True
-            ):
-                continue
-            if trusted_bindings_are_present(metadata):
-                requested.append(name)
     return _registered_capability_names(gateway, requested)
 
 
@@ -2884,7 +2834,6 @@ def execute_adaptive_turn(
     user_concept_id: str | None = None,
     org_concept_id: str | None = None,
     trusted_argument_values: Mapping[str, Any] | None = None,
-    agent_test_trusted_capability_names: Sequence[str] | None = None,
     workflow_launch_inputs: Mapping[str, Any] | None = None,
     progress_tracker: Any = None,
     turn_id: str | None = None,
@@ -2962,7 +2911,6 @@ def execute_adaptive_turn(
         gateway,
         user_concept_id=user_concept_id,
         trusted_argument_values=trusted_values,
-        agent_test_trusted_capability_names=agent_test_trusted_capability_names,
     )
     delegated_lookup = {name.lower(): name for name in delegated_names}
     workflow_capabilities_by_name: dict[str, Any] = {}

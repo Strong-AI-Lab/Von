@@ -151,7 +151,7 @@ def _gateway(handler: Any) -> InternalMCPGateway:
     )
 
 
-def test_scope_message_prefers_progressive_low_cost_read_plans() -> None:
+def test_scope_message_contains_boundaries_not_selection_policy() -> None:
     message = _scope_message(
         TrustedTurnScope(
             user_concept_id="#V#person",
@@ -162,13 +162,10 @@ def test_scope_message_prefers_progressive_low_cost_read_plans() -> None:
         final_synthesis=False,
     )
 
-    assert "start with the least costly observable plan" in message
-    assert "escalate only if its returned evidence exposes a material gap" in message
-    assert "Several reads alone do not make a workflow necessary" in message
-    assert "merely to hedge uncertainty" in message
-    assert "A positive hit proves existence, not completeness" in message
-    assert "one page, predicate, direction, or represented form" in message
-    assert "state status or time qualifiers only when inspected evidence" in message
+    assert "Authenticated actor: #V#person" in message
+    assert "Effect boundary:" in message
+    assert "least costly" not in message
+    assert "representedness" not in message
 
 
 def _gmail_gateway(handler: Any) -> InternalMCPGateway:
@@ -688,7 +685,6 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     assert "#V#person" in system_message
     assert "#V#org" in system_message
     assert "all other writes are unavailable" in system_message
-    assert "Co-participation alone is a qualified candidate" in system_message
     assert {
         tool.name for tool in client.calls[0]["available_tools"]
     } == {
@@ -702,6 +698,10 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
         for tool in client.calls[0]["available_tools"]
         if tool.name == "turn_capabilities"
     )
+    assert "complete unranked compact purpose index" in catalogue_tool.description
+    assert "represented workflows are peers" in catalogue_tool.description
+    assert "representedness does not rank a plan" in catalogue_tool.description
+    assert "smallest plan that can produce" in catalogue_tool.description
     assert set(catalogue_tool.input_schema["properties"]) == {
         "query",
         "names",
@@ -1178,88 +1178,6 @@ def test_ordinary_delegation_is_actor_capability_not_every_read_method() -> None
         gateway,
         user_concept_id=None,
     ) == ("search_arxiv",)
-
-
-def test_agent_test_exact_names_extend_only_registered_read_or_effect_capability() -> None:
-    catalogue = MethodCatalogue()
-    for definition in (
-        MethodDefinition(
-            name="ordinary_read",
-            handler=lambda **_kwargs: {"success": True},
-            input_schema=Schema(allow_unknown=True),
-            category="read",
-        ),
-        MethodDefinition(
-            name="deployment_read",
-            handler=lambda **_kwargs: {"success": True},
-            input_schema=Schema(allow_unknown=True),
-            category="read",
-            ordinary_turn_excluded_reason="deployment_global_account",
-        ),
-        MethodDefinition(
-            name="unmarked_write",
-            handler=lambda **_kwargs: {"success": True},
-            input_schema=Schema(allow_unknown=True),
-            category="write",
-        ),
-        MethodDefinition(
-            name="bounded_effect",
-            handler=lambda **_kwargs: {"success": True},
-            input_schema=Schema(allow_unknown=True),
-            category="write",
-            ordinary_turn_excluded_reason="deployment_global_account",
-            ordinary_turn_effect=True,
-        ),
-        MethodDefinition(
-            name="bound_deployment_read",
-            handler=lambda **_kwargs: {"success": True},
-            input_schema=Schema(allow_unknown=True),
-            category="read",
-            ordinary_turn_excluded_reason="deployment_global_account",
-            ordinary_turn_trusted_argument_bindings={"profile": "profile"},
-        ),
-    ):
-        catalogue.register(definition)
-    gateway = InternalMCPGateway(
-        catalogue=catalogue,
-        transport=InternalMCPTransport(read_timeout_sec=1.0),
-        enabled=True,
-    )
-
-    default = ordinary_turn_capability_delegation(
-        gateway,
-        user_concept_id="#V#person",
-    )
-    assert default == ("ordinary_read",)
-    assert ordinary_turn_capability_delegation(
-        gateway,
-        user_concept_id="#V#person",
-        agent_test_trusted_capability_names=(),
-    ) == default
-
-    granted = ordinary_turn_capability_delegation(
-        gateway,
-        user_concept_id="#V#person",
-        agent_test_trusted_capability_names=(
-            "deployment_read",
-            "unmarked_write",
-            "bounded_effect",
-            "bound_deployment_read",
-            "unknown_capability",
-        ),
-    )
-    assert granted == ("bounded_effect", "deployment_read", "ordinary_read")
-    assert ordinary_turn_capability_delegation(
-        gateway,
-        user_concept_id="#V#person",
-        trusted_argument_values={"profile": "represented-profile"},
-        agent_test_trusted_capability_names=("bound_deployment_read",),
-    ) == ("bound_deployment_read", "ordinary_read")
-    assert ordinary_turn_capability_delegation(
-        gateway,
-        user_concept_id=None,
-        agent_test_trusted_capability_names=("deployment_read", "bounded_effect"),
-    ) == ()
 
 
 def test_server_bound_capability_argument_is_not_model_visible() -> None:

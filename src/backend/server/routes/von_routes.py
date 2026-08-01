@@ -55,9 +55,6 @@ from ...services import chat_prompt_queue_service
 from ...services.adaptive_turn_service import (
     execute_adaptive_turn,
 )
-from ...services.agent_test_replay_mode_service import (
-    resolve_agent_test_trusted_capability_names,
-)
 from ...services.background_task_service import background_task_registry
 from ...services.workflow_payload_store import is_workflow_payload_blob_ref
 from ...services.live_request_load import (
@@ -11310,13 +11307,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             user_namespace=user_namespace,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
-            agent_test_trusted_capability_names=(
-                resolve_agent_test_trusted_capability_names(
-                    user_concept_id=user_concept_id,
-                    organisation_concept_id=org_concept_id,
-                    namespace=user_namespace,
-                )
-            ),
             trusted_argument_values=(
                 {"gmail_profile": request_gmail_profile}
                 if request_gmail_profile

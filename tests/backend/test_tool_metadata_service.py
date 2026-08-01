@@ -272,6 +272,7 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
         assert "coverage candidates, not the answer entities" in (
             incidence.planner_hint or ""
         )
+        assert "co-participation alone does not" in (incidence.planner_hint or "")
         assert "selects only one stored slot" in (incidence.planner_hint or "")
         assert relation_read.default_payload == {
             "include_concept_preview": False,
@@ -285,6 +286,9 @@ def test_relation_read_hints_start_bounded_without_losing_negative_completeness(
         )
         assert "small any-direction incidence" in (relation_read.planner_hint or "")
         assert "every fitting exact predicate" in (relation_read.planner_hint or "")
+        assert "co-participation alone does not" in (
+            relation_read.planner_hint or ""
+        )
         assert "not the whole object side" in (relation_read.planner_hint or "")
         assert "small predicate-filtered relation read" in (
             concept_fetch.planner_hint or ""

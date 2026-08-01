@@ -707,8 +707,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "selected concepts only when needed. A hit proves existence, not list "
             "or count completeness. If predicate, direction, or represented-form "
             "coverage is not established, inspect small any-direction incidence "
-            "first, then read every fitting exact predicate. A numeric object index "
-            "selects one stored slot, not the whole object side."
+            "first, then read every fitting exact predicate. When a hit reaches a "
+            "reified, event, claim, or role node, inspect represented role predicates "
+            "before treating another filler as the requested entity; co-participation "
+            "alone does not establish that role. A numeric object index selects one "
+            "stored slot, not the whole object side."
         ),
     },
     "find_concepts_by_name": {
@@ -787,8 +790,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
             "Treat every semantically fitting row, including inverse forms, as a "
             "coverage candidate; read all exact predicates, deduplicate overlaps, "
             "and inspect role fillers when a matching row grounds a reified node. "
-            "Incidence identifies coverage candidates, not the answer entities; a "
-            "numeric object index selects only one stored slot."
+            "Incidence identifies coverage candidates, not the answer entities. A "
+            "filler qualifies only when its represented role establishes the requested "
+            "relationship; co-participation alone does not. A numeric object index "
+            "selects only one stored slot."
         ),
     },
     "get_concept_usage_profile": {
