@@ -688,6 +688,7 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
     assert "#V#person" in system_message
     assert "#V#org" in system_message
     assert "all other writes are unavailable" in system_message
+    assert "Co-participation alone is a qualified candidate" in system_message
     assert {
         tool.name for tool in client.calls[0]["available_tools"]
     } == {

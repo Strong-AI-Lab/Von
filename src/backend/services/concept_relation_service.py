@@ -1130,7 +1130,7 @@ def get_predicate_incidence(
     relation_kind: Optional[str] = None,
     scope: Optional[str] = None,  # Accepted for caller consistency; currently unused.
     include_text_snippets: bool = False,
-    include_concept_preview: bool = True,
+    include_concept_preview: bool = False,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     sort_by: Optional[str] = None,
@@ -1195,6 +1195,8 @@ def get_predicate_incidence(
         role_expansion_depth=role_expansion_depth,
         max_sample_concepts_per_type=type_count_options.max_sample_concepts_per_type,
     )
+    skeleton_type_count_options = PredicateIncidenceTypeCountOptions()
+    skeleton_role_expansion_options = PredicateIncidenceRoleExpansionOptions()
 
     if resolved_concept_id:
         hits, diagnostics = _collect_all_argument_hits_for_incidence(
@@ -1208,25 +1210,32 @@ def get_predicate_incidence(
             uncertainty_mode=uncertainty_mode,
             uncertainty_statuses=uncertainty_statuses,
         )
-        if type_count_options.include:
-            _attach_direct_type_ids_to_fast_incidence_hits({resolved_concept_id: hits})
         predicate_rows = _aggregate_predicate_incidence_rows(
             hits=hits,
-            include_concept_preview=include_concept_preview,
+            # Count and sort without doing predicate/grounding preview, type, or
+            # role reads.  Only the selected page is hydrated below.
+            include_concept_preview=False,
             preview_cache=preview_cache,
             anchor_concept_id=resolved_concept_id,
             mode="entity",
             type_membership_ids=None,
-            type_count_options=type_count_options,
-            role_expansion_options=role_expansion_options,
+            type_count_options=skeleton_type_count_options,
+            role_expansion_options=skeleton_role_expansion_options,
         )
         sorted_rows = _sort_predicate_incidence_rows(
             predicate_rows,
             sort_by=resolved_sort_by,
         )
-        paged_rows = sorted_rows[
-            resolved_offset : resolved_offset + resolved_limit_value
-        ]
+        paged_rows = _hydrate_predicate_incidence_page(
+            sorted_rows[resolved_offset : resolved_offset + resolved_limit_value],
+            hits_by_anchor={resolved_concept_id: hits},
+            mode="entity",
+            type_membership_ids=None,
+            include_concept_preview=include_concept_preview,
+            preview_cache=preview_cache,
+            type_count_options=type_count_options,
+            role_expansion_options=role_expansion_options,
+        )
         return {
             "mode": "entity",
             "concept_id": resolved_concept_id,
@@ -1311,9 +1320,7 @@ def get_predicate_incidence(
         if grouped_hits is not None
         else ("per_instance_relation_lookup")
     )
-    if grouped_hits is not None and type_count_options.include:
-        _attach_direct_type_ids_to_fast_incidence_hits(grouped_hits)
-
+    hits_by_instance: Dict[str, List[Dict[str, Any]]] = {}
     for instance_id in instance_ids:
         if grouped_hits is None:
             hits, _ = _collect_all_argument_hits_for_incidence(
@@ -1329,27 +1336,41 @@ def get_predicate_incidence(
             )
         else:
             hits = grouped_hits.get(instance_id, [])
+        hits_by_instance[instance_id] = hits
         _accumulate_predicate_incidence_rows(
             aggregated_by_predicate,
             hits=hits,
-            include_concept_preview=include_concept_preview,
+            # The complete type-wide skeleton must remain read-free apart from
+            # relation materialisation and access filtering.  Enrich only the
+            # selected predicate page below.
+            include_concept_preview=False,
             preview_cache=preview_cache,
             anchor_concept_id=instance_id,
             mode="type",
             contributing_instance_id=instance_id,
             type_membership_ids=type_ids,
-            type_count_options=type_count_options,
-            role_expansion_options=role_expansion_options,
+            type_count_options=skeleton_type_count_options,
+            role_expansion_options=skeleton_role_expansion_options,
         )
 
+    predicate_rows = [
+        _finalise_predicate_incidence_row(row, mode="type")
+        for row in aggregated_by_predicate.values()
+    ]
     sorted_rows = _sort_predicate_incidence_rows(
-        [
-            _finalise_predicate_incidence_row(row, mode="type")
-            for row in aggregated_by_predicate.values()
-        ],
+        predicate_rows,
         sort_by=resolved_sort_by,
     )
-    paged_rows = sorted_rows[resolved_offset : resolved_offset + resolved_limit_value]
+    paged_rows = _hydrate_predicate_incidence_page(
+        sorted_rows[resolved_offset : resolved_offset + resolved_limit_value],
+        hits_by_anchor=hits_by_instance,
+        mode="type",
+        type_membership_ids=type_ids,
+        include_concept_preview=include_concept_preview,
+        preview_cache=preview_cache,
+        type_count_options=type_count_options,
+        role_expansion_options=role_expansion_options,
+    )
     return {
         "mode": "type",
         "instance_of": resolved_instance_of,
@@ -1412,6 +1433,112 @@ def _empty_payload(limit: Optional[int], offset: Optional[int]) -> Dict[str, Any
             "total_available": 0,
         },
     }
+
+
+def _hydrate_predicate_incidence_page(
+    skeleton_rows: Sequence[Dict[str, Any]],
+    *,
+    hits_by_anchor: Mapping[str, List[Dict[str, Any]]],
+    mode: str,
+    type_membership_ids: Optional[Sequence[str]],
+    include_concept_preview: bool,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+    type_count_options: PredicateIncidenceTypeCountOptions,
+    role_expansion_options: PredicateIncidenceRoleExpansionOptions,
+) -> List[Dict[str, Any]]:
+    enrich_types_or_roles = (
+        type_count_options.include
+        or role_expansion_options.mode == _ROLE_EXPANSION_MODE_EXPLICIT
+    )
+    if not (include_concept_preview or enrich_types_or_roles):
+        return list(skeleton_rows)
+
+    selected_ids = {
+        predicate_id
+        for row in skeleton_rows
+        if isinstance((predicate_id := row.get("predicate_concept_id")), str)
+    }
+    selected_hits_by_anchor = {
+        anchor_concept_id: [
+            hit
+            for hit in hits
+            if isinstance(hit.get("predicate_concept_id"), str)
+            and str(hit["predicate_concept_id"]).strip() in selected_ids
+        ]
+        for anchor_concept_id, hits in hits_by_anchor.items()
+    }
+    if enrich_types_or_roles:
+        _attach_direct_type_ids_to_fast_incidence_hits(selected_hits_by_anchor)
+
+    preview_ids: List[str] = []
+    if include_concept_preview:
+        preview_ids.extend(selected_ids)
+        for row in skeleton_rows:
+            for sample in [
+                *(row.get("sample_groundings") or []),
+                *(row.get("sample_instances") or []),
+            ]:
+                if isinstance(sample, Mapping):
+                    preview_ids.append(sample.get("concept_id"))
+    if enrich_types_or_roles:
+        for hits in selected_hits_by_anchor.values():
+            for hit in hits:
+                for field_name in ("source_type_ids", "target_type_ids"):
+                    raw_type_ids = hit.get(field_name)
+                    if isinstance(raw_type_ids, list):
+                        preview_ids.extend(raw_type_ids)
+    _prime_concept_preview_cache(
+        preview_ids,
+        include_preview=True,
+        preview_cache=preview_cache,
+    )
+
+    hydrated_by_predicate: Dict[str, Dict[str, Any]] = {}
+    for anchor_concept_id, hits in selected_hits_by_anchor.items():
+        _accumulate_predicate_incidence_rows(
+            hydrated_by_predicate,
+            hits=hits,
+            include_concept_preview=include_concept_preview,
+            preview_cache=preview_cache,
+            anchor_concept_id=anchor_concept_id,
+            mode=mode,
+            contributing_instance_id=(anchor_concept_id if mode == "type" else None),
+            type_membership_ids=type_membership_ids,
+            type_count_options=type_count_options,
+            role_expansion_options=role_expansion_options,
+        )
+    hydrated_by_id = {
+        row["predicate_concept_id"]: _finalise_predicate_incidence_row(
+            row,
+            mode=mode,
+        )
+        for row in hydrated_by_predicate.values()
+    }
+    if include_concept_preview and type_count_options.include:
+        sample_concepts = [
+            sample
+            for row in hydrated_by_id.values()
+            for type_count in row.get("argument_type_counts", [])
+            for sample in type_count.get("sample_concepts", [])
+            if isinstance(type_count, Mapping) and isinstance(sample, dict)
+        ]
+        _prime_concept_preview_cache(
+            [sample.get("concept_id") for sample in sample_concepts],
+            include_preview=True,
+            preview_cache=preview_cache,
+        )
+        for sample in sample_concepts:
+            preview = _resolve_concept_preview(
+                str(sample.get("concept_id") or ""),
+                True,
+                preview_cache,
+            )
+            if isinstance(preview, Mapping):
+                sample.update(_compact_concept_sample(preview))
+    return [
+        hydrated_by_id.get(row.get("predicate_concept_id"), row)
+        for row in skeleton_rows
+    ]
 
 
 def _collect_all_argument_hits_for_incidence(
@@ -1672,12 +1799,14 @@ def _attach_direct_type_ids_to_fast_incidence_hits(
     grouped_hits: Mapping[str, List[Dict[str, Any]]],
 ) -> None:
     target_ids: List[str] = []
-    for source_id, hits in grouped_hits.items():
+    for anchor_id, hits in grouped_hits.items():
         for hit in hits:
+            source_id = _normalise_concept_id(hit.get("source_concept_id"))
             target_id = _normalise_concept_id(hit.get("target_value"))
-            if not target_id or target_id == source_id:
-                continue
-            target_ids.append(target_id)
+            if source_id and source_id != anchor_id:
+                target_ids.append(source_id)
+            if target_id and target_id != anchor_id:
+                target_ids.append(target_id)
     target_ids = list(dict.fromkeys(target_ids))
     if not target_ids:
         return
@@ -1731,11 +1860,12 @@ def _attach_direct_type_ids_to_fast_incidence_hits(
                 type_id for type_id in type_ids if type_id in accessible_type_ids
             ]
 
-    for source_id, hits in grouped_hits.items():
+    for hits in grouped_hits.values():
         for hit in hits:
+            source_id = _normalise_concept_id(hit.get("source_concept_id"))
             target_id = _normalise_concept_id(hit.get("target_value"))
-            if not target_id or target_id == source_id:
-                continue
+            if source_id in type_ids_by_target:
+                hit["source_type_ids"] = list(type_ids_by_target[source_id])
             if target_id in type_ids_by_target:
                 hit["target_type_ids"] = list(type_ids_by_target[target_id])
 
@@ -1886,19 +2016,19 @@ def _accumulate_predicate_incidence_rows(
                     role_expansion_options=role_expansion_options,
                 )
 
-        if len(row["sample_groundings"]) < 4:
-            for grounding_key, grounding in _extract_predicate_incidence_groundings(
-                hit,
-                anchor_concept_id=anchor_concept_id,
-                include_concept_preview=include_concept_preview,
-                preview_cache=preview_cache,
-            ):
-                if grounding_key in row["_grounding_keys"]:
-                    continue
-                row["_grounding_keys"].add(grounding_key)
+        for grounding_key, grounding in _extract_predicate_incidence_groundings(
+            hit,
+            anchor_concept_id=anchor_concept_id,
+            include_concept_preview=(
+                include_concept_preview and len(row["sample_groundings"]) < 4
+            ),
+            preview_cache=preview_cache,
+        ):
+            if grounding_key in row["_grounding_keys"]:
+                continue
+            row["_grounding_keys"].add(grounding_key)
+            if len(row["sample_groundings"]) < 4:
                 row["sample_groundings"].append(grounding)
-                if len(row["sample_groundings"]) >= 4:
-                    break
 
         if mode == "type" and contributing_instance_id:
             row["_instance_ids"].add(contributing_instance_id)
@@ -1962,16 +2092,32 @@ def _extract_predicate_incidence_argument_entries(
 
     source_concept_id = _normalise_concept_id(hit.get("source_concept_id"))
     if source_concept_id and source_concept_id != anchor_concept_id:
+        raw_source_type_ids = hit.get("source_type_ids")
+        source_type_ids: Optional[List[str]] = (
+            [
+                str(type_id).strip()
+                for type_id in raw_source_type_ids
+                if isinstance(type_id, str) and str(type_id).strip()
+            ]
+            if isinstance(raw_source_type_ids, list)
+            else None
+        )
         entries.append(
             {
                 "argument_index": _ARG_INDEX_SUBJECT,
                 "argument_role": "subject",
                 "concept_id": source_concept_id,
-                "concept_preview": _resolve_concept_preview(
-                    source_concept_id,
-                    True,
-                    preview_cache,
+                "concept_preview": preview_cache.get(source_concept_id)
+                or (
+                    {"concept_id": source_concept_id, "type_ids": source_type_ids}
+                    if source_type_ids is not None
+                    else _resolve_concept_preview(
+                        source_concept_id,
+                        True,
+                        preview_cache,
+                    )
                 ),
+                "type_ids": source_type_ids,
             }
         )
 
@@ -1993,7 +2139,7 @@ def _extract_predicate_incidence_argument_entries(
         )
         if not isinstance(resolved_preview, Mapping):
             if target_type_ids is not None:
-                resolved_preview = {
+                resolved_preview = preview_cache.get(target_concept_id) or {
                     "concept_id": target_concept_id,
                     "type_ids": list(target_type_ids),
                 }
@@ -2149,7 +2295,16 @@ def _accumulate_predicate_incidence_role_expansion(
             and frame_id not in frames
         ):
             continue
-        frame_type_ids = _resolve_accessible_concept_type_ids(frame_id)
+        raw_frame_type_ids = entry.get("type_ids")
+        frame_type_ids = (
+            [
+                str(type_id).strip()
+                for type_id in raw_frame_type_ids
+                if isinstance(type_id, str) and str(type_id).strip()
+            ]
+            if isinstance(raw_frame_type_ids, list)
+            else _resolve_accessible_concept_type_ids(frame_id)
+        )
         if frame_type_ids is None:
             continue
         if allowed_node_types and not (

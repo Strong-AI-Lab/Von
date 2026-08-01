@@ -2320,7 +2320,7 @@
         },
         {
             "name": "get_predicate_incidence",
-            "description": "Summarise which predicates are actually observed around a concept or across instances of a type. The anchor entity goes in concept_id. Use before a filtered relation read when a list, count, broad category, or negative lacks established predicate, direction, or represented-form coverage. Start with one small argument_index='any' binary page; read every fitting predicate including inverse forms, deduplicate overlaps, and inspect role fillers for matching reified nodes. Incidence returns coverage candidates, not answer entities. Set role_expansion_mode='explicit' with represented node-type or role-predicate filters when the immediate neighbour is a reified/event/claim node whose other role fillers are the useful retrieval targets.",
+            "description": "Discover predicates actually used around a known anchor or type when relationship coverage is uncertain. The anchor entity goes in concept_id. Use before a filtered relation read when a list, count, broad category, or negative lacks established predicate, direction, or represented-form coverage. Start with one small argument_index='any' binary page; read every fitting predicate including inverse forms, deduplicate overlaps, and inspect role fillers for matching reified nodes. Incidence returns coverage candidates, not answer entities. Set role_expansion_mode='explicit' with represented node-type or role-predicate filters when the immediate neighbour is a reified/event/claim node whose other role fillers are the useful retrieval targets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

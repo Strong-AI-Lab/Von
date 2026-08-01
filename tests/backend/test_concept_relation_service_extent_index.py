@@ -857,7 +857,7 @@ def test_predicate_incidence_materialises_incoming_relations_once(
             "targets": [target_id],
             "updated_at": None,
         }
-        for index in range(1_205)
+        for index in range(12_005)
     ]
 
     monkeypatch.setattr(
@@ -884,6 +884,20 @@ def test_predicate_incidence_materialises_incoming_relations_once(
             lambda pipeline: aggregate_calls.append(pipeline) or incoming_rows
         ),
     )
+    monkeypatch.setattr(
+        service,
+        "_load_accessible_preview_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unselected incidence rows must not read previews")
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_attach_direct_type_ids_to_fast_incidence_hits",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default incidence must not hydrate argument types")
+        ),
+    )
 
     payload = service.get_predicate_incidence(
         concept_id=target_id,
@@ -896,5 +910,6 @@ def test_predicate_incidence_materialises_incoming_relations_once(
     assert len(aggregate_calls) == 1
     assert payload["total_predicates"] == 1
     assert payload["predicates"][0]["predicate_concept_id"] == "#V#related_to"
-    assert payload["predicates"][0]["relation_hit_count"] == 1_205
-    assert payload["predicates"][0]["object_argument_hit_count"] == 1_205
+    assert payload["predicates"][0]["relation_hit_count"] == 12_005
+    assert payload["predicates"][0]["grounding_count"] == 12_005
+    assert payload["predicates"][0]["object_argument_hit_count"] == 12_005

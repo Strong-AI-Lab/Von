@@ -298,6 +298,7 @@ def test_relation_previews_and_predicate_incidence_groundings_include_type_ids()
         concept_id="#V#michael_witbrock",
         argument_index="subject",
         relation_kind="binary",
+        include_concept_preview=True,
     )
     rows = incidence_payload.get("predicates") or []
     author_row = next(

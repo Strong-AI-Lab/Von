@@ -533,7 +533,7 @@ def _get_predicate_incidence(**kwargs):
         relation_kind=kwargs.get("relation_kind"),
         scope=kwargs.get("scope"),
         include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
-        include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
+        include_concept_preview=bool(kwargs.get("include_concept_preview", False)),
         limit=kwargs.get("limit"),
         offset=kwargs.get("offset"),
         sort_by=kwargs.get("sort_by"),
@@ -33973,8 +33973,9 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             output_schema=_predicate_incidence_output_schema(),
             category="read",
             description=(
-                "Summarise which predicates are actually observed around a concept or across "
-                "instances of a type. The anchor entity goes in concept_id. Use before a "
+                "Discover predicates actually used around a known anchor or type when "
+                "relationship coverage is uncertain. The anchor entity goes in concept_id. "
+                "Use before a "
                 "filtered relation read when a list, "
                 "count, broad category, or negative lacks established predicate, "
                 "direction, or represented-form coverage. Start with one small "

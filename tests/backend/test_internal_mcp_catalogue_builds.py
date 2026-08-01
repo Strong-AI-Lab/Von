@@ -719,6 +719,10 @@ def test_predicate_incidence_input_schema_accepts_target_type_alias():
 
     catalogue = build_default_catalogue()
     method = catalogue.get("get_predicate_incidence")
+    assert method.description.startswith(
+        "Discover predicates actually used around a known anchor or type when "
+        "relationship coverage is uncertain."
+    )
     payload = {
         "target_type": "#V#scientific_publication",
         "relation_kind": "binary",
