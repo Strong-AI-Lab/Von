@@ -385,7 +385,7 @@ def find_relations_with_argument(
 
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     hits: List[Dict[str, Any]] = []
-    incoming_asserted_binary_hits: List[Dict[str, Any]] = []
+    asserted_binary_hits: List[Dict[str, Any]] = []
     scoped_concept_query_truncated = False
     actor_effective_text_query_truncated = False
 
@@ -396,21 +396,6 @@ def find_relations_with_argument(
 
     if include_asserted_rows and include_structural and subject_doc:
         relationships = (subject_doc.get("relationships") or {}) if subject_doc else {}
-        _prime_concept_preview_cache(
-            [
-                resolved_concept_id,
-                *(
-                    target
-                    for predicate_id, raw_targets in relationships.items()
-                    if include_arg1
-                    and _predicate_matches_terms(predicate_id, predicate_terms)
-                    for target in _normalise_relationship_targets(raw_targets)
-                    if isinstance(target, str) and target.startswith("#V#")
-                ),
-            ],
-            include_preview=include_concept_preview,
-            preview_cache=preview_cache,
-        )
         source_updated_at = (
             _isoformat(subject_doc.get("updated_at")) if subject_doc else None
         )
@@ -420,11 +405,6 @@ def find_relations_with_argument(
             targets = _normalise_relationship_targets(raw_targets)
             if not targets:
                 continue
-            source_preview = _resolve_concept_preview(
-                resolved_concept_id,
-                include_concept_preview,
-                preview_cache,
-            )
             for target_index, target_value in enumerate(targets):
                 matched_indexes = [_ARG_INDEX_SUBJECT]
                 arg_target_index = _ARG_INDEX_FIRST_OBJECT + target_index
@@ -432,31 +412,19 @@ def find_relations_with_argument(
                     matched_indexes.append(arg_target_index)
                 if not _argument_indexes_match(matched_indexes, argument_filter):
                     continue
-                target_preview = None
-                if (
-                    include_concept_preview
-                    and isinstance(target_value, str)
-                    and target_value.startswith("#V#")
-                ):
-                    target_preview = _resolve_concept_preview(
-                        target_value,
-                        True,
-                        preview_cache,
-                    )
                 hit = {
                     "source_concept_id": resolved_concept_id,
                     "predicate_concept_id": predicate_id,
                     "relation_kind": "binary",
                     "argument_indexes": matched_indexes,
                     "target_value": target_value,
-                    "target_concept_preview": target_preview,
+                    "target_concept_preview": None,
                     "relation_metadata": {
                         "relation_id": f"struct::{resolved_concept_id}::{predicate_id}::{target_index}",
                         "updated_at": source_updated_at,
                         "match_type": "exact",
                     },
-                    "access_granted": source_preview is not None
-                    or not include_concept_preview,
+                    "access_granted": not include_concept_preview,
                     "follow_up_actions": _build_follow_up_actions(
                         [target_value],
                         exclude={resolved_concept_id},
@@ -465,9 +433,8 @@ def find_relations_with_argument(
                     "is_asserted": True,
                     "relation_state": "asserted",
                 }
-                if include_concept_preview:
-                    hit["source_concept_preview"] = source_preview
                 hits.append(hit)
+                asserted_binary_hits.append(hit)
 
     if include_asserted_rows and include_structural and include_arg2_or_later:
         incoming_candidates: List[Tuple[str, Any, int, Any]] = []
@@ -519,7 +486,11 @@ def find_relations_with_argument(
             exact_index_filter = (
                 {"predicate_id": exact_predicate_ids[0]}
                 if len(exact_predicate_ids) == 1
-                else {}
+                else (
+                    {"predicate_ids": exact_predicate_ids}
+                    if exact_predicate_ids
+                    else {}
+                )
             )
             index_rows, index_total = query_relationship_extent_index(
                 **exact_index_filter,
@@ -569,11 +540,13 @@ def find_relations_with_argument(
                     ),
                     "bounded": bounded,
                     "complete": complete,
+                    "fallback_reason": bounded_index_diagnostics.get("reason"),
                     **(
                         {
                             "stop_reason": bounded_index_diagnostics.get(
                                 "stop_reason"
-                            ),
+                            )
+                            or bounded_index_diagnostics.get("reason"),
                             "has_more": bool(
                                 bounded_index_diagnostics.get("has_more")
                             ),
@@ -677,50 +650,13 @@ def find_relations_with_argument(
             else:
                 incoming_asserted_binary_diagnostics.update(
                     {
-                        "path": "canonical_aggregation",
+                        "path": "relationship_extent_index_unavailable",
                         "fallback_reason": ("relationship_extent_index_unavailable"),
+                        "bounded": False,
+                        "complete": False,
+                        "stop_reason": "relationship_extent_index_unavailable",
                     }
                 )
-                incoming_pipeline = [
-                    {"$match": {"relationships": {"$type": "object"}}},
-                    {
-                        "$project": {
-                            "concept_id": 1,
-                            "updated_at": 1,
-                            "relationship_items": {"$objectToArray": "$relationships"},
-                        }
-                    },
-                    {"$unwind": "$relationship_items"},
-                    {
-                        "$project": {
-                            "concept_id": 1,
-                            "updated_at": 1,
-                            "predicate": "$relationship_items.k",
-                            "targets": "$relationship_items.v",
-                        }
-                    },
-                    {"$match": {"targets": resolved_concept_id}},
-                ]
-                for row in ConceptsRepository.aggregate(incoming_pipeline):
-                    incoming_asserted_binary_diagnostics["canonical_rows_returned"] += 1
-                    source_id = row.get("concept_id")
-                    if not isinstance(source_id, str) or not source_id.strip():
-                        continue
-                    source_id = source_id.strip()
-                    targets = _normalise_relationship_targets(row.get("targets"))
-                    if not targets:
-                        continue
-                    for target_index, target_value in enumerate(targets):
-                        if target_value != resolved_concept_id:
-                            continue
-                        incoming_candidates.append(
-                            (
-                                source_id,
-                                row.get("predicate"),
-                                target_index,
-                                row.get("updated_at"),
-                            )
-                        )
 
         for (
             source_id,
@@ -755,7 +691,7 @@ def find_relations_with_argument(
                 "relation_state": "asserted",
             }
             hits.append(hit)
-            incoming_asserted_binary_hits.append(hit)
+            asserted_binary_hits.append(hit)
 
     if (
         context_view == "actor_effective"
@@ -1032,34 +968,43 @@ def find_relations_with_argument(
     )
     if include_concept_preview:
         paged_hit_ids = {id(hit) for hit in paged_hits}
-        paged_incoming_hits = [
-            hit for hit in incoming_asserted_binary_hits if id(hit) in paged_hit_ids
+        paged_asserted_binary_hits = [
+            hit for hit in asserted_binary_hits if id(hit) in paged_hit_ids
         ]
-        if paged_incoming_hits:
+        if paged_asserted_binary_hits:
             _prime_concept_preview_cache(
                 [
-                    resolved_concept_id,
                     *(
-                        str(hit.get("source_concept_id") or "")
-                        for hit in paged_incoming_hits
+                        related_id
+                        for hit in paged_asserted_binary_hits
+                        for related_id in (
+                            str(hit.get("source_concept_id") or ""),
+                            str(hit.get("target_value") or ""),
+                        )
+                        if related_id.startswith("#V#")
                     ),
                 ],
                 include_preview=True,
                 preview_cache=preview_cache,
             )
-            target_preview = _resolve_concept_preview(
-                resolved_concept_id,
-                True,
-                preview_cache,
-            )
-            for hit in paged_incoming_hits:
+            for hit in paged_asserted_binary_hits:
+                source_id = str(hit.get("source_concept_id") or "")
+                target_value = str(hit.get("target_value") or "")
                 source_preview = _resolve_concept_preview(
-                    str(hit.get("source_concept_id") or ""),
+                    source_id,
                     True,
                     preview_cache,
                 )
                 hit["source_concept_preview"] = source_preview
-                hit["target_concept_preview"] = target_preview
+                hit["target_concept_preview"] = (
+                    _resolve_concept_preview(
+                        target_value,
+                        True,
+                        preview_cache,
+                    )
+                    if target_value.startswith("#V#")
+                    else None
+                )
                 hit["access_granted"] = source_preview is not None
     counts_are_lower_bounds = bool(
         scoped_concept_query_truncated
@@ -1239,6 +1184,12 @@ def get_predicate_incidence(
         return {
             "mode": "entity",
             "concept_id": resolved_concept_id,
+            "coverage_complete": bool(diagnostics.get("coverage_complete", True)),
+            **(
+                {"counts_are_lower_bounds": True}
+                if not diagnostics.get("coverage_complete", True)
+                else {}
+            ),
             "total_predicates": len(sorted_rows),
             "predicates": paged_rows,
             "role_expansions": _extract_predicate_incidence_role_expansions(paged_rows),
@@ -1247,8 +1198,16 @@ def get_predicate_incidence(
                 "offset": resolved_offset,
                 "returned": len(paged_rows),
                 "total_available": len(sorted_rows),
+                **(
+                    {"total_available_is_lower_bound": True}
+                    if not diagnostics.get("coverage_complete", True)
+                    else {}
+                ),
             },
-            "uncertainty_diagnostics": diagnostics,
+            "uncertainty_diagnostics": {
+                key: diagnostics.get(key)
+                for key in ("mode", "include_uncertain", "statuses")
+            },
             "typed_predicate_incidence_diagnostics": (
                 _build_typed_predicate_incidence_diagnostics(
                     type_count_options=type_count_options,
@@ -1270,6 +1229,10 @@ def get_predicate_incidence(
                 "include_text_snippets": bool(include_text_snippets),
                 "include_concept_preview": bool(include_concept_preview),
                 "include_argument_type_counts": type_count_options.include,
+                "coverage_complete": bool(
+                    diagnostics.get("coverage_complete", True)
+                ),
+                "coverage_gaps": list(diagnostics.get("coverage_gaps") or []),
                 "uncertainty_mode": diagnostics.get("mode"),
                 "include_uncertain": diagnostics.get("include_uncertain"),
                 "uncertainty_statuses": diagnostics.get("statuses"),
@@ -1303,6 +1266,8 @@ def get_predicate_incidence(
             )
         ),
         "statuses": _normalise_uncertainty_statuses(uncertainty_statuses) or None,
+        "coverage_complete": True,
+        "coverage_gaps": [],
     }
 
     grouped_hits = _collect_type_subject_hits_for_incidence_fast(
@@ -1323,7 +1288,7 @@ def get_predicate_incidence(
     hits_by_instance: Dict[str, List[Dict[str, Any]]] = {}
     for instance_id in instance_ids:
         if grouped_hits is None:
-            hits, _ = _collect_all_argument_hits_for_incidence(
+            hits, instance_diagnostics = _collect_all_argument_hits_for_incidence(
                 concept_id=instance_id,
                 argument_index=argument_index,
                 predicate_filter=predicate_filter,
@@ -1334,6 +1299,16 @@ def get_predicate_incidence(
                 uncertainty_mode=uncertainty_mode,
                 uncertainty_statuses=uncertainty_statuses,
             )
+            if not instance_diagnostics.get("coverage_complete", True):
+                diagnostics["coverage_complete"] = False
+                diagnostics["coverage_gaps"].extend(
+                    {
+                        **dict(gap),
+                        "anchor_concept_id": instance_id,
+                    }
+                    for gap in instance_diagnostics.get("coverage_gaps", [])
+                    if isinstance(gap, Mapping)
+                )
         else:
             hits = grouped_hits.get(instance_id, [])
         hits_by_instance[instance_id] = hits
@@ -1374,6 +1349,12 @@ def get_predicate_incidence(
     return {
         "mode": "type",
         "instance_of": resolved_instance_of,
+        "coverage_complete": bool(diagnostics.get("coverage_complete", True)),
+        **(
+            {"counts_are_lower_bounds": True}
+            if not diagnostics.get("coverage_complete", True)
+            else {}
+        ),
         "type_ids_considered": type_ids,
         "instance_count_considered": len(instance_ids),
         "direct_instances_only": bool(direct_instances_only),
@@ -1385,8 +1366,16 @@ def get_predicate_incidence(
             "offset": resolved_offset,
             "returned": len(paged_rows),
             "total_available": len(sorted_rows),
+            **(
+                {"total_available_is_lower_bound": True}
+                if not diagnostics.get("coverage_complete", True)
+                else {}
+            ),
         },
-        "uncertainty_diagnostics": diagnostics,
+        "uncertainty_diagnostics": {
+            key: diagnostics.get(key)
+            for key in ("mode", "include_uncertain", "statuses")
+        },
         "typed_predicate_incidence_diagnostics": (
             _build_typed_predicate_incidence_diagnostics(
                 type_count_options=type_count_options,
@@ -1411,6 +1400,8 @@ def get_predicate_incidence(
             "include_text_snippets": bool(include_text_snippets),
             "include_concept_preview": bool(include_concept_preview),
             "include_argument_type_counts": type_count_options.include,
+            "coverage_complete": bool(diagnostics.get("coverage_complete", True)),
+            "coverage_gaps": list(diagnostics.get("coverage_gaps") or []),
             "uncertainty_mode": diagnostics.get("mode"),
             "include_uncertain": diagnostics.get("include_uncertain"),
             "uncertainty_statuses": diagnostics.get("statuses"),
@@ -1573,6 +1564,8 @@ def _collect_all_argument_hits_for_incidence(
             )
         ),
         "statuses": _normalise_uncertainty_statuses(uncertainty_statuses) or None,
+        "coverage_complete": True,
+        "coverage_gaps": [],
     }
 
     argument_filter = _coerce_argument_index(argument_index)
@@ -1608,7 +1601,34 @@ def _collect_all_argument_hits_for_incidence(
             _materialise_all_hits=True,
         )
         if isinstance(payload.get("uncertainty_diagnostics"), dict):
-            diagnostics = dict(payload["uncertainty_diagnostics"])
+            uncertainty_diagnostics = payload["uncertainty_diagnostics"]
+            for key in ("mode", "include_uncertain", "statuses"):
+                if key in uncertainty_diagnostics:
+                    diagnostics[key] = uncertainty_diagnostics[key]
+        relation_diagnostics = payload.get("relation_query_diagnostics")
+        incoming_diagnostics = (
+            relation_diagnostics.get("incoming_asserted_binary")
+            if isinstance(relation_diagnostics, Mapping)
+            else None
+        )
+        if (
+            isinstance(incoming_diagnostics, Mapping)
+            and incoming_diagnostics.get("requested")
+            and not incoming_diagnostics.get("complete", True)
+        ):
+            diagnostics["coverage_complete"] = False
+            diagnostics["coverage_gaps"].append(
+                {
+                    "relation_kind": query_relation_kind,
+                    "argument_index": query_argument_index,
+                    "path": incoming_diagnostics.get("path"),
+                    "reason": (
+                        incoming_diagnostics.get("stop_reason")
+                        or incoming_diagnostics.get("fallback_reason")
+                        or "incomplete_incoming_relation_coverage"
+                    ),
+                }
+            )
         batch_hits = payload.get("hits")
         if isinstance(batch_hits, list):
             all_hits.extend(
@@ -1630,6 +1650,10 @@ def _collect_type_subject_hits_for_incidence_fast(
     uncertainty_statuses: Optional[Sequence[str]],
 ) -> Optional[Dict[str, List[Dict[str, Any]]]]:
     argument_filter = _coerce_argument_index(argument_index)
+    explicitly_all_arguments = bool(
+        isinstance(argument_index, str)
+        and argument_index.strip().lower() == "any"
+    )
     relation_filter = _normalise_relation_kind_filter(relation_kind)
     mode_value, include_asserted_rows, include_uncertain_rows = (
         _resolve_uncertainty_mode(
@@ -1641,6 +1665,7 @@ def _collect_type_subject_hits_for_incidence_fast(
         not include_asserted_rows
         or include_uncertain_rows
         or _normalise_uncertainty_statuses(uncertainty_statuses)
+        or explicitly_all_arguments
         or argument_filter not in (None, _ARG_INDEX_SUBJECT)
         or relation_filter not in {"any", "binary", "text"}
     ):

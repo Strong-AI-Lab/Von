@@ -323,6 +323,16 @@ def _annotate_bounded_relation_lookup(
     result = dict(payload)
     if not bool(result.get("total_hits_is_lower_bound")):
         return result
+    diagnostics = result.get("relation_query_diagnostics")
+    actor_overlay_truncated = bool(
+        isinstance(diagnostics, Mapping)
+        and (
+            diagnostics.get("scoped_concept_query_truncated")
+            or diagnostics.get("actor_effective_text_query_truncated")
+        )
+    )
+    if not actor_overlay_truncated:
+        return result
 
     paging = dict(result.get("paging") or {})
     paging.update(
@@ -504,7 +514,7 @@ def _find_relations_with_argument(**kwargs):
             relation_kind=kwargs.get("relation_kind"),
             scope=kwargs.get("scope"),
             include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
-            include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
+            include_concept_preview=bool(kwargs.get("include_concept_preview", False)),
             limit=kwargs.get("limit"),
             offset=kwargs.get("offset"),
             sort_by=kwargs.get("sort_by"),
@@ -9842,6 +9852,8 @@ def _predicate_incidence_output_schema() -> Schema:
             "type_ids_considered": (list, type(None)),
             "instance_count_considered": (int, type(None)),
             "direct_instances_only": (bool, type(None)),
+            "coverage_complete": (bool, type(None)),
+            "counts_are_lower_bounds": (bool, type(None)),
             "uncertainty_diagnostics": (dict, type(None)),
         },
         allow_unknown=True,
@@ -9853,7 +9865,9 @@ def _predicate_incidence_output_schema() -> Schema:
             "sample_groundings, optional argument_type_counts/untyped/literal/inaccessible "
             "argument counters, optional role_expansion summaries, and in type mode "
             "grounded_instance_count/sample_instances), plus role_expansions, paging metadata, "
-            "and optional typed/uncertainty diagnostics."
+            "and optional typed/uncertainty diagnostics. coverage_complete=false "
+            "and counts_are_lower_bounds=true report an unavailable coverage path "
+            "rather than presenting a partial incidence result as exhaustive."
         ),
     )
 
@@ -33859,7 +33873,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "and pagination. A positive hit proves existence, not enumeration "
                 "completeness. When predicate, direction, or represented-form coverage "
                 "is uncertain, inspect predicate incidence first and then read every "
-                "fitting exact predicate. When a hit reaches a reified, event, claim, "
+                "fitting exact predicate. For list, count, broad-category, or negative "
+                "claims, pass all semantically fitting predicate IDs together in one "
+                "predicate_filter read unless the incidence evidence distinguishes "
+                "their coverage; do not choose only the most obvious label. When a hit "
+                "reaches a reified, event, claim, "
                 "or role node, inspect its represented role predicates before treating "
                 "another filler as the requested related entity; co-participation alone "
                 "does not establish that semantic role. "
@@ -33982,8 +34000,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "filtered relation read when a list, "
                 "count, broad category, or negative lacks established predicate, "
                 "direction, or represented-form coverage. Start with one small "
-                "argument_index='any' binary page; read every fitting predicate including "
-                "inverse forms, deduplicate overlaps, and inspect role fillers for matching "
+                "argument_index='any' binary page. For list, count, broad-category, or "
+                "negative claims, pass every semantically fitting returned "
+                "predicate_concept_id, including inverse forms, together in one exact "
+                "predicate_filter read; do not choose only the most obvious label. "
+                "Deduplicate overlaps and inspect role fillers for matching "
                 "reified nodes. Incidence returns coverage candidates, not answer entities. "
                 "A filler qualifies only when its represented role establishes the requested "
                 "relationship; co-participation alone does not. "

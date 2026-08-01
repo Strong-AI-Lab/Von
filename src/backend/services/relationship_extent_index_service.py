@@ -674,6 +674,7 @@ def rebuild_relationship_extent_index(
 def _build_relationship_extent_index_query(
     *,
     predicate_id: str | None = None,
+    predicate_ids: Iterable[str] | None = None,
     target_value: str | None = None,
     target_values: Iterable[str] | None = None,
     source_concept_id: str | None = None,
@@ -682,8 +683,41 @@ def _build_relationship_extent_index_query(
     query: dict[str, Any] = {
         "schema_version": RELATIONSHIP_EXTENT_INDEX_SCHEMA_VERSION,
     }
-    if predicate_id:
-        query["predicate_id"] = predicate_id
+    predicate_filter_supplied = bool(predicate_id) or predicate_ids is not None
+    raw_predicate_ids = (
+        [predicate_ids]
+        if isinstance(predicate_ids, str)
+        else list(predicate_ids or [])
+    )
+    resolved_predicate_ids = list(
+        dict.fromkeys(
+            [
+                *(
+                    [predicate_id.strip()]
+                    if isinstance(predicate_id, str) and predicate_id.strip()
+                    else []
+                ),
+                *(
+                    item.strip()
+                    for item in raw_predicate_ids
+                    if isinstance(item, str) and item.strip()
+                ),
+            ]
+        )
+    )
+    if exclude_structural_predicates and resolved_predicate_ids:
+        structural_predicates = get_relationship_kinds_set()
+        resolved_predicate_ids = [
+            item for item in resolved_predicate_ids if item not in structural_predicates
+        ]
+    if predicate_filter_supplied and not resolved_predicate_ids:
+        return {}, False
+    if resolved_predicate_ids:
+        query["predicate_id"] = (
+            resolved_predicate_ids[0]
+            if len(resolved_predicate_ids) == 1
+            else {"$in": resolved_predicate_ids}
+        )
     if target_value:
         query["target_value"] = target_value
     elif target_values is not None:
@@ -695,19 +729,15 @@ def _build_relationship_extent_index_query(
         query["target_value"] = {"$in": values}
     if source_concept_id:
         query["source_concept_id"] = source_concept_id
-    if exclude_structural_predicates:
-        if predicate_id and predicate_id in get_relationship_kinds_set():
-            return {}, False
-        predicate_filter: dict[str, Any] = {"$nin": list(get_relationship_kinds_set())}
-        if predicate_id:
-            predicate_filter["$eq"] = predicate_id
-        query["predicate_id"] = predicate_filter
+    if exclude_structural_predicates and not resolved_predicate_ids:
+        query["predicate_id"] = {"$nin": list(get_relationship_kinds_set())}
     return query, True
 
 
 def query_relationship_extent_index(
     *,
     predicate_id: str | None = None,
+    predicate_ids: Iterable[str] | None = None,
     target_value: str | None = None,
     target_values: Iterable[str] | None = None,
     source_concept_id: str | None = None,
@@ -733,6 +763,7 @@ def query_relationship_extent_index(
 
     query, should_query = _build_relationship_extent_index_query(
         predicate_id=predicate_id,
+        predicate_ids=predicate_ids,
         target_value=target_value,
         target_values=target_values,
         source_concept_id=source_concept_id,

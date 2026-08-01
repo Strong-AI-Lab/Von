@@ -357,6 +357,17 @@ def _compact_capability_selection_profiles(
             )
             if adequacy_sources:
                 compact_selection["adequacy_sources"] = adequacy_sources
+        existing_adequacy_sources = selection.get("adequacy_sources")
+        if (
+            "adequacy_sources" not in compact_selection
+            and isinstance(existing_adequacy_sources, Sequence)
+            and not isinstance(existing_adequacy_sources, (str, bytes, bytearray))
+        ):
+            compact_selection["adequacy_sources"] = [
+                str(item)
+                for item in existing_adequacy_sources
+                if str(item).strip()
+            ]
         compact["selection"] = compact_selection
     return compact
 
@@ -378,13 +389,10 @@ def _capability_purpose_index(
         first_sentence_end = re.search(r"[.!?](?=(?:\s+[A-Z#])|$)", purpose)
         if first_sentence_end is not None:
             purpose = purpose[: first_sentence_end.end()]
-        if len(purpose) > _CAPABILITY_PURPOSE_MAX_CHARS:
-            prefix = purpose[: _CAPABILITY_PURPOSE_MAX_CHARS - 3]
-            if not prefix.endswith(" ") and not purpose[len(prefix)].isspace():
-                word_boundary = prefix.rfind(" ")
-                if word_boundary > 0:
-                    prefix = prefix[:word_boundary]
-            purpose = prefix.rstrip() + "..."
+        purpose = _truncate_capability_purpose(
+            purpose,
+            max_chars=_CAPABILITY_PURPOSE_MAX_CHARS,
+        )
         entry: dict[str, Any] = {"name": name, "purpose": purpose}
         plan_profile = capability.get("plan_profile")
         shape = (
@@ -411,6 +419,59 @@ def _capability_purpose_index(
         },
         "entries": entries,
     }
+
+
+def _truncate_capability_purpose(purpose: str, *, max_chars: int) -> str:
+    if len(purpose) <= max_chars:
+        return purpose
+    if max_chars <= 3:
+        return purpose[:max_chars]
+    prefix = purpose[: max_chars - 3]
+    if not prefix.endswith(" ") and not purpose[len(prefix)].isspace():
+        word_boundary = prefix.rfind(" ")
+        if word_boundary > 0:
+            prefix = prefix[:word_boundary]
+    return prefix.rstrip() + "..."
+
+
+def _capability_purpose_index_with_limit(
+    purpose_index: Mapping[str, Any],
+    *,
+    max_chars: int,
+) -> dict[str, Any]:
+    """Keep every purpose entry while compacting only its descriptive text."""
+
+    compact = dict(purpose_index)
+    entries = purpose_index.get("entries")
+    compact_entries: list[dict[str, Any]] = []
+    if isinstance(entries, Sequence) and not isinstance(
+        entries,
+        (str, bytes, bytearray),
+    ):
+        for raw_entry in entries:
+            if not isinstance(raw_entry, Mapping):
+                continue
+            entry = dict(raw_entry)
+            purpose = str(entry.get("purpose") or "")
+            if purpose and max_chars > 0:
+                entry["purpose"] = _truncate_capability_purpose(
+                    purpose,
+                    max_chars=max_chars,
+                )
+            else:
+                entry.pop("purpose", None)
+            compact_entries.append(entry)
+    compact.update(
+        {
+            "entries": compact_entries,
+            "purpose_projection": (
+                "first_authored_sentence_model_context_compacted"
+            ),
+            "purpose_max_chars": max_chars,
+            "purpose_text_compacted_for_model_context": True,
+        }
+    )
+    return compact
 
 
 def _capability_schema_reference(
@@ -468,6 +529,22 @@ def _capability_schema_reference(
     return compact
 
 
+def _capability_discovery_reference(
+    capability: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose compact selection facts while deferring exact hydration."""
+
+    compact = {
+        key: capability.get(key)
+        for key in ("name", "query_match")
+        if key in capability
+    }
+    selection = _compact_capability_selection_profiles(capability).get("selection")
+    if isinstance(selection, Mapping):
+        compact["selection"] = dict(selection)
+    return compact
+
+
 def _capability_schema_focused_projection(
     capability: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -510,8 +587,9 @@ def _bounded_capability_catalogue_output(
     raw_next_offset = value.get("next_offset")
     if not isinstance(raw_next_offset, int) or isinstance(raw_next_offset, bool):
         raw_next_offset = None
+    exact_name_page = value.get("catalogue_scope") == "requested_exact_names"
     exact_singleton_page = (
-        value.get("catalogue_scope") == "requested_exact_names"
+        exact_name_page
         and value.get("total") == 1
         and len(capabilities) == 1
         and raw_next_offset is None
@@ -556,7 +634,11 @@ def _bounded_capability_catalogue_output(
             "omitted_page_entry_count": omitted_page_entry_count,
         }
         if omitted_page_entry_count or schema_reference_count:
-            projection["reason"] = "model_context_budget"
+            projection["reason"] = (
+                "exact_name_hydration_required"
+                if not exact_name_page
+                else "model_context_budget"
+            )
         return {
             **base,
             "next_offset": next_offset,
@@ -596,9 +678,55 @@ def _bounded_capability_catalogue_output(
             schema_reference_count=schema_reference_count,
         )
         if len(_json_bytes(bounded)) > max_bytes:
-            return {}
+            try:
+                maximum_purpose_chars = max(
+                    0,
+                    int(purpose_index.get("purpose_max_chars") or 0),
+                )
+            except (TypeError, ValueError):
+                maximum_purpose_chars = 0
+            best_fit: tuple[dict[str, Any], dict[str, Any]] | None = None
+            lower = 0
+            upper = maximum_purpose_chars
+            while lower <= upper:
+                candidate_limit = (lower + upper) // 2
+                candidate_base = {
+                    **base,
+                    "purpose_index": _capability_purpose_index_with_limit(
+                        purpose_index,
+                        max_chars=candidate_limit,
+                    ),
+                }
+                base = candidate_base
+                candidate = assemble(
+                    included,
+                    full_schema_count=full_schema_count,
+                    schema_reference_count=schema_reference_count,
+                )
+                if len(_json_bytes(candidate)) <= max_bytes:
+                    best_fit = candidate_base, candidate
+                    lower = candidate_limit + 1
+                else:
+                    upper = candidate_limit - 1
+            if best_fit is None:
+                return {}
+            base, bounded = best_fit
 
     for capability in capabilities:
+        if not exact_name_page:
+            reference = _capability_discovery_reference(capability)
+            reference_candidate = assemble(
+                [*included, reference],
+                full_schema_count=full_schema_count,
+                schema_reference_count=schema_reference_count + 1,
+            )
+            if len(_json_bytes(reference_candidate)) > max_bytes:
+                break
+            included.append(reference)
+            schema_reference_count += 1
+            bounded = reference_candidate
+            continue
+
         full_candidate = assemble(
             [*included, capability],
             full_schema_count=full_schema_count + 1,
@@ -1292,7 +1420,8 @@ def _tool_definitions() -> list[ToolDefinition]:
                 "yourself. Prefer the smallest plan that can produce the requested "
                 "work product and evidence; use a workflow when its added composition, "
                 "verification, or recovery is materially needed. Request an exact "
-                "name to hydrate its canonical argument schema. This is discovery, "
+                "name to hydrate its canonical description, planner guidance, plan "
+                "and effect facts, and argument schema. This is discovery, "
                 "not a requirement to use any particular capability."
             ),
             input_schema={
@@ -1335,7 +1464,9 @@ def _tool_definitions() -> list[ToolDefinition]:
             name=_EVIDENCE_TOOL_NAME,
             description=(
                 "Read a selected bounded slice of a prior tool result by its "
-                "turn-scoped evidence handle. Select with a JSON pointer, a text "
+                "turn-scoped evidence handle. Evidence IDs are opaque: copy the "
+                "complete evidence_id exactly from the result or evidence index; "
+                "never reconstruct or shorten it. Select with a JSON pointer, a text "
                 "query, an offset, or any combination. Repeated calls may inspect "
                 "different portions; the raw result is not discarded. Omit "
                 "json_pointer, use the RFC root pointer (an empty string), or use "
@@ -1691,6 +1822,7 @@ def _capability_catalogue(
     *,
     workflow_capabilities: Sequence[Any] = (),
     workflow_discovery: Mapping[str, Any] | None = None,
+    capability_details_by_name: MutableMapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     query = str(payload.get("query") or "").strip().lower()
     requested_names = payload.get("names")
@@ -2262,8 +2394,18 @@ def _capability_catalogue(
             or item["selection"].get("frontier_status") != "declared_dominated"
         )
     )
-    page = selected[offset : offset + limit]
-    next_offset = offset + len(page)
+    full_page = selected[offset : offset + limit]
+    if capability_details_by_name is not None:
+        for capability in full_page:
+            capability_name = str(capability.get("name") or "").strip().lower()
+            if capability_name:
+                capability_details_by_name[capability_name] = dict(capability)
+    page = (
+        full_page
+        if exact_names
+        else [_capability_discovery_reference(item) for item in full_page]
+    )
+    next_offset = offset + len(full_page)
     return {
         "schema_version": _CAPABILITY_CATALOGUE_SCHEMA_VERSION,
         "success": True,
@@ -4022,24 +4164,8 @@ def execute_adaptive_turn(
                             workflow_capabilities_by_name.values()
                         ),
                         workflow_discovery=latest_workflow_discovery,
+                        capability_details_by_name=catalogued_capabilities_by_name,
                     )
-                    raw_catalogued_capabilities = output.get("capabilities")
-                    if isinstance(
-                        raw_catalogued_capabilities, Sequence
-                    ) and not isinstance(
-                        raw_catalogued_capabilities,
-                        (str, bytes, bytearray),
-                    ):
-                        for raw_capability in raw_catalogued_capabilities:
-                            if not isinstance(raw_capability, Mapping):
-                                continue
-                            catalogued_name = str(
-                                raw_capability.get("name") or ""
-                            ).strip()
-                            if catalogued_name:
-                                catalogued_capabilities_by_name[
-                                    catalogued_name.lower()
-                                ] = dict(raw_capability)
                     raw_selection_policy = output.get("selection_policy")
                     latest_capability_selection_policy = (
                         dict(raw_selection_policy)
