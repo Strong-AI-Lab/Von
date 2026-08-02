@@ -27,6 +27,7 @@ from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_discovery_exemplars,
     resolve_workflow_launch_input_contract,
+    resolve_workflow_publication_lifecycle,
     resolve_workflow_routing_profile,
 )
 
@@ -107,7 +108,13 @@ def test_bootstrap_materialises_model_led_spreadsheet_workflow_family(
     )
     assert source.startswith("text_relation:")
     assert routing["role"] == "execution"
-    assert routing["routing_eligible"] is True
+    assert routing["routing_eligible"] is False
+
+    lifecycle, lifecycle_source = resolve_workflow_publication_lifecycle(
+        SPREADSHEET_PROGRAMME_WORKFLOW_ID
+    )
+    assert lifecycle_source == "concept_data"
+    assert lifecycle["published"] is True
 
     child_routing, _ = resolve_workflow_routing_profile(
         SPREADSHEET_RECORD_ITEM_WORKFLOW_ID
@@ -343,7 +350,7 @@ def test_processing_authority_fingerprint_tracks_exact_kr_dependency(
     from scripts import generate_spreadsheet_programme_workflow_seed as generator
 
     baseline = generator.build_bundle()
-    assert baseline["seed_version"] == "21"
+    assert baseline["seed_version"] == "22"
     assert baseline[
         "known_legacy_authority_payload_sha256_by_seed_version"
     ] == generator.REVIEWED_LEGACY_AUTHORITY_PAYLOAD_SHA256_BY_SEED_VERSION

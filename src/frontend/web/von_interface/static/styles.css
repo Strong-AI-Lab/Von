@@ -8812,6 +8812,10 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     transition: opacity 0.2s ease;
 }
 
+.thinking-card-wrapper[aria-hidden="true"] {
+    display: none;
+}
+
 .thinking-card-wrapper[aria-hidden="false"] {
     opacity: 1;
 }

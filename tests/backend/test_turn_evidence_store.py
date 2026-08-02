@@ -126,6 +126,137 @@ def test_read_supports_bounded_pointer_slices_and_escaped_tokens() -> None:
     assert escaped["has_more"] is False
 
 
+def test_pointer_slice_preserves_bounded_root_source_diagnostics() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-source-diagnostics")
+    envelope = store.record(
+        "bounded_canonical_read",
+        "call-source-diagnostics",
+        {
+            "coverage_complete": False,
+            "counts_are_lower_bounds": True,
+            "total_hits_is_lower_bound": True,
+            "total_available_is_lower_bound": False,
+            "has_more": True,
+            "next_offset": 25,
+            "offset": 0,
+            "limit": 25,
+            "total": 500,
+            "records": [{"summary": "selected evidence"}],
+            "unrelated_large_source_field": "x" * 100_000,
+            "not_a_boolean_is_lower_bound": "true",
+        },
+    )
+
+    expected_source_diagnostics = {
+        "coverage_complete": False,
+        "counts_are_lower_bounds": True,
+        "has_more": True,
+        "next_offset": 25,
+        "offset": 0,
+        "limit": 25,
+        "total": 500,
+        "total_hits_is_lower_bound": True,
+        "total_available_is_lower_bound": False,
+    }
+    projected = envelope.to_mapping()
+    assert projected["source_diagnostics"] == expected_source_diagnostics
+    assert len(json.dumps(projected, sort_keys=True)) < 5_000
+
+    selected = store.read(
+        envelope.evidence_id,
+        json_pointer="/records/0/summary",
+        max_chars=100,
+        trusted_scope=scope,
+        turn_id="turn-source-diagnostics",
+    )
+
+    assert selected["success"] is True
+    assert selected["content"] == "selected evidence"
+    assert selected["source_diagnostics"] == expected_source_diagnostics
+    assert selected["has_more"] is False
+    assert "unrelated_large_source_field" not in selected
+    assert "not_a_boolean_is_lower_bound" not in selected["source_diagnostics"]
+
+
+def test_absent_source_diagnostics_are_not_projected_as_false() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-no-source-diagnostics")
+    envelope = store.record(
+        "generic_lookup",
+        "call-no-source-diagnostics",
+        {"records": [{"summary": "ordinary evidence"}]},
+    )
+
+    assert "source_diagnostics" not in envelope.to_mapping()
+    selected = store.read(
+        envelope.evidence_id,
+        json_pointer="/records/0",
+        max_chars=100,
+        trusted_scope=scope,
+        turn_id="turn-no-source-diagnostics",
+    )
+    assert selected["success"] is True
+    assert "source_diagnostics" not in selected
+
+
+def test_pointer_slice_preserves_recognised_nested_paging_diagnostics() -> None:
+    scope = _scope()
+    store = TurnEvidenceStore(scope, "turn-nested-paging")
+    envelope = store.record(
+        "list_scoped_assertions",
+        "call-nested-paging",
+        {
+            "success": True,
+            "assertions": [
+                {
+                    "assertion_id": "assertion-1",
+                    "body": "x" * 100_000,
+                }
+            ],
+            "assertions_found": 200,
+            "assertions_found_is_lower_bound": True,
+            "paging": {
+                "limit": 200,
+                "offset": 0,
+                "returned": 200,
+                "has_more": True,
+                "next_offset": 200,
+                "counts_are_lower_bounds": True,
+                "total_available": 500,
+                "total_available_is_lower_bound": True,
+                "visibility_filtered": True,
+                "unrelated_large_field": "y" * 100_000,
+            },
+        },
+    )
+
+    selected = store.read(
+        envelope.evidence_id,
+        json_pointer="/assertions/0/assertion_id",
+        max_chars=100,
+        trusted_scope=scope,
+        turn_id="turn-nested-paging",
+    )
+
+    assert selected["success"] is True
+    assert selected["content"] == "assertion-1"
+    assert selected["source_diagnostics"] == {
+        "assertions_found_is_lower_bound": True,
+        "paging": {
+            "has_more": True,
+            "counts_are_lower_bounds": True,
+            "next_offset": 200,
+            "offset": 0,
+            "limit": 200,
+            "total_available": 500,
+            "total_available_is_lower_bound": True,
+        },
+    }
+    assert selected["has_more"] is False
+    assert "unrelated_large_field" not in selected["source_diagnostics"]["paging"]
+
+
 def test_store_keeps_rfc_slash_and_empty_string_pointer_semantics() -> None:
     scope = _scope()
     store = TurnEvidenceStore(scope, "turn-rfc-root")

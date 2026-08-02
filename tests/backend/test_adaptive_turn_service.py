@@ -37,6 +37,7 @@ from src.backend.services.adaptive_turn_service import (
     _bounded_conversation_observation_projection,
     _capability_catalogue,
     _compact_context_after_limit,
+    _compact_evidence_envelope,
     _compact_evidence_index,
     _effect_result_target_ids,
     _effect_subject_authorised,
@@ -4420,6 +4421,36 @@ def test_evidence_index_omission_is_bounded_and_pageable() -> None:
     assert omission["total_count"] == 1_000
     assert omission["next_offset"] > 0
     assert omission["list_tool"] == "turn_list_evidence"
+
+
+def test_compact_evidence_envelope_keeps_source_diagnostics_before_preview() -> None:
+    source_diagnostics = {
+        "coverage_complete": False,
+        "counts_are_lower_bounds": True,
+        "has_more": True,
+        "next_offset": 20,
+        "offset": 0,
+        "limit": 20,
+        "total": 200,
+        "total_hits_is_lower_bound": True,
+    }
+    compact = _compact_evidence_envelope(
+        {
+            "schema_version": "turn_evidence_envelope.v1",
+            "evidence_id": "ev-source-diagnostics",
+            "source_diagnostics": source_diagnostics,
+            "tool_name": "bounded_canonical_read",
+            "preview": "x" * 100_000,
+            "unrelated_large_source_field": "y" * 100_000,
+        },
+        max_bytes=400,
+    )
+
+    assert len(_json_bytes(compact)) <= 400
+    assert compact["evidence_id"] == "ev-source-diagnostics"
+    assert compact["source_diagnostics"] == source_diagnostics
+    assert "unrelated_large_source_field" not in compact
+    assert len(compact.get("preview", "")) < 100_000
 
 
 def test_evidence_page_resumes_at_first_globally_omitted_handle() -> None:

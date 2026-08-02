@@ -1131,6 +1131,9 @@ def test_bootstrap_publishes_file_copy_upload_classification_route_map_metadata(
         "#V#scholarly_paper_representation_workflow"
     ]
     assert route_by_key["cv"]["selected_route_mode"] == "specialised"
+    assert route_by_key["spreadsheet"]["selected_route_mode"] == "interpret"
+    assert route_by_key["spreadsheet"]["mutation_route"] is False
+    assert route_by_key["spreadsheet"]["candidate_workflow_ids"] == []
     assert route_by_key["interpret"]["selected_route_mode"] == "interpret"
     assert (
         metadata["typed_subworkflow_route_map_source"]
