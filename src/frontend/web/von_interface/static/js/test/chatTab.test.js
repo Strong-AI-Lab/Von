@@ -56,6 +56,7 @@ import {
     __testOnly_reduceThinkingCardDisplayState,
     __testOnly_copyActiveThinkingDiagnostics,
     __testOnly_shouldAcceptThinkingProgressUpdate,
+    __testOnly_applyImmediateThinkingTerminalOutcome,
     __testOnly_getThinkingProgressPollFetchTimeoutMs,
     __testOnly_setThinkingCardRequests,
     __testOnly_setThinkingState,
@@ -2346,6 +2347,8 @@ describe('loadChatHistory degraded handling', () => {
         expect(loaded).toBe(true);
         const card = document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper');
         expect(card).not.toBeNull();
+        expect(card.querySelector('[data-thinking-role="status"]').textContent).toBe('Complete');
+        expect(card.textContent).toContain('Tool call finished');
         expect(card.textContent).toContain('Selected workflow execution');
         expect(card.textContent).toContain('Every LLM interaction');
         expect(card.textContent).toContain('View full LLM call log');
@@ -2400,9 +2403,12 @@ describe('loadChatHistory degraded handling', () => {
                             turn_execution_diagnostics: {
                                 request_id: 'request-history-on-demand-card',
                                 latest_progress: {
-                                    status: 'completed',
-                                    phase_label: 'Complete',
-                                    result_summary: 'Debug loaded'
+                                    status: 'heartbeat',
+                                    phase: 'response_finalising',
+                                    phase_label: 'Finalising response',
+                                    result_summary: 'Stale pre-persistence activity',
+                                    current_activity: 'assembling the final response payload; persisting chat history',
+                                    liveness_state: 'active'
                                 },
                                 workflow_stage_path: {
                                     path: [
@@ -2468,6 +2474,10 @@ describe('loadChatHistory degraded handling', () => {
 
         const card = document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper');
         expect(card).not.toBeNull();
+        expect(card.querySelector('[data-thinking-role="status"]').textContent).toBe('Complete');
+        expect(card.textContent).not.toContain('Finalising response');
+        expect(card.textContent).not.toContain('persisting chat history');
+        expect(card.textContent).toContain('Loaded from Conversation history');
         expect(card.textContent).toContain('Selected workflow execution');
         expect(card.textContent).toContain('Every LLM interaction');
         const criticButton = card.querySelector('[data-thinking-role="critic"]');
@@ -4754,6 +4764,47 @@ describe('thinking activity history normalisation', () => {
         expect(text).toContain('Waiting at Building context');
     });
 
+    test('default synopsis omits Working on only when it repeats Objective', () => {
+        const duplicateHtml = __testOnly_renderThinkingCardBodyHTML({
+            latestProgress: {
+                thinking_card_view_model: {
+                    objective_summary: 'Represent the first three candidatures',
+                    object_or_target_summary: '  represent   the first three candidatures  '
+                }
+            }
+        });
+        const wrappedDuplicateHtml = __testOnly_renderThinkingCardBodyHTML({
+            latestProgress: {
+                thinking_card_view_model: {
+                    objective_summary: 'User request: "Represent the first three candidatures"',
+                    object_or_target_summary: 'represent the first three candidatures'
+                }
+            }
+        });
+        const distinctHtml = __testOnly_renderThinkingCardBodyHTML({
+            latestProgress: {
+                thinking_card_view_model: {
+                    objective_summary: 'Represent the first three candidatures',
+                    object_or_target_summary: 'Read and reconcile the uploaded workbook rows'
+                }
+            }
+        });
+
+        const duplicateContainer = document.createElement('div');
+        duplicateContainer.innerHTML = duplicateHtml;
+        const wrappedDuplicateContainer = document.createElement('div');
+        wrappedDuplicateContainer.innerHTML = wrappedDuplicateHtml;
+        const distinctContainer = document.createElement('div');
+        distinctContainer.innerHTML = distinctHtml;
+
+        expect(duplicateContainer.textContent).toContain('Objective');
+        expect(duplicateContainer.textContent).not.toContain('Working on');
+        expect(wrappedDuplicateContainer.textContent).toContain('Objective');
+        expect(wrappedDuplicateContainer.textContent).not.toContain('Working on');
+        expect(distinctContainer.textContent).toContain('Working on');
+        expect(distinctContainer.textContent).toContain('Read and reconcile the uploaded workbook rows');
+    });
+
     test('copies progress view model in thinking and keyboard diagnostic exports', () => {
         const request = {
             clientRequestId: 'req-view-model-export',
@@ -6096,6 +6147,154 @@ describe('thinking card toggle accessibility', () => {
         expect(criticButton.getAttribute('aria-hidden')).toBe('true');
         expect(criticButton.disabled).toBe(true);
         expect(document.getElementById('loadingIndicatorDetail').textContent).not.toContain('Critic review');
+    });
+
+    test.each([
+        ['completed', 'completed', 'Complete'],
+        ['error', 'error', 'Failed'],
+        ['failed', 'error', 'Failed'],
+        ['cancelled', 'cancelled', 'Cancelled']
+    ])('shows a %s turn outcome immediately as terminal', (outcomeStatus, progressStatus, badgeText) => {
+        const request = {
+            sessionId: 'thinking-card-test-session',
+            thinkingStartedAtMs: Date.now() - 1000,
+            latestProgress: {
+                status: 'heartbeat',
+                phase: 'response_finalising',
+                phase_label: 'Finalising response',
+                liveness_state: 'waiting',
+                sequence_no: 7
+            },
+            turnOutcome: {
+                status: outcomeStatus,
+                summary: `${outcomeStatus} outcome`
+            }
+        };
+
+        __testOnly_setThinkingCardRequests(request, null);
+        __testOnly_setThinkingState(true, request);
+
+        const terminalProgress = __testOnly_applyImmediateThinkingTerminalOutcome(request);
+
+        expect(terminalProgress.status).toBe(progressStatus);
+        expect(document.getElementById('thinkingCardStatusBadge').textContent).toBe(badgeText);
+        expect(Number.isFinite(request.thinkingFinishedAtMs)).toBe(true);
+    });
+
+    test('keeps an already-reported canonical terminal progress event', () => {
+        const canonicalProgress = {
+            status: 'completed',
+            phase: 'response_finalising',
+            phase_label: 'Canonical completion',
+            result_summary: 'Canonical result summary',
+            sequence_no: 11
+        };
+        const request = {
+            sessionId: 'thinking-card-test-session',
+            thinkingStartedAtMs: Date.now() - 1000,
+            latestProgress: canonicalProgress,
+            turnOutcome: {
+                status: 'completed',
+                summary: 'Synthetic summary must not replace canonical telemetry'
+            }
+        };
+
+        __testOnly_setThinkingCardRequests(request, null);
+        __testOnly_setThinkingState(true, request);
+
+        expect(__testOnly_applyImmediateThinkingTerminalOutcome(request)).toBe(canonicalProgress);
+        expect(request.latestProgress.result_summary).toBe('Canonical result summary');
+    });
+
+    test.each([
+        ['successful', true, { response: 'Done' }, 'Complete'],
+        ['failed', false, { error: 'The turn failed' }, 'Failed'],
+        ['typed non-success', true, {
+            success: false,
+            terminal_status: 'failed',
+            response: 'The requested effect was not completed'
+        }, 'Failed']
+    ])('terminalises a %s delivery before queue persistence finishes', async (_label, responseOk, responseData, badgeText) => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+        document.getElementById('promptInput').value = 'Complete this bounded turn';
+
+        let resolveFinish;
+        let markFinishStarted;
+        const finishResponse = new Promise((resolve) => {
+            resolveFinish = resolve;
+        });
+        const finishStarted = new Promise((resolve) => {
+            markFinishStarted = resolve;
+        });
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        item: {
+                            queue_id: 'queue-terminal-test',
+                            session_id: 'thinking-card-test-session',
+                            prompt_raw: 'Complete this bounded turn',
+                            status: 'in_progress'
+                        }
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.endsWith('/queue-terminal-test/finish')) {
+                markFinishStarted();
+                return finishResponse;
+            }
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'heartbeat',
+                        phase: 'response_finalising',
+                        phase_label: 'Finalising response',
+                        liveness_state: 'waiting'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: responseOk,
+                    json: async () => responseData
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        let sendSettled = false;
+        const sendPromise = sendMessage().finally(() => {
+            sendSettled = true;
+        });
+        await finishStarted;
+        await Promise.resolve();
+
+        expect(sendSettled).toBe(false);
+        expect(document.getElementById('thinkingCardStatusBadge').textContent).toBe(badgeText);
+
+        resolveFinish({ ok: true, json: async () => ({ success: true }) });
+        await expect(sendPromise).resolves.toBeUndefined();
     });
 
     test('shows concise critic review from completed thinking card on demand', async () => {
@@ -7937,6 +8136,121 @@ describe('chat session composer state', () => {
         );
         expect(activeTab).not.toBeNull();
         expect(activeTab.classList.contains('is-active')).toBe(true);
+    });
+
+    test('new chat creates immediately without a native dialog and preserves the composer draft', async () => {
+        const promptInput = document.getElementById('promptInput');
+        initializePromptCartoucheOverlay(promptInput);
+        promptInput.value = 'Move this draft into a new conversation';
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+        const createBodies = [];
+        let created = false;
+        let resolveCreate;
+        const createResponse = new Promise((resolve) => {
+            resolveCreate = resolve;
+        });
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                const sessions = [{
+                    session_id: created ? 'session-new' : 'session-current',
+                    session_name: created ? 'Chat 2026-04-13 18:30' : 'Current chat',
+                    message_count: created ? 0 : 2,
+                    last_message_at: created ? '2026-04-13T18:30:00Z' : '2026-04-13T05:00:00Z'
+                }];
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: created ? 'session-new' : 'session-current',
+                        sessions
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/create_chat_session')) {
+                createBodies.push(JSON.parse(options.body || '{}'));
+                return createResponse;
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({ sessions: [] }) });
+        });
+
+        await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+        const promptSpy = jest.spyOn(window, 'prompt').mockImplementation(() => 'should not be used');
+        const alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => {});
+        const newChatButton = document.querySelector('.chat-session-tab-new');
+
+        newChatButton.click();
+        newChatButton.click();
+
+        expect(promptSpy).not.toHaveBeenCalled();
+        expect(alertSpy).not.toHaveBeenCalled();
+        expect(createBodies).toEqual([{}]);
+
+        created = true;
+        resolveCreate({
+            ok: true,
+            json: async () => ({
+                session_id: 'session-new',
+                session_name: 'Chat 2026-04-13 18:30',
+                history: []
+            })
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(promptInput.value).toBe('Move this draft into a new conversation');
+        expect(document.activeElement).toBe(promptInput);
+        expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
+            .toBe('session-new');
+    });
+
+    test('new chat reports creation failure without blocking the page', async () => {
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'Keep this draft';
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: 'session-current',
+                        sessions: [{
+                            session_id: 'session-current',
+                            session_name: 'Current chat',
+                            message_count: 2,
+                            last_message_at: '2026-04-13T05:00:00Z'
+                        }]
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/create_chat_session')) {
+                return Promise.resolve({
+                    ok: false,
+                    json: async () => ({ error: 'Creation temporarily unavailable' })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+        const promptSpy = jest.spyOn(window, 'prompt').mockImplementation(() => 'should not be used');
+        const alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => {});
+
+        document.querySelector('.chat-session-tab-new').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(promptSpy).not.toHaveBeenCalled();
+        expect(alertSpy).not.toHaveBeenCalled();
+        expect(document.querySelector('.toast-error')?.textContent)
+            .toBe('Creation temporarily unavailable');
+        expect(promptInput.value).toBe('Keep this draft');
+        expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
+            .toBe('session-current');
     });
 
     test('first send without an active conversation creates a real session before generate', async () => {

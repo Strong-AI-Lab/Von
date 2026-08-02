@@ -132,6 +132,7 @@ let totalHistorySegments = 1;
 let activeChatSessionId = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
+let newChatCreationInFlight = null;
 let sessionTabsCache = [];
 let displayedHistorySessionId = null;
 const historyLoadState = {
@@ -3361,13 +3362,29 @@ function buildSyntheticThinkingTerminalProgress(request) {
     }
 
     const outcomeStatus = normaliseThinkingProgressStatusValue(turnOutcome.status) || 'completed';
-    const terminalStatus = outcomeStatus === 'error'
+    const terminalStatus = outcomeStatus === 'error' || outcomeStatus === 'failed'
         ? 'error'
-        : (outcomeStatus === 'follow_up_required' ? 'follow_up_required' : 'completed');
+        : (
+            outcomeStatus === 'follow_up_required'
+                ? 'follow_up_required'
+                : (
+                    outcomeStatus === 'cancelled' || outcomeStatus === 'canceled' || outcomeStatus === 'aborted'
+                        ? 'cancelled'
+                        : (outcomeStatus === 'terminated' ? 'terminated' : 'completed')
+                )
+        );
     const phaseLabel = normaliseThinkingActivityString(turnOutcome.phase_label)
         || (terminalStatus === 'error'
             ? 'Turn failed'
-            : (terminalStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed'));
+            : (
+                terminalStatus === 'follow_up_required'
+                    ? 'Follow-up required'
+                    : (
+                        terminalStatus === 'cancelled'
+                            ? 'Turn stopped'
+                            : (terminalStatus === 'terminated' ? 'Turn terminated' : 'Turn completed')
+                    )
+            ));
     const resultSummary = normaliseThinkingActivityString(turnOutcome.result_summary)
         || normaliseThinkingActivityString(turnOutcome.summary);
     const thinkingStartedAtMs = Number.isFinite(request.thinkingStartedAtMs)
@@ -3387,6 +3404,7 @@ function buildSyntheticThinkingTerminalProgress(request) {
         stage: terminalStatus,
         phase_label: phaseLabel,
         stage_label: phaseLabel,
+        current_activity: resultSummary || phaseLabel,
         result_summary: resultSummary || null,
         elapsed_ms: elapsedMs
     };
@@ -3568,6 +3586,39 @@ function applyThinkingProgressUpdate(request, nextProgress) {
         progress: nextProgress
     });
     return true;
+}
+
+function applyImmediateThinkingTerminalOutcome(request) {
+    if (!request || typeof request !== 'object' || !request.turnOutcome) {
+        return null;
+    }
+
+    if (!Number.isFinite(request.thinkingFinishedAtMs)) {
+        request.thinkingFinishedAtMs = Date.now();
+    }
+
+    const currentProgress = (request.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    if (isTerminalThinkingProgress(currentProgress)) {
+        applyThinkingCardDisplayStateUpdate(request, {
+            type: 'progress_update',
+            progress: currentProgress
+        });
+    } else {
+        const syntheticProgress = buildSyntheticThinkingTerminalProgress(request);
+        if (syntheticProgress) {
+            applyThinkingProgressUpdate(
+                request,
+                currentProgress
+                    ? { ...currentProgress, ...syntheticProgress }
+                    : syntheticProgress
+            );
+        }
+    }
+
+    refreshThinkingCardProgressUi(request);
+    return request.latestProgress || null;
 }
 
 function refreshThinkingCardProgressUi(request, cardRoot = null) {
@@ -3939,13 +3990,27 @@ function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
     if (diagnostics) {
         syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnostics);
     }
-    if (!request.latestProgress || typeof request.latestProgress !== 'object') {
+    if (!isTerminalThinkingProgress(request.latestProgress)) {
+        const archivedTerminalStatus = canonicalThinkingTerminalStatus(
+            diagnostics?.completion_gate?.decision
+            || diagnostics?.completion_gate_decision
+            || diagnostics?.terminal_status
+            || debugData.terminal_status
+        ) || (
+            debugData.success === false
+            || (
+                debugData.error !== undefined
+                && debugData.error !== null
+                && debugData.error !== ''
+            )
+                ? THINKING_STATUS_FAILED
+                : THINKING_STATUS_COMPLETED
+        );
         request.turnOutcome = {
-            status: 'completed',
-            phase_label: 'Turn completed',
+            status: archivedTerminalStatus,
             summary: 'Loaded from Conversation history'
         };
-        request.latestProgress = buildSyntheticThinkingTerminalProgress(request);
+        applyImmediateThinkingTerminalOutcome(request);
     }
     request.thinkingCardDisplayState = reduceThinkingCardDisplayState(
         request.thinkingCardDisplayState,
@@ -5175,6 +5240,14 @@ function normaliseThinkingComparisonText(value) {
         .toLowerCase();
 }
 
+function normaliseThinkingSynopsisIdentity(value) {
+    const normalised = normaliseThinkingComparisonText(value);
+    const wrappedUserRequest = normalised.match(/^user request:\s*(?:"(.*)"|“(.*)”)$/);
+    return wrappedUserRequest
+        ? normaliseThinkingComparisonText(wrappedUserRequest[1] ?? wrappedUserRequest[2])
+        : normalised;
+}
+
 function shouldDistinguishThinkingRequestAndStep(promptRaw, goalLabel) {
     const prompt = normaliseThinkingComparisonText(promptRaw);
     const goal = normaliseThinkingComparisonText(goalLabel);
@@ -5414,6 +5487,9 @@ export function __testOnly_persistThinkingCardBodyHeightFromDom(request = getThi
 
 export function __testOnly_shouldAcceptThinkingProgressUpdate(currentProgress = null, nextProgress = null) {
     return shouldAcceptThinkingProgressUpdate(currentProgress, nextProgress);
+}
+export function __testOnly_applyImmediateThinkingTerminalOutcome(request = null) {
+    return applyImmediateThinkingTerminalOutcome(request);
 }
 
 export function __testOnly_getThinkingProgressPollFetchTimeoutMs() {
@@ -6872,8 +6948,12 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
         viewModel.execution_interpretation?.execution_family
     );
 
+    const objectiveSummary = normaliseThinkingSynopsisIdentity(viewModel.objective_summary);
+    const workingOnSummary = normaliseThinkingSynopsisIdentity(viewModel.object_or_target_summary);
     addItem('Objective', viewModel.objective_summary);
-    addItem('Working on', viewModel.object_or_target_summary);
+    if (!objectiveSummary || workingOnSummary !== objectiveSummary) {
+        addItem('Working on', viewModel.object_or_target_summary);
+    }
     addItem('Route', viewModel.route_summary, viewModel.route_summary_html);
     addItem('Evidence and context', viewModel.evidence_context_summary);
     addItem('Current activity', viewModel.current_activity);
@@ -23813,7 +23893,7 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
         newTab.setAttribute('aria-label', 'New chat');
         newTab.textContent = '+';
         newTab.addEventListener('click', () => {
-            void promptAndCreateChatSession();
+            void createNewChatSession();
         });
         fragment.appendChild(newTab);
     }
@@ -24254,7 +24334,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     newTab.setAttribute('aria-label', 'New chat');
     newTab.textContent = '+';
     newTab.addEventListener('click', () => {
-        void promptAndCreateChatSession();
+        void createNewChatSession();
     });
     newTab.addEventListener('contextmenu', (event) => {
         event.preventDefault();
@@ -24598,7 +24678,7 @@ function buildNewChatContextMenuItems() {
         {
             label: 'New chat',
             onClick: () => {
-                void promptAndCreateChatSession();
+                void createNewChatSession();
             }
         }
     ];
@@ -24729,18 +24809,27 @@ function setupChatTabContextMenu() {
     });
 }
 
-async function promptAndCreateChatSession() {
-    const proposed = window.prompt('Name this chat (optional)', '');
-    if (proposed === null) {
-        return;
+function createNewChatSession() {
+    if (newChatCreationInFlight) {
+        return newChatCreationInFlight;
     }
-    try {
-        await createChatSession(proposed);
-        scheduleChatSessionTabsRefresh(true);
-    } catch (err) {
-        const msg = err?.message ? String(err.message) : 'Unable to create chat.';
-        alert(msg);
-    }
+
+    const creation = (async () => {
+        try {
+            return await createChatSession('', { preserveComposerDraft: true });
+        } catch (err) {
+            console.error('[chatTab] Unable to create chat:', err);
+            const msg = err?.message ? String(err.message) : 'Unable to create chat.';
+            showToast(msg, 'error');
+            return null;
+        } finally {
+            if (newChatCreationInFlight === creation) {
+                newChatCreationInFlight = null;
+            }
+        }
+    })();
+    newChatCreationInFlight = creation;
+    return creation;
 }
 
 async function promptRenameChatSession(sessionId, currentName) {
@@ -24766,7 +24855,7 @@ async function promptRenameChatSession(sessionId, currentName) {
     }
 }
 
-async function createChatSession(sessionName) {
+async function createChatSession(sessionName, options = {}) {
     const payload = {};
     if (typeof sessionName === 'string' && sessionName.trim()) {
         payload.session_name = sessionName.trim();
@@ -24851,7 +24940,10 @@ async function createChatSession(sessionName) {
         });
     }
 
-    setPromptComposerValue('', { focus: true });
+    const composerValue = options.preserveComposerDraft
+        ? String(getPromptInputElement()?.value || '')
+        : '';
+    setPromptComposerValue(composerValue, { focus: true });
 
     document.dispatchEvent(new CustomEvent('von:contextReset', {
         detail: { trigger: 'chat_new_session', session_id: effectiveSessionId, session_name: effectiveName || null }
@@ -32001,27 +32093,33 @@ async function handleSendPrompt(options = {}) {
             turnExecutionDiagnostics?.completion_gate?.decision
             || turnExecutionDiagnostics?.completion_gate_decision
         );
+        const payloadTerminalStatus = normaliseThinkingProgressStatusValue(data?.terminal_status);
         const turnOutcomeStatus = canonicalThinkingTerminalStatus(completionGateDecision)
+            || canonicalThinkingTerminalStatus(payloadTerminalStatus)
+            || (data?.success === false ? THINKING_STATUS_FAILED : null)
             || THINKING_STATUS_COMPLETED;
+        const typedNonSuccess = data?.success === false;
         request.turnOutcome = {
             status: turnOutcomeStatus,
-            phase_label: turnOutcomeStatus === 'error'
-                ? 'Turn failed'
+            phase_label: turnOutcomeStatus === THINKING_STATUS_FAILED
+                ? (typedNonSuccess ? 'Turn incomplete' : 'Turn failed')
                 : (turnOutcomeStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed'),
             summary: turnOutcomeStatus === 'follow_up_required'
                 ? 'The turn completed, but a follow-up step is still required.'
-                : 'Response generated'
+                : (
+                    typedNonSuccess
+                        ? `Response returned with status ${payloadTerminalStatus || 'incomplete'}`
+                        : 'Response generated'
+                )
         };
-        if (source === 'task_result') {
+        if (source === 'task_result' && !typedNonSuccess) {
             request.turnOutcome.summary = 'Response generated from completed task result';
         }
         if (turnExecutionDiagnostics) {
             syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
             syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
-            if (isRequestVisible()) {
-                refreshThinkingCardProgressUi(request);
-            }
         }
+        applyImmediateThinkingTerminalOutcome(request);
 
         // Store LLM debug data if available
         if (data.llm_debug) {
@@ -32096,10 +32194,8 @@ async function handleSendPrompt(options = {}) {
         if (turnExecutionDiagnostics) {
             syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, turnExecutionDiagnostics);
             syncThinkingCriticOutputFromSource(request, turnExecutionDiagnostics);
-            if (isRequestVisible()) {
-                refreshThinkingCardProgressUi(request);
-            }
         }
+        applyImmediateThinkingTerminalOutcome(request);
         // Store LLM debug data if available even on error
         const errorTurnId = `e-${Date.now()}`;
         if (data?.llm_debug) {
@@ -32114,6 +32210,34 @@ async function handleSendPrompt(options = {}) {
         if (isRequestVisible()) {
             appendMessage('Error', data?.error || data?.detail || fallbackMessage, errorTurnId, !!data?.llm_debug);
         }
+        return true;
+    };
+
+    const deliverCancelledResponseData = (data = {}) => {
+        if (!claimForegroundDelivery()) {
+            return false;
+        }
+        const cancellationSummary = normaliseThinkingActivityString(
+            data?.progress?.result_summary
+            || data?.result_summary
+            || data?.detail
+            || data?.error
+        ) || 'Turn stopped.';
+        request.turnOutcome = {
+            status: THINKING_STATUS_CANCELLED,
+            phase_label: 'Turn stopped',
+            summary: cancellationSummary
+        };
+
+        const reportedProgress = (
+            data?.progress && typeof data.progress === 'object'
+                ? data.progress
+                : data
+        );
+        if (isTerminalThinkingProgress(reportedProgress)) {
+            applyThinkingProgressUpdate(request, reportedProgress);
+        }
+        applyImmediateThinkingTerminalOutcome(request);
         return true;
     };
 
@@ -32177,10 +32301,12 @@ async function handleSendPrompt(options = {}) {
                 }
             },
             onFailed: async (statusPayload, status) => {
-                const message = status === 'cancelled'
-                    ? 'Task was cancelled before the response reached the chat UI.'
-                    : 'Task failed before the response reached the chat UI.';
-                const delivered = deliverErrorResponseData(statusPayload, message);
+                const delivered = status === 'cancelled'
+                    ? deliverCancelledResponseData(statusPayload)
+                    : deliverErrorResponseData(
+                        statusPayload,
+                        'Task failed before the response reached the chat UI.'
+                    );
                 if (delivered) {
                     try {
                         request.abortController.abort();
@@ -32248,6 +32374,7 @@ async function handleSendPrompt(options = {}) {
             summary: failureSummary
         };
         retainGenerateFailureSummaryInLatestProgress(request, failureSummary);
+        applyImmediateThinkingTerminalOutcome(request);
         console.error('Error:', error);
         request.resultTurnId = `e-${Date.now()}`;
         if (isRequestVisible()) {
@@ -32265,11 +32392,14 @@ async function handleSendPrompt(options = {}) {
             }
         }
         if (request?.promptQueueRecordId) {
-            const terminalStatus = request.aborted
+            const outcomeStatus = canonicalThinkingTerminalStatus(request.turnOutcome?.status);
+            const terminalStatus = request.aborted || outcomeStatus === THINKING_STATUS_CANCELLED
                 ? CHAT_PROMPT_QUEUE_STATUS_CANCELLED
-                : (request.turnOutcome?.status === 'error'
+                : (
+                    outcomeStatus === THINKING_STATUS_FAILED || outcomeStatus === THINKING_STATUS_TERMINATED
                     ? CHAT_PROMPT_QUEUE_STATUS_FAILED
-                    : CHAT_PROMPT_QUEUE_STATUS_COMPLETED);
+                    : CHAT_PROMPT_QUEUE_STATUS_COMPLETED
+                );
             const terminalError = terminalStatus === CHAT_PROMPT_QUEUE_STATUS_FAILED
                 ? (request.turnOutcome?.summary || 'Prompt failed')
                 : null;
@@ -35094,6 +35224,7 @@ export function __testOnly_resetChatRequestState() {
     locallyHiddenChatPromptQueueEntryKeys.clear();
     activeChatRequest = null;
     lastFinishedThinkingCard = null;
+    newChatCreationInFlight = null;
     activeChatSessionId = null;
     activeChatSessionName = null;
     activeChatSessionOwnerId = null;
