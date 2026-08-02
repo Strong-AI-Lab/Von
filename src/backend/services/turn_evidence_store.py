@@ -34,6 +34,19 @@ _MAX_PROVENANCE_FIELDS = 20
 _MAX_PROVENANCE_STRING_CHARS = 300
 _MAX_QUERY_SNIPPET_CHARS = 240
 _MAX_QUERY_POINTER_CHARS = 500
+_MAX_SOURCE_DIAGNOSTIC_FIELDS = 32
+
+_SOURCE_DIAGNOSTIC_BOOLEAN_KEYS = (
+    "coverage_complete",
+    "counts_are_lower_bounds",
+    "has_more",
+)
+_SOURCE_DIAGNOSTIC_PAGINATION_KEYS = (
+    "next_offset",
+    "offset",
+    "limit",
+    "total",
+)
 
 
 def _clean_optional_text(value: Any) -> str | None:
@@ -81,10 +94,11 @@ class EvidenceEnvelope:
     preview_format: str
     preview_truncated: bool
     provenance: Mapping[str, Any]
+    source_diagnostics: Mapping[str, Any]
     available_selectors: tuple[str, ...]
 
     def to_mapping(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": EVIDENCE_ENVELOPE_SCHEMA_VERSION,
             "evidence_id": self.evidence_id,
             "tool_name": self.tool_name,
@@ -104,6 +118,9 @@ class EvidenceEnvelope:
             "provenance": copy.deepcopy(dict(self.provenance)),
             "available_selectors": list(self.available_selectors),
         }
+        if self.source_diagnostics:
+            result["source_diagnostics"] = copy.deepcopy(dict(self.source_diagnostics))
+        return result
 
 
 @dataclass(frozen=True)
@@ -229,6 +246,99 @@ def _compact_provenance(
     if omitted:
         compacted["_omitted_field_count"] = omitted
     return compacted
+
+
+def _compact_source_diagnostics(value: Any) -> dict[str, Any]:
+    """Project bounded source-level completeness and pagination diagnostics."""
+
+    if not isinstance(value, Mapping):
+        return {}
+
+    diagnostics: dict[str, Any] = {}
+    for key in _SOURCE_DIAGNOSTIC_BOOLEAN_KEYS:
+        raw_value = value.get(key)
+        if isinstance(raw_value, bool):
+            diagnostics[key] = raw_value
+
+    dynamic_fields: list[tuple[str, bool]] = []
+    for raw_key, raw_value in value.items():
+        key = str(raw_key)
+        if key in _SOURCE_DIAGNOSTIC_BOOLEAN_KEYS:
+            continue
+        if isinstance(raw_value, bool) and key.endswith(
+            (
+                "_coverage_complete",
+                "_counts_are_lower_bounds",
+                "_is_lower_bound",
+            )
+        ):
+            dynamic_fields.append((key[:_MAX_SHAPE_KEY_CHARS], raw_value))
+
+    for key in _SOURCE_DIAGNOSTIC_PAGINATION_KEYS:
+        if key not in value:
+            continue
+        raw_value = value[key]
+        if raw_value is None or (
+            isinstance(raw_value, int) and not isinstance(raw_value, bool)
+        ):
+            diagnostics[key] = raw_value
+
+    remaining = max(0, _MAX_SOURCE_DIAGNOSTIC_FIELDS - len(diagnostics))
+    selected_dynamic_fields = dynamic_fields[:remaining]
+    omitted = max(0, len(dynamic_fields) - len(selected_dynamic_fields))
+    if omitted and remaining:
+        selected_dynamic_fields = selected_dynamic_fields[: remaining - 1]
+        omitted = len(dynamic_fields) - len(selected_dynamic_fields)
+    diagnostics.update(dict(selected_dynamic_fields))
+    if omitted:
+        diagnostics["_omitted_source_diagnostic_field_count"] = omitted
+
+    paging = _compact_source_paging_diagnostics(value.get("paging"))
+    if paging:
+        diagnostics["paging"] = paging
+    return diagnostics
+
+
+def _compact_source_paging_diagnostics(value: Any) -> dict[str, Any]:
+    """Project recognised fields from one root ``paging`` result mapping."""
+
+    if not isinstance(value, Mapping):
+        return {}
+
+    diagnostics: dict[str, Any] = {}
+    for key in ("has_more", "counts_are_lower_bounds"):
+        raw_value = value.get(key)
+        if isinstance(raw_value, bool):
+            diagnostics[key] = raw_value
+
+    for key in (*_SOURCE_DIAGNOSTIC_PAGINATION_KEYS, "total_available"):
+        if key not in value:
+            continue
+        raw_value = value[key]
+        if raw_value is None or (
+            isinstance(raw_value, int) and not isinstance(raw_value, bool)
+        ):
+            diagnostics[key] = raw_value
+
+    lower_bound_fields = [
+        (str(raw_key)[:_MAX_SHAPE_KEY_CHARS], raw_value)
+        for raw_key, raw_value in value.items()
+        if isinstance(raw_value, bool)
+        and str(raw_key).endswith("_is_lower_bound")
+    ]
+    remaining = max(0, _MAX_SOURCE_DIAGNOSTIC_FIELDS - len(diagnostics))
+    selected_lower_bound_fields = lower_bound_fields[:remaining]
+    omitted = max(
+        0,
+        len(lower_bound_fields) - len(selected_lower_bound_fields),
+    )
+    if omitted and remaining:
+        selected_lower_bound_fields = selected_lower_bound_fields[: remaining - 1]
+        omitted = len(lower_bound_fields) - len(selected_lower_bound_fields)
+    diagnostics.update(dict(selected_lower_bound_fields))
+    if omitted:
+        diagnostics["_omitted_source_diagnostic_field_count"] = omitted
+    return diagnostics
 
 
 def _escape_json_pointer_token(value: Any) -> str:
@@ -431,6 +541,7 @@ class TurnEvidenceStore:
                 preview_format=preview_format,
                 preview_truncated=len(rendered) > len(preview),
                 provenance=_compact_provenance(provenance),
+                source_diagnostics=_compact_source_diagnostics(stored_value),
                 available_selectors=tuple(selectors),
             )
             self._records[evidence_id] = _StoredEvidence(
@@ -484,7 +595,7 @@ class TurnEvidenceStore:
     @staticmethod
     def _slice_metadata(record: _StoredEvidence) -> dict[str, Any]:
         envelope = record.envelope
-        return {
+        result = {
             "schema_version": EVIDENCE_SLICE_SCHEMA_VERSION,
             "success": True,
             "evidence_id": envelope.evidence_id,
@@ -497,6 +608,11 @@ class TurnEvidenceStore:
             "source_size_bytes": envelope.size_bytes,
             "provenance": copy.deepcopy(dict(envelope.provenance)),
         }
+        if envelope.source_diagnostics:
+            result["source_diagnostics"] = copy.deepcopy(
+                dict(envelope.source_diagnostics)
+            )
+        return result
 
     def _read_query(
         self,

@@ -182,6 +182,7 @@ def _compact_evidence_envelope(
     for key in (
         "schema_version",
         "evidence_id",
+        "source_diagnostics",
         "effect_status",
         "changed",
         "error_code",
@@ -226,10 +227,19 @@ def _compact_evidence_envelope(
     remaining = max(0, int(max_bytes) - len(_json_bytes(compact)) - 32)
     preview_limit = min(max(0, int(preview_max_chars)), remaining)
     if preview_limit > 0:
-        compact["preview"] = preview[:preview_limit]
-        compact["preview_truncated"] = bool(
-            envelope.get("preview_truncated") or len(preview) > preview_limit
-        )
+        while preview_limit > 0:
+            candidate = {
+                **compact,
+                "preview": preview[:preview_limit],
+                "preview_truncated": bool(
+                    envelope.get("preview_truncated") or len(preview) > preview_limit
+                ),
+            }
+            overflow = len(_json_bytes(candidate)) - int(max_bytes)
+            if overflow <= 0:
+                compact = candidate
+                break
+            preview_limit = max(0, preview_limit - overflow)
     return compact
 
 
