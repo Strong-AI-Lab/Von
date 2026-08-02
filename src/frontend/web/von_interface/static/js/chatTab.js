@@ -132,6 +132,7 @@ let totalHistorySegments = 1;
 let activeChatSessionId = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
+let chatSessionSelectionGeneration = 0;
 let newChatCreationInFlight = null;
 let sessionTabsCache = [];
 let displayedHistorySessionId = null;
@@ -22380,6 +22381,7 @@ function setActiveChatSession(sessionId, sessionName) {
     activeChatSessionOwnerId = null;
 
     if (previousSessionId !== activeChatSessionId) {
+        chatSessionSelectionGeneration += 1;
         synchroniseLlmExecutionContext({ reason: 'conversation_session_changed' });
         if (activeChatSessionId) {
             if (conversationSituationStateBySession.has(activeChatSessionId)) {
@@ -23957,6 +23959,7 @@ async function refreshChatSessionTabs() {
     if (!container) {
         return;
     }
+    const selectionGenerationAtStart = chatSessionSelectionGeneration;
     await _ensureInviteSessionContext();
 
     const hasCachedTabs = Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0;
@@ -24031,6 +24034,17 @@ async function refreshChatSessionTabs() {
                 renderChatSessionTabsPlaceholder('error');
                 setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
             }
+            return;
+        }
+
+        // A refresh can begin before an explicit session change and return after it.
+        // Never let that stale response erase a chat that was just selected or created.
+        if (chatSessionSelectionGeneration !== selectionGenerationAtStart) {
+            if (Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+                renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+                container.hidden = false;
+            }
+            setTimeout(() => scheduleChatSessionTabsRefresh(true), 0);
             return;
         }
 
@@ -25113,6 +25127,15 @@ async function switchToChatSession(sessionId) {
     });
 
     setActiveChatSession(sid, cachedSession?.session_name);
+    const selectionGeneration = chatSessionSelectionGeneration;
+    const isCurrentSelection = () => (
+        chatSessionSelectionGeneration === selectionGeneration
+        && activeChatSessionId === sid
+    );
+    const finishSupersededSwitch = () => {
+        setChatSessionTabLoading(sid, false);
+        return { ok: false, superseded: true };
+    };
     clearSharedSessionUnread(sid);
     clearLatestUnreadBoundary();
     hideNewSharedMessagesIndicator();
@@ -25135,6 +25158,8 @@ async function switchToChatSession(sessionId) {
     }
 
     scrollableField.innerHTML = '<div class="chat-session-loading">Switching chat…</div>';
+    transcriptTurns.length = 0;
+    clearLlmDebugDataEntries();
     displayedHistorySessionId = null;
     clearHistoryLoadState();
     historySegmentsShown = 0;
@@ -25154,6 +25179,9 @@ async function switchToChatSession(sessionId) {
                 body: JSON.stringify({ session_id: sid, include_history: false })
             });
             data = await response.json().catch(() => ({}));
+            if (!isCurrentSelection()) {
+                return finishSupersededSwitch();
+            }
             setSessionMs = Math.round(performance.now() - setSessionStart);
             console.log('[chatTab] switchToChatSession set_chat_session', {
                 ok: response.ok,
@@ -25172,6 +25200,9 @@ async function switchToChatSession(sessionId) {
                 break;
             }
             await new Promise((resolve) => setTimeout(resolve, 320));
+            if (!isCurrentSelection()) {
+                return finishSupersededSwitch();
+            }
         }
 
         if (!response) {
@@ -25201,6 +25232,11 @@ async function switchToChatSession(sessionId) {
                 forceScrollToBottom: true
             });
             return { ok: false, error: msg };
+        }
+
+        const responseSessionId = normaliseHistorySessionId(data?.session_id);
+        if (responseSessionId !== sid) {
+            throw new Error('Conversation switch response did not match the selected session.');
         }
 
         setActiveChatSession(data?.session_id, data?.session_name);
@@ -25236,6 +25272,9 @@ async function switchToChatSession(sessionId) {
                 showResetNotice: false,
                 forceScrollToBottom: true
             });
+            if (!isCurrentSelection()) {
+                return finishSupersededSwitch();
+            }
             const recentMs = Math.round(performance.now() - recentStart);
             console.log('[chatTab] switchToChatSession recent pair', {
                 loaded,
@@ -25247,7 +25286,7 @@ async function switchToChatSession(sessionId) {
             }
 
             setTimeout(() => {
-                if (activeChatSessionId !== sid) {
+                if (!isCurrentSelection()) {
                     setChatSessionTabLoading(sid, false);
                     return;
                 }
@@ -25259,7 +25298,7 @@ async function switchToChatSession(sessionId) {
                     showResetNotice: false
                 });
                 backfillPromise.finally(() => {
-                    if (activeChatSessionId === sid) {
+                    if (isCurrentSelection()) {
                         setChatSessionTabLoading(sid, false);
                     }
                 });
@@ -25285,6 +25324,9 @@ async function switchToChatSession(sessionId) {
         });
         return { ok: true, data };
     } catch (err) {
+        if (!isCurrentSelection()) {
+            return finishSupersededSwitch();
+        }
         console.error('Error switching chat session:', err);
         setActiveChatSession(previousSessionId, previousSessionName);
         if (sessionTabsCache.length > 0) {
@@ -31768,17 +31810,10 @@ async function sendQueuedChatPromptEntryAtIndex(nextIndex) {
         return;
     }
 
-    const targetSessionId = normaliseHistorySessionId(nextEntry.sessionId);
-    if (targetSessionId && targetSessionId !== activeChatSessionId) {
-        const switchResult = await switchToChatSession(targetSessionId);
-        if (!switchResult?.ok) {
-            nextEntry.syncError = switchResult?.error || 'Could not show this queued task conversation.';
-            renderChatTaskQueuePanel();
-            refreshChatSessionTabActivityIndicators();
-            updateSendButtonForCurrentChatState();
-            return;
-        }
-    }
+    // A queued turn is bound to its originating conversation, but executing it
+    // must not navigate the user away from the conversation they are currently
+    // reading. `handleSendPrompt` accepts the explicit target session and keeps
+    // all live/result rendering scoped to that session.
 
     if (nextEntry.queueId) {
         try {

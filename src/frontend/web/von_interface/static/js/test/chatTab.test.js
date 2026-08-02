@@ -4031,7 +4031,7 @@ describe('thinking activity history normalisation', () => {
             }
         ]);
 
-        expect(entriesHtml).toContain('Prompt (truncated)');
+        expect(entriesHtml).toContain('Prompt (14 chars, truncated)');
         expect(entriesHtml).toContain('Response (truncated)');
     });
 
@@ -7899,6 +7899,156 @@ describe('chat session composer state', () => {
         delete global.fetch;
     });
 
+    test('a late prior switch cannot replace a canonical empty selected session', async () => {
+        jest.useFakeTimers();
+        try {
+            const staleSessionId = 'session-stale-populated';
+            const emptySessionId = 'session-canonical-empty';
+            const ok = (data) => ({
+                ok: true,
+                status: 200,
+                json: async () => data
+            });
+            const carrier = (history, situation = null) => ({
+                history,
+                segments_returned: history.length > 0 ? 1 : 0,
+                total_segments: history.length > 0 ? 1 : 0,
+                has_more_history: false,
+                conversation_situation: situation,
+                conversation_observations: [],
+                conversation_observation_state: {
+                    schema_version: 'conversation_observation_state.v1',
+                    retained_count: 0,
+                    total_count: 0,
+                    omitted_count: 0,
+                    retention_limit: 12
+                }
+            });
+
+            __testOnly_resetHistoryUiState();
+            __testOnly_setActiveChatSession('session-origin', 'Origin');
+            __testOnly_setSessionTabsCache([
+                {
+                    session_id: staleSessionId,
+                    session_name: 'Populated',
+                    message_count: 2,
+                    last_message_at: '2026-08-01T20:00:00Z'
+                },
+                {
+                    session_id: emptySessionId,
+                    session_name: 'Empty',
+                    message_count: 0,
+                    last_message_at: '2026-08-01T20:01:00Z'
+                }
+            ]);
+            __testOnly_setTranscriptTurns([
+                { role: 'user', sender: 'User', message: 'STALE POPULATED TRANSCRIPT' }
+            ]);
+            document.getElementById('scrollableField').innerHTML =
+                '<div class="message-container user-turn">STALE POPULATED TRANSCRIPT</div>';
+
+            let releaseStaleSetSession;
+            const historyUrls = [];
+
+            global.fetch = jest.fn((url, options = {}) => {
+                if (
+                    typeof url === 'string'
+                    && url.startsWith('/von/api/session/set_chat_session')
+                ) {
+                    const body = JSON.parse(options.body || '{}');
+                    const response = ok({
+                        session_id: body.session_id,
+                        session_name: body.session_id === emptySessionId
+                            ? 'Empty'
+                            : 'Populated'
+                    });
+                    if (body.session_id === staleSessionId) {
+                        return new Promise((resolve) => {
+                            releaseStaleSetSession = () => resolve(response);
+                        });
+                    }
+                    return Promise.resolve(response);
+                }
+
+                if (
+                    typeof url === 'string'
+                    && url.startsWith('/von/api/session/chat_session_links')
+                ) {
+                    return Promise.resolve(ok({ session_links: {} }));
+                }
+
+                if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                    historyUrls.push(url);
+                    const sid = new URL(url, 'http://von.test')
+                        .searchParams.get('session_id');
+                    if (sid === staleSessionId) {
+                        return Promise.resolve(ok(carrier([
+                            {
+                                role: 'user',
+                                content: 'STALE POPULATED TRANSCRIPT',
+                                timestamp: '2026-08-01T20:00:00Z'
+                            }
+                        ], {
+                            text: 'Stale populated situation.',
+                            revision: 1,
+                            source: 'adaptive_turn'
+                        })));
+                    }
+                    return Promise.resolve(ok(carrier([])));
+                }
+
+                if (
+                    typeof url === 'string'
+                    && url.startsWith('/von/api/session/context')
+                ) {
+                    return Promise.resolve(ok({
+                        user_id: 'user',
+                        organisation_id: 'org',
+                        namespace: 'user@org'
+                    }));
+                }
+
+                return Promise.resolve(ok({ sessions: [] }));
+            });
+
+            const staleSwitch = switchToChatSession(staleSessionId);
+            expect(typeof releaseStaleSetSession).toBe('function');
+
+            await expect(switchToChatSession(emptySessionId)).resolves.toEqual(
+                expect.objectContaining({ ok: true })
+            );
+
+            let activeCarrier = __testOnly_buildConversationSituationExportPayload();
+            expect(activeCarrier.session_id).toBe(emptySessionId);
+            expect(activeCarrier.availability).toBe('ready');
+            expect(activeCarrier.conversation_situation).toBeNull();
+            expect(__testOnly_getConversationTranscriptTurnsSnapshot()).toEqual([]);
+            expect(document.getElementById('scrollableField').textContent)
+                .not.toContain('STALE POPULATED TRANSCRIPT');
+
+            releaseStaleSetSession();
+            await expect(staleSwitch).resolves.toEqual(
+                expect.objectContaining({ ok: false, superseded: true })
+            );
+
+            activeCarrier = __testOnly_buildConversationSituationExportPayload();
+            expect(activeCarrier.session_id).toBe(emptySessionId);
+            expect(activeCarrier.conversation_situation).toBeNull();
+            expect(__testOnly_getConversationTranscriptTurnsSnapshot()).toEqual([]);
+            expect(document.getElementById('scrollableField').textContent)
+                .not.toContain('STALE POPULATED TRANSCRIPT');
+            expect(
+                document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId
+            ).toBe(emptySessionId);
+            expect(
+                historyUrls.filter((url) => url.includes(`session_id=${staleSessionId}`))
+            ).toHaveLength(0);
+        } finally {
+            jest.clearAllTimers();
+            jest.useRealTimers();
+        }
+    });
+
     test('switching chat sessions keeps the originating request running in the background', async () => {
         const promptInput = document.getElementById('promptInput');
         initializePromptCartoucheOverlay(promptInput);
@@ -8092,6 +8242,8 @@ describe('chat session composer state', () => {
         expect(generateBodies).toHaveLength(2);
         expect(generateBodies[0].conversation_session_id).toBe('session-1');
         expect(generateBodies[1].conversation_session_id).toBe('session-2');
+        expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
+            .toBe('session-1');
         expect(document.getElementById('scrollableField').textContent).not.toContain('queued for session 2');
     });
 
@@ -8147,17 +8299,36 @@ describe('chat session composer state', () => {
         const createBodies = [];
         let created = false;
         let resolveCreate;
+        let resolveStaleHistoryRefresh;
+        let historyRequestCount = 0;
         const createResponse = new Promise((resolve) => {
             resolveCreate = resolve;
         });
+        const staleHistoryRefreshResponse = new Promise((resolve) => {
+            resolveStaleHistoryRefresh = resolve;
+        });
         global.fetch = jest.fn((url, options = {}) => {
             if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
-                const sessions = [{
-                    session_id: created ? 'session-new' : 'session-current',
-                    session_name: created ? 'Chat 2026-04-13 18:30' : 'Current chat',
-                    message_count: created ? 0 : 2,
-                    last_message_at: created ? '2026-04-13T18:30:00Z' : '2026-04-13T05:00:00Z'
-                }];
+                historyRequestCount += 1;
+                if (historyRequestCount === 2) {
+                    return staleHistoryRefreshResponse;
+                }
+                const sessions = [
+                    {
+                        session_id: 'session-current',
+                        session_name: 'Current chat',
+                        message_count: 2,
+                        last_message_at: '2026-04-13T05:00:00Z'
+                    }
+                ];
+                if (created) {
+                    sessions.unshift({
+                        session_id: 'session-new',
+                        session_name: 'Chat 2026-04-13 18:30',
+                        message_count: 0,
+                        last_message_at: '2026-04-13T18:30:00Z'
+                    });
+                }
                 return Promise.resolve({
                     ok: true,
                     json: async () => ({
@@ -8181,6 +8352,11 @@ describe('chat session composer state', () => {
         });
 
         await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+        const staleRefresh = __testOnly_refreshChatSessionTabs();
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(historyRequestCount).toBe(2);
         const promptSpy = jest.spyOn(window, 'prompt').mockImplementation(() => 'should not be used');
         const alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => {});
         const newChatButton = document.querySelector('.chat-session-tab-new');
@@ -8201,6 +8377,23 @@ describe('chat session composer state', () => {
                 history: []
             })
         });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await Promise.resolve();
+
+        resolveStaleHistoryRefresh({
+            ok: true,
+            json: async () => ({
+                authenticated: true,
+                active_session_id: 'session-current',
+                sessions: [{
+                    session_id: 'session-current',
+                    session_name: 'Current chat',
+                    message_count: 2,
+                    last_message_at: '2026-04-13T05:00:00Z'
+                }]
+            })
+        });
+        await expect(staleRefresh).resolves.toBeUndefined();
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(promptInput.value).toBe('Move this draft into a new conversation');

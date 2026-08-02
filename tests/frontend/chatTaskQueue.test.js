@@ -382,7 +382,7 @@ describe('chat task queue', () => {
         expect(fetchCalls.some((call) => String(call.url).includes('/queue-2/claim'))).toBe(true);
     }, 15000);
 
-    test('switches to the queued prompt session before starting an off-session selected prompt', async () => {
+    test('starts an off-session selected prompt without switching the visible conversation', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const {
             __testOnly_refreshChatPromptQueueFromServer,
@@ -535,12 +535,13 @@ describe('chat task queue', () => {
             String(call.url) === '/von/api/chat_prompt_queue/queue-off-session/claim'
         ));
         const generateIndex = fetchCalls.findIndex((call) => String(call.url).startsWith('/von/generate'));
-        expect(setSessionIndex).toBeGreaterThanOrEqual(0);
-        expect(claimIndex).toBeGreaterThan(setSessionIndex);
-        expect(generateIndex).toBeGreaterThan(setSessionIndex);
+        expect(setSessionIndex).toBe(-1);
+        expect(claimIndex).toBeGreaterThanOrEqual(0);
+        expect(generateIndex).toBeGreaterThan(claimIndex);
         expect(generateBodies[0].conversation_session_id).toBe('session-2');
-        expect(document.getElementById('scrollableField')?.textContent).toContain('Off-session selected queued');
-        expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden')).toBe('false');
+        expect(document.getElementById('scrollableField')?.textContent)
+            .not.toContain('Off-session selected queued');
+        expect(document.getElementById('thinkingCardWrapper')?.getAttribute('aria-hidden')).toBe('true');
 
         expect(resolveGenerate).toBeTruthy();
         resolveGenerate();
