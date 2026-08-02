@@ -114,6 +114,7 @@ from `AGENTS.md`.
 | [Frontend browser validation](engineering/frontend_browser_user_view_validation.md) | Active practical guide | Risk-tiered reference; browser evidence needs a dated locator when used |
 | [Real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md) | Active practical guide | Risk-tiered protocol; exact-path evidence outranks prose, but full protocol is not universal |
 | [Operational engineering guide](engineering/operational_engineering_guide.md) | Active companion runbook | Consult by operational need and revalidate host/tool-specific details |
+| [Atlas egress reconciler](engineering/atlas_egress_reconciler_runbook.md) | Active bounded operational runbook | Use for the standalone mobile-client/DGX database access-list reconciler; revalidate Atlas API policy and credentials live |
 | [Authority-alignment scan](engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md) | Active companion guide | Advisory structural review procedure under `AGENTS.md` |
 
 ## 6. Programme direction and current synthesis
