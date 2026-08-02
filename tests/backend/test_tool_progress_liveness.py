@@ -953,6 +953,72 @@ def test_tool_summary_survives_a_long_heartbeat_tail(monkeypatch) -> None:
     assert tool_history[0]["resultSummary"] == "One evidence item read."
 
 
+def test_relation_start_and_end_collapse_to_one_human_tool_row(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=5600.0)
+    scope_key = "scope-semantic-relation"
+    request_id = "req-semantic-relation"
+    call_id = "call-semantic-relation"
+    running_summary = (
+        "Add Relationship: Subject: Nathan Young Doctoral Candidature Situation; "
+        "Relation: Has Doctoral Supervisor; Object: Robert Amor (in progress)."
+    )
+    terminal_summary = (
+        "Add Relationship confirmed no change was needed: "
+        "Subject: Nathan Young Doctoral Candidature Situation; "
+        "Relation: Has Doctoral Supervisor; Object: Robert Amor."
+    )
+
+    von_routes._set_tool_progress(
+        scope_key,
+        request_id,
+        {
+            "status": "tool_call_start",
+            "event_kind": "tool_call_start",
+            "phase": "adaptive_research",
+            "tool": "add_relationship",
+            "call_id": call_id,
+            "result_summary": running_summary,
+            "request_id": request_id,
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        scope_key,
+        request_id,
+        {
+            "status": "tool_completed",
+            "event_kind": "tool_call_end",
+            "phase": "adaptive_research",
+            "tool": "add_relationship",
+            "call_id": call_id,
+            "success": True,
+            "result_summary": terminal_summary,
+            "request_id": request_id,
+        },
+    )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        scope_key,
+        request_id,
+    )
+    assert snapshot is not None
+    assert snapshot["result_summary"] == terminal_summary
+    assert snapshot["tool_call_count"] == 1
+    assert snapshot["tool_success_count"] == 1
+    assert snapshot["tool_pending_count"] == 0
+    assert snapshot["tool_history"] == [
+        {
+            "tool": "add_relationship",
+            "workflowTask": "",
+            "batchSize": None,
+            "phase": "adaptive_research",
+            "resultSummary": terminal_summary,
+            "success": True,
+            "callId": call_id,
+        }
+    ]
+
+
 def test_serialisation_exposes_a_bounded_timing_trace(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=6000.0)
     von_routes._set_tool_progress(

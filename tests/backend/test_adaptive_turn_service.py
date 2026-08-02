@@ -4882,6 +4882,88 @@ def test_effect_batch_preserves_order_and_read_can_observe_prior_effect(
     ) >= 0
 
 
+def test_relation_progress_emits_one_human_start_and_terminal_summary(
+    monkeypatch,
+) -> None:
+    from src.backend.services import adaptive_turn_service
+
+    progress_events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        adaptive_turn_service,
+        "_effect_subject_authorised",
+        lambda *_args, **_kwargs: True,
+    )
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="robert-amor-supervision",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": (
+                                "#V#nathan_young_doctoral_candidature_situation"
+                            ),
+                            "predicate": "#V#has_doctoral_supervisor",
+                            "target": "#V#robert_amor",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="That supervision relationship was already known."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            lambda _name, _arguments: {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": False,
+            }
+        ),
+        prompt="Re-assert the existing Robert Amor supervision relationship.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="semantic-relation-progress",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event)),
+            check_cancellation=lambda: None,
+        ),
+    )
+
+    relation_events = [
+        event
+        for event in progress_events
+        if event.get("call_id") == "robert-amor-supervision"
+    ]
+    assert [event["event_kind"] for event in relation_events] == [
+        "tool_call_start",
+        "tool_call_end",
+    ]
+    assert relation_events[0]["result_summary"] == (
+        "Add Relationship: Subject: Nathan Young Doctoral Candidature Situation; "
+        "Relation: Has Doctoral Supervisor; Object: Robert Amor (in progress)."
+    )
+    assert relation_events[1]["success"] is True
+    assert relation_events[1]["result_summary"] == (
+        "Add Relationship confirmed no change was needed: "
+        "Subject: Nathan Young Doctoral Candidature Situation; "
+        "Relation: Has Doctoral Supervisor; Object: Robert Amor."
+    )
+    assert "semantic_operation" not in relation_events[0]
+    assert result.tool_invocations[0]["changed"] is False
+
+
 def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> None:
     seen_cases: list[str] = []
     progress_events: list[dict[str, Any]] = []
@@ -4971,6 +5053,7 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
         and event.get("call_id") == "effect-partial"
     )
     assert partial_progress["success"] is False
+    assert not partial_progress["result_summary"].startswith("Finished ")
 
 
 def test_partial_effect_downgrades_nominal_model_completion() -> None:

@@ -44,6 +44,9 @@ from src.backend.services.turn_evidence_store import (
     TrustedTurnScope,
     TurnEvidenceStore,
 )
+from src.backend.services.thinking_semantic_projection_service import (
+    build_semantic_operation_projection,
+)
 
 _CAPABILITY_TOOL_NAME = "turn_capabilities"
 _INVOKE_TOOL_NAME = "turn_invoke_capability"
@@ -4748,6 +4751,27 @@ def execute_adaptive_turn(
                         )
                     return index, contained(denial_payload)
             try:
+                semantic_operation = build_semantic_operation_projection(
+                    operation_id=call.call_id,
+                    capability_name=canonical_name,
+                    execution_method=execution_method_name,
+                    capability_kind=item.capability_kind,
+                    arguments=arguments,
+                    lifecycle_status="running",
+                )
+                _emit(
+                    progress_tracker,
+                    {
+                        "status": "tool_call_start",
+                        "event_kind": "tool_call_start",
+                        "stage": "adaptive_research",
+                        "phase": "adaptive_research",
+                        "tool": canonical_name,
+                        "execution_method": execution_method_name,
+                        "call_id": call.call_id,
+                        "result_summary": semantic_operation["summary"],
+                    },
+                )
                 with override_current_actor(
                     scope.user_concept_id,
                     scope.organisation_concept_id,
@@ -5260,28 +5284,43 @@ def execute_adaptive_turn(
                     }
                 )
                 tool_invocations.append(invocation)
+                semantic_result = {
+                    **dict(envelope_payload),
+                    **(
+                        dict(raw_payload)
+                        if isinstance(raw_payload, Mapping)
+                        else {}
+                    ),
+                    **(
+                        {"result_target_ids": result_target_ids}
+                        if result_target_ids
+                        else {}
+                    ),
+                }
+                semantic_operation = build_semantic_operation_projection(
+                    operation_id=call.call_id,
+                    capability_name=canonical_name,
+                    execution_method=execution_method_name,
+                    capability_kind=contained_result.capability_kind,
+                    arguments=arguments,
+                    lifecycle_status=(
+                        effect_status or ("succeeded" if status == "ok" else "failed")
+                    ),
+                    success=status == "ok",
+                    result=semantic_result,
+                )
                 _emit(
                     progress_tracker,
                     {
                         "status": "tool_completed",
+                        "event_kind": "tool_call_end",
                         "stage": "adaptive_research",
                         "phase": "adaptive_research",
                         "tool": canonical_name,
                         "execution_method": execution_method_name,
                         "call_id": call.call_id,
                         "success": status == "ok",
-                        "result_summary": (
-                            (
-                                f"Effect {effect_identifier} completed with "
-                                f"status {effect_status}; evidence recorded as "
-                                f"{envelope_payload.get('evidence_id')}."
-                            )
-                            if is_effect
-                            else (
-                                f"Read evidence recorded as "
-                                f"{envelope_payload.get('evidence_id')}."
-                            )
-                        ),
+                        "result_summary": semantic_operation["summary"],
                     },
                 )
 
