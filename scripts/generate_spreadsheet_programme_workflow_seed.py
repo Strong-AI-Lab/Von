@@ -1528,7 +1528,7 @@ def main_workflow() -> dict[str, object]:
                 {
                     "schema_version": "workflow_routing_profile.v1",
                     "role": "execution",
-                    "routing_eligible": True,
+                    "routing_eligible": False,
                     "authoring_intent_required": False,
                     "prefer_existing_capability": False,
                 },
@@ -1561,7 +1561,11 @@ def main_workflow() -> dict[str, object]:
             ),
             text_relation(
                 "#V#hasWorkflowLifecycleJson",
-                lifecycle("JVNAUTOSCI-2592 represented spreadsheet capability"),
+                lifecycle(
+                    "Explicit-only JVNAUTOSCI-2592 PhD batch-import preset; "
+                    "ordinary spreadsheet representation is composed at runtime",
+                    routing_eligible=False,
+                ),
             ),
             text_relation(
                 "#V#hasWorkflowTerminalSuccessContractJson", terminal_contract()
@@ -1606,7 +1610,7 @@ def build_bundle() -> dict[str, object]:
     return {
         "family_id": "spreadsheet_programme_representation_workflow_seed_bundle",
         "schema_version": "repo_seed_workflow_bundle.v1",
-        "seed_version": "21",
+        "seed_version": "22",
         "source_tag": "JVNAUTOSCI-2592",
         "managed_by": "spreadsheet_programme_workflow_vontology_service",
         "known_legacy_authority_payload_sha256_by_seed_version": (
