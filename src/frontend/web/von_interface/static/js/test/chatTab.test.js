@@ -3155,6 +3155,44 @@ describe('thinking activity history normalisation', () => {
         expect(fallbackHtml).toContain('Fetched');
     });
 
+    test('renders a semantic relation summary in Default thinking without raw receipts', () => {
+        const resultSummary = 'Add Relationship confirmed no change was needed: '
+            + 'Subject: Nathan Young Doctoral Candidature Situation; '
+            + 'Relation: Has Doctoral Supervisor; Object: Robert Amor.';
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            promptRaw: 'Re-assert the existing supervision relationship.',
+            thinkingStartedAtMs: Date.now() - 1000,
+            latestProgress: {
+                status: 'tool_completed',
+                stage: 'adaptive_research',
+                result_summary: resultSummary,
+                tool_history: [{
+                    tool: 'add_relationship',
+                    workflowTask: '',
+                    batchSize: null,
+                    phase: 'adaptive_research',
+                    resultSummary,
+                    success: true,
+                    callId: 'call-semantic-relation'
+                }],
+                tool_call_count: 1,
+                tool_success_count: 1,
+                tool_failure_count: 0,
+                tool_pending_count: 0
+            }
+        }, { mode: 'default' });
+
+        expect(html).toContain('Nathan Young Doctoral Candidature Situation');
+        expect(html).toContain('Subject:');
+        expect(html).toContain('Relation:');
+        expect(html).toContain('Object:');
+        expect(html).toContain('Has Doctoral Supervisor');
+        expect(html).toContain('Robert Amor');
+        expect(html).toContain('no change was needed');
+        expect(html).not.toContain('effect_');
+        expect((html.match(/<div class="thinking-card-tool">/g) || [])).toHaveLength(1);
+    });
+
     test('prefers canonical latest progress tool history over stale local tool history', () => {
         const request = {
             toolUseProgressHistory: [{
