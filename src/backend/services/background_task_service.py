@@ -201,7 +201,7 @@ class BackgroundTaskRegistry:
                         task_status = self._tasks.get(task_id)
                         if (
                             task_status
-                            and task_status.status == "cancelled"
+                            and _is_active_status(task_status.status)
                             and task_status.cancellation_requested
                         ):
                             raise CancellationRequested(task_id=task_id)
@@ -351,6 +351,20 @@ class BackgroundTaskRegistry:
             status = self._tasks.get(task_id)
             if status is None or not _is_active_status(status.status):
                 return False
+            if status.cancellation_requested:
+                prior_activity_status = progress_payload.get("status")
+                if prior_activity_status not in (None, "cancellation_requested"):
+                    progress_payload["activity_status_before_stop"] = (
+                        prior_activity_status
+                    )
+                progress_payload.update(
+                    {
+                        "status": "cancellation_requested",
+                        "phase": "cancelling",
+                        "phase_label": "Stopping",
+                        "result_summary": "Stop requested.",
+                    }
+                )
             status.progress = progress_payload
             _append_progress_history(status, progress_payload)
             return True
@@ -382,8 +396,10 @@ class BackgroundTaskRegistry:
     def request_cancellation(self, task_id: str) -> bool:
         """Request cancellation of a running task.
 
-        This sets a flag that the task implementation can check.
-        Actual cancellation depends on the task cooperating.
+        This sets a flag that the task implementation can check.  Requesting
+        cancellation is deliberately nonterminal: the task remains active
+        until its worker observes the request and raises
+        ``CancellationRequested``, or completes first.
 
         Args:
             task_id: The task identifier.
@@ -398,25 +414,18 @@ class BackgroundTaskRegistry:
             if status.status not in ("pending", "running"):
                 return False
             status.cancellation_requested = True
-            status.status = "cancelled"
-            if status.started_at is None:
-                status.started_at = datetime.now(timezone.utc)
-            status.completed_at = datetime.now(timezone.utc)
-            status.error = f"Cancellation requested for task {task_id}"
             progress_payload = dict(status.progress)
             progress_payload.update(
                 {
-                    "status": "cancelled",
-                    "phase": "cancelled",
-                    "phase_label": "Cancelled",
-                    "result_summary": (
-                        "Cancellation requested for the background generate task."
-                    ),
+                    "status": "cancellation_requested",
+                    "phase": "cancelling",
+                    "phase_label": "Stopping",
+                    "result_summary": "Stop requested.",
                 }
             )
             status.progress = progress_payload
             _append_progress_history(status, progress_payload)
-            _logger.info("[background_task] Task %s marked cancelled", task_id)
+            _logger.info("[background_task] Cancellation requested for %s", task_id)
             return True
 
     def is_cancellation_requested(self, task_id: str) -> bool:

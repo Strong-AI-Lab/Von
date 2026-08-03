@@ -1855,6 +1855,20 @@ _CONVERSATION_OBSERVATION_STRING_FIELDS = frozenset(
         "final_state",
         "completed_at",
         "execution_trace_id",
+        "activity_id",
+        "activity_status",
+        "milestone",
+        "objective",
+        "originated_at_utc",
+        "progress_message",
+        "progress_summary",
+    }
+)
+
+_CONVERSATION_OBSERVATION_INTEGER_FIELDS = frozenset(
+    {
+        "progress_current",
+        "progress_total",
     }
 )
 
@@ -1926,6 +1940,18 @@ def _normalise_conversation_observation(
         elif boolean_value is not None and strict:
             raise ChatHistoryServiceError(
                 f"observation.{boolean_field} must be a boolean."
+            )
+    for integer_field in _CONVERSATION_OBSERVATION_INTEGER_FIELDS:
+        integer_value = value.get(integer_field)
+        if (
+            isinstance(integer_value, int)
+            and not isinstance(integer_value, bool)
+            and integer_value >= 0
+        ):
+            normalised[integer_field] = integer_value
+        elif integer_value is not None and strict:
+            raise ChatHistoryServiceError(
+                f"observation.{integer_field} must be a non-negative integer."
             )
     return normalised
 

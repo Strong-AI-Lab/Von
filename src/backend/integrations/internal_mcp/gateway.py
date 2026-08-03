@@ -108,6 +108,9 @@ class MethodDefinition:
     # prevents a generic maximum from starving normally fast later effects.
     # Omission retains the conservative full-hard-window requirement.
     effect_admission_window_sec: float | None = None
+    # Opt-in only when the handler observes the transport cancellation event at
+    # safe semantic boundaries and returns a truthful partial receipt.
+    supports_cooperative_cancellation: bool = False
     # Existing concepts may be changed only when this authoritative forward
     # subject is scoped to the trusted actor or organisation. Creation effects
     # leave this unset because their scope is fixed server-side.
@@ -228,6 +231,9 @@ class MethodCatalogue:
             name: {
                 "category": definition.category,
                 "timeout_sec": definition.timeout_sec,
+                "supports_cooperative_cancellation": (
+                    definition.supports_cooperative_cancellation
+                ),
                 "has_output_schema": definition.output_schema is not None,
                 "description": definition.description,
                 "write_guardrail": (
@@ -376,12 +382,24 @@ class InternalMCPGateway:
         deadline_monotonic: float | None = None,
         require_effect_admission_window: bool = False,
         late_completion_observer: LateCompletionObserver | None = None,
+        deadline_policy: str = "terminal",
+        cancellation_checker: Callable[[], bool] | None = None,
+        attention_threshold_observer: Callable[[Dict[str, Any]], None] | None = None,
     ) -> TransportResult:
         if not self._enabled:
             raise GatewayDisabledError("Internal MCP gateway is disabled.")
 
         payload_dict: MutableMapping[str, Any] = dict(payload or {})
         definition = self._catalogue.get(method_name)
+        if (
+            str(deadline_policy or "terminal").strip().lower()
+            == "attention_only"
+            and not definition.supports_cooperative_cancellation
+        ):
+            raise ValueError(
+                f"Internal MCP method '{method_name}' does not support "
+                "cooperative attention-only execution."
+            )
         self.register_metrics_if_missing(method_name)
 
         payload_dict, alias_warnings = normalise_payload_aliases(
@@ -560,6 +578,11 @@ class InternalMCPGateway:
                         minimum_execution_window_sec=minimum_execution_window,
                         log_tag=self._log_tag,
                         late_completion_observer=observed_late_completion,
+                        deadline_policy=deadline_policy,
+                        cancellation_checker=cancellation_checker,
+                        attention_threshold_observer=(
+                            attention_threshold_observer
+                        ),
                     )
             finally:
                 _PREEXISTING_ACTOR_CONTEXT.reset(preexisting_actor_token)
@@ -689,6 +712,15 @@ class InternalMCPGateway:
             definition.resolved_timeout(self._transport)
             if definition is not None
             else None
+        )
+
+    def method_supports_cooperative_cancellation(self, method_name: str) -> bool:
+        """Return whether one handler has explicit safe cancellation points."""
+
+        definition = self.get_method_definition(method_name)
+        return bool(
+            definition is not None
+            and definition.supports_cooperative_cancellation
         )
 
     def get_method_effect_admission_window_sec(

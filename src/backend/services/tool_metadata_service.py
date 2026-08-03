@@ -1327,6 +1327,7 @@ _DEFAULT_VERIFICATION_READ_TOOL_NAMES = {
     "get_team_members",
     "get_teams",
     "get_text_relations",
+    "get_text_relations_batch",
     "get_text_relations_summary",
     "get_tree",
     "issue_read",

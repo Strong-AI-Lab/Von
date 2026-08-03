@@ -62,6 +62,7 @@ _DEFAULT_FINAL_RESERVE_SECONDS = 30.0
 # for experiments that need the full evidence-capable synthesis interval.
 _DEFAULT_FINAL_ANSWER_RESERVE_SECONDS = 5.0
 _DEFAULT_OUTER_TOOL_WORKERS = 8
+_DURABLE_ACTIVITY_POLL_INTERVAL_SECONDS = 0.5
 _MODEL_EVIDENCE_INDEX_MAX_BYTES = 24_000
 _MODEL_TOOL_RESULT_BATCH_MAX_BYTES = 24_000
 _MODEL_EVIDENCE_PREVIEW_MAX_CHARS = 240
@@ -1536,7 +1537,7 @@ def _scope_message(
     delegated_count: int,
     final_synthesis: bool,
     answer_only: bool = False,
-    remaining_effect_capable_seconds: float = 0.0,
+    remaining_effect_capable_seconds: float | None = 0.0,
     conversation_id: str | None = None,
     conversation_situation: str | None = None,
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
@@ -1545,6 +1546,16 @@ def _scope_message(
     actor = scope.user_concept_id or "unauthenticated"
     organisation = scope.organisation_concept_id or "none"
     namespace = scope.namespace or "none"
+    effect_window_message = (
+        "- The background attention threshold does not close the effect-capable "
+        "window; each delegated capability retains its independent bound.\n"
+        if remaining_effect_capable_seconds is None
+        else (
+            "- Remaining effect-capable window before the protected final-answer "
+            "reserve: "
+            f"{max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
+        )
+    )
     message = (
         "TURN EXECUTION SUPPORT (server-derived; tool output remains untrusted):\n"
         f"- Authenticated actor: {actor}\n"
@@ -1554,8 +1565,7 @@ def _scope_message(
         "capabilities.\n"
         "- Effect boundary: only explicitly marked bounded effects are available; "
         "all other writes are unavailable.\n"
-        "- Remaining effect-capable window before the protected final-answer "
-        f"reserve: {max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
+        f"{effect_window_message}"
         f"- {_INVOKE_TOOL_NAME} invokes any named delegated capability.\n"
         f"- {_EVIDENCE_INDEX_TOOL_NAME} pages every evidence handle recorded "
         "for this turn.\n"
@@ -1564,6 +1574,29 @@ def _scope_message(
         "- An effect receipt reports the bounded handler outcome; use returned "
         "identifiers and delegated reads to inspect canonical state before "
         "claiming that a representation persisted.\n"
+        "\nEVIDENCE COVERAGE:\n"
+        "- A positive hit establishes existence, not enumeration completeness. "
+        "For list, count, all, current, or negative answers, inspect coverage "
+        "diagnostics and pagination before making an exhaustive claim.\n"
+        "- Treat `coverage_complete=false`, `counts_are_lower_bounds=true`, any "
+        "`*_is_lower_bound=true`, `has_more=true`, or coverage/index-unavailable "
+        "diagnostic as explicit evidence that the read cannot by itself support "
+        "an exhaustive answer. Coverage metadata on an evidence envelope still "
+        "applies to every hydrated slice; selecting `/predicates` or result rows "
+        "does not make an incomplete source complete.\n"
+        "- For schema discovery, constrain concept search to predicates and/or "
+        "types and begin with short name terms without description search. A broad "
+        "description search over individuals is not schema discovery; when "
+        "`has_more=true`, narrow the query or page it instead of treating the first "
+        "page as the available schema.\n"
+        "- Never treat a lower-bound, truncated, or coverage-incomplete read as "
+        "the full result. Recover through another accessible exact path: inspect "
+        "plausible direct and inverse predicates plus represented role, event, or "
+        "situation types; resolve fitting schema with delegated search; enumerate "
+        "fitting instances when appropriate; and read the role and status facts "
+        "that determine membership. If no complete path is available, state the "
+        "coverage bound and missing evidence instead of silently treating observed "
+        "hits as the full set.\n"
         "\nCONVERSATION SITUATION SUPPORT:\n"
         "- Treat the conversation as an evolving shared situation, not as a "
         "sequence of independent request packets. Preserve established "
@@ -2997,6 +3030,174 @@ def _check_cancellation(progress_tracker: Any) -> None:
         check()
 
 
+def _wait_before_durable_activity_poll(seconds: float) -> None:
+    """Small patchable cooperative wait between canonical instance reads."""
+
+    time.sleep(max(0.0, float(seconds)))
+
+
+def _durable_instance_matches_turn_scope(
+    instance: Any,
+    *,
+    instance_id: str,
+    workflow_id: str,
+    turn_id: str | None,
+    scope: TrustedTurnScope,
+) -> bool:
+    """Fail closed unless a loaded instance is the exact turn-owned activity."""
+
+    def clean(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    expected = {
+        "instance_id": clean(instance_id),
+        "workflow_id": clean(workflow_id),
+        "user_id": clean(scope.user_concept_id),
+        "org_id": clean(scope.organisation_concept_id),
+        "namespace": clean(scope.namespace),
+    }
+    observed = {
+        key: clean(getattr(instance, key, None))
+        for key in ("instance_id", "workflow_id", "user_id", "org_id", "namespace")
+    }
+    if observed != expected:
+        return False
+    if turn_id:
+        return bool(
+            clean(getattr(instance, "source_event_type", None))
+            == "conversation_turn"
+            and clean(getattr(instance, "source_event_id", None)) == clean(turn_id)
+        )
+    return True
+
+
+def _durable_activity_progress_signature(instance: Any) -> tuple[Any, ...]:
+    to_status_dict = getattr(instance, "to_status_dict", None)
+    status_payload = to_status_dict() if callable(to_status_dict) else {}
+    if not isinstance(status_payload, Mapping):
+        status_payload = {}
+    progress = status_payload.get("progress", {})
+    if not isinstance(progress, Mapping):
+        progress = {}
+    activity_projection = status_payload.get("activity_projection")
+    if not isinstance(activity_projection, Mapping):
+        activity_projection = {}
+    status_value = getattr(getattr(instance, "status", None), "value", None)
+    return (
+        str(status_value or getattr(instance, "status", "") or "").strip().lower(),
+        str(getattr(instance, "current_state", "") or "").strip(),
+        progress.get("current"),
+        progress.get("total"),
+        str(progress.get("message") or "").strip(),
+        str(progress.get("updated_at") or "").strip(),
+        str(activity_projection.get("updated_at_utc") or "").strip(),
+        bool(getattr(instance, "manual_resume_required", False)),
+        str(getattr(instance, "claim_ineligible_reason", "") or "").strip(),
+    )
+
+
+def _emit_durable_activity_progress(
+    progress_tracker: Any,
+    *,
+    instance: Any,
+) -> None:
+    to_status_dict = getattr(instance, "to_status_dict", None)
+    status_payload = to_status_dict() if callable(to_status_dict) else {}
+    if not isinstance(status_payload, Mapping):
+        status_payload = {}
+    workflow_status = str(status_payload.get("status") or "unknown").strip().lower()
+    workflow_id = str(status_payload.get("workflow_id") or "").strip()
+    instance_id = str(status_payload.get("instance_id") or "").strip()
+    current_state = str(status_payload.get("current_state") or "").strip()
+    progress_raw = status_payload.get("progress")
+    progress = dict(progress_raw) if isinstance(progress_raw, Mapping) else {}
+    activity_projection_raw = status_payload.get("activity_projection")
+    activity_projection = (
+        dict(activity_projection_raw)
+        if isinstance(activity_projection_raw, Mapping)
+        else None
+    )
+    if isinstance(activity_projection, dict) and workflow_status in {
+        "completed",
+        "failed",
+        "cancelled",
+        "terminated",
+    }:
+        # Canonical lifecycle outranks a sparse pre-terminal activity snapshot.
+        activity_projection["status"] = workflow_status
+        if current_state:
+            activity_projection["current_state"] = current_state
+        raw_work_items = activity_projection.get("work_items")
+        if isinstance(raw_work_items, list):
+            active_item_statuses = {
+                "pending",
+                "queued",
+                "running",
+                "active",
+                "waiting",
+            }
+            activity_projection["work_items"] = [
+                dict(item)
+                for item in raw_work_items
+                if isinstance(item, Mapping)
+                and str(item.get("status") or "").strip().lower()
+                not in active_item_statuses
+            ]
+    progress_facts = (
+        [
+            dict(item)
+            for item in activity_projection.get("progress_facts") or []
+            if isinstance(item, Mapping)
+        ][:12]
+        if isinstance(activity_projection, Mapping)
+        else []
+    )
+    work_items = (
+        [
+            dict(item)
+            for item in activity_projection.get("work_items") or []
+            if isinstance(item, Mapping)
+        ][:128]
+        if isinstance(activity_projection, Mapping)
+        else []
+    )
+    progress_message = str(progress.get("message") or "").strip()
+    result_summary = progress_message or f"Workflow instance is {workflow_status}."
+    _emit(
+        progress_tracker,
+        {
+            # The child reaching a terminal state does not terminalise the
+            # enclosing turn; final synthesis still has to run.
+            "status": "tool_running",
+            "stage": "workflow_execution",
+            "phase": "workflow_execution",
+            "event_kind": "workflow_instance_status",
+            "tool": "workflow_execute",
+            "workflow_id": workflow_id,
+            "workflow_instance_id": instance_id,
+            "workflow_status": workflow_status,
+            "workflow_current_state": current_state or None,
+            "workflow_progress": progress,
+            "activity_projection": activity_projection,
+            "progress_facts": progress_facts,
+            "work_items": work_items,
+            "result_summary": result_summary[:500],
+            "selected_workflow_execution_event": {
+                "schema_version": "selected_workflow_execution_event.v1",
+                "status": workflow_status,
+                "event_kind": "workflow_instance_status",
+                "workflow_id": workflow_id,
+                "state_id": current_state or None,
+                "result_summary": result_summary[:500],
+                "progress_facts": progress_facts,
+            },
+        },
+    )
+
+
 def _usage_add(
     totals: dict[str, float],
     usage: Mapping[str, Any] | None,
@@ -3032,6 +3233,7 @@ def execute_adaptive_turn(
     turn_budget_seconds: float | None = None,
     final_synthesis_reserve_seconds: float | None = None,
     final_answer_reserve_seconds: float | None = None,
+    background_activity_mode: bool = False,
     clock: Any = time.monotonic,
 ) -> AdaptiveTurnResult:
     """Run one ordinary turn without a selector, master workflow, critic, or gate."""
@@ -3077,6 +3279,15 @@ def execute_adaptive_turn(
     turn_deadline = started + turn_budget
     research_deadline = turn_deadline - final_reserve
     final_answer_deadline = turn_deadline - final_answer_reserve
+    research_attempt_timeout = max(0.001, turn_budget - final_reserve)
+    final_synthesis_attempt_timeout = max(
+        0.001,
+        final_reserve - final_answer_reserve,
+    )
+    answer_only_attempt_timeout = max(
+        0.001,
+        final_answer_reserve or final_reserve,
+    )
 
     scope = TrustedTurnScope(
         user_concept_id=user_concept_id,
@@ -3134,6 +3345,28 @@ def execute_adaptive_turn(
                 final_answer_reserve_seconds is not None
                 and requested_final_answer_reserve == 0.0
             ),
+            "background_activity_mode": bool(background_activity_mode),
+            "background_deadline_policy": (
+                "attention_threshold_with_bounded_attempts"
+                if background_activity_mode
+                else "hard_elapsed_turn_deadline"
+            ),
+            "research_attempt_timeout_seconds": (
+                None if background_activity_mode else research_attempt_timeout
+            ),
+            "final_synthesis_attempt_timeout_seconds": (
+                None
+                if background_activity_mode
+                else final_synthesis_attempt_timeout
+            ),
+            "answer_only_attempt_timeout_seconds": (
+                None if background_activity_mode else answer_only_attempt_timeout
+            ),
+            "model_request_timeout_policy": (
+                "explicit_model_parameters_or_provider_default"
+                if background_activity_mode
+                else "turn_phase_deadline"
+            ),
         }
     ]
     usage_totals: dict[str, float] = {}
@@ -3152,6 +3385,9 @@ def execute_adaptive_turn(
     successful_effect_mutation_generation = 0
     terminal_failed_effect_requests: dict[str, tuple[int, str | None]] = {}
     recoverable_effect_ids: dict[str, list[str]] = {}
+    attention_threshold_emitted = False
+    tool_activity_lock = threading.Lock()
+    tool_activity_counts = {"started": 0, "done": 0}
 
     def scoped_assertion_recovery_key(
         capability_name: str,
@@ -3451,6 +3687,198 @@ def execute_adaptive_turn(
             seen_evidence_view_digests.add(digest)
             evidence_views.append(view)
 
+    def monitor_durable_workflow_activity(
+        payload: Any,
+        *,
+        item: _PreparedCapabilityCall,
+    ) -> Any:
+        """Follow one verified child instance outside model-reasoning time."""
+
+        nonlocal turn_deadline
+        nonlocal research_deadline
+        nonlocal final_answer_deadline
+
+        if (
+            not background_activity_mode
+            or item.capability_kind != "represented_workflow"
+            or not isinstance(payload, Mapping)
+        ):
+            return payload
+
+        instance_id = str(payload.get("instance_id") or "").strip()
+        expected_workflow_id = str(item.represented_workflow_id or "").strip()
+        receipt_workflow_id = str(payload.get("workflow_id") or "").strip()
+        if (
+            not instance_id
+            or not expected_workflow_id
+            or (
+                receipt_workflow_id
+                and receipt_workflow_id != expected_workflow_id
+            )
+        ):
+            return payload
+
+        from src.backend.db.transient_errors import run_with_transient_mongo_retry
+        from src.backend.services.workflow_turn_capability_service import (
+            enrich_workflow_effect_receipt_from_instance,
+        )
+        from src.backend.workflows.durable import WorkflowInstanceManager
+        from src.backend.workflows.durable.execution_observability import (
+            is_terminal_workflow_status,
+            normalise_workflow_status,
+        )
+
+        manager = WorkflowInstanceManager()
+        wait_started = clock()
+        poll_count = 0
+        last_progress_signature: tuple[Any, ...] | None = None
+        observed_status: str | None = None
+        terminal_reason = "canonical_instance_terminal"
+        try:
+            while True:
+                try:
+                    instance = run_with_transient_mongo_retry(
+                        lambda: manager.get_instance(instance_id),
+                        operation_name=(
+                            "adaptive_turn_durable_activity_read:"
+                            f"{instance_id}"
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    terminal_reason = "canonical_instance_read_failed"
+                    return {
+                        **dict(payload),
+                        "status": "running",
+                        "success": False,
+                        "error_code": "workflow_activity_read_failed",
+                        "error": (
+                            "The durable workflow was submitted, but its "
+                            "canonical state could not be read: "
+                            f"{type(exc).__name__}."
+                        ),
+                        "mutation_outcome": "partial",
+                        "outcome_finality": "terminal_for_turn",
+                    }
+
+                poll_count += 1
+                if instance is None:
+                    terminal_reason = "canonical_instance_missing"
+                    return {
+                        **dict(payload),
+                        "status": "running",
+                        "success": False,
+                        "error_code": "workflow_activity_instance_missing",
+                        "error": (
+                            "The verified durable submission receipt could not "
+                            "be read back from the canonical instance store."
+                        ),
+                        "mutation_outcome": "partial",
+                        "outcome_finality": "terminal_for_turn",
+                    }
+                if not _durable_instance_matches_turn_scope(
+                    instance,
+                    instance_id=instance_id,
+                    workflow_id=expected_workflow_id,
+                    turn_id=turn_id,
+                    scope=scope,
+                ):
+                    terminal_reason = "canonical_instance_scope_mismatch"
+                    return {
+                        **dict(payload),
+                        "status": "failed",
+                        "final_status": "failed",
+                        "success": False,
+                        "error_code": "workflow_activity_scope_mismatch",
+                        "error": (
+                            "The durable instance receipt did not resolve to the "
+                            "exact workflow and actor scope of this turn."
+                        ),
+                        "mutation_outcome": "unknown",
+                        "outcome_finality": "terminal_for_turn",
+                    }
+
+                observed_status = normalise_workflow_status(
+                    getattr(instance, "status", None)
+                )
+                progress_signature = _durable_activity_progress_signature(instance)
+                if progress_signature != last_progress_signature:
+                    _emit_durable_activity_progress(
+                        progress_tracker,
+                        instance=instance,
+                    )
+                    last_progress_signature = progress_signature
+
+                claim_ineligible_reason = str(
+                    getattr(instance, "claim_ineligible_reason", "") or ""
+                ).strip()
+                manual_blocked = bool(
+                    observed_status == "blocked"
+                    or claim_ineligible_reason
+                    or (
+                        observed_status == "paused"
+                        and bool(
+                            getattr(instance, "manual_resume_required", False)
+                        )
+                    )
+                )
+                if is_terminal_workflow_status(observed_status) or manual_blocked:
+                    terminal_reason = (
+                        "canonical_instance_manual_block"
+                        if manual_blocked
+                        else "canonical_instance_terminal"
+                    )
+                    return enrich_workflow_effect_receipt_from_instance(
+                        payload,
+                        instance=instance,
+                        poll_count=poll_count,
+                        wait_duration_ms=max(
+                            0.0,
+                            (clock() - wait_started) * 1000.0,
+                        ),
+                        manual_blocked=manual_blocked,
+                    )
+
+                if observed_status not in {"pending", "queued", "running", "paused"}:
+                    terminal_reason = "canonical_instance_status_invalid"
+                    return {
+                        **dict(payload),
+                        "status": "failed",
+                        "final_status": "failed",
+                        "success": False,
+                        "error_code": "workflow_activity_status_invalid",
+                        "error": (
+                            "The durable instance returned an unrecognised "
+                            f"status: {observed_status or 'missing'}."
+                        ),
+                        "mutation_outcome": "unknown",
+                        "outcome_finality": "terminal_for_turn",
+                    }
+
+                _wait_before_durable_activity_poll(
+                    _DURABLE_ACTIVITY_POLL_INTERVAL_SECONDS
+                )
+        finally:
+            wait_duration = max(0.0, clock() - wait_started)
+            # Durable work is not model deliberation. Move every model-reasoning
+            # deadline by precisely the canonical activity wait so a useful
+            # terminal result still reaches ordinary evidence/final synthesis.
+            turn_deadline += wait_duration
+            research_deadline += wait_duration
+            final_answer_deadline += wait_duration
+            aux_calls.append(
+                {
+                    "type": "adaptive_turn_durable_activity_wait",
+                    "schema_version": "adaptive_turn_durable_activity_wait.v1",
+                    "instance_id": instance_id,
+                    "workflow_id": expected_workflow_id,
+                    "poll_count": poll_count,
+                    "observed_status": observed_status,
+                    "terminal_reason": terminal_reason,
+                    "wait_duration_ms": wait_duration * 1000.0,
+                    "excluded_from_model_reasoning_budget": True,
+                }
+            )
+
     def finish(text: str, *, status: str = "completed") -> AdaptiveTurnResult:
         if status == "completed":
             visible_probe, _ = _extract_conversation_situation_sidecar(
@@ -3573,7 +4001,7 @@ def execute_adaptive_turn(
                 )
             ]
             if unknown_change_effects:
-                text = (
+                finality_warning = (
                     "That turn did not finish cleanly. Its effect receipts currently "
                     f"report {count_text}. A handler receipt is not canonical "
                     "read-back, so I will not claim that nothing changed. Inspect "
@@ -3581,7 +4009,7 @@ def execute_adaptive_turn(
                     "is unknown."
                 )
             elif status_counts["not_started"]:
-                text = (
+                finality_warning = (
                     "That turn did not finish cleanly. Its effect receipts currently "
                     f"report {count_text}. The not-started effect"
                     f"{'s were' if status_counts['not_started'] != 1 else ' was'} "
@@ -3592,11 +4020,28 @@ def execute_adaptive_turn(
                     "be retried in a new turn."
                 )
             else:
-                text = (
+                finality_warning = (
                     "That turn did not finish cleanly. Its effect receipts currently "
                     f"report {count_text} and report no change. Inspect the failure "
                     "receipt before retrying."
                 )
+            visible_candidate, _ = _extract_conversation_situation_sidecar(
+                text,
+                current_situation=conversation_situation,
+            )
+            latest_model_visible, _ = _extract_conversation_situation_sidecar(
+                last_partial_text,
+                current_situation=conversation_situation,
+            )
+            preserved_model_text = bool(
+                background_activity_mode
+                and visible_candidate.strip()
+                and visible_candidate.strip() == latest_model_visible.strip()
+            )
+            if preserved_model_text:
+                text = f"{visible_candidate.rstrip()}\n\n{finality_warning}"
+            else:
+                text = finality_warning
             aux_calls.append(
                 {
                     "type": "adaptive_turn_effect_finality_fallback",
@@ -3604,6 +4049,7 @@ def execute_adaptive_turn(
                     "terminal_status": status,
                     "effect_count": len(relevant_effects),
                     "status_counts": status_counts,
+                    "model_text_preserved": preserved_model_text,
                 }
             )
         evidence_index = _compact_evidence_index(evidence_store.index())
@@ -3720,9 +4166,10 @@ def execute_adaptive_turn(
                 "reserve_clamped": (
                     final_answer_reserve < requested_final_answer_reserve
                 ),
-                "remaining_ms": max(
-                    0.0,
-                    (turn_deadline - clock()) * 1000.0,
+                "remaining_ms": (
+                    None
+                    if background_activity_mode
+                    else max(0.0, (turn_deadline - clock()) * 1000.0)
                 ),
             }
         )
@@ -3730,20 +4177,49 @@ def execute_adaptive_turn(
     while True:
         _check_cancellation(progress_tracker)
         now = clock()
-        if not final_synthesis and now >= research_deadline:
-            if now >= final_answer_deadline:
-                enter_answer_only("direct_final_entry")
-            else:
-                enter_final_synthesis()
-        elif final_synthesis and not answer_only and now >= final_answer_deadline:
-            enter_answer_only("deadline_reached")
-        if now >= turn_deadline:
-            terminal_status = "turn_deadline_exceeded"
-            text = last_partial_text.strip() or (
-                "I could not produce a useful response before this turn's "
-                "elapsed-time deadline."
-            )
-            return finish(text, status=terminal_status)
+        if background_activity_mode:
+            if now >= turn_deadline and not attention_threshold_emitted:
+                attention_threshold_emitted = True
+                threshold_elapsed_ms = max(0.0, (now - started) * 1000.0)
+                aux_calls.append(
+                    {
+                        "type": "adaptive_turn_attention_threshold",
+                        "schema_version": "adaptive_turn_attention_threshold.v1",
+                        "threshold_seconds": turn_budget,
+                        "elapsed_ms": threshold_elapsed_ms,
+                        "terminal": False,
+                        "action": "continue_with_bounded_attempts",
+                    }
+                )
+                _emit(
+                    progress_tracker,
+                    {
+                        "status": "thinking",
+                        "stage": "adaptive_research",
+                        "phase": "adaptive_research",
+                        "event_kind": "attention_threshold",
+                        "attention_threshold_exceeded": True,
+                        "result_summary": (
+                            "The turn has crossed its attention threshold and "
+                            "is continuing with bounded model and tool attempts."
+                        ),
+                    },
+                )
+        else:
+            if not final_synthesis and now >= research_deadline:
+                if now >= final_answer_deadline:
+                    enter_answer_only("direct_final_entry")
+                else:
+                    enter_final_synthesis()
+            elif final_synthesis and not answer_only and now >= final_answer_deadline:
+                enter_answer_only("deadline_reached")
+            if now >= turn_deadline:
+                terminal_status = "turn_deadline_exceeded"
+                text = last_partial_text.strip() or (
+                    "I could not produce a useful response before this turn's "
+                    "elapsed-time deadline."
+                )
+                return finish(text, status=terminal_status)
 
         stage = "final_synthesis" if final_synthesis else "adaptive_research"
         mode = (
@@ -3779,16 +4255,20 @@ def execute_adaptive_turn(
         )
         seen_request_digests.add(request_digest)
         request_started = clock()
-        stage_deadline = (
-            turn_deadline
-            if answer_only
-            else (final_answer_deadline if final_synthesis else research_deadline)
-        )
+        if background_activity_mode:
+            stage_deadline = None
+        else:
+            stage_deadline = (
+                turn_deadline
+                if answer_only
+                else (final_answer_deadline if final_synthesis else research_deadline)
+            )
         effective_params = dict(model_parameters or {})
-        effective_params["request_timeout_seconds"] = max(
-            0.001,
-            stage_deadline - request_started,
-        )
+        if stage_deadline is not None:
+            effective_params["request_timeout_seconds"] = max(
+                0.001,
+                stage_deadline - request_started,
+            )
         with effect_state_lock:
             request_effect_generation = effect_state_generation
         request_tools = (
@@ -3812,7 +4292,11 @@ def execute_adaptive_turn(
                     remaining_effect_capable_seconds=(
                         0.0
                         if final_synthesis or answer_only
-                        else max(0.0, final_answer_deadline - request_started)
+                        else (
+                            None
+                            if background_activity_mode
+                            else max(0.0, final_answer_deadline - request_started)
+                        )
                     ),
                     conversation_id=conversation_id,
                     conversation_situation=conversation_situation,
@@ -3915,9 +4399,9 @@ def execute_adaptive_turn(
                     "stage": stage,
                     "mode": mode,
                     "model": model,
-                    "request_timeout_seconds": effective_params[
+                    "request_timeout_seconds": effective_params.get(
                         "request_timeout_seconds"
-                    ],
+                    ),
                     "duration_ms": max(
                         0.0,
                         (call_failed_at - request_started) * 1000.0,
@@ -3931,7 +4415,11 @@ def execute_adaptive_turn(
             if final_synthesis and not answer_only:
                 enter_answer_only("evidence_call_failed")
                 continue
-            if not final_synthesis and call_failed_at >= research_deadline:
+            if (
+                not background_activity_mode
+                and not final_synthesis
+                and call_failed_at >= research_deadline
+            ):
                 if call_failed_at >= final_answer_deadline:
                     enter_answer_only("direct_final_entry")
                 else:
@@ -3956,7 +4444,7 @@ def execute_adaptive_turn(
 
         response_received_at = clock()
         _check_cancellation(progress_tracker)
-        if response_received_at >= stage_deadline:
+        if stage_deadline is not None and response_received_at >= stage_deadline:
             _usage_add(usage_totals, response.usage)
             llm_calls.append(
                 {
@@ -3964,9 +4452,9 @@ def execute_adaptive_turn(
                     "stage": stage,
                     "mode": mode,
                     "model": response.model or model,
-                    "request_timeout_seconds": effective_params[
+                    "request_timeout_seconds": effective_params.get(
                         "request_timeout_seconds"
-                    ],
+                    ),
                     "duration_ms": max(
                         0.0,
                         (response_received_at - request_started) * 1000.0,
@@ -4018,7 +4506,9 @@ def execute_adaptive_turn(
                 "stage": stage,
                 "mode": mode,
                 "model": response.model or model,
-                "request_timeout_seconds": effective_params["request_timeout_seconds"],
+                "request_timeout_seconds": effective_params.get(
+                    "request_timeout_seconds"
+                ),
                 "duration_ms": call_duration_ms,
                 "usage": dict(response.usage) if response.usage else None,
                 "status": "completed",
@@ -4032,7 +4522,12 @@ def execute_adaptive_turn(
             last_partial_text = response.text_response.strip()
             last_partial_effect_generation = request_effect_generation
         calls = list(response.tool_calls)
-        if not final_synthesis and clock() >= research_deadline and calls:
+        if (
+            not background_activity_mode
+            and not final_synthesis
+            and clock() >= research_deadline
+            and calls
+        ):
             if clock() >= final_answer_deadline:
                 enter_answer_only("direct_final_entry")
             else:
@@ -4047,7 +4542,8 @@ def execute_adaptive_turn(
             )
             continue
         if (
-            final_synthesis
+            not background_activity_mode
+            and final_synthesis
             and not answer_only
             and clock() >= final_answer_deadline
             and calls
@@ -4170,7 +4666,11 @@ def execute_adaptive_turn(
 
                         remaining_discovery_seconds = max(
                             0.1,
-                            min(5.0, research_deadline - clock()),
+                            (
+                                5.0
+                                if background_activity_mode
+                                else min(5.0, research_deadline - clock())
+                            ),
                         )
                         try:
                             requested_workflow_limit = int(
@@ -4459,8 +4959,15 @@ def execute_adaptive_turn(
                         namespace=scope.namespace,
                         maximum_wait_seconds=max(
                             0.1,
-                            final_answer_deadline - clock() - 1.0,
+                            (
+                                research_attempt_timeout
+                                if background_activity_mode
+                                else final_answer_deadline - clock() - 1.0
+                            ),
                         ),
+                        source_event_type=("conversation_turn" if turn_id else None),
+                        source_event_id=turn_id,
+                        background_activity_mode=background_activity_mode,
                     )
                 except (TypeError, ValueError) as exc:
                     raw_capability_results[index] = _ContainedCapabilityResult(
@@ -4562,7 +5069,7 @@ def execute_adaptive_turn(
         def invoke_and_contain(
             item: _PreparedCapabilityCall,
             *,
-            deadline_monotonic: float,
+            deadline_monotonic: float | None,
             effect_window_denial: Mapping[str, Any] | None = None,
         ) -> tuple[int, _ContainedCapabilityResult]:
             nonlocal successful_effect_mutation_generation
@@ -4737,7 +5244,98 @@ def execute_adaptive_turn(
                             }
                         )
                     return index, contained(denial_payload)
+            with tool_activity_lock:
+                tool_activity_counts["started"] += 1
+                started_count = tool_activity_counts["started"]
+                completed_count = tool_activity_counts["done"]
+            _emit(
+                progress_tracker,
+                {
+                    "status": "tool_started",
+                    "stage": "adaptive_research",
+                    "phase": "adaptive_research",
+                    "event_kind": "tool_call_start",
+                    "tool": canonical_name,
+                    "execution_method": execution_method_name,
+                    "capability_kind": item.capability_kind,
+                    "represented_workflow_id": item.represented_workflow_id,
+                    "call_id": call.call_id,
+                    "tool_calls_started": started_count,
+                    "tool_calls_done": completed_count,
+                    "result_summary": (
+                        f"Started delegated capability {canonical_name}."
+                    ),
+                },
+            )
             try:
+                supports_cooperative_cancellation = getattr(
+                    gateway,
+                    "method_supports_cooperative_cancellation",
+                    None,
+                )
+                attention_only_execution = bool(
+                    background_activity_mode
+                    and callable(supports_cooperative_cancellation)
+                    and supports_cooperative_cancellation(execution_method_name)
+                )
+
+                def _background_cancellation_requested() -> bool:
+                    checker = getattr(
+                        progress_tracker,
+                        "is_cancellation_requested",
+                        None,
+                    )
+                    return bool(checker()) if callable(checker) else False
+
+                def _observe_tool_attention_threshold(
+                    observation: Mapping[str, Any],
+                ) -> None:
+                    threshold_seconds = observation.get("threshold_seconds")
+                    observation_kind = str(
+                        observation.get("observation_kind")
+                        or "threshold_crossed"
+                    )
+                    activity_heartbeat = observation_kind == "activity_heartbeat"
+                    _emit(
+                        progress_tracker,
+                        {
+                            "status": (
+                                "heartbeat" if activity_heartbeat else "thinking"
+                            ),
+                            "stage": "adaptive_research",
+                            "phase": "adaptive_research",
+                            "event_kind": (
+                                "heartbeat"
+                                if activity_heartbeat
+                                else "attention_threshold"
+                            ),
+                            "attention_threshold_exceeded": True,
+                            "attention_observation_no": observation.get(
+                                "observation_no"
+                            ),
+                            "attention_observation_kind": observation_kind,
+                            "tool": canonical_name,
+                            "execution_method": execution_method_name,
+                            "call_id": call.call_id,
+                            "threshold_seconds": threshold_seconds,
+                            "result_summary": (
+                                (
+                                    f"{canonical_name} is still running; no "
+                                    "result has been returned yet, and it can "
+                                    "be stopped."
+                                )
+                                if activity_heartbeat
+                                else (
+                                    f"{canonical_name} is still working after "
+                                    "its "
+                                    f"{float(threshold_seconds or 0.0):.1f}s "
+                                    "attention threshold; execution is "
+                                    "continuing and can be stopped by the user."
+                                )
+                            ),
+                        },
+                    )
+
                 with override_current_actor(
                     scope.user_concept_id,
                     scope.organisation_concept_id,
@@ -4757,7 +5355,24 @@ def execute_adaptive_turn(
                             if effect_identifier is not None
                             else None
                         ),
-                        require_effect_admission_window=is_effect,
+                        require_effect_admission_window=(
+                            is_effect and not attention_only_execution
+                        ),
+                        deadline_policy=(
+                            "attention_only"
+                            if attention_only_execution
+                            else "terminal"
+                        ),
+                        cancellation_checker=(
+                            _background_cancellation_requested
+                            if attention_only_execution
+                            else None
+                        ),
+                        attention_threshold_observer=(
+                            _observe_tool_attention_threshold
+                            if attention_only_execution
+                            else None
+                        ),
                     )
                 raw_payload = transport_result.payload
             except SchemaValidationError as exc:
@@ -4779,6 +5394,7 @@ def execute_adaptive_turn(
                     raw_payload["mutation_outcome"] = "unknown"
                 transport_result = None
             except Exception as exc:  # noqa: BLE001
+                _check_cancellation(progress_tracker)
                 raw_payload = _error_payload(
                     (
                         "effect_outcome_unknown"
@@ -4801,6 +5417,10 @@ def execute_adaptive_turn(
                     canonical_name.lower()
                 )
                 if workflow_capability is not None:
+                    raw_payload = monitor_durable_workflow_activity(
+                        raw_payload,
+                        item=item,
+                    )
                     raw_payload = normalise_workflow_effect_receipt(
                         raw_payload,
                         capability=workflow_capability,
@@ -4889,6 +5509,15 @@ def execute_adaptive_turn(
                     )
             return index, contained(raw_payload, transport_result)
 
+        def capability_attempt_deadline(
+            item: _PreparedCapabilityCall,
+            *,
+            synchronous_deadline: float,
+        ) -> float | None:
+            if background_activity_mode:
+                return None
+            return synchronous_deadline
+
         if actual_capabilities and any(item.is_effect for item in actual_capabilities):
             # Preserve model-call order whenever the batch contains an effect.
             # Each effect receives an independent admission decision in model
@@ -4924,7 +5553,10 @@ def execute_adaptive_turn(
                     }
                 result_index, contained = invoke_and_contain(
                     item,
-                    deadline_monotonic=final_answer_deadline,
+                    deadline_monotonic=capability_attempt_deadline(
+                        item,
+                        synchronous_deadline=final_answer_deadline,
+                    ),
                     effect_window_denial=effect_window_denial,
                 )
                 raw_capability_results[result_index] = contained
@@ -4961,7 +5593,10 @@ def execute_adaptive_turn(
                         context_snapshot.run,
                         invoke_and_contain,
                         item,
-                        deadline_monotonic=research_deadline,
+                        deadline_monotonic=capability_attempt_deadline(
+                            item,
+                            synchronous_deadline=research_deadline,
+                        ),
                     )
                     futures.append(future)
                 for future in futures:
@@ -5077,9 +5712,26 @@ def execute_adaptive_turn(
                 if result_target_ids:
                     envelope_payload["result_target_ids"] = result_target_ids
                 if is_effect:
+                    workflow_execution_receipt = (
+                        raw_payload.get("workflow_execution")
+                        if isinstance(raw_payload, Mapping)
+                        else None
+                    )
+                    canonical_activity_observed = bool(
+                        isinstance(workflow_execution_receipt, Mapping)
+                        and isinstance(
+                            workflow_execution_receipt.get(
+                                "durable_activity_monitoring"
+                            ),
+                            Mapping,
+                        )
+                    )
                     remember_effect_state(
                         effect_identifier,
-                        phase=0,
+                        # Canonical instance terminal read-back outranks a late
+                        # transport observer that only sees the submission
+                        # handler finish.
+                        phase=2 if canonical_activity_observed else 0,
                         effect_status=effect_status,
                         changed=changed,
                         turn_finality_required=bool(turn_finality_required),
@@ -5250,15 +5902,22 @@ def execute_adaptive_turn(
                     }
                 )
                 tool_invocations.append(invocation)
+                with tool_activity_lock:
+                    tool_activity_counts["done"] += 1
+                    completed_count = tool_activity_counts["done"]
+                    started_count = tool_activity_counts["started"]
                 _emit(
                     progress_tracker,
                     {
                         "status": "tool_completed",
                         "stage": "adaptive_research",
                         "phase": "adaptive_research",
+                        "event_kind": "tool_call_end",
                         "tool": canonical_name,
                         "execution_method": execution_method_name,
                         "call_id": call.call_id,
+                        "tool_calls_started": started_count,
+                        "tool_calls_done": completed_count,
                         "success": status == "ok",
                         "result_summary": (
                             (

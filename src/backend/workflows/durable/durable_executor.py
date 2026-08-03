@@ -7,9 +7,12 @@ enabling resume from the last checkpoint after interruption.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Mapping
+from datetime import datetime, timezone
+from threading import Lock
+from typing import Any, Callable, Mapping
 
 from ...db.transient_errors import run_with_transient_mongo_retry
 from ...services.relationship_extent_index_service import (
@@ -82,6 +85,189 @@ _DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_FIELDS = (
     "state_count",
     "action_count",
 )
+
+_ACTIVITY_WORK_ITEM_LIMIT = 128
+_ACTIVITY_FACT_LIMIT = 12
+_ACTIVITY_TEXT_LIMIT = 240
+_ACTIVITY_PROJECTION_FLUSH_INTERVAL_SECONDS = 5.0
+
+
+def _durable_activity_event_requires_checkpoint(
+    *,
+    event_status: str | None,
+    progress_current: int | None,
+    progress_total: int | None,
+) -> bool:
+    """Select logarithmic item-completion checkpoints for durable persistence."""
+
+    if event_status != "workflow_for_each_item_completed":
+        return False
+    if progress_current is None or progress_current <= 0:
+        return False
+    logarithmic_checkpoint = progress_current & (progress_current - 1) == 0
+    declared_completion = (
+        progress_total is not None
+        and progress_total > 0
+        and progress_current >= progress_total
+    )
+    return logarithmic_checkpoint or declared_completion
+
+
+class _ActivityProjectionCoalescer:
+    """Keep every latest snapshot while bounding synchronous store writes.
+
+    The first observation, time-spaced observations, explicit logarithmic
+    checkpoints, and a final flush may write. Concurrent callbacks never wait
+    behind the state lock while Mongo is running; while one writer is active,
+    they replace one pending latest-only snapshot.
+    """
+
+    def __init__(
+        self,
+        writer: Callable[[Mapping[str, Any]], None],
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        flush_interval_seconds: float = _ACTIVITY_PROJECTION_FLUSH_INTERVAL_SECONDS,
+    ) -> None:
+        self._writer = writer
+        self._clock = clock
+        self._flush_interval_seconds = max(0.0, float(flush_interval_seconds))
+        self._lock = Lock()
+        self._pending: tuple[int, dict[str, Any]] | None = None
+        self._pending_due = False
+        self._writer_active = False
+        self._last_persisted_at: float | None = None
+        self._highest_observed_sequence = -1
+        self._next_sequence = 0
+
+    def observe(
+        self,
+        projection: Mapping[str, Any],
+        *,
+        force_checkpoint: bool = False,
+        sequence: int | None = None,
+    ) -> None:
+        snapshot = dict(projection)
+        with self._lock:
+            if sequence is None:
+                sequence = self._next_sequence
+                self._next_sequence += 1
+            else:
+                self._next_sequence = max(self._next_sequence, sequence + 1)
+            if sequence <= self._highest_observed_sequence:
+                return
+            self._highest_observed_sequence = sequence
+            now = self._clock()
+            self._pending = (sequence, snapshot)
+            interval_due = (
+                self._last_persisted_at is None
+                or now - self._last_persisted_at
+                >= self._flush_interval_seconds
+            )
+            self._pending_due = bool(
+                self._pending_due or force_checkpoint or interval_due
+            )
+            if self._writer_active or not self._pending_due:
+                return
+            self._writer_active = True
+            next_snapshot = self._take_pending_locked()
+        self._drain(next_snapshot)
+
+    def flush(self) -> None:
+        """Persist the latest observed state before executor finality."""
+
+        with self._lock:
+            if self._pending is None:
+                return
+            self._pending_due = True
+            if self._writer_active:
+                return
+            self._writer_active = True
+            next_snapshot = self._take_pending_locked()
+        self._drain(next_snapshot)
+
+    def _take_pending_locked(self) -> tuple[int, dict[str, Any]] | None:
+        pending = self._pending
+        self._pending = None
+        self._pending_due = False
+        return pending
+
+    def _drain(self, pending: tuple[int, dict[str, Any]] | None) -> None:
+        while pending is not None:
+            _sequence, snapshot = pending
+            try:
+                self._writer(snapshot)
+            except Exception:
+                logger.warning(
+                    "[durable_workflow] Activity projection update failed",
+                    exc_info=True,
+                )
+            with self._lock:
+                self._last_persisted_at = self._clock()
+                if self._pending_due and self._pending is not None:
+                    pending = self._take_pending_locked()
+                    continue
+                self._writer_active = False
+                return
+
+
+def _bounded_activity_text(value: Any, *, limit: int = _ACTIVITY_TEXT_LIMIT) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split()).strip()
+    if not cleaned:
+        return None
+    return cleaned if len(cleaned) <= limit else f"{cleaned[: limit - 3].rstrip()}..."
+
+
+def _bounded_activity_facts(value: Any) -> list[dict[str, Any]]:
+    """Retain only workflow-authored, already-redacted progress facts."""
+
+    if not isinstance(value, (list, tuple)):
+        return []
+    facts: list[dict[str, Any]] = []
+    for raw_fact in value:
+        if not isinstance(raw_fact, Mapping):
+            continue
+        fact: dict[str, Any] = {}
+        for key in (
+            "schema_version",
+            "fact_id",
+            "label",
+            "value_kind",
+            "visibility",
+            "status",
+            "reason_code",
+            "workflow_id",
+            "state_id",
+            "action_id",
+            "contract_id",
+        ):
+            text = _bounded_activity_text(raw_fact.get(key), limit=180)
+            if text:
+                fact[key] = text
+        for key in ("present", "redacted", "truncated"):
+            if isinstance(raw_fact.get(key), bool):
+                fact[key] = raw_fact[key]
+        if "value" in raw_fact and not bool(raw_fact.get("redacted")):
+            raw_value = raw_fact.get("value")
+            if isinstance(raw_value, (bool, int, float)):
+                fact["value"] = raw_value
+            elif isinstance(raw_value, str):
+                bounded_value = _bounded_activity_text(raw_value, limit=320)
+                if bounded_value:
+                    fact["value"] = bounded_value
+            elif isinstance(raw_value, (list, tuple)):
+                fact["value"] = [
+                    bounded
+                    for item in list(raw_value)[:5]
+                    if (bounded := _bounded_activity_text(item, limit=160))
+                ]
+        if fact.get("fact_id") and fact.get("label"):
+            facts.append(fact)
+        if len(facts) >= _ACTIVITY_FACT_LIMIT:
+            break
+    return facts
 
 
 def _execution_required_checkpoint_context_keys(
@@ -720,6 +906,237 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         if requested_model_parameters:
             context.setdefault("requested_model_parameters", requested_model_parameters)
 
+        activity_lock = Lock()
+        prior_activity_projection = (
+            dict(instance.activity_projection)
+            if isinstance(instance.activity_projection, Mapping)
+            else {}
+        )
+        prior_work_items = prior_activity_projection.get("work_items")
+        activity_work_items: dict[int, dict[str, Any]] = {}
+        if isinstance(prior_work_items, list):
+            for raw_item in prior_work_items[:_ACTIVITY_WORK_ITEM_LIMIT]:
+                if not isinstance(raw_item, Mapping):
+                    continue
+                raw_index = raw_item.get("index")
+                if isinstance(raw_index, int) and raw_index >= 0:
+                    activity_work_items[raw_index] = dict(raw_item)
+
+        activity_updater = getattr(
+            self._instance_manager,
+            "update_activity_projection",
+            None,
+        )
+
+        def _persist_activity_projection(snapshot: Mapping[str, Any]) -> None:
+            if not callable(activity_updater):
+                return
+            updater = activity_updater
+            raw_progress = snapshot.get("progress")
+            progress = raw_progress if isinstance(raw_progress, Mapping) else {}
+            progress_current = progress.get("current")
+            progress_total = progress.get("total")
+            progress_message = progress.get("message")
+            _retry_store_call(
+                "update_activity_projection",
+                lambda: updater(
+                    instance_id,
+                    activity_projection=snapshot,
+                    progress_current=(
+                        progress_current if isinstance(progress_current, int) else None
+                    ),
+                    progress_total=(
+                        progress_total if isinstance(progress_total, int) else None
+                    ),
+                    progress_message=(
+                        progress_message
+                        if isinstance(progress_message, str)
+                        else None
+                    ),
+                    worker_id=worker_id,
+                    claim_token=claim_token,
+                ),
+            )
+
+        activity_projection_coalescer = _ActivityProjectionCoalescer(
+            _persist_activity_projection
+        )
+        activity_projection_sequence = 0
+
+        def _activity_step_callback(raw_event: Mapping[str, Any]) -> None:
+            """Retain every live update and sparsely persist its latest projection."""
+
+            nonlocal activity_projection_sequence
+
+            if not isinstance(raw_event, Mapping):
+                return
+            if not callable(activity_updater):
+                return
+
+            with activity_lock:
+                event = dict(raw_event)
+                event_status = _bounded_activity_text(event.get("status"), limit=100)
+                event_workflow_id = _bounded_activity_text(
+                    event.get("workflow_id"), limit=180
+                )
+                event_facts = _bounded_activity_facts(event.get("progress_facts"))
+
+                raw_item_index = event.get("item_index")
+                if not isinstance(raw_item_index, int):
+                    raw_item_index = event.get("for_each_item_index")
+                raw_item_total = event.get("item_total")
+                if not isinstance(raw_item_total, int):
+                    raw_item_total = event.get("for_each_item_total")
+                item_index = (
+                    raw_item_index
+                    if isinstance(raw_item_index, int) and raw_item_index >= 0
+                    else None
+                )
+                item_total = (
+                    raw_item_total
+                    if isinstance(raw_item_total, int) and raw_item_total >= 0
+                    else None
+                )
+
+                if item_index is not None and item_index < _ACTIVITY_WORK_ITEM_LIMIT:
+                    item = dict(activity_work_items.get(item_index) or {})
+                    item.update(
+                        {
+                            "item_id": (
+                                f"{event_workflow_id or definition.workflow_id}:"
+                                f"{item_index}"
+                            ),
+                            "index": item_index,
+                            "item_number": item_index + 1,
+                            "status": "running",
+                        }
+                    )
+                    if item_total is not None:
+                        item["total"] = item_total
+                    if event_status == "workflow_for_each_item_completed":
+                        item["status"] = (
+                            "completed" if bool(event.get("completed")) else "failed"
+                        )
+                        error_text = _bounded_activity_text(event.get("error"))
+                        if error_text:
+                            item["error"] = error_text
+                    elif event_status == "workflow_for_each_item_start":
+                        item["status"] = "running"
+                    if event_facts:
+                        existing_facts = {
+                            str(fact.get("fact_id")): dict(fact)
+                            for fact in item.get("progress_facts") or []
+                            if isinstance(fact, Mapping) and fact.get("fact_id")
+                        }
+                        for fact in event_facts:
+                            existing_facts[str(fact["fact_id"])] = fact
+                        item["progress_facts"] = list(existing_facts.values())[
+                            -_ACTIVITY_FACT_LIMIT:
+                        ]
+                    activity_work_items[item_index] = item
+
+                completed_count = sum(
+                    1
+                    for item in activity_work_items.values()
+                    if item.get("status") in {"completed", "failed", "skipped"}
+                )
+                if isinstance(event.get("completed_count"), int):
+                    completed_count = max(completed_count, int(event["completed_count"]))
+                effective_total = item_total
+                if effective_total is None:
+                    totals: list[int] = []
+                    for item in activity_work_items.values():
+                        raw_total = item.get("total")
+                        if isinstance(raw_total, int) and not isinstance(
+                            raw_total, bool
+                        ):
+                            totals.append(raw_total)
+                    effective_total = max(totals) if totals else None
+
+                if item_index is not None and effective_total:
+                    if event_status == "workflow_for_each_item_completed":
+                        progress_message = (
+                            f"Completed {completed_count} of {effective_total} items"
+                        )
+                    else:
+                        progress_message = (
+                            f"Working on item {item_index + 1} of {effective_total}"
+                        )
+                else:
+                    progress_message = (
+                        _bounded_activity_text(event.get("state_id"), limit=120)
+                        or _bounded_activity_text(event.get("action_id"), limit=120)
+                        or "running"
+                    )
+
+                last_event: dict[str, Any] = {}
+                for key in (
+                    "schema_version",
+                    "status",
+                    "workflow_id",
+                    "state_id",
+                    "action_id",
+                    "parent_workflow_id",
+                    "parent_state_id",
+                    "for_each_parent_workflow_id",
+                    "for_each_parent_state_id",
+                ):
+                    text = _bounded_activity_text(event.get(key), limit=180)
+                    if text:
+                        last_event[key] = text
+                for key in (
+                    "item_index",
+                    "item_number",
+                    "item_total",
+                    "completed_count",
+                    "for_each_item_index",
+                    "for_each_item_number",
+                    "for_each_item_total",
+                ):
+                    if isinstance(event.get(key), int):
+                        last_event[key] = event[key]
+                if event_facts:
+                    last_event["progress_facts"] = event_facts
+
+                projection: dict[str, Any] = {
+                    "schema_version": "workflow_activity_projection.v1",
+                    "instance_id": instance_id,
+                    "root_workflow_id": definition.workflow_id,
+                    "status": "running",
+                    "current_state": current_state,
+                    "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "progress": {
+                        "current": completed_count if effective_total is not None else None,
+                        "total": effective_total,
+                        "message": progress_message,
+                    },
+                    "last_event": last_event,
+                    "work_items": [
+                        dict(activity_work_items[index])
+                        for index in sorted(activity_work_items)
+                    ],
+                }
+                if event_facts:
+                    projection["progress_facts"] = event_facts
+                force_checkpoint = _durable_activity_event_requires_checkpoint(
+                    event_status=event_status,
+                    progress_current=(
+                        completed_count if effective_total is not None else None
+                    ),
+                    progress_total=effective_total,
+                )
+                projection_sequence = activity_projection_sequence
+                activity_projection_sequence += 1
+
+            # Never hold ``activity_lock`` over a remote store operation. Parallel
+            # children can continue updating the pending latest-only snapshot while
+            # one sparse checkpoint is being written.
+            activity_projection_coalescer.observe(
+                projection,
+                force_checkpoint=force_checkpoint,
+                sequence=projection_sequence,
+            )
+
         llm_client = get_llm_client(
             client_type=requested_client_type,
             user_concept_id=instance.user_id,
@@ -733,6 +1150,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             user_namespace=instance.namespace,
             user_concept_id=instance.user_id,
             org_concept_id=instance.org_id,
+            step_callback=_activity_step_callback,
         )
 
         # Create trace for observability
@@ -930,6 +1348,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             error_step: str | None = None,
         ) -> DurableWorkflowResult:
             nonlocal persisted_execution_trace_id
+            activity_projection_coalescer.flush()
             _reassert_executed_definition_identity()
             result_envelope = build_workflow_result_envelope(
                 workflow_id=definition.workflow_id,

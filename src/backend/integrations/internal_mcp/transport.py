@@ -6,7 +6,7 @@ handler from occupying the workflow worker indefinitely while preserving the
 caller's context variables (actor scope, AgentTest fault scope, and similar
 request-local authority).
 
-Deadlines have two deliberately separate meanings:
+Elapsed thresholds have two deliberately separate meanings:
 
 * the advisory budget is telemetry only and never changes a successful result;
 * the hard deadline is terminal for the current turn and returns a typed MCP
@@ -14,6 +14,12 @@ Deadlines have two deliberately separate meanings:
   Reads and calls without an observer discard the late payload; an explicitly
   observed handler-started write may emit one bounded out-of-band completion
   observation.
+
+Interactive background turns may explicitly select ``attention_only`` policy.
+In that mode the configured hard interval becomes a user-visible attention
+threshold: the caller keeps waiting for the bounded worker, while an explicit
+user cancellation is propagated cooperatively to the handler.  Ordinary
+synchronous callers retain terminal hard deadlines.
 
 The pool and its queue are both bounded.  Python cannot forcibly stop an
 arbitrary running thread, so handlers may also use the cooperative cancellation
@@ -168,7 +174,7 @@ class InternalMCPExecutionScope:
 
     execution_id: str
     method_name: str
-    deadline_monotonic: float
+    deadline_monotonic: float | None
     cancellation_event: threading.Event
     effect_receipt_recorder: Callable[[Mapping[str, Any]], None] | None = None
 
@@ -178,6 +184,8 @@ class InternalMCPExecutionScope:
 
     @property
     def remaining_seconds(self) -> float:
+        if self.deadline_monotonic is None:
+            return float("inf")
         return max(0.0, self.deadline_monotonic - time.monotonic())
 
 
@@ -302,6 +310,9 @@ class TransportResult:
     late_result_policy: str = "discard_from_turn"
     configured_hard_timeout_sec: float | None = None
     minimum_execution_window_sec: float | None = None
+    deadline_policy: str = "terminal"
+    attention_threshold_sec: float | None = None
+    attention_threshold_exceeded: bool = False
 
     @property
     def timed_out(self) -> bool:
@@ -326,10 +337,15 @@ class TransportResult:
             "late_result_policy": self.late_result_policy,
             "configured_hard_timeout_sec": self.configured_hard_timeout_sec,
             "minimum_execution_window_sec": self.minimum_execution_window_sec,
+            "deadline_policy": self.deadline_policy,
+            "attention_threshold_sec": self.attention_threshold_sec,
+            "attention_threshold_exceeded": self.attention_threshold_exceeded,
         }
 
 
 LateCompletionObserver = Callable[[Dict[str, Any]], None]
+AttentionThresholdObserver = Callable[[Dict[str, Any]], None]
+CancellationChecker = Callable[[], bool]
 
 
 @dataclass
@@ -339,7 +355,7 @@ class _HandlerTask:
     context: Context
     handler: Callable[..., Any]
     payload: Dict[str, Any]
-    deadline_monotonic: float
+    deadline_monotonic: float | None
     submitted_at: float
     on_late_completion: Callable[["_HandlerTask"], None]
     category: str = "read"
@@ -385,6 +401,12 @@ class _HandlerTask:
         )
         token = _ACTIVE_EXECUTION_SCOPE.set(scope)
         try:
+            if scope.deadline_monotonic is None:
+                # Background activity uses the Mongo client's ordinary
+                # per-operation network limits instead of one cumulative CSOT
+                # budget for a useful multi-operation capability.
+                return self.handler(**self.payload)
+
             remaining_seconds = scope.remaining_seconds
             if remaining_seconds <= 0.0:
                 raise InternalMCPHandlerDeadlineExceeded(
@@ -442,7 +464,10 @@ class _HandlerTask:
                 self.done_event.set()
                 return
             admission_checked_monotonic = time.monotonic()
-            if self.minimum_execution_window_sec is not None:
+            if (
+                self.minimum_execution_window_sec is not None
+                and self.deadline_monotonic is not None
+            ):
                 remaining_window_sec = max(
                     0.0,
                     self.deadline_monotonic - admission_checked_monotonic,
@@ -485,7 +510,10 @@ class _HandlerTask:
                 not self.deadline_exceeded_during_handler
                 and (
                     self.terminal_returned
-                    or completed_monotonic > self.deadline_monotonic
+                    or (
+                        self.deadline_monotonic is not None
+                        and completed_monotonic > self.deadline_monotonic
+                    )
                 )
             )
             # Wake the caller before any potentially blocking durable observer.
@@ -709,6 +737,8 @@ class InternalMCPTransport:
         observer_notified = False
         observer_error_type: str | None = None
         if is_observable_write:
+            observer = task.late_completion_observer
+            assert observer is not None
             bounded_payload = None
             payload_truncated = False
             error_text = None
@@ -745,7 +775,7 @@ class InternalMCPTransport:
                 "output_schema_error": None,
             }
             try:
-                task.late_completion_observer(observation)
+                observer(observation)
                 observer_notified = True
             except BaseException as exc:
                 observer_error_type = type(exc).__name__
@@ -965,8 +995,11 @@ class InternalMCPTransport:
         minimum_execution_window_sec: float | None = None,
         log_tag: str = "[mcp_gateway]",
         late_completion_observer: LateCompletionObserver | None = None,
+        deadline_policy: str = "terminal",
+        cancellation_checker: CancellationChecker | None = None,
+        attention_threshold_observer: AttentionThresholdObserver | None = None,
     ) -> TransportResult:
-        """Execute a handler within a bounded hard deadline.
+        """Execute a handler with terminal or attention-only elapsed policy.
 
         The returned result is immutable for the current turn.  If the handler
         ignores cooperative cancellation and completes late, the terminal
@@ -976,7 +1009,19 @@ class InternalMCPTransport:
         cancelled while still queued reports ``not_started`` and cannot promise
         an observation.  A caller may provide an absolute monotonic deadline to
         shorten, but never extend, the method's configured hard timeout.
+
+        ``attention_only`` is reserved for cancellable interactive background
+        activity.  Its configured interval emits telemetry and a progress
+        observation but does not abandon a useful handler.  Explicit caller
+        cancellation still sets the handler's cooperative cancellation event.
         """
+
+        deadline_policy_clean = str(deadline_policy or "terminal").strip().lower()
+        if deadline_policy_clean not in {"terminal", "attention_only"}:
+            raise ValueError(
+                "deadline_policy must be 'terminal' or 'attention_only'"
+            )
+        attention_only = deadline_policy_clean == "attention_only"
 
         configured_hard_timeout_sec = float(
             timeout_sec
@@ -1000,7 +1045,7 @@ class InternalMCPTransport:
         submitted_at = time.perf_counter()
         submitted_monotonic = time.monotonic()
         hard_timeout_sec = configured_hard_timeout_sec
-        if deadline_monotonic is not None:
+        if deadline_monotonic is not None and not attention_only:
             hard_timeout_sec = min(
                 configured_hard_timeout_sec,
                 max(0.0, float(deadline_monotonic) - submitted_monotonic),
@@ -1015,7 +1060,11 @@ class InternalMCPTransport:
         )
         advisory_sec = min(advisory_sec, hard_timeout_sec)
         execution_id = f"mcp_{uuid.uuid4().hex}"
-        handler_deadline_monotonic = submitted_monotonic + hard_timeout_sec
+        handler_deadline_monotonic = (
+            None
+            if attention_only
+            else submitted_monotonic + hard_timeout_sec
+        )
         observe_late_write = (
             str(category or "").strip().lower() == "write"
             and late_completion_observer is not None
@@ -1103,11 +1152,13 @@ class InternalMCPTransport:
             ),
         )
         logger.info(
-            "%s invoking %s (advisory=%.1fs, hard_deadline=%.1fs, execution_id=%s)",
+            "%s invoking %s (advisory=%.1fs, threshold=%.1fs, policy=%s, "
+            "execution_id=%s)",
             log_tag,
             method_name,
             advisory_sec,
             hard_timeout_sec,
+            deadline_policy_clean,
             execution_id,
         )
 
@@ -1136,15 +1187,100 @@ class InternalMCPTransport:
                 timeout_phase="queue",
                 configured_hard_timeout_sec=configured_hard_timeout_sec,
                 minimum_execution_window_sec=minimum_window_sec,
+                deadline_policy=deadline_policy_clean,
             )
 
-        completed = task.done_event.wait(timeout=hard_timeout_sec)
+        attention_threshold_exceeded = False
+        if attention_only:
+            attention_observation_no = 0
+            next_attention_observation_monotonic = (
+                submitted_monotonic + hard_timeout_sec
+            )
+            caller_cancellation_requested = False
+            wait_poll_sec = min(0.25, max(0.01, hard_timeout_sec))
+            while True:
+                completed = task.done_event.wait(timeout=wait_poll_sec)
+                if completed or task.done_event.is_set():
+                    break
+                if (
+                    not caller_cancellation_requested
+                    and cancellation_checker is not None
+                    and cancellation_checker()
+                ):
+                    caller_cancellation_requested = True
+                    with task.lock:
+                        task.cancellation_event.set()
+                        if task.started_at is None:
+                            # The worker will decline dispatch. No write has
+                            # begun and no late observer is meaningful.
+                            task.late_completion_observer = None
+                observed_monotonic = time.monotonic()
+                elapsed_sec = max(0.0, observed_monotonic - submitted_monotonic)
+                with task.lock:
+                    handler_running = bool(
+                        task.started_at is not None
+                        and task.completed_monotonic is None
+                    )
+                if (
+                    handler_running
+                    and observed_monotonic
+                    >= next_attention_observation_monotonic
+                ):
+                    attention_observation_no += 1
+                    attention_threshold_exceeded = True
+                    observation_kind = (
+                        "threshold_crossed"
+                        if attention_observation_no == 1
+                        else "activity_heartbeat"
+                    )
+                    observation = {
+                        "schema_version": "internal_mcp_attention_threshold.v1",
+                        "method_name": method_name,
+                        "execution_id": execution_id,
+                        "threshold_seconds": hard_timeout_sec,
+                        "elapsed_ms": elapsed_sec * 1000.0,
+                        "observation_no": attention_observation_no,
+                        "observation_kind": observation_kind,
+                        "handler_state": "running",
+                        "terminal": False,
+                        "action": "continue_until_completion_or_user_cancellation",
+                    }
+                    next_attention_observation_monotonic = (
+                        observed_monotonic + hard_timeout_sec
+                    )
+                    if attention_observation_no == 1:
+                        logger.warning(
+                            "%s %s crossed its %.1fs attention threshold and is "
+                            "continuing (execution_id=%s)",
+                            log_tag,
+                            method_name,
+                            hard_timeout_sec,
+                            execution_id,
+                        )
+                    if attention_threshold_observer is not None:
+                        try:
+                            attention_threshold_observer(observation)
+                        except Exception:
+                            logger.debug(
+                                "%s attention observer failed for %s",
+                                log_tag,
+                                method_name,
+                                exc_info=True,
+                            )
+        else:
+            completed = task.done_event.wait(timeout=hard_timeout_sec)
         terminal_at = time.perf_counter()
         with task.lock:
             completed_within_deadline = bool(
                 (completed or task.done_event.is_set())
                 and task.completed_monotonic is not None
-                and task.completed_monotonic <= handler_deadline_monotonic
+                and (
+                    attention_only
+                    or (
+                        handler_deadline_monotonic is not None
+                        and task.completed_monotonic <= handler_deadline_monotonic
+                    )
+                )
                 and not task.deadline_exceeded_during_handler
             )
             if completed_within_deadline:
@@ -1164,6 +1300,7 @@ class InternalMCPTransport:
             admission_denied_before_start = (
                 task.admission_denied_before_start
             )
+            cancelled_before_start = task.cancelled_before_start
             admission_remaining_window_sec = (
                 task.admission_remaining_window_sec
             )
@@ -1178,6 +1315,45 @@ class InternalMCPTransport:
             terminal_at=terminal_at,
         )
         duration_ms = max(0.0, (terminal_at - submitted_at) * 1000.0)
+
+        if task_completed and cancelled_before_start:
+            cancellation_payload = {
+                "success": False,
+                "status": "cancelled",
+                "error": f"Internal MCP tool '{method_name}' was cancelled.",
+                "error_code": "cancellation_requested",
+                "retryable": True,
+                "execution_id": execution_id,
+                "mutation_outcome": (
+                    "not_started"
+                    if str(category or "").strip().lower() == "write"
+                    else None
+                ),
+                "outcome_finality": "terminal_for_turn",
+            }
+            return TransportResult(
+                payload=cancellation_payload,
+                duration_ms=duration_ms,
+                execution_id=execution_id,
+                outcome="cancelled",
+                timeout_sec=None if attention_only else hard_timeout_sec,
+                advisory_timeout_sec=advisory_sec,
+                advisory_budget_exceeded=attention_threshold_exceeded,
+                queue_duration_ms=queue_ms,
+                handler_duration_ms=None,
+                handler_elapsed_ms=None,
+                transport_overhead_ms=max(0.0, duration_ms - queue_ms),
+                timeout_phase="queue",
+                configured_hard_timeout_sec=(
+                    None if attention_only else configured_hard_timeout_sec
+                ),
+                minimum_execution_window_sec=minimum_window_sec,
+                deadline_policy=deadline_policy_clean,
+                attention_threshold_sec=(
+                    hard_timeout_sec if attention_only else None
+                ),
+                attention_threshold_exceeded=attention_threshold_exceeded,
+            )
 
         if task_completed and admission_denied_before_start:
             remaining_window_sec = max(
@@ -1300,15 +1476,20 @@ class InternalMCPTransport:
             duration_ms=duration_ms,
             execution_id=execution_id,
             outcome="completed",
-            timeout_sec=hard_timeout_sec,
+            timeout_sec=None if attention_only else hard_timeout_sec,
             advisory_timeout_sec=advisory_sec,
             advisory_budget_exceeded=advisory_exceeded,
             queue_duration_ms=queue_ms,
             handler_duration_ms=handler_ms,
             handler_elapsed_ms=handler_ms,
             transport_overhead_ms=transport_overhead_ms,
-            configured_hard_timeout_sec=configured_hard_timeout_sec,
+            configured_hard_timeout_sec=(
+                None if attention_only else configured_hard_timeout_sec
+            ),
             minimum_execution_window_sec=minimum_window_sec,
+            deadline_policy=deadline_policy_clean,
+            attention_threshold_sec=(hard_timeout_sec if attention_only else None),
+            attention_threshold_exceeded=attention_threshold_exceeded,
         )
 
     def get_diagnostics(self) -> Dict[str, Any]:

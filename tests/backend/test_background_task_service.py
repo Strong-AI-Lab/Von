@@ -200,14 +200,18 @@ class TestBackgroundTaskRegistry:
         registry.shutdown(wait=True)
 
     def test_request_cancellation_sets_flag(self) -> None:
-        """request_cancellation() should terminally mark the task cancelled."""
+        """Cancellation request should stay nonterminal until acknowledged."""
         registry = BackgroundTaskRegistry(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
 
         def _slow_task() -> str:
-            time.sleep(10)
+            started.set()
+            release.wait(timeout=2)
             return "done"
 
         registry.submit_task(task_id="task-cancel", callable=_slow_task)
+        assert started.wait(timeout=2)
 
         # Request cancellation
         success = registry.request_cancellation("task-cancel")
@@ -219,14 +223,26 @@ class TestBackgroundTaskRegistry:
         status = registry.get_task_status("task-cancel")
         assert status is not None
         assert status.cancellation_requested is True
-        assert status.status == "cancelled"
-        assert status.completed_at is not None
-        assert status.progress.get("status") == "cancelled"
+        assert status.status == "running"
+        assert status.completed_at is None
+        assert status.progress.get("status") == "cancellation_requested"
+        assert status.progress.get("phase_label") == "Stopping"
 
-        registry.shutdown(wait=False)
+        assert registry.update_progress(
+            "task-cancel",
+            {"status": "tool_completed", "sequence": 4},
+        )
+        status = registry.get_task_status("task-cancel")
+        assert status is not None
+        assert status.status == "running"
+        assert status.progress.get("status") == "cancellation_requested"
+        assert status.progress.get("activity_status_before_stop") == "tool_completed"
 
-    def test_request_cancellation_resists_late_worker_completion(self) -> None:
-        """A cancelled task should not be overwritten by a late worker result."""
+        release.set()
+        registry.shutdown(wait=True)
+
+    def test_request_cancellation_does_not_fabricate_terminal_state(self) -> None:
+        """A task that finishes first should report its real completion."""
         registry = BackgroundTaskRegistry(max_workers=1)
         started = threading.Event()
         release = threading.Event()
@@ -251,9 +267,9 @@ class TestBackgroundTaskRegistry:
 
         status = registry.get_task_status("late-cancel")
         assert status is not None
-        assert status.status == "cancelled"
-        assert status.result is None
-        assert status.error == "Cancellation requested for task late-cancel"
+        assert status.status == "completed"
+        assert status.result == "done"
+        assert status.error is None
 
         registry.shutdown(wait=True)
 

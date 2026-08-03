@@ -219,6 +219,31 @@ class TestWorkflowInstance:
         assert status_dict["has_outputs"] is False
         assert status_dict["execution_trace_id"] == "trace-status-1"
 
+    def test_activity_projection_roundtrips_into_status(self) -> None:
+        """Bounded live activity should survive persistence and API projection."""
+        instance = WorkflowInstance.create(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        instance.activity_projection = {
+            "schema_version": "workflow_activity_projection.v1",
+            "work_items": [
+                {
+                    "item_id": "item-2",
+                    "item_index": 2,
+                    "status": "running",
+                }
+            ],
+        }
+
+        restored = WorkflowInstance.from_doc(instance.to_doc())
+        status_dict = restored.to_status_dict()
+
+        assert restored.activity_projection == instance.activity_projection
+        assert status_dict["activity_projection"] == instance.activity_projection
+
     def test_event_fields_roundtrip(self) -> None:
         """Event linkage fields should survive model serialisation."""
         instance = WorkflowInstance.create(
@@ -539,6 +564,44 @@ class TestWorkflowInstanceManager:
         assert instance.current_state == "state_2"
         assert instance.workflow_data == {"accumulated": "data"}
         assert instance.step_index == 3
+
+    def test_update_activity_projection_does_not_advance_checkpoint(self) -> None:
+        """Live observations must not falsely claim restart-safe progress."""
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        success = manager.update_activity_projection(
+            instance_id,
+            activity_projection={
+                "schema_version": "workflow_activity_projection.v1",
+                "work_items": [
+                    {
+                        "item_id": "item-1",
+                        "item_index": 1,
+                        "status": "completed",
+                    }
+                ],
+            },
+            progress_current=1,
+            progress_total=6,
+            progress_message="Completed item 1 of 6",
+        )
+
+        assert success is True
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.current_state == ""
+        assert instance.step_index == 0
+        assert instance.progress_current == 1
+        assert instance.progress_total == 6
+        assert instance.progress_message == "Completed item 1 of 6"
+        assert instance.activity_projection is not None
+        assert instance.activity_projection["work_items"][0]["status"] == "completed"
 
     def test_mark_completed_updates_status(self) -> None:
         """mark_completed() should set status to COMPLETED."""

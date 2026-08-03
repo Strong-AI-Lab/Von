@@ -56,6 +56,7 @@ import {
     __testOnly_reduceThinkingCardDisplayState,
     __testOnly_copyActiveThinkingDiagnostics,
     __testOnly_shouldAcceptThinkingProgressUpdate,
+    __testOnly_applyForegroundTaskStatusProgress,
     __testOnly_getThinkingProgressPollFetchTimeoutMs,
     __testOnly_setThinkingCardRequests,
     __testOnly_setThinkingState,
@@ -4021,7 +4022,7 @@ describe('thinking activity history normalisation', () => {
             }
         ]);
 
-        expect(entriesHtml).toContain('Prompt (truncated)');
+        expect(entriesHtml).toContain('Prompt (14 chars, truncated)');
         expect(entriesHtml).toContain('Response (truncated)');
     });
 
@@ -5459,6 +5460,194 @@ describe('thinking activity history normalisation', () => {
         expect(debugText).toContain('reason: redaction_policy_missing');
     });
 
+    test('renders stable projected work items from task status ahead of generic heartbeats', () => {
+        const request = {
+            promptRaw: 'Represent the bounded papers',
+            clientRequestId: 'request-projected-work-items',
+            latestProgress: {
+                status: 'pending',
+                stage: 'context_build',
+                result_summary: 'Preparing the turn.'
+            }
+        };
+
+        expect(__testOnly_applyForegroundTaskStatusProgress(request, {
+            task_id: 'request-projected-work-items',
+            status: 'running',
+            progress: {
+                status: 'heartbeat',
+                stage: 'adaptive_research',
+                result_summary: 'Generic heartbeat text that must not hide durable work.'
+            },
+            progress_history: [
+                {
+                    status: 'tool_running',
+                    workflow_status: 'running',
+                    workflow_current_state: 'awaiting_paper_representation',
+                    activity_projection: {
+                        schema_version: 'workflow_activity_projection.v1',
+                        instance_id: 'workflow-instance-papers',
+                        root_workflow_id: '#V#represent_papers_workflow',
+                        status: 'running',
+                        current_state: 'awaiting_paper_representation',
+                        progress: {
+                            current: 1,
+                            total: 3,
+                            message: 'Representing 1 of 3 papers'
+                        },
+                        progress_facts: [
+                            {
+                                fact_id: 'mail_batch',
+                                label: 'Mail batch',
+                                status: 'available',
+                                value: 'July migration',
+                                visibility: 'default'
+                            }
+                        ],
+                        work_items: [
+                            {
+                                item_index: 2,
+                                total: 3,
+                                status: 'running',
+                                raw_item: {
+                                    title: 'Unrepresented raw paper title'
+                                }
+                            },
+                            {
+                                index: 0,
+                                total: 3,
+                                item_label: 'Represented paper A',
+                                status: 'completed',
+                                progress_facts: [
+                                    {
+                                        fact_id: 'paper_title',
+                                        label: 'Paper',
+                                        status: 'available',
+                                        value: 'Bounded paper title',
+                                        visibility: 'default'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        })).toBe(true);
+
+        const viewModel = __testOnly_buildThinkingCardProgressViewModel(request);
+        expect(viewModel.activity_projection.work_items.map((item) => item.index)).toEqual([0, 2]);
+        expect(viewModel.activity_projection.work_items.map((item) => item.status))
+            .toEqual(['completed', 'running']);
+        expect(viewModel.current_activity).toContain('Representing 1 of 3 papers');
+        expect(viewModel.current_activity).toContain('Awaiting paper representation');
+        expect(viewModel.current_activity).not.toContain('Generic heartbeat text');
+
+        const container = document.createElement('div');
+        container.innerHTML = __testOnly_renderThinkingCardBodyHTML(request);
+        const text = container.textContent || '';
+        expect(text).toContain('Workflow state');
+        expect(text).toContain('Item 1 of 3 — Represented paper A');
+        expect(text).toContain('Completed');
+        expect(text).toContain('Paper: Bounded paper title');
+        expect(text).toContain('Item 3 of 3');
+        expect(text).toContain('Running');
+        expect(text).toContain('Mail batch: July migration');
+        expect(text.indexOf('Item 1 of 3')).toBeLessThan(text.indexOf('Item 3 of 3'));
+        expect(text).not.toContain('Unrepresented raw paper title');
+        expect(text).not.toContain('Skip');
+    });
+
+    test('terminal workflow status outranks a stale running activity item', () => {
+        const request = {
+            promptRaw: 'Represent the bounded papers',
+            clientRequestId: 'request-terminal-projection',
+            latestProgress: {
+                status: 'completed',
+                result_summary: 'The response is ready.',
+                activity_projection: {
+                    schema_version: 'workflow_activity_projection.v1',
+                    status: 'completed',
+                    current_state: 'completed',
+                    progress: { current: 2, total: 3, message: 'Working on item 3 of 3' },
+                    work_items: [{ index: 2, total: 3, status: 'running' }]
+                }
+            }
+        };
+
+        const viewModel = __testOnly_buildThinkingCardProgressViewModel(request);
+        expect(viewModel.current_activity).toBe('The response is ready.');
+    });
+
+    test('keeps generic tool start and completion progress legible without workflow identity', () => {
+        const request = {
+            promptRaw: 'Perform two bounded reads',
+            clientRequestId: 'request-generic-tool-progress',
+            latestProgress: { status: 'pending' }
+        };
+
+        expect(__testOnly_applyForegroundTaskStatusProgress(request, {
+            status: 'running',
+            progress: {
+                status: 'heartbeat',
+                stage: 'adaptive_research',
+                result_summary: 'Background activity heartbeat.'
+            },
+            progress_history: [
+                {
+                    sequence_no: 10,
+                    status: 'tool_started',
+                    stage: 'adaptive_research',
+                    event_kind: 'tool_call_start',
+                    call_id: 'bounded-read-1',
+                    tool: 'general_read'
+                }
+            ]
+        })).toBe(true);
+        let container = document.createElement('div');
+        container.innerHTML = __testOnly_renderThinkingCardBodyHTML(request);
+        let text = container.textContent || '';
+        expect(text).toContain('Started tool: general_read');
+        expect(text).toContain('General tool use: general_read');
+        expect(text).toContain('Tool call: general_read');
+        expect(text).not.toContain('Selected workflow');
+
+        expect(__testOnly_applyForegroundTaskStatusProgress(request, {
+            status: 'running',
+            progress: {
+                status: 'heartbeat',
+                stage: 'adaptive_research',
+                result_summary: 'Background activity heartbeat.'
+            },
+            progress_history: [
+                {
+                    sequence_no: 10,
+                    status: 'tool_started',
+                    stage: 'adaptive_research',
+                    event_kind: 'tool_call_start',
+                    call_id: 'bounded-read-1',
+                    tool: 'general_read'
+                },
+                {
+                    sequence_no: 11,
+                    status: 'tool_completed',
+                    stage: 'adaptive_research',
+                    event_kind: 'tool_call_end',
+                    call_id: 'bounded-read-1',
+                    tool: 'general_read',
+                    success: true,
+                    result_summary: 'Read evidence recorded for the bounded query.'
+                }
+            ]
+        })).toBe(true);
+        container = document.createElement('div');
+        container.innerHTML = __testOnly_renderThinkingCardBodyHTML(request);
+        text = container.textContent || '';
+        expect(text).toContain('Read evidence recorded for the bounded query.');
+        expect(text).toContain('General tool use: general_read');
+        expect(text).toContain('Tool call: general_read');
+        expect(text).not.toContain('Selected workflow');
+    });
+
     test('surfaces interpretable execution path for general tool-use turns', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             thinkingCardMode: 'expert',
@@ -6371,14 +6560,8 @@ describe('thinking card toggle accessibility', () => {
         expect(wrapper.classList.contains('is-collapsed')).toBe(false);
         expect(detail.getAttribute('aria-hidden')).toBe('false');
 
-        document.getElementById('abortButton').click();
-        await new Promise((r) => setTimeout(r, 0));
-
         expect(generateSignal).not.toBeNull();
-        expect(generateSignal.aborted).toBe(true);
-        expect(toggleButton.getAttribute('aria-hidden')).toBe('true');
-
-        await expect(sendPromise).resolves.toBeUndefined();
+        __testOnly_resetChatRequestState();
     });
 
     test('renders structured pending progress payloads instead of generic waiting placeholder', async () => {
@@ -6448,9 +6631,7 @@ describe('thinking card toggle accessibility', () => {
         expect(indicatorText.textContent).toContain('request setup');
         expect(document.getElementById('loadingIndicatorDetail').innerHTML).toContain('Resolving session scope, namespace, and chat-history context');
 
-        document.getElementById('abortButton').click();
-        await new Promise((r) => setTimeout(r, 0));
-        await expect(sendPromise).resolves.toBeUndefined();
+        __testOnly_resetChatRequestState();
     });
 
     test('progress poll timeout falls back to retryable waiting state instead of freezing the card', async () => {
@@ -6544,9 +6725,7 @@ describe('thinking card toggle accessibility', () => {
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
                 .toContain('remain delayed');
 
-            document.getElementById('abortButton').click();
-            await Promise.resolve();
-            await expect(sendPromise).resolves.toBeUndefined();
+            __testOnly_resetChatRequestState();
         } finally {
             jest.useRealTimers();
         }
@@ -6635,12 +6814,8 @@ describe('thinking card toggle accessibility', () => {
         expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
         expect(wrapper.classList.contains('is-expanded')).toBe(true);
 
-        document.getElementById('abortButton').click();
-        await new Promise((r) => setTimeout(r, 0));
-
         expect(generateSignal).not.toBeNull();
-        expect(generateSignal.aborted).toBe(true);
-        await expect(sendPromise).resolves.toBeUndefined();
+        __testOnly_resetChatRequestState();
     });
 
     test('retains finished run history inline per turn and allows expanding afterwards', async () => {
@@ -6920,7 +7095,12 @@ describe('thinking card toggle accessibility', () => {
                     json: async () => ({
                         task_id: decodeURIComponent(url.split('/').pop()),
                         result: {
-                            response: '**Rendered from completed task result**',
+                            success: false,
+                            terminal_status: 'effect_partially_completed',
+                            response: (
+                                '**Rendered from completed task result.** '
+                                + 'Inspect the represented state before retrying the partial effect.'
+                            ),
                             llm_debug: {
                                 model: 'gpt-5.2',
                                 request_id: decodeURIComponent(url.split('/').pop())
@@ -6935,7 +7115,10 @@ describe('thinking card toggle accessibility', () => {
                     ok: true,
                     status: 200,
                     json: async () => ({
-                        html: 'Rendered from completed task result'
+                        html: (
+                            'Rendered from completed task result. '
+                            + 'Inspect the represented state before retrying the partial effect.'
+                        )
                     })
                 });
             }
@@ -6979,8 +7162,265 @@ describe('thinking card toggle accessibility', () => {
 
         const retained = getRetainedThinkingCardElements();
         expect(retained).not.toBeNull();
-        expect(retained.detail.innerHTML).toContain('Response generated from completed task result');
+        expect(retained.detail.innerHTML).toContain('Turn incomplete');
+        expect(retained.detail.innerHTML).toContain('effect_partially_completed');
+        expect(assistantMessages[0].textContent).toContain('Inspect the represented state');
     });
+
+    test('keeps a background 202 acknowledgement nonterminal and delivers its result exactly once', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        __testOnly_setActiveChatSession('session-background-ack', 'Background acknowledgement');
+        document.getElementById('promptInput').value = 'return through the background task result';
+
+        let submittedBody = null;
+        let resolveTaskStatus = null;
+        const taskStatusUrls = [];
+        const taskResultUrls = [];
+        const taskStatusCredentials = [];
+        const taskResultCredentials = [];
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        status: 'thinking',
+                        stage: 'adaptive_research',
+                        phase: 'adaptive_research',
+                        event_kind: 'attention_threshold',
+                        attention_threshold_exceeded: true,
+                        result_summary: 'The turn crossed its attention threshold and is continuing with bounded attempts.'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/task/status/')) {
+                taskStatusUrls.push(url);
+                taskStatusCredentials.push(options.credentials);
+                return new Promise((resolve) => {
+                    resolveTaskStatus = () => resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ status: 'completed', has_result: true })
+                    });
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/task/result/')) {
+                taskResultUrls.push(url);
+                taskResultCredentials.push(options.credentials);
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        task_id: decodeURIComponent(url.split('/').pop()),
+                        result: {
+                            response: '**Delivered once from the background result**',
+                            llm_debug: {
+                                request_id: decodeURIComponent(url.split('/').pop())
+                            }
+                        }
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ html: 'Delivered once from the background result' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                submittedBody = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        background: true,
+                        task_id: submittedBody.client_request_id,
+                        status: 'running',
+                        message: 'Task submitted for background execution'
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+        expect(submittedBody).toEqual(expect.objectContaining({ background: true }));
+        expect(resolveTaskStatus).not.toBeNull();
+        expect(document.querySelectorAll('.message-container.assistant-turn')).toHaveLength(0);
+        expect(document.getElementById('thinkingCardWrapper').getAttribute('aria-hidden')).toBe('false');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
+        expect(document.getElementById('abortButton').disabled).toBe(false);
+        expect(document.getElementById('loadingIndicatorDetail').textContent)
+            .toContain('crossed its attention threshold and is continuing');
+
+        resolveTaskStatus();
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            const renderedText = document.querySelector('.message-container.assistant-turn .chat-message-text')?.textContent || '';
+            if (renderedText.includes('Delivered once from the background result')) {
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        expect(taskStatusUrls.length).toBeGreaterThan(0);
+        expect(taskResultUrls.length).toBeGreaterThan(0);
+        expect(taskStatusCredentials).toEqual(
+            expect.arrayContaining(['same-origin'])
+        );
+        expect(taskResultCredentials).toEqual(
+            expect.arrayContaining(['same-origin'])
+        );
+        const assistantMessages = Array.from(
+            document.querySelectorAll('.message-container.assistant-turn .chat-message-text')
+        );
+        expect(assistantMessages).toHaveLength(1);
+        expect(assistantMessages[0].textContent).toContain('Delivered once from the background result');
+        expect(document.getElementById('scrollableField').textContent)
+            .not.toContain('Task submitted for background execution');
+    });
+
+    test('retries a timed-out task status read and delivers a typed non-success result', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        __testOnly_setActiveChatSession('session-status-timeout', 'Status timeout');
+        document.getElementById('promptInput').value = 'recover the completed background result';
+
+        let taskStatusReadCount = 0;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        status: 'thinking',
+                        stage: 'adaptive_research',
+                        phase: 'adaptive_research'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/task/status/')) {
+                taskStatusReadCount += 1;
+                if (taskStatusReadCount === 1) {
+                    const timeoutError = new Error('Timed out waiting for task status');
+                    timeoutError.name = 'AbortError';
+                    timeoutError.vonTimeout = true;
+                    return Promise.reject(timeoutError);
+                }
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ status: 'completed', has_result: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/task/result/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        task_id: decodeURIComponent(url.split('/').pop()),
+                        result: {
+                            response: '**Recovered typed non-success response**',
+                            success: false,
+                            terminal_status: 'effect_failed',
+                            llm_debug: {
+                                request_id: decodeURIComponent(url.split('/').pop()),
+                                turn_execution_diagnostics: {
+                                    completion_gate: { decision: 'effect_failed' }
+                                }
+                            }
+                        }
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ html: 'Recovered typed non-success response' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                const submittedBody = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        background: true,
+                        task_id: submittedBody.client_request_id,
+                        status: 'running'
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+            const renderedText = document.querySelector(
+                '.message-container.assistant-turn .chat-message-text'
+            )?.textContent || '';
+            if (renderedText.includes('Recovered typed non-success response')) {
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        expect(taskStatusReadCount).toBeGreaterThanOrEqual(2);
+        const assistantMessages = Array.from(
+            document.querySelectorAll('.message-container.assistant-turn .chat-message-text')
+        );
+        expect(assistantMessages).toHaveLength(1);
+        expect(assistantMessages[0].textContent).toContain('Recovered typed non-success response');
+
+        const retained = getRetainedThinkingCardElements();
+        expect(retained).not.toBeNull();
+        expect(retained.detail.innerHTML).toContain('Turn incomplete');
+        expect(retained.detail.innerHTML).toContain('effect_failed');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
+        expect(document.getElementById('sendButton').textContent).toBe('Send Prompt');
+    }, 10000);
 
     test('retains a failed card inline when the last live progress remains non-terminal', async () => {
         const { getUserContext } = require('../apiService.js');
@@ -7584,7 +8024,7 @@ describe('chat abort behaviour', () => {
         delete global.fetch;
     });
 
-    test('abort restores prompt text and re-enables sending', async () => {
+    test('stop waits for canonical task cancellation before cleaning up transport', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
@@ -7603,6 +8043,8 @@ describe('chat abort behaviour', () => {
         }
 
         let generateSignal = null;
+        let cancellationRequested = false;
+        let resolveCancelledStatus = null;
 
         global.fetch = jest.fn((url, options = {}) => {
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
@@ -7612,23 +8054,58 @@ describe('chat abort behaviour', () => {
                 });
             }
 
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: false,
+                    status: 202,
+                    json: async () => ({ status: 'pending' })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/task/status/')) {
+                if (cancellationRequested) {
+                    return new Promise((resolve) => {
+                        resolveCancelledStatus = () => resolve({
+                            ok: true,
+                            status: 200,
+                            json: async () => ({ status: 'cancelled' })
+                        });
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ status: 'running' })
+                });
+            }
+
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
                 generateSignal = options.signal;
-                return new Promise((resolve, reject) => {
-                    if (generateSignal) {
-                        generateSignal.addEventListener('abort', () => {
-                            const err = new Error('aborted');
-                            err.name = 'AbortError';
-                            reject(err);
-                        });
-                    }
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        background: true,
+                        task_id: body.client_request_id,
+                        status: 'running'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/task/cancel/')) {
+                cancellationRequested = true;
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true })
                 });
             }
 
             return Promise.resolve({ ok: true, json: async () => ({}) });
         });
 
-        const sendPromise = sendMessage();
+        await expect(sendMessage()).resolves.toBeUndefined();
 
         expect(document.getElementById('sendButton').disabled).toBe(false);
         expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
@@ -7636,17 +8113,31 @@ describe('chat abort behaviour', () => {
 
         document.getElementById('abortButton').click();
 
-        // Let abort propagate through promise chain
+        // The task is still active until the status endpoint confirms cancellation.
         await new Promise((r) => setTimeout(r, 0));
 
         expect(generateSignal).not.toBeNull();
-        expect(generateSignal.aborted).toBe(true);
+        expect(generateSignal.aborted).toBe(false);
         expect(document.getElementById('sendButton').disabled).toBe(false);
+        expect(document.getElementById('abortButton').disabled).toBe(true);
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
+        expect(promptInput.value).toBe('');
+
+        expect(resolveCancelledStatus).not.toBeNull();
+        resolveCancelledStatus();
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            if (
+                generateSignal.aborted
+                && document.getElementById('abortButton').getAttribute('aria-hidden') === 'true'
+            ) {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        expect(generateSignal.aborted).toBe(true);
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
         expect(promptInput.value).toBe("since we'\n");
-
-        // Ensure the sendMessage promise resolves without throwing
-        await expect(sendPromise).resolves.toBeUndefined();
     });
 });
 
@@ -7698,6 +8189,154 @@ describe('chat session composer state', () => {
         __testOnly_setSessionTabsCache([]);
         jest.restoreAllMocks();
         delete global.fetch;
+    });
+
+    test('a late prior switch cannot replace a canonical empty selected session', async () => {
+        jest.useFakeTimers();
+        try {
+            const staleSessionId = 'session-stale-populated';
+            const emptySessionId = 'session-canonical-empty';
+            const ok = (data) => ({
+                ok: true,
+                status: 200,
+                json: async () => data
+            });
+            const carrier = (history, situation = null) => ({
+                history,
+                segments_returned: history.length > 0 ? 1 : 0,
+                total_segments: history.length > 0 ? 1 : 0,
+                has_more_history: false,
+                conversation_situation: situation,
+                conversation_observations: [],
+                conversation_observation_state: {
+                    schema_version: 'conversation_observation_state.v1',
+                    retained_count: 0,
+                    total_count: 0,
+                    omitted_count: 0,
+                    retention_limit: 12
+                }
+            });
+
+            __testOnly_resetHistoryUiState();
+            __testOnly_setActiveChatSession('session-origin', 'Origin');
+            __testOnly_setSessionTabsCache([
+                {
+                    session_id: staleSessionId,
+                    session_name: 'Populated',
+                    message_count: 2,
+                    last_message_at: '2026-08-01T20:00:00Z'
+                },
+                {
+                    session_id: emptySessionId,
+                    session_name: 'Empty',
+                    message_count: 0,
+                    last_message_at: '2026-08-01T20:01:00Z'
+                }
+            ]);
+            __testOnly_setTranscriptTurns([
+                { role: 'user', sender: 'User', message: 'STALE POPULATED TRANSCRIPT' }
+            ]);
+            document.getElementById('scrollableField').innerHTML =
+                '<div class="message-container user-turn">STALE POPULATED TRANSCRIPT</div>';
+
+            let releaseStaleSetSession;
+            const historyUrls = [];
+
+            global.fetch = jest.fn((url, options = {}) => {
+                if (
+                    typeof url === 'string'
+                    && url.startsWith('/von/api/session/set_chat_session')
+                ) {
+                    const body = JSON.parse(options.body || '{}');
+                    const response = ok({
+                        session_id: body.session_id,
+                        session_name: body.session_id === emptySessionId
+                            ? 'Empty'
+                            : 'Populated'
+                    });
+                    if (body.session_id === staleSessionId) {
+                        return new Promise((resolve) => {
+                            releaseStaleSetSession = () => resolve(response);
+                        });
+                    }
+                    return Promise.resolve(response);
+                }
+
+                if (
+                    typeof url === 'string'
+                    && url.startsWith('/von/api/session/chat_session_links')
+                ) {
+                    return Promise.resolve(ok({ session_links: {} }));
+                }
+
+                if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                    historyUrls.push(url);
+                    const sid = new URL(url, 'http://von.test')
+                        .searchParams.get('session_id');
+                    if (sid === staleSessionId) {
+                        return Promise.resolve(ok(carrier([
+                            {
+                                role: 'user',
+                                content: 'STALE POPULATED TRANSCRIPT',
+                                timestamp: '2026-08-01T20:00:00Z'
+                            }
+                        ], {
+                            text: 'Stale populated situation.',
+                            revision: 1,
+                            source: 'adaptive_turn'
+                        })));
+                    }
+                    return Promise.resolve(ok(carrier([])));
+                }
+
+                if (
+                    typeof url === 'string'
+                    && url.startsWith('/von/api/session/context')
+                ) {
+                    return Promise.resolve(ok({
+                        user_id: 'user',
+                        organisation_id: 'org',
+                        namespace: 'user@org'
+                    }));
+                }
+
+                return Promise.resolve(ok({ sessions: [] }));
+            });
+
+            const staleSwitch = switchToChatSession(staleSessionId);
+            expect(typeof releaseStaleSetSession).toBe('function');
+
+            await expect(switchToChatSession(emptySessionId)).resolves.toEqual(
+                expect.objectContaining({ ok: true })
+            );
+
+            let activeCarrier = __testOnly_buildConversationSituationExportPayload();
+            expect(activeCarrier.session_id).toBe(emptySessionId);
+            expect(activeCarrier.availability).toBe('ready');
+            expect(activeCarrier.conversation_situation).toBeNull();
+            expect(__testOnly_getConversationTranscriptTurnsSnapshot()).toEqual([]);
+            expect(document.getElementById('scrollableField').textContent)
+                .not.toContain('STALE POPULATED TRANSCRIPT');
+
+            releaseStaleSetSession();
+            await expect(staleSwitch).resolves.toBeDefined();
+
+            activeCarrier = __testOnly_buildConversationSituationExportPayload();
+            expect(activeCarrier.session_id).toBe(emptySessionId);
+            expect(activeCarrier.conversation_situation).toBeNull();
+            expect(__testOnly_getConversationTranscriptTurnsSnapshot()).toEqual([]);
+            expect(document.getElementById('scrollableField').textContent)
+                .not.toContain('STALE POPULATED TRANSCRIPT');
+            expect(
+                document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId
+            ).toBe(emptySessionId);
+            expect(
+                historyUrls.filter((url) => url.includes(`session_id=${staleSessionId}`))
+            ).toHaveLength(0);
+        } finally {
+            jest.clearAllTimers();
+            jest.useRealTimers();
+        }
     });
 
     test('switching chat sessions keeps the originating request running in the background', async () => {
@@ -7937,6 +8576,166 @@ describe('chat session composer state', () => {
         );
         expect(activeTab).not.toBeNull();
         expect(activeTab.classList.contains('is-active')).toBe(true);
+    });
+
+    test('new chat creates immediately without a native dialog and preserves the composer draft', async () => {
+        const promptInput = document.getElementById('promptInput');
+        initializePromptCartoucheOverlay(promptInput);
+        promptInput.value = 'Move this draft into a new conversation';
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+        const createBodies = [];
+        let created = false;
+        let resolveCreate;
+        let resolveStaleHistoryRefresh;
+        let historyRequestCount = 0;
+        const createResponse = new Promise((resolve) => {
+            resolveCreate = resolve;
+        });
+        const staleHistoryRefreshResponse = new Promise((resolve) => {
+            resolveStaleHistoryRefresh = resolve;
+        });
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                historyRequestCount += 1;
+                if (historyRequestCount === 2) {
+                    return staleHistoryRefreshResponse;
+                }
+                const sessions = [
+                    {
+                        session_id: 'session-current',
+                        session_name: 'Current chat',
+                        message_count: 2,
+                        last_message_at: '2026-04-13T05:00:00Z'
+                    }
+                ];
+                if (created) {
+                    sessions.unshift({
+                        session_id: 'session-new',
+                        session_name: 'Chat 2026-04-13 18:30',
+                        message_count: 0,
+                        last_message_at: '2026-04-13T18:30:00Z'
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: created ? 'session-new' : 'session-current',
+                        sessions
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/create_chat_session')) {
+                createBodies.push(JSON.parse(options.body || '{}'));
+                return createResponse;
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+        const staleRefresh = __testOnly_refreshChatSessionTabs();
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(historyRequestCount).toBe(2);
+        const promptSpy = jest.spyOn(window, 'prompt').mockImplementation(() => 'should not be used');
+        const alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => {});
+        const newChatButton = document.querySelector('.chat-session-tab-new');
+
+        newChatButton.click();
+        newChatButton.click();
+
+        expect(promptSpy).not.toHaveBeenCalled();
+        expect(alertSpy).not.toHaveBeenCalled();
+        expect(createBodies).toEqual([{}]);
+
+        created = true;
+        resolveCreate({
+            ok: true,
+            json: async () => ({
+                session_id: 'session-new',
+                session_name: 'Chat 2026-04-13 18:30',
+                history: []
+            })
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await Promise.resolve();
+
+        resolveStaleHistoryRefresh({
+            ok: true,
+            json: async () => ({
+                authenticated: true,
+                active_session_id: 'session-current',
+                sessions: [{
+                    session_id: 'session-current',
+                    session_name: 'Current chat',
+                    message_count: 2,
+                    last_message_at: '2026-04-13T05:00:00Z'
+                }]
+            })
+        });
+        await expect(staleRefresh).resolves.toBeUndefined();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const activeTab = document.querySelector(
+            '.chat-session-tab[data-session-id="session-new"]'
+        );
+        expect(activeTab).not.toBeNull();
+        expect(activeTab.classList.contains('is-active')).toBe(true);
+        expect(activeTab.getAttribute('aria-selected')).toBe('true');
+        expect(promptInput.value).toBe('Move this draft into a new conversation');
+        expect(document.activeElement).toBe(promptInput);
+    });
+
+    test('new chat reports creation failure without blocking the page', async () => {
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'Keep this draft';
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: 'session-current',
+                        sessions: [{
+                            session_id: 'session-current',
+                            session_name: 'Current chat',
+                            message_count: 2,
+                            last_message_at: '2026-04-13T05:00:00Z'
+                        }]
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/create_chat_session')) {
+                return Promise.resolve({
+                    ok: false,
+                    json: async () => ({ error: 'Creation temporarily unavailable' })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+        const promptSpy = jest.spyOn(window, 'prompt').mockImplementation(() => 'should not be used');
+        const alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => {});
+
+        document.querySelector('.chat-session-tab-new').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(promptSpy).not.toHaveBeenCalled();
+        expect(alertSpy).not.toHaveBeenCalled();
+        expect(document.querySelector('.toast-error')?.textContent)
+            .toBe('Creation temporarily unavailable');
+        expect(promptInput.value).toBe('Keep this draft');
+        expect(document.querySelector('.chat-session-tab.is-active')?.dataset.sessionId)
+            .toBe('session-current');
     });
 
     test('first send without an active conversation creates a real session before generate', async () => {

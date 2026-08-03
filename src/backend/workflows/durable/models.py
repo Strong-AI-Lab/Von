@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 
 class WorkflowInstanceStatus(str, Enum):
@@ -214,6 +214,7 @@ class WorkflowInstance:
     progress_total: int | None = None
     progress_message: str | None = None
     progress_updated_at: datetime | None = None
+    activity_projection: dict[str, Any] | None = None
 
     # Locking (for distributed workers)
     locked_by: str | None = None
@@ -305,6 +306,7 @@ class WorkflowInstance:
             "progress_total": self.progress_total,
             "progress_message": self.progress_message,
             "progress_updated_at": self.progress_updated_at,
+            "activity_projection": self.activity_projection,
             "locked_by": self.locked_by,
             "lock_expires_at": self.lock_expires_at,
             "claimed_at": self.claimed_at,
@@ -358,6 +360,11 @@ class WorkflowInstance:
             progress_total=doc.get("progress_total"),
             progress_message=doc.get("progress_message"),
             progress_updated_at=doc.get("progress_updated_at"),
+            activity_projection=(
+                dict(cast(dict[str, Any], doc.get("activity_projection")))
+                if isinstance(doc.get("activity_projection"), dict)
+                else None
+            ),
             locked_by=doc.get("locked_by"),
             lock_expires_at=doc.get("lock_expires_at"),
             claimed_at=doc.get("claimed_at"),
@@ -468,6 +475,11 @@ class WorkflowInstance:
                     doc.get("progress_updated_at")
                 ),
             },
+            "activity_projection": (
+                dict(cast(dict[str, Any], doc.get("activity_projection")))
+                if isinstance(doc.get("activity_projection"), dict)
+                else None
+            ),
             "error": doc.get("error"),
             "has_outputs": has_outputs,
             "retry_count": doc.get("retry_count", 0),
@@ -505,6 +517,7 @@ class WorkflowInstance:
                 "progress_total": self.progress_total,
                 "progress_message": self.progress_message,
                 "progress_updated_at": self.progress_updated_at,
+                "activity_projection": self.activity_projection,
                 "error": self.error,
                 "has_outputs": self.outputs is not None,
                 "retry_count": self.retry_count,

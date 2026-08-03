@@ -9,9 +9,11 @@ JVNAUTOSCI-1311:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 import hashlib
 import json
 import os
+from threading import Lock
 from typing import Any, Callable, Dict, Mapping, Sequence
 
 from ..action_registry import (
@@ -689,7 +691,56 @@ def _build_for_each_handler(
                 },
             )
 
+        progress_lock = Lock()
+        completed_item_indices: set[int] = set()
+
+        def _emit_item_event(
+            *,
+            index: int,
+            status: str,
+            completed: bool | None = None,
+            error: str | None = None,
+            progress_facts: Any = None,
+        ) -> None:
+            callback = request.environment.step_callback
+            if not callable(callback):
+                return
+            with progress_lock:
+                if completed is not None:
+                    completed_item_indices.add(index)
+                completed_count = len(completed_item_indices)
+            event: dict[str, Any] = {
+                "schema_version": "workflow_for_each_item_event.v1",
+                "status": status,
+                "workflow_id": child_workflow_id,
+                "parent_workflow_id": request.workflow_id,
+                "parent_state_id": request.workflow_state_id,
+                "item_index": index,
+                "item_number": index + 1,
+                "item_total": len(selected_items),
+                "completed_count": completed_count,
+            }
+            if completed is not None:
+                event["completed"] = bool(completed)
+            if error:
+                event["error"] = error
+            if isinstance(progress_facts, Sequence) and not isinstance(
+                progress_facts, (str, bytes, bytearray)
+            ):
+                event["progress_facts"] = [
+                    dict(fact)
+                    for fact in progress_facts
+                    if isinstance(fact, Mapping)
+                ]
+            try:
+                callback(event)
+            except Exception:
+                # Progress is observational and must never change workflow
+                # semantics.
+                return
+
         def _execute_item(index: int, item: Any) -> dict[str, Any]:
+            _emit_item_event(index=index, status="workflow_for_each_item_start")
             child_context = dict(request.data)
             child_context.pop(WORKFLOW_STEP_RESULT_ENVELOPES_KEY, None)
             child_context.pop("invocations", None)
@@ -724,12 +775,35 @@ def _build_for_each_handler(
                     "authority_resolution": authority_resolution.to_projection(),
                 },
             )
+            parent_callback = request.environment.step_callback
+
+            def _child_step_callback(raw_event: Mapping[str, Any]) -> None:
+                if not callable(parent_callback) or not isinstance(raw_event, Mapping):
+                    return
+                event = dict(raw_event)
+                event.update(
+                    {
+                        "for_each_parent_workflow_id": request.workflow_id,
+                        "for_each_parent_state_id": request.workflow_state_id,
+                        "for_each_item_index": index,
+                        "for_each_item_number": index + 1,
+                        "for_each_item_total": len(selected_items),
+                    }
+                )
+                parent_callback(event)
+
+            child_environment = replace(
+                request.environment,
+                step_callback=(
+                    _child_step_callback if callable(parent_callback) else None
+                ),
+            )
             child_result = WorkflowExecutor(
                 registry=registry,
                 max_transitions=max_transitions,
             ).run(
                 child_definition,
-                environment=request.environment,
+                environment=child_environment,
                 data=child_context,
                 trace=child_trace,
                 _execution_scope=request.execution_scope,
@@ -738,6 +812,14 @@ def _build_for_each_handler(
                 child_result,
                 child_definition=child_definition,
                 child_workflow_id=child_workflow_id,
+            )
+            progress_facts = child_result.data.get("last_workflow_progress_facts")
+            _emit_item_event(
+                index=index,
+                status="workflow_for_each_item_completed",
+                completed=bool(child_result.completed),
+                error=_normalise_text(child_result.error) or None,
+                progress_facts=progress_facts,
             )
             return {
                 "index": index,

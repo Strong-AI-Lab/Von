@@ -105,8 +105,11 @@ describe('chat abort behaviour', () => {
         delete global.fetch;
     });
 
-    test('abort restores prompt text and re-enables sending', async () => {
-        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+    test('stop requests server cancellation and keeps Thinking visible until terminal status', async () => {
+        const {
+            fetchWithTimeout,
+            getUserContext
+        } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
             org_id: 'org',
@@ -124,7 +127,61 @@ describe('chat abort behaviour', () => {
             // jsdom best-effort
         }
 
+        fetchWithTimeout.mockReset();
+        let cancellationRequested = false;
+        let cancellationProgressObserved = false;
+        let resolveCancelledStatus = null;
+        fetchWithTimeout.mockImplementation((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: false,
+                    status: 202,
+                    json: async () => ({ status: 'pending' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/task/status/')) {
+                if (cancellationRequested) {
+                    if (!cancellationProgressObserved) {
+                        cancellationProgressObserved = true;
+                        return Promise.resolve({
+                            ok: true,
+                            status: 200,
+                            json: async () => ({
+                                status: 'running',
+                                progress: {
+                                    status: 'cancellation_requested',
+                                    result_summary: 'Stop requested.'
+                                }
+                            })
+                        });
+                    }
+                    return new Promise((resolve) => {
+                        resolveCancelledStatus = () => resolve({
+                            ok: true,
+                            status: 200,
+                            json: async () => ({
+                                status: 'cancelled',
+                                progress: {
+                                    status: 'cancelled',
+                                    result_summary: 'Turn stopped.'
+                                }
+                            })
+                        });
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ status: 'running' })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+        });
+
         let generateSignal = null;
+        let submittedGenerateBody = null;
+        const cancellationUrls = [];
+        const cancellationCredentials = [];
 
         global.fetch = jest.fn((url, options = {}) => {
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
@@ -136,36 +193,84 @@ describe('chat abort behaviour', () => {
 
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
                 generateSignal = options.signal;
-                return new Promise((resolve, reject) => {
-                    if (generateSignal) {
-                        generateSignal.addEventListener('abort', () => {
-                            const err = new Error('aborted');
-                            err.name = 'AbortError';
-                            reject(err);
-                        });
-                    }
+                submittedGenerateBody = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        background: true,
+                        task_id: submittedGenerateBody.client_request_id,
+                        status: 'running'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/task/cancel/')) {
+                cancellationRequested = true;
+                cancellationUrls.push(url);
+                cancellationCredentials.push(options.credentials);
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true, message: 'Cancellation requested' })
                 });
             }
 
             return Promise.resolve({ ok: true, json: async () => ({}) });
         });
 
-        const sendPromise = sendMessage();
+        await expect(sendMessage()).resolves.toBeUndefined();
 
         expect(document.getElementById('sendButton').disabled).toBe(false);
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
+        expect(submittedGenerateBody.background).toBe(true);
 
         document.getElementById('abortButton').click();
 
         await new Promise((r) => setTimeout(r, 0));
 
         expect(generateSignal).not.toBeNull();
-        expect(generateSignal.aborted).toBe(true);
+        expect(generateSignal.aborted).toBe(false);
+        expect(cancellationUrls).toHaveLength(1);
+        expect(cancellationUrls[0]).toBe(
+            `/von/api/task/cancel/${encodeURIComponent(submittedGenerateBody.client_request_id)}`
+        );
+        expect(cancellationCredentials).toEqual(['same-origin']);
+        expect(document.querySelector('.loading-indicator-text').textContent)
+            .toBe('Stopping…');
         expect(document.getElementById('sendButton').disabled).toBe(false);
+        expect(document.getElementById('abortButton').disabled).toBe(true);
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
+        expect(promptInput.value).toBe('');
+
+        for (let attempt = 0; attempt < 20 && !cancellationProgressObserved; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(cancellationProgressObserved).toBe(true);
+        expect(generateSignal.aborted).toBe(false);
+        expect(document.querySelector('.loading-indicator-text').textContent)
+            .toBe('Stopping…');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
+        expect(document.getElementById('abortButton').disabled).toBe(true);
+
+        for (let attempt = 0; attempt < 80 && !resolveCancelledStatus; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(resolveCancelledStatus).not.toBeNull();
+        resolveCancelledStatus();
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            if (
+                generateSignal.aborted
+                && document.getElementById('abortButton').getAttribute('aria-hidden') === 'true'
+            ) {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        expect(generateSignal.aborted).toBe(true);
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
         expect(promptInput.value).toBe("since we'\n");
-
-        await expect(sendPromise).resolves.toBeUndefined();
     });
 
     test('non-json generate failure shows controlled server response error', async () => {
@@ -253,10 +358,21 @@ describe('thinking progress polling', () => {
             language: 'en-NZ',
             gmail_profile: null
         });
-        fetchWithTimeout.mockResolvedValue({
-            ok: false,
-            status: 202,
-            json: async () => ({ status: 'pending' })
+        fetchWithTimeout.mockReset();
+        let cancellationRequested = false;
+        fetchWithTimeout.mockImplementation((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/task/status/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ status: cancellationRequested ? 'cancelled' : 'running' })
+                });
+            }
+            return Promise.resolve({
+                ok: false,
+                status: 202,
+                json: async () => ({ status: 'pending' })
+            });
         });
         __testOnly_setActiveChatSession('session-progress-credentials', 'Progress Credentials');
 
@@ -272,19 +388,31 @@ describe('thinking progress polling', () => {
             }
 
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
-                return new Promise((resolve, reject) => {
-                    options.signal?.addEventListener('abort', () => {
-                        const err = new Error('aborted');
-                        err.name = 'AbortError';
-                        reject(err);
-                    });
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        background: true,
+                        task_id: body.client_request_id,
+                        status: 'running'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/task/cancel/')) {
+                cancellationRequested = true;
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ success: true })
                 });
             }
 
             return Promise.resolve({ ok: true, json: async () => ({}) });
         });
 
-        const sendPromise = sendMessage();
+        await sendMessage();
         await new Promise((resolve) => setTimeout(resolve, 0));
         await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -295,7 +423,13 @@ describe('thinking progress polling', () => {
         expect(progressCall[1]?.credentials).toBe('omit');
 
         document.getElementById('abortButton').click();
-        await expect(sendPromise).resolves.toBeUndefined();
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            if (document.getElementById('abortButton').getAttribute('aria-hidden') === 'true') {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
     });
 });
 

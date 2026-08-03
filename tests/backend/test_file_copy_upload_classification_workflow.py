@@ -70,14 +70,8 @@ def _seed_route_map() -> dict[str, object]:
             },
             {
                 "route_key": "spreadsheet",
-                "selected_route_mode": "specialised",
-                "mutation_route": True,
-                "candidate_workflow_ids": [
-                    "#V#spreadsheet_phd_programme_representation_workflow"
-                ],
-                "on_workflow_unavailable": "interpret_if_allowed_else_noop",
-                "on_low_confidence": "fail_closed",
-                "unsupported_reason": "specialised_workflow_unavailable",
+                "selected_route_mode": "interpret",
+                "mutation_route": False,
             },
             {
                 "route_key": "interpret",
@@ -201,7 +195,7 @@ def test_classification_does_not_mutate_from_xlsx_format_alone(
     assert result.outputs["target_workflow_id"] is None
 
 
-def test_explicit_spreadsheet_route_can_select_programme_workflow(
+def test_explicit_spreadsheet_route_remains_compositional(
     monkeypatch,
 ) -> None:
     _patch_route_map(monkeypatch)
@@ -225,12 +219,9 @@ def test_explicit_spreadsheet_route_can_select_programme_workflow(
     )
 
     assert result.outputs["route_key"] == "spreadsheet"
-    assert result.outputs["route_mode"] == "specialised"
-    assert result.outputs["mutation_route"] is True
-    assert (
-        result.outputs["target_workflow_id"]
-        == "#V#spreadsheet_phd_programme_representation_workflow"
-    )
+    assert result.outputs["route_mode"] == "interpret"
+    assert result.outputs["mutation_route"] is False
+    assert result.outputs["target_workflow_id"] is None
 
 
 def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -> None:

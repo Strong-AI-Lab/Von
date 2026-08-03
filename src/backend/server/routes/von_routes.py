@@ -52,6 +52,7 @@ from ...services.request_progress_service import (
 )
 from ...services import chat_history_service
 from ...services import chat_prompt_queue_service
+from ...services import conversation_activity_projection_service
 from ...services.adaptive_turn_service import (
     execute_adaptive_turn,
 )
@@ -6150,10 +6151,75 @@ def _build_durable_turn_background_result(instance: Any) -> dict[str, Any]:
     return result_payload
 
 
-def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
+def _get_current_background_task_actor_scope() -> dict[str, str | None] | None:
+    """Resolve private background-task scope from trusted request context only."""
+
+    try:
+        from ...security.access_control import (
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+        )
+
+        user_id = _normalise_non_empty_text(get_effective_user_concept_id())
+        organisation_id = _normalise_non_empty_text(
+            get_effective_organisation_concept_id()
+        )
+    except Exception:
+        return None
+    if not user_id:
+        return None
+
+    try:
+        effective_context = get_effective_context(
+            request.headers.get(_WINDOW_SESSION_HEADER_NAME),
+            dict(session),
+            user_id,
+        )
+    except Exception:
+        effective_context = {}
+    if not organisation_id:
+        organisation_id = _normalise_non_empty_text(
+            effective_context.get("organisation_id")
+        )
+    namespace = _normalise_non_empty_text(effective_context.get("namespace"))
+    if not namespace:
+        namespace = _normalise_non_empty_text(session.get("namespace"))
+    if not namespace:
+        namespace = _derive_namespace_for_user_org(user_id, organisation_id)
+    return {
+        "user_id": user_id,
+        "organisation_id": organisation_id,
+        "namespace": namespace,
+    }
+
+
+def _background_task_not_found_response(task_id: str):
+    return (
+        jsonify(
+            {
+                "error": "Task not found",
+                "error_code": "task_not_found",
+                "task_id": task_id,
+            }
+        ),
+        404,
+    )
+
+
+def _find_terminal_durable_turn_instance(
+    task_id: str,
+    *,
+    actor_scope: Mapping[str, Any],
+) -> Any | None:
+    actor_user_id = _normalise_non_empty_text(actor_scope.get("user_id"))
+    if not actor_user_id:
+        return None
     try:
         manager = get_instance_manager()
         instances = manager.list_instances(
+            user_id=actor_user_id,
+            org_id=_normalise_non_empty_text(actor_scope.get("organisation_id")),
+            namespace=_normalise_non_empty_text(actor_scope.get("namespace")),
             workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
             source_event_type="conversation_turn",
             source_event_id=task_id,
@@ -6195,7 +6261,12 @@ def _find_terminal_durable_turn_instance(task_id: str) -> Any | None:
         return None
 
 
-def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> Any:
+def _reconcile_background_task_from_durable_turn(
+    task_id: str,
+    status: Any,
+    *,
+    actor_scope: Mapping[str, Any],
+) -> Any:
     if status is not None and getattr(status, "status", None) == "completed":
         progress = getattr(status, "progress", None)
         if isinstance(progress, Mapping) and _normalise_non_empty_text(
@@ -6203,7 +6274,10 @@ def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> A
         ):
             return status
 
-    instance = _find_terminal_durable_turn_instance(task_id)
+    instance = _find_terminal_durable_turn_instance(
+        task_id,
+        actor_scope=actor_scope,
+    )
     if instance is None:
         return status
 
@@ -6243,8 +6317,50 @@ def _reconcile_background_task_from_durable_turn(task_id: str, status: Any) -> A
             error=error,
             progress=progress,
             session_id=result.get("session_id"),
+            user_id=_normalise_non_empty_text(actor_scope.get("user_id")),
         )
     return status
+
+
+def _get_actor_owned_background_task_status(
+    task_id: str,
+    *,
+    reconcile_durable: bool,
+) -> tuple[Any | None, Any | None]:
+    """Return a private task only when its stored owner is the current actor."""
+
+    actor_scope = _get_current_background_task_actor_scope()
+    if actor_scope is None:
+        return None, (
+            jsonify(
+                {
+                    "error": "Not authenticated",
+                    "error_code": "not_authenticated",
+                }
+            ),
+            401,
+        )
+
+    actor_user_id = _normalise_non_empty_text(actor_scope.get("user_id"))
+    status = background_task_registry.get_task_status(task_id)
+    if status is not None:
+        task_user_id = _normalise_non_empty_text(getattr(status, "user_id", None))
+        if not task_user_id or task_user_id != actor_user_id:
+            return None, _background_task_not_found_response(task_id)
+
+    if reconcile_durable:
+        status = _reconcile_background_task_from_durable_turn(
+            task_id,
+            status,
+            actor_scope=actor_scope,
+        )
+    if status is None:
+        return None, _background_task_not_found_response(task_id)
+
+    task_user_id = _normalise_non_empty_text(getattr(status, "user_id", None))
+    if not task_user_id or task_user_id != actor_user_id:
+        return None, _background_task_not_found_response(task_id)
+    return status, None
 
 
 @von_bp.route("/api/task/status/<task_id>", methods=["GET"])
@@ -6260,10 +6376,14 @@ def get_task_status(task_id: str):
         return jsonify({"error": "Invalid task_id"}), 400
 
     task_id_clean = task_id.strip()
-    status = background_task_registry.get_task_status(task_id_clean)
-    status = _reconcile_background_task_from_durable_turn(task_id_clean, status)
+    status, access_error = _get_actor_owned_background_task_status(
+        task_id_clean,
+        reconcile_durable=True,
+    )
+    if access_error is not None:
+        return access_error
     if status is None:
-        return jsonify({"error": "Task not found", "task_id": task_id}), 404
+        return _background_task_not_found_response(task_id_clean)
 
     return jsonify(_json_safe_response_payload(status.to_dict())), 200
 
@@ -6351,13 +6471,6 @@ def _normalise_background_generate_result(result: Any) -> dict[str, Any]:
     if status_code >= 400:
         raise RuntimeError(
             f"/von/generate background execution failed with status {status_code}: "
-            f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
-        )
-    if payload.get("success") is False:
-        terminal_status = _progress_str(payload.get("terminal_status")) or "failed"
-        raise RuntimeError(
-            "/von/generate background execution returned non-success "
-            f"{terminal_status}: "
             f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
         )
     return _json_safe_response_payload(payload)
@@ -6541,10 +6654,14 @@ def get_task_result(task_id: str):
         return jsonify({"error": "Invalid task_id"}), 400
 
     task_id_clean = task_id.strip()
-    status = background_task_registry.get_task_status(task_id_clean)
-    status = _reconcile_background_task_from_durable_turn(task_id_clean, status)
+    status, access_error = _get_actor_owned_background_task_status(
+        task_id_clean,
+        reconcile_durable=True,
+    )
+    if access_error is not None:
+        return access_error
     if status is None:
-        return jsonify({"error": "Task not found", "task_id": task_id}), 404
+        return _background_task_not_found_response(task_id_clean)
 
     if status.status == "failed":
         return (
@@ -6606,7 +6723,15 @@ def cancel_task(task_id: str):
     if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
         return jsonify({"error": "Invalid task_id"}), 400
 
-    success = background_task_registry.request_cancellation(task_id.strip())
+    task_id_clean = task_id.strip()
+    _status, access_error = _get_actor_owned_background_task_status(
+        task_id_clean,
+        reconcile_durable=False,
+    )
+    if access_error is not None:
+        return access_error
+
+    success = background_task_registry.request_cancellation(task_id_clean)
     if not success:
         return (
             jsonify(
@@ -9221,6 +9346,292 @@ def _load_conversation_session_state_fail_soft(
         }
 
 
+def _conversation_activity_progress_count(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and value >= 0 and value.is_integer():
+        return int(value)
+    return None
+
+
+def _material_conversation_activity_from_progress(
+    update: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Select one user-meaningful completed-work milestone from live progress.
+
+    Tool starts stay on the memory-first Thinking projection. Persisting them
+    into the conversation carrier would put several synchronous Mongo calls in
+    front of the tool invocation itself without adding durable outcome
+    evidence.
+    """
+
+    if not isinstance(update, Mapping):
+        return None
+    payload = dict(update)
+    status = (_progress_str(payload.get("status")) or "").lower()
+    event_kind = (_derive_progress_event_kind(payload) or "").lower()
+    if status in {"", "thinking", "heartbeat", "phase_transition"} or event_kind in {
+        "heartbeat",
+        "stage_event",
+        "status_update",
+    }:
+        return None
+
+    selected_event = payload.get("selected_workflow_execution_event")
+    selected_event = selected_event if isinstance(selected_event, Mapping) else {}
+    workflow_id = (
+        _progress_str(payload.get("workflow_id"))
+        or _progress_str(payload.get("selected_workflow_id"))
+        or _progress_str(selected_event.get("workflow_id"))
+    )
+    instance_id = _progress_str(payload.get("workflow_instance_id")) or _progress_str(
+        payload.get("instance_id")
+    )
+    tool_name = _progress_str(payload.get("tool"))
+    tool_milestone = bool(tool_name) and (
+        event_kind == "tool_call_end"
+        or status in {"tool_completed", "tool_invoked", "tool_failed", "tool_blocked"}
+    )
+    workflow_marker = " ".join(
+        value
+        for value in (
+            event_kind,
+            status,
+            _progress_str(payload.get("stage")) or "",
+            _progress_str(payload.get("phase")) or "",
+        )
+        if value
+    ).lower()
+    workflow_milestone = bool(workflow_id) and any(
+        marker in workflow_marker
+        for marker in (
+            "workflow_execution",
+            "workflow_instance",
+            "workflow_step",
+            "workflow_for_each",
+        )
+    )
+    if not tool_milestone and not workflow_milestone:
+        return None
+
+    progress_payload = payload.get("workflow_progress")
+    if not isinstance(progress_payload, Mapping):
+        progress_payload = payload.get("progress")
+    progress_payload = (
+        progress_payload if isinstance(progress_payload, Mapping) else {}
+    )
+    progress_current = _conversation_activity_progress_count(
+        progress_payload.get("current")
+    )
+    if progress_current is None:
+        progress_current = _conversation_activity_progress_count(
+            payload.get("tool_calls_done")
+        )
+    progress_total = _conversation_activity_progress_count(
+        progress_payload.get("total")
+    )
+    progress_message = _progress_str(payload.get("result_summary")) or _progress_str(
+        progress_payload.get("message")
+    )
+    if not progress_message and tool_name:
+        if event_kind == "tool_call_start" or status == "tool_call_start":
+            progress_message = f"Calling {tool_name}"
+        elif status in {"tool_failed", "tool_blocked"}:
+            progress_message = f"{tool_name} did not complete"
+        else:
+            progress_message = f"{tool_name} completed"
+
+    progress_facts = _normalise_progress_facts(
+        payload.get("progress_facts") or selected_event.get("progress_facts")
+    )
+    return {
+        "activity_status": "running",
+        "milestone": event_kind or status,
+        "progress_current": progress_current,
+        "progress_total": progress_total,
+        "progress_message": progress_message,
+        "represented_progress_facts": progress_facts or None,
+        "workflow_id": workflow_id,
+        "instance_id": instance_id,
+    }
+
+
+def _coarse_conversation_activity_checkpoint_key(
+    update: Mapping[str, Any] | None,
+) -> tuple[str, str, int, int | None] | None:
+    """Return a sparse durable checkpoint identity for completed work.
+
+    Power-of-two completion counts bound an N-tool turn to O(log N) carrier
+    writes. A declared final count is retained even when it is not a power of
+    two. Start and terminal observations are projected explicitly by the route
+    and therefore do not pass through this gate.
+    """
+
+    if not isinstance(update, Mapping):
+        return None
+    milestone = (_progress_str(update.get("milestone")) or "").lower()
+    completion_milestone = milestone == "tool_call_end" or any(
+        marker in milestone for marker in ("completed", "failed", "blocked")
+    )
+    if not completion_milestone:
+        return None
+    current = _conversation_activity_progress_count(update.get("progress_current"))
+    total = _conversation_activity_progress_count(update.get("progress_total"))
+    if current is None or current <= 0:
+        return None
+    logarithmic_checkpoint = current & (current - 1) == 0
+    declared_completion = total is not None and total > 0 and current >= total
+    if not logarithmic_checkpoint and not declared_completion:
+        return None
+    return (
+        _progress_str(update.get("workflow_id")) or "",
+        _progress_str(update.get("instance_id")) or "",
+        current,
+        total,
+    )
+
+
+def _project_conversation_activity_fail_soft(**kwargs: Any) -> dict[str, Any] | None:
+    """Project activity without allowing the optional carrier to fail the turn."""
+
+    try:
+        return conversation_activity_projection_service.project_conversation_turn_activity(
+            **kwargs
+        )
+    except Exception as exc:
+        _safe_app_log(
+            "warning",
+            "Conversation activity projection unavailable for session_id=%s "
+            "request_id=%s: %s",
+            kwargs.get("session_id"),
+            kwargs.get("request_id"),
+            exc,
+        )
+        return None
+
+
+_TERMINAL_CONVERSATION_ACTIVITY_STATUSES = frozenset(
+    {"completed", "failed", "cancelled"}
+)
+
+
+def _conversation_activity_observation_id(
+    observation: Mapping[str, Any],
+) -> str | None:
+    kind = _progress_str(observation.get("kind"))
+    if kind not in {
+        conversation_activity_projection_service.CONVERSATION_ACTIVITY_OBSERVATION_KIND,
+        conversation_activity_projection_service.DURABLE_WORKFLOW_ACTIVITY_OBSERVATION_KIND,
+    }:
+        return None
+    return _progress_str(observation.get("activity_id")) or _progress_str(
+        observation.get("instance_id")
+    )
+
+
+def _collapse_terminal_activity_observations_for_model(
+    observations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep terminal evidence without replaying an old objective as policy."""
+
+    copied = [dict(item) for item in observations if isinstance(item, Mapping)]
+    latest_index_by_activity: dict[str, int] = {}
+    for index, observation in enumerate(copied):
+        activity_id = _conversation_activity_observation_id(observation)
+        if activity_id:
+            latest_index_by_activity[activity_id] = index
+
+    terminal_activity_ids = {
+        activity_id
+        for activity_id, index in latest_index_by_activity.items()
+        if (_progress_str(copied[index].get("activity_status")) or "").lower()
+        in _TERMINAL_CONVERSATION_ACTIVITY_STATUSES
+    }
+    selected: list[dict[str, Any]] = []
+    for index, observation in enumerate(copied):
+        activity_id = _conversation_activity_observation_id(observation)
+        if activity_id not in terminal_activity_ids:
+            selected.append(observation)
+            continue
+        if latest_index_by_activity.get(activity_id) != index:
+            continue
+        terminal_observation = dict(observation)
+        terminal_observation.pop("objective", None)
+        selected.append(terminal_observation)
+    return selected
+
+
+def _prepare_current_activity_model_snapshot(
+    *,
+    prior_situation: Mapping[str, Any] | None,
+    prior_observations: Sequence[Mapping[str, Any]],
+    current_projection: Mapping[str, Any] | None,
+    request_id: str,
+) -> tuple[dict[str, Any] | None, str | None, int, list[dict[str, Any]]]:
+    """Prefer the just-started turn over reducer text from an older turn."""
+
+    combined_observations = [
+        dict(item) for item in prior_observations if isinstance(item, Mapping)
+    ]
+    projected_observation = (
+        current_projection.get("projected_observation")
+        if isinstance(current_projection, Mapping)
+        else None
+    )
+    if isinstance(projected_observation, Mapping):
+        projected = dict(projected_observation)
+        projected_id = _progress_str(projected.get("observation_id"))
+        retained_ids = {
+            _progress_str(item.get("observation_id"))
+            for item in combined_observations
+            if _progress_str(item.get("observation_id"))
+        }
+        if projected_id is None or projected_id not in retained_ids:
+            combined_observations.append(projected)
+
+    situation_outcome = (
+        current_projection.get("situation")
+        if isinstance(current_projection, Mapping)
+        else None
+    )
+    projected_situation = (
+        situation_outcome.get("conversation_situation")
+        if isinstance(situation_outcome, Mapping)
+        else None
+    )
+    current_reducer_situation = bool(
+        isinstance(projected_situation, Mapping)
+        and projected_situation.get("source")
+        == conversation_activity_projection_service.CONVERSATION_ACTIVITY_SITUATION_SOURCE
+        and projected_situation.get("source_request_id") == request_id
+    )
+    if current_reducer_situation:
+        situation_descriptor, situation_text, situation_revision = (
+            _normalise_conversation_situation_descriptor(projected_situation)
+        )
+    elif (
+        isinstance(prior_situation, Mapping)
+        and prior_situation.get("source")
+        == conversation_activity_projection_service.CONVERSATION_ACTIVITY_SITUATION_SOURCE
+    ):
+        # A failed optional projection must not promote an older reducer-owned
+        # objective into the new turn's system context.
+        situation_descriptor, situation_text, situation_revision = None, None, 0
+    else:
+        situation_descriptor, situation_text, situation_revision = (
+            _normalise_conversation_situation_descriptor(prior_situation)
+        )
+
+    return (
+        situation_descriptor,
+        situation_text,
+        situation_revision,
+        _collapse_terminal_activity_observations_for_model(combined_observations),
+    )
+
+
 def _persist_conversation_situation_fail_soft(
     *,
     user_id: str | None,
@@ -9249,6 +9660,11 @@ def _persist_conversation_situation_fail_soft(
         if isinstance(previous_text, str) and previous_text.strip()
         else None
     )
+    request_id_value = (
+        request_id.strip()
+        if isinstance(request_id, str) and request_id.strip()
+        else None
+    )
     if updated_text == previous_text:
         return
 
@@ -9261,7 +9677,7 @@ def _persist_conversation_situation_fail_soft(
             source="adaptive_turn",
             updated_by=updated_by.strip(),
             namespace=namespace,
-            source_request_id=request_id,
+            source_request_id=request_id_value,
         )
     except Exception as exc:
         _safe_app_log(
@@ -9275,6 +9691,56 @@ def _persist_conversation_situation_fail_soft(
         return
 
     if isinstance(result, Mapping) and result.get("conflict") is True:
+        current_situation = result.get("conversation_situation")
+        reducer_owned_by_request = bool(
+            isinstance(current_situation, Mapping)
+            and request_id_value is not None
+            and current_situation.get("source")
+            == conversation_activity_projection_service.CONVERSATION_ACTIVITY_SITUATION_SOURCE
+            and current_situation.get("source_request_id") == request_id_value
+        )
+        current_revision = (
+            current_situation.get("revision")
+            if isinstance(current_situation, Mapping)
+            else None
+        )
+        if (
+            reducer_owned_by_request
+            and request_id_value is not None
+            and isinstance(current_revision, int)
+            and not isinstance(current_revision, bool)
+            and current_revision >= 0
+        ):
+            try:
+                retry_result = (
+                    chat_history_service.set_chat_history_conversation_situation(
+                        user_id=user_id.strip(),
+                        session_id=session_id,
+                        text=updated_text,
+                        expected_revision=current_revision,
+                        source="adaptive_turn",
+                        updated_by=updated_by.strip(),
+                        namespace=namespace,
+                        source_request_id=request_id_value,
+                    )
+                )
+            except Exception as exc:
+                _safe_app_log(
+                    "warning",
+                    "Conversation situation retry unavailable for session_id=%s "
+                    "request_id=%s: %s",
+                    session_id,
+                    request_id,
+                    exc,
+                )
+                return
+            if not (
+                isinstance(retry_result, Mapping)
+                and retry_result.get("conflict") is True
+            ):
+                return
+            result = retry_result
+
         _safe_app_log(
             "warning",
             "Conversation situation revision conflict for session_id=%s "
@@ -9837,14 +10303,11 @@ def _submit_generate_background_request(
         if session_snapshot.get("session_id")
         else None
     )
+    actor_scope = _get_current_background_task_actor_scope()
     background_user_id = (
-        str(session_snapshot.get("user_concept_id")).strip()
-        if session_snapshot.get("user_concept_id")
-        else (
-            str(session_snapshot.get("user_id")).strip()
-            if session_snapshot.get("user_id")
-            else None
-        )
+        _normalise_non_empty_text(actor_scope.get("user_id"))
+        if actor_scope is not None
+        else None
     )
 
     def _run_generate_request_in_background() -> dict[str, Any]:
@@ -10686,6 +11149,65 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
             _check_background_cancellation("early user-message persist")
 
+    projected_activity_checkpoint_keys: set[tuple[str, str, int, int | None]] = set()
+
+    def _project_background_conversation_activity(
+        *,
+        activity_status: str,
+        milestone: str,
+        progress_current: int | None = None,
+        progress_total: int | None = None,
+        progress_message: str | None = None,
+        represented_progress_facts: Sequence[Mapping[str, Any]] | None = None,
+        workflow_id: str | None = None,
+        instance_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if (
+            background_task_id is None
+            or not _user_message_persisted_early
+            or not isinstance(user_concept_id, str)
+            or not user_concept_id.strip()
+            or not isinstance(history_user_id, str)
+            or not history_user_id.strip()
+        ):
+            return None
+        return _project_conversation_activity_fail_soft(
+            actor_user_id=user_concept_id,
+            history_owner_user_id=history_user_id,
+            session_id=session_id,
+            namespace=history_namespace,
+            request_id=request_id,
+            activity_id=background_task_id,
+            objective=prompt_text,
+            activity_status=activity_status,
+            milestone=milestone,
+            originated_at_utc=interaction_timestamp_utc,
+            progress_current=progress_current,
+            progress_total=progress_total,
+            progress_message=progress_message,
+            represented_progress_facts=represented_progress_facts,
+            workflow_id=workflow_id,
+            instance_id=instance_id,
+        )
+
+    start_activity_projection = _project_background_conversation_activity(
+        activity_status="running",
+        milestone="started",
+        progress_current=0,
+        progress_message="Background turn started",
+    )
+    (
+        conversation_situation_descriptor,
+        conversation_situation_text,
+        conversation_situation_revision,
+        conversation_observations,
+    ) = _prepare_current_activity_model_snapshot(
+        prior_situation=conversation_situation_descriptor,
+        prior_observations=conversation_observations,
+        current_projection=start_activity_projection,
+        request_id=request_id,
+    )
+
     if progress_updates_enabled:
         _emit_generate_progress(
             {
@@ -11283,6 +11805,25 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload.setdefault("request_id", request_id)
                 payload.setdefault("goal_label", progress_goal_label)
                 _emit_generate_progress(payload)
+                if background_task_id is not None:
+                    activity_update = _material_conversation_activity_from_progress(
+                        payload
+                    )
+                    if activity_update is not None:
+                        checkpoint_key = (
+                            _coarse_conversation_activity_checkpoint_key(
+                                activity_update
+                            )
+                        )
+                        if (
+                            checkpoint_key is not None
+                            and checkpoint_key
+                            not in projected_activity_checkpoint_keys
+                        ):
+                            projected_activity_checkpoint_keys.add(checkpoint_key)
+                            _project_background_conversation_activity(
+                                **activity_update
+                            )
 
             progress_tracker = ProgressTracker(
                 callback=_progress_update,
@@ -11321,6 +11862,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             conversation_situation=conversation_situation_text,
             conversation_observations=conversation_observations,
             conversation_observation_state=conversation_observation_state,
+            background_activity_mode=background_task_id is not None,
         )
         llm_interaction["duration_ms"] = (
             time.perf_counter() - adaptive_turn_started
@@ -12888,6 +13430,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             timing_recorder=turn_timing_recorder,
             refresh_llm_debug_timing_fn=_refresh_llm_debug_timing_payload,
         )
+        _project_background_conversation_activity(
+            activity_status="completed" if adaptive_success else "failed",
+            milestone="completed" if adaptive_success else "failed",
+            progress_message=(
+                "Background turn completed and the response is ready"
+                if adaptive_success
+                else "Background turn ended without completing the requested outcome"
+            ),
+        )
         _persist_conversation_situation_fail_soft(
             user_id=history_user_id,
             session_id=session_id,
@@ -12978,6 +13529,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
         return jsonify(final_success_body)
     except CancellationRequested:
+        project_background_activity = locals().get(
+            "_project_background_conversation_activity"
+        )
+        if callable(project_background_activity):
+            project_background_activity(
+                activity_status="cancelled",
+                milestone="cancelled",
+                progress_message="Background turn was cancelled",
+            )
         if progress_updates_enabled:
             try:
                 if show_tool_use_progress:
@@ -13004,6 +13564,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         raise
     except Exception as e:
         print(f"Error during generation: {e}")  # Log error server-side
+        project_background_activity = locals().get(
+            "_project_background_conversation_activity"
+        )
+        if callable(project_background_activity):
+            project_background_activity(
+                activity_status="failed",
+                milestone="failed",
+                progress_message="Background turn failed before producing a result",
+            )
         # Return error with debug info showing the current turn only (not full context)
         # to avoid exponential token growth in debug data
 

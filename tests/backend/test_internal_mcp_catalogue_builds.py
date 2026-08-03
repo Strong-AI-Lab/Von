@@ -80,9 +80,25 @@ def test_default_catalogue_exposes_calibrated_effect_admission_windows():
         == 8.0
     )
     assert catalogue.get("add_relationship").effect_admission_window_sec == 5.0
+    assert (
+        catalogue.get("create_concepts").supports_cooperative_cancellation is True
+    )
+    assert (
+        catalogue.get("add_relationship").supports_cooperative_cancellation is True
+    )
+    assert (
+        catalogue.get("upsert_text_relation").supports_cooperative_cancellation
+        is False
+    )
     assert snapshot["create_concepts"]["effect_admission_window_sec"] is None
     assert snapshot["upsert_text_relation"]["effect_admission_window_sec"] == 8.0
     assert snapshot["add_relationship"]["effect_admission_window_sec"] == 5.0
+    assert (
+        snapshot["create_concepts"]["supports_cooperative_cancellation"] is True
+    )
+    assert (
+        snapshot["add_relationship"]["supports_cooperative_cancellation"] is True
+    )
 
 
 def test_ordinary_turn_read_projection_follows_capability_authority_metadata():

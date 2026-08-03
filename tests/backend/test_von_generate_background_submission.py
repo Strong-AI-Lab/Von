@@ -261,6 +261,7 @@ def test_background_generate_reentry_passes_authorised_inputs_to_adaptive_turn(
         "base_gmail_query": "arxiv.org newer_than:365d",
         "gmail_max_results": 1,
     }
+    assert adaptive_turn.calls[0]["background_activity_mode"] is True
     assert len(task_registry.terminal_updates) == 1
     terminal_task_id, terminal_update = task_registry.terminal_updates[0]
     assert terminal_task_id == submitted["task_id"]
@@ -271,13 +272,251 @@ def test_background_generate_reentry_passes_authorised_inputs_to_adaptive_turn(
     assert isinstance(llm_debug.get("turn_execution_record"), dict)
 
 
-def test_background_generate_preserves_adaptive_non_success(monkeypatch):
+def test_background_generate_projects_material_activity_lifecycle(monkeypatch):
+    import src.backend.server.routes.von_routes as von_routes
+
     adaptive_result = AdaptiveTurnResult(
-        response_text="The model call failed.",
+        response_text="ok",
         extra_messages=(),
         tool_invocations=(),
         aux_llm_calls=(),
-        terminal_status="model_error",
+    )
+
+    class _ProgressAdaptiveTurn(_StubAdaptiveTurn):
+        def execute(self, **kwargs: Any) -> AdaptiveTurnResult:
+            self.calls.append(dict(kwargs))
+            tracker = kwargs["progress_tracker"]
+            tracker.emit({"status": "thinking", "phase": "model_call"})
+            tracker.emit(
+                {
+                    "status": "tool_call_start",
+                    "tool": "create_concepts",
+                    "tool_calls_done": 41,
+                }
+            )
+            tracker.emit({"status": "heartbeat", "tool": "create_concepts"})
+            tracker.emit(
+                {
+                    "status": "tool_invoked",
+                    "tool": "create_concepts",
+                    "tool_calls_done": 42,
+                    "result_summary": "Concept creation result was recorded.",
+                }
+            )
+            return self._result
+
+    task_registry = _CapturingTaskRegistry()
+    adaptive_turn = _ProgressAdaptiveTurn(adaptive_result)
+    app = _make_app(monkeypatch, adaptive_turn, task_registry)
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "build_mongo_operation_comment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "_CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+
+    lifecycle: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_project(**kwargs: Any) -> dict[str, Any]:
+        lifecycle.append(("project", dict(kwargs)))
+        return {"updated": True}
+
+    monkeypatch.setattr(
+        von_routes.conversation_activity_projection_service,
+        "project_conversation_turn_activity",
+        fake_project,
+    )
+
+    def fake_readback(**kwargs: Any):
+        lifecycle.append(("readback", dict(kwargs)))
+        return (
+            None,
+            [],
+            {
+                "schema_version": "conversation_observation_state.v1",
+                "retained_count": 0,
+                "total_count": 0,
+                "omitted_count": 0,
+                "retention_limit": 32,
+            },
+        )
+
+    monkeypatch.setattr(
+        von_routes,
+        "_read_conversation_carrier_after_persistence_fail_soft",
+        fake_readback,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Diagnose the empty conversation situation",
+            "background": True,
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+    assert response.status_code == 202
+    submitted = cast(dict[str, Any], task_registry.calls[0])
+    task_callable = submitted["callable"]
+    assert callable(task_callable)
+    task_callable()
+
+    projections = [payload for event, payload in lifecycle if event == "project"]
+    assert [projection["milestone"] for projection in projections] == [
+        "started",
+        "completed",
+    ]
+    # Tool starts remain live-only, and count 42 is not a logarithmic checkpoint
+    # when the progress stream does not declare a total. The terminal projection
+    # retains the completed turn without another per-tool carrier write.
+    assert all(
+        projection["originated_at_utc"] == projections[0]["originated_at_utc"]
+        for projection in projections
+    )
+    assert adaptive_turn.calls[0]["background_activity_mode"] is True
+    assert lifecycle[-2][0] == "project"
+    assert lifecycle[-2][1]["activity_status"] == "completed"
+    assert lifecycle[-1][0] == "readback"
+
+
+def test_background_generate_passes_current_activity_not_stale_failed_objective(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    adaptive_result = AdaptiveTurnResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    task_registry = _CapturingTaskRegistry()
+    adaptive_turn = _StubAdaptiveTurn(adaptive_result)
+    app = _make_app(monkeypatch, adaptive_turn, task_registry)
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+
+    stale_observations = [
+        {
+            "kind": "conversation_turn_activity_milestone",
+            "observation_id": "a26-started",
+            "activity_id": "activity-a26",
+            "activity_status": "running",
+            "milestone": "started",
+            "objective": "Process A26",
+        },
+        {
+            "kind": "conversation_turn_activity_milestone",
+            "observation_id": "a26-failed",
+            "activity_id": "activity-a26",
+            "activity_status": "failed",
+            "milestone": "failed",
+            "objective": "Process A26",
+        },
+    ]
+    monkeypatch.setattr(
+        von_routes,
+        "_load_conversation_session_state_fail_soft",
+        lambda **_kwargs: (
+            [],
+            {
+                "text": "Current conversation activity:\n- Objective: Process A26",
+                "revision": 4,
+                "source": "conversation_activity_projection",
+                "source_request_id": "request-a26",
+            },
+            "Current conversation activity:\n- Objective: Process A26",
+            4,
+            stale_observations,
+            {
+                "conversation_observation_state": {
+                    "schema_version": "conversation_observation_state.v1",
+                    "retained_count": 2,
+                    "total_count": 2,
+                    "omitted_count": 0,
+                    "retention_limit": 32,
+                }
+            },
+        ),
+    )
+
+    def fake_project(**kwargs: Any) -> dict[str, Any]:
+        observation = {
+            "kind": "conversation_turn_activity_milestone",
+            "observation_id": f"{kwargs['request_id']}-{kwargs['milestone']}",
+            "activity_id": kwargs["activity_id"],
+            "activity_status": kwargs["activity_status"],
+            "milestone": kwargs["milestone"],
+            "objective": kwargs["objective"],
+        }
+        situation = {
+            "text": (
+                "Current conversation activity:\n"
+                f"- Objective: {kwargs['objective']}"
+            ),
+            "revision": 5,
+            "source": "conversation_activity_projection",
+            "source_request_id": kwargs["request_id"],
+        }
+        return {
+            "updated": True,
+            "projected_observation": observation,
+            "situation": {"conversation_situation": situation},
+        }
+
+    monkeypatch.setattr(
+        von_routes.conversation_activity_projection_service,
+        "project_conversation_turn_activity",
+        fake_project,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={
+            "prompt": "Process A2",
+            "background": True,
+            "model": "gpt-5.4-nano",
+        },
+        headers={"X-Von-Window-Session": "window-123"},
+    )
+    assert response.status_code == 202
+    submitted = cast(dict[str, Any], task_registry.calls[0])
+    task_callable = submitted["callable"]
+    assert callable(task_callable)
+    task_callable()
+
+    assert adaptive_turn.calls
+    adaptive_call = adaptive_turn.calls[0]
+    assert adaptive_call["conversation_situation"] == (
+        "Current conversation activity:\n- Objective: Process A2"
+    )
+    projected_observations = adaptive_call["conversation_observations"]
+    assert projected_observations[-1]["objective"] == "Process A2"
+    assert "Process A26" not in json.dumps(projected_observations)
+
+
+def test_background_generate_preserves_adaptive_non_success(monkeypatch):
+    adaptive_result = AdaptiveTurnResult(
+        response_text=(
+            "I represented four of the six papers.\n\n"
+            "One effect remains partial, so inspect the represented state "
+            "before retrying it."
+        ),
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        terminal_status="effect_partially_completed",
     )
     task_registry = _CapturingTaskRegistry()
     app = _make_app(
@@ -301,8 +540,10 @@ def test_background_generate_preserves_adaptive_non_success(monkeypatch):
     submitted = cast(dict[str, Any], task_registry.calls[0])
     task_callable = submitted["callable"]
     assert callable(task_callable)
-    with pytest.raises(RuntimeError, match="non-success model_error"):
-        task_callable()
+    payload = task_callable()
+    assert payload["success"] is False
+    assert payload["terminal_status"] == "effect_partially_completed"
+    assert payload["response"] == adaptive_result.response_text
     assert task_registry.terminal_updates == []
 
 
@@ -447,6 +688,7 @@ def test_generate_passes_authorised_inputs_to_adaptive_turn(monkeypatch):
         "base_gmail_query": "arxiv.org newer_than:365d",
         "gmail_max_results": 1,
     }
+    assert adaptive_turn.calls[0]["background_activity_mode"] is False
 
 
 def test_generate_surfaces_adaptive_terminal_status_without_rejudging_it(
@@ -527,26 +769,32 @@ def test_normalise_background_generate_result_preserves_json_payload() -> None:
     assert llm_debug.get("response") == "ok"
 
 
-def test_normalise_background_generate_result_rejects_typed_non_success() -> None:
+def test_normalise_background_generate_result_preserves_typed_non_success() -> None:
     from flask import Flask, jsonify
 
     import src.backend.server.routes.von_routes as von_routes
 
     app = Flask(__name__)
     with app.app_context():
-        with pytest.raises(RuntimeError, match="non-success model_error"):
-            von_routes._normalise_background_generate_result(
-                (
-                    jsonify(
-                        {
-                            "success": False,
-                            "terminal_status": "model_error",
-                            "response": "Provider failed.",
-                        }
-                    ),
-                    200,
-                )
+        payload = von_routes._normalise_background_generate_result(
+            (
+                jsonify(
+                    {
+                        "success": False,
+                        "terminal_status": "effect_partially_completed",
+                        "response": (
+                            "I represented four of the six papers. Inspect the "
+                            "represented state before retrying the partial effect."
+                        ),
+                    }
+                ),
+                200,
             )
+        )
+
+    assert payload["success"] is False
+    assert payload["terminal_status"] == "effect_partially_completed"
+    assert "Inspect the represented state" in payload["response"]
 
 
 def test_resolve_generate_requested_model_prefers_explicit_request_model(monkeypatch):

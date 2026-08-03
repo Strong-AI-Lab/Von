@@ -253,6 +253,63 @@ def test_for_each_action_executes_child_workflow_per_item() -> None:
     }
 
 
+def test_for_each_action_emits_generic_item_lifecycle_without_raw_items() -> None:
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="child.emit_item",
+            handler=lambda request: WorkflowActionResult(
+                outputs={"item_value": request.data.get("current_item")}
+            ),
+        )
+    )
+    definitions = {
+        "#V#child_each": _child_definition("#V#child_each", "child.emit_item"),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+    events: list[dict[str, object]] = []
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each",
+            "items": ["private-A", "private-B"],
+            "max_concurrency": 1,
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=None,
+            step_callback=lambda event: events.append(dict(event)),
+        ),
+        workflow_id="#V#parent",
+        workflow_state_id="fan_out",
+    )
+
+    assert result.status == "success"
+    item_events = [
+        event
+        for event in events
+        if str(event.get("status") or "").startswith("workflow_for_each_item_")
+    ]
+    assert [event["status"] for event in item_events] == [
+        "workflow_for_each_item_start",
+        "workflow_for_each_item_completed",
+        "workflow_for_each_item_start",
+        "workflow_for_each_item_completed",
+    ]
+    assert item_events[-1]["completed_count"] == 2
+    assert item_events[-1]["item_total"] == 2
+    assert all("item" not in event for event in item_events)
+    nested_events = [
+        event for event in events if "for_each_item_index" in event
+    ]
+    assert nested_events
+    assert {event["for_each_item_index"] for event in nested_events} == {0, 1}
+
+
 def test_for_each_action_emits_empty_invocations_for_empty_input() -> None:
     registry = ActionRegistry()
     definitions = {

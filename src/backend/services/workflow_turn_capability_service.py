@@ -26,10 +26,13 @@ _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS = frozenset(
         "actor_concept_id",
         "actor_user_concept_id",
         "augmented_context",
+        "event_idempotency_key",
         "namespace",
         "org_concept_id",
         "organisation_concept_id",
         "prompt",
+        "source_event_id",
+        "source_event_type",
         "workflow_id",
         "user_id",
         "org_id",
@@ -629,6 +632,9 @@ def build_workflow_execution_arguments(
     organisation_concept_id: str | None,
     namespace: str,
     maximum_wait_seconds: float,
+    source_event_type: str | None = None,
+    source_event_id: str | None = None,
+    background_activity_mode: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Bind workflow identity/actor and build verified-submission arguments."""
 
@@ -715,15 +721,22 @@ def build_workflow_execution_arguments(
     except (TypeError, ValueError):
         max_retries = 3
 
+    requested_await_terminal = _coerce_bool(
+        model_arguments.get("await_terminal"),
+        default=True,
+    )
     effective_arguments = {
         "workflow_id": capability.workflow_id,
         "user_id": user_concept_id,
         "namespace": namespace,
         "inputs": launch_inputs,
         "max_retries": max(0, min(max_retries, 50)),
-        "await_terminal": _coerce_bool(
-            model_arguments.get("await_terminal"),
-            default=True,
+        # A background UI turn owns the long-lived activity wait.  The MCP
+        # write deadline therefore covers verified durable submission only;
+        # the actor-bound canonical instance is monitored by the turn after
+        # this call returns.
+        "await_terminal": (
+            False if background_activity_mode else requested_await_terminal
         ),
         "timeout_seconds": effective_wait,
         "poll_interval_seconds": max(0.0, poll_interval),
@@ -738,6 +751,19 @@ def build_workflow_execution_arguments(
     }
     if organisation_concept_id is not None:
         effective_arguments["org_id"] = organisation_concept_id
+    clean_source_event_type = _normalise_non_empty_text(source_event_type)
+    clean_source_event_id = _normalise_non_empty_text(source_event_id)
+    if bool(clean_source_event_type) != bool(clean_source_event_id):
+        raise ValueError(
+            "source_event_type and source_event_id must be supplied together"
+        )
+    if clean_source_event_type and clean_source_event_id:
+        effective_arguments.update(
+            {
+                "source_event_type": clean_source_event_type,
+                "source_event_id": clean_source_event_id,
+            }
+        )
     binding_diagnostics = {
         "schema_version": "workflow_turn_capability_binding.v1",
         "capability_name": capability.name,
@@ -747,13 +773,118 @@ def build_workflow_execution_arguments(
             "user_id",
             "org_id",
             "namespace",
+            "source_event_type",
+            "source_event_id",
         ],
         "ignored_model_arguments": unknown_arguments,
         "trusted_request_input_keys": sorted(trusted_request_inputs),
         "model_input_keys": sorted(model_inputs),
         "effective_wait_seconds": effective_wait,
+        "background_activity_mode": bool(background_activity_mode),
+        "requested_await_terminal": requested_await_terminal,
     }
     return effective_arguments, binding_diagnostics
+
+
+def enrich_workflow_effect_receipt_from_instance(
+    payload: Any,
+    *,
+    instance: Any,
+    poll_count: int,
+    wait_duration_ms: float,
+    manual_blocked: bool = False,
+) -> Any:
+    """Overlay canonical durable-instance state on its submission receipt.
+
+    This is deliberately a projection helper, not a second execution path.
+    It uses the same instance and telemetry projections as ``workflow_execute``
+    after a caller has monitored an actor-authorised instance outside the MCP
+    handler's bounded submission deadline.
+    """
+
+    if not isinstance(payload, Mapping):
+        return payload
+
+    from src.backend.workflows.durable.execution_observability import (
+        build_workflow_execution_telemetry,
+        build_workflow_instance_payload,
+        normalise_workflow_status,
+    )
+
+    receipt = dict(payload)
+    instance_payload = build_workflow_instance_payload(
+        instance,
+        include_inputs=False,
+        include_outputs=True,
+        include_workflow_data=False,
+    )
+    final_status = normalise_workflow_status(getattr(instance, "status", None))
+    if not final_status:
+        final_status = _normalise_non_empty_text(instance_payload.get("status")) or ""
+
+    workflow_execution_raw = receipt.get("workflow_execution")
+    workflow_execution = (
+        dict(workflow_execution_raw)
+        if isinstance(workflow_execution_raw, Mapping)
+        else {}
+    )
+    prior_submission_observation = {
+        key: receipt.get(key)
+        for key in (
+            "status",
+            "error_code",
+            "error",
+            "message",
+            "timed_out",
+            "mutation_outcome",
+            "outcome_finality",
+        )
+        if key in receipt
+    }
+    if prior_submission_observation:
+        workflow_execution["submission_observation"] = prior_submission_observation
+
+    workflow_execution.update(
+        {
+            "current_status": final_status or None,
+            "current_state": _normalise_non_empty_text(
+                instance_payload.get("current_state")
+            ),
+            "outputs": instance_payload.get("outputs"),
+            "error": _normalise_non_empty_text(instance_payload.get("error")),
+            "error_step": _normalise_non_empty_text(
+                instance_payload.get("error_step")
+            ),
+            "final_status": final_status or None,
+            "durable_activity_monitoring": {
+                "schema_version": "workflow_turn_durable_activity_monitoring.v1",
+                "poll_count": max(0, int(poll_count)),
+                "wait_duration_ms": max(0.0, float(wait_duration_ms)),
+                "manual_blocked": bool(manual_blocked),
+            },
+        }
+    )
+    workflow_execution.update(build_workflow_execution_telemetry(instance))
+
+    receipt.update(
+        {
+            "workflow_instance": instance_payload,
+            "workflow_execution": workflow_execution,
+            "final_status": final_status or None,
+            "status": final_status or receipt.get("status"),
+            "timed_out": False,
+            "success": final_status == "completed",
+        }
+    )
+    # A submission transport timeout has been reconciled by canonical
+    # read-back.  Retain it under ``submission_observation`` without leaving a
+    # stale top-level error beside the terminal instance outcome.
+    if final_status:
+        receipt.pop("error_code", None)
+        receipt.pop("message", None)
+        if final_status == "completed":
+            receipt.pop("error", None)
+    return receipt
 
 
 def normalise_workflow_effect_receipt(
@@ -871,5 +1002,6 @@ __all__ = [
     "WorkflowTurnCapability",
     "build_workflow_execution_arguments",
     "discover_turn_workflow_capabilities",
+    "enrich_workflow_effect_receipt_from_instance",
     "normalise_workflow_effect_receipt",
 ]

@@ -101,6 +101,7 @@ _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "progress_total": 1,
     "progress_message": 1,
     "progress_updated_at": 1,
+    "activity_projection": 1,
     "error": 1,
     "retry_count": 1,
     "max_retries": 1,
@@ -1866,6 +1867,50 @@ class WorkflowInstanceManager:
     # -------------------------------------------------------------------------
     # Checkpointing
     # -------------------------------------------------------------------------
+
+    def update_activity_projection(
+        self,
+        instance_id: str,
+        *,
+        activity_projection: Mapping[str, Any],
+        progress_current: int | None = None,
+        progress_total: int | None = None,
+        progress_message: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> bool:
+        """Persist bounded live activity without changing checkpoint state.
+
+        A workflow action can run for much longer than one outer state.  Using
+        ``checkpoint`` for those updates would falsely claim that the action
+        itself was restart-safe.  This narrow projection therefore updates
+        only observational progress under the active worker's claim fence.
+        """
+
+        coll = self._get_instances_collection()
+        if coll is None or not isinstance(activity_projection, Mapping):
+            return False
+
+        now = datetime.now(timezone.utc)
+        set_fields: dict[str, Any] = {
+            "activity_projection": dict(activity_projection),
+            "progress_updated_at": now,
+        }
+        if progress_current is not None:
+            set_fields["progress_current"] = int(progress_current)
+        if progress_total is not None:
+            set_fields["progress_total"] = int(progress_total)
+        if progress_message is not None:
+            set_fields["progress_message"] = str(progress_message)[:240]
+
+        query = self._claim_fence_query(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            require_unexpired=(worker_id is not None or claim_token is not None),
+        )
+        result = coll.update_one(query, {"$set": set_fields})
+        return result.modified_count > 0
 
     def checkpoint(
         self,

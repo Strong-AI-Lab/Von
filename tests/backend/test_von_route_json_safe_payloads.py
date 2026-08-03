@@ -45,6 +45,7 @@ def test_task_status_endpoint_jsonifies_set_payloads(monkeypatch) -> None:
 
     status = SimpleNamespace(
         status="completed",
+        user_id="#V#json_safe_user",
         to_dict=lambda: {
             "task_id": "task-json-safe",
             "status": "completed",
@@ -56,6 +57,15 @@ def test_task_status_endpoint_jsonifies_set_payloads(monkeypatch) -> None:
         von_routes.background_task_registry,
         "get_task_status",
         lambda task_id: status,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_get_current_background_task_actor_scope",
+        lambda: {
+            "user_id": "#V#json_safe_user",
+            "organisation_id": None,
+            "namespace": None,
+        },
     )
 
     response = app.test_client().get("/von/api/task/status/task-json-safe")
@@ -71,6 +81,7 @@ def test_task_result_endpoint_jsonifies_generic_set_payloads(monkeypatch) -> Non
 
     status = SimpleNamespace(
         status="completed",
+        user_id="#V#json_safe_user",
         result={"allowed_write_tools": {"workflow.write", "kb.write"}},
     )
 
@@ -78,6 +89,15 @@ def test_task_result_endpoint_jsonifies_generic_set_payloads(monkeypatch) -> Non
         von_routes.background_task_registry,
         "get_task_status",
         lambda task_id: status,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_get_current_background_task_actor_scope",
+        lambda: {
+            "user_id": "#V#json_safe_user",
+            "organisation_id": None,
+            "namespace": None,
+        },
     )
 
     response = app.test_client().get("/von/api/task/result/task-json-safe")

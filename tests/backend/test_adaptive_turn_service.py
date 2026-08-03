@@ -164,6 +164,17 @@ def test_scope_message_contains_boundaries_not_selection_policy() -> None:
 
     assert "Authenticated actor: #V#person" in message
     assert "Effect boundary:" in message
+    assert "A positive hit establishes existence, not enumeration completeness" in message
+    assert "`coverage_complete=false`" in message
+    assert "`counts_are_lower_bounds=true`" in message
+    assert "`*_is_lower_bound=true`" in message
+    assert "Coverage metadata on an evidence envelope" in message
+    assert "selecting `/predicates`" in message
+    assert "constrain concept search to predicates and/or types" in message
+    assert "broad description search over individuals is not schema discovery" in message
+    assert "when `has_more=true`, narrow the query or page it" in message
+    assert "represented role, event, or situation types" in message
+    assert "state the coverage bound and missing evidence" in message
     assert "least costly" not in message
     assert "representedness" not in message
 
@@ -302,6 +313,9 @@ def _effect_gateway(
                 output_schema=effect_output_schema,
                 category="write",
                 ordinary_turn_effect=True,
+                supports_cooperative_cancellation=(
+                    name in {"create_concepts", "add_relationship"}
+                ),
                 effect_admission_window_sec=effect_admission_window_sec,
                 ordinary_turn_mutation_subject_argument=subject_argument,
                 ordinary_turn_trusted_argument_bindings=(
@@ -413,6 +427,78 @@ def _workflow_gateway(handler: Any) -> InternalMCPGateway:
             write_timeout_sec=1.0,
         ),
         enabled=True,
+    )
+
+
+def _durable_test_instance(
+    status: Any,
+    *,
+    current_state: str,
+    outputs: dict[str, Any] | None = None,
+) -> SimpleNamespace:
+    status_text = str(getattr(status, "value", status) or "").strip().lower()
+    progress = {
+        "current": 1 if status_text == "completed" else 0,
+        "total": 1,
+        "message": status_text,
+        "updated_at": f"2026-08-01T12:00:0{1 if status_text == 'completed' else 0}+00:00",
+    }
+    activity_projection = {
+        "schema_version": "workflow_activity_projection.v1",
+        "instance_id": "workflow-instance-activity",
+        "root_workflow_id": "#V#represented_activity_workflow",
+        "status": "running" if status_text != "completed" else "completed",
+        "updated_at_utc": progress["updated_at"],
+        "progress": dict(progress),
+        "progress_facts": [
+            {
+                "schema_version": "workflow_progress_projection.v1",
+                "fact_id": "paper_title",
+                "label": "Paper",
+                "status": "available",
+                "present": True,
+                "redacted": False,
+                "truncated": False,
+                "value": "Bounded paper title",
+            }
+        ],
+        "work_items": [
+            {
+                "item_id": "#V#represented_activity_workflow:0",
+                "index": 0,
+                "item_number": 1,
+                "total": 1,
+                "status": status_text,
+            }
+        ],
+    }
+    return SimpleNamespace(
+        instance_id="workflow-instance-activity",
+        workflow_id="#V#represented_activity_workflow",
+        user_id="#V#real_user",
+        org_id="#V#real_org",
+        namespace="#V#real_user@real_org",
+        source_event_type="conversation_turn",
+        source_event_id="turn-durable-activity",
+        status=status,
+        current_state=current_state,
+        outputs=outputs,
+        workflow_data={},
+        execution_trace_id="trace-durable-activity",
+        error=None,
+        error_step=None,
+        manual_resume_required=False,
+        claim_ineligible_reason=None,
+        activity_projection=activity_projection,
+        to_status_dict=lambda: {
+            "instance_id": "workflow-instance-activity",
+            "workflow_id": "#V#represented_activity_workflow",
+            "status": status_text,
+            "current_state": current_state,
+            "progress": dict(progress),
+            "activity_projection": dict(activity_projection),
+            "execution_trace_id": "trace-durable-activity",
+        },
     )
 
 
@@ -6205,6 +6291,748 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert selection_trace["selection_policy"]["representedness_priority"] is False
     assert selection_trace["plan_profile"]["shape"] == ("represented_workflow")
     assert result.response_text == "The represented work product was completed."
+
+
+def test_background_durable_activity_waits_for_canonical_terminal_state_without_using_turn_budget(
+    monkeypatch,
+) -> None:
+    from src.backend.services.request_progress_service import ProgressTracker
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+    from src.backend.workflows.durable import WorkflowInstanceStatus
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_activity_test",
+        workflow_id="#V#represented_activity_workflow",
+        display_name="Represented activity workflow",
+        description="Produce a durable represented work product.",
+        relevance_score=0.97,
+        input_schema={
+            "type": "object",
+            "properties": {"inputs": {"type": "object"}},
+            "additionalProperties": False,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+
+    clock_base = time.monotonic()
+    clock = _ManualClock(clock_base)
+    pending = _durable_test_instance(
+        WorkflowInstanceStatus.PENDING,
+        current_state="queued",
+    )
+    completed = _durable_test_instance(
+        WorkflowInstanceStatus.COMPLETED,
+        current_state="completed",
+        outputs={"summary": "canonical work product"},
+    )
+    completed.activity_projection["status"] = "running"
+    completed.activity_projection["work_items"][0]["status"] = "running"
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_instance(self, instance_id: str) -> Any:
+            assert instance_id == "workflow-instance-activity"
+            self.calls += 1
+            if self.calls == 1:
+                clock.now = clock_base + 6.0
+                return pending
+            clock.now = clock_base + 12.0
+            return completed
+
+    manager = _Manager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.adaptive_turn_service."
+        "_wait_before_durable_activity_poll",
+        lambda _seconds: None,
+    )
+
+    seen_arguments: dict[str, Any] = {}
+
+    def _execute_workflow(**kwargs: Any) -> dict[str, Any]:
+        seen_arguments.update(kwargs)
+        return {
+            "success": True,
+            "status": "submitted",
+            "instance_id": "workflow-instance-activity",
+            "workflow_id": "#V#represented_activity_workflow",
+            "created_new": True,
+            "workflow_execution": {
+                "instance_id": "workflow-instance-activity",
+                "workflow_id": "#V#represented_activity_workflow",
+            },
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-durable-activity",
+                    payload={"query": "produce a durable work product"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-durable-activity",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {"inputs": {}},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The canonical work product is ready."),
+    )
+    progress_events: list[dict[str, Any]] = []
+
+    result = execute_adaptive_turn(
+        gateway=_workflow_gateway(_execute_workflow),
+        prompt="Produce a durable work product.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        progress_tracker=ProgressTracker(
+            callback=lambda payload: progress_events.append(dict(payload))
+        ),
+        turn_id="turn-durable-activity",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        background_activity_mode=True,
+        clock=clock,
+    )
+
+    assert seen_arguments["await_terminal"] is False
+    assert seen_arguments["source_event_type"] == "conversation_turn"
+    assert seen_arguments["source_event_id"] == "turn-durable-activity"
+    assert seen_arguments["event_idempotency_key"].startswith(
+        "conversation_turn_workflow:"
+    )
+    assert manager.calls == 2
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The canonical work product is ready."
+    invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == workflow_capability.name
+    )
+    assert invocation["effect_status"] == "succeeded"
+    assert invocation["final_status"] == "completed"
+    wait_record = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_durable_activity_wait"
+    )
+    assert wait_record["poll_count"] == 2
+    assert wait_record["wait_duration_ms"] == 12_000
+    assert wait_record["excluded_from_model_reasoning_budget"] is True
+    assert all(
+        "request_timeout_seconds" not in call["llm_params"]
+        for call in client.calls
+    )
+    workflow_progress = [
+        item
+        for item in progress_events
+        if item.get("event_kind") == "workflow_instance_status"
+    ]
+    assert [item["workflow_status"] for item in workflow_progress] == [
+        "pending",
+        "completed",
+    ]
+    assert all(item["status"] == "tool_running" for item in workflow_progress)
+    assert workflow_progress[-1]["activity_projection"]["schema_version"] == (
+        "workflow_activity_projection.v1"
+    )
+    assert workflow_progress[-1]["activity_projection"]["status"] == "completed"
+    assert workflow_progress[-1]["progress_facts"][0]["fact_id"] == "paper_title"
+    assert workflow_progress[-1]["work_items"] == []
+
+
+def test_background_durable_activity_waits_for_terminal_boundary_before_stop(
+    monkeypatch,
+) -> None:
+    from src.backend.services.request_progress_service import (
+        CancellationRequested,
+        ProgressTracker,
+    )
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+    from src.backend.workflows.durable import WorkflowInstanceStatus
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_activity_test",
+        workflow_id="#V#represented_activity_workflow",
+        display_name="Represented activity workflow",
+        description="Produce a durable represented work product.",
+        relevance_score=0.97,
+        input_schema={"type": "object", "properties": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {"status": "completed", "match_count": 1},
+        ),
+    )
+
+    cancellation = {"requested": False}
+    pending = _durable_test_instance(
+        WorkflowInstanceStatus.RUNNING,
+        current_state="performing_work",
+    )
+    completed = _durable_test_instance(
+        WorkflowInstanceStatus.COMPLETED,
+        current_state="completed",
+        outputs={"summary": "completed before outer stop"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.adaptive_turn_service."
+        "_wait_before_durable_activity_poll",
+        lambda _seconds: None,
+    )
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.read_count = 0
+
+        def get_instance(self, instance_id: str) -> Any:
+            assert instance_id == "workflow-instance-activity"
+            self.read_count += 1
+            if self.read_count == 1:
+                cancellation["requested"] = True
+                return pending
+            return completed
+
+    manager = _Manager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-durable-activity-cancel",
+                    payload={"query": "produce a durable work product"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-durable-activity-cancel",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {"inputs": {}},
+                    },
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(CancellationRequested):
+        execute_adaptive_turn(
+            gateway=_workflow_gateway(
+                lambda **_kwargs: {
+                    "success": True,
+                    "status": "submitted",
+                    "instance_id": "workflow-instance-activity",
+                    "workflow_id": "#V#represented_activity_workflow",
+                    "created_new": True,
+                }
+            ),
+            prompt="Produce a durable work product.",
+            context=[],
+            llm_client=client,
+            model="test-model",
+            user_namespace="#V#real_user@real_org",
+            user_concept_id="#V#real_user",
+            org_concept_id="#V#real_org",
+            progress_tracker=ProgressTracker(
+                cancellation_checker=lambda: cancellation["requested"],
+                task_id="background-task",
+            ),
+            turn_id="turn-durable-activity",
+            turn_budget_seconds=10,
+            final_synthesis_reserve_seconds=2,
+            background_activity_mode=True,
+        )
+
+    # Stop is acknowledged only by the outer task after the durable child has
+    # reached an observable terminal boundary. It must not mark the instance
+    # cancelled and release its worker lock while an effect may still be live.
+    assert manager.read_count == 2
+
+
+def test_background_durable_activity_rereads_until_terminal(
+    monkeypatch,
+) -> None:
+    from src.backend.services.request_progress_service import ProgressTracker
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+    from src.backend.workflows.durable import WorkflowInstanceStatus
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_activity_test",
+        workflow_id="#V#represented_activity_workflow",
+        display_name="Represented activity workflow",
+        description="Produce a durable represented work product.",
+        relevance_score=0.97,
+        input_schema={"type": "object", "properties": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {"status": "completed", "match_count": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.adaptive_turn_service."
+        "_wait_before_durable_activity_poll",
+        lambda _seconds: None,
+    )
+
+    pending = _durable_test_instance(
+        WorkflowInstanceStatus.RUNNING,
+        current_state="performing_work",
+    )
+    completed = _durable_test_instance(
+        WorkflowInstanceStatus.COMPLETED,
+        current_state="completed",
+        outputs={"summary": "won the terminal race"},
+    )
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.read_count = 0
+
+        def get_instance(self, instance_id: str) -> Any:
+            assert instance_id == "workflow-instance-activity"
+            self.read_count += 1
+            if self.read_count == 1:
+                return pending
+            return completed
+
+    manager = _Manager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-cancel-race",
+                    payload={"query": "produce a durable work product"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-cancel-race",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {"inputs": {}},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The workflow completed before cancellation."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_workflow_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "status": "submitted",
+                "instance_id": "workflow-instance-activity",
+                "workflow_id": "#V#represented_activity_workflow",
+                "created_new": True,
+            }
+        ),
+        prompt="Produce a durable work product.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        progress_tracker=ProgressTracker(task_id="background-task"),
+        turn_id="turn-durable-activity",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        background_activity_mode=True,
+    )
+
+    assert manager.read_count == 2
+    assert result.terminal_status == "completed"
+    invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == workflow_capability.name
+    )
+    assert invocation["effect_status"] == "succeeded"
+    assert invocation["final_status"] == "completed"
+
+
+def test_background_mode_continues_slow_non_workflow_multi_tool_turn_past_attention_threshold() -> None:
+    from src.backend.services.request_progress_service import ProgressTracker
+
+    clock_base = time.monotonic()
+    clock = _ManualClock(clock_base)
+    handler_queries: list[str] = []
+
+    def _slow_read(**kwargs: Any) -> dict[str, Any]:
+        handler_queries.append(str(kwargs.get("query") or ""))
+        clock.now += 6.0
+        return {
+            "success": True,
+            "query": kwargs.get("query"),
+            "items": [f"result-{len(handler_queries)}"],
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="slow-read-1",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "first bounded read"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="slow-read-2",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "second bounded read"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Both bounded reads are complete."),
+    )
+    progress_events: list[dict[str, Any]] = []
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(_slow_read),
+        prompt="Perform both reads and then answer.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        progress_tracker=ProgressTracker(
+            callback=lambda payload: progress_events.append(dict(payload))
+        ),
+        turn_id="turn-background-slow-multi-tool",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        background_activity_mode=True,
+        clock=clock,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Both bounded reads are complete."
+    assert handler_queries == ["first bounded read", "second bounded read"]
+    assert all(
+        "request_timeout_seconds" not in call["llm_params"]
+        for call in client.calls
+    )
+    threshold = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_attention_threshold"
+    )
+    assert threshold["terminal"] is False
+    assert threshold["elapsed_ms"] == 12_000
+    starts = [
+        item
+        for item in progress_events
+        if item.get("event_kind") == "tool_call_start"
+    ]
+    completions = [
+        item
+        for item in progress_events
+        if item.get("event_kind") == "tool_call_end"
+    ]
+    assert [item["call_id"] for item in starts] == ["slow-read-1", "slow-read-2"]
+    assert [item["tool_calls_started"] for item in starts] == [1, 2]
+    assert [item["tool_calls_done"] for item in starts] == [0, 1]
+    assert [item["call_id"] for item in completions] == [
+        "slow-read-1",
+        "slow-read-2",
+    ]
+    assert [item["tool_calls_started"] for item in completions] == [1, 2]
+    assert [item["tool_calls_done"] for item in completions] == [1, 2]
+
+
+def test_background_cooperative_write_continues_past_transport_threshold() -> None:
+    from src.backend.services.request_progress_service import ProgressTracker
+
+    progress_events: list[dict[str, Any]] = []
+    handler_release = Event()
+
+    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "create_concepts"
+        assert handler_release.wait(timeout=1.0)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "created_concept_ids": ["#V#slow_but_complete"],
+        }
+
+    def _record_progress(payload: dict[str, Any]) -> None:
+        event = dict(payload)
+        progress_events.append(event)
+        if (
+            event.get("event_kind") == "heartbeat"
+            and event.get("tool") == "create_concepts"
+        ):
+            handler_release.set()
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="slow-background-write",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {
+                            "concepts": [{"name": "Slow but complete"}]
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The represented effect completed."),
+    )
+    gateway = _effect_gateway(handler, write_timeout_sec=0.02)
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Represent this bounded result.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        progress_tracker=ProgressTracker(
+            callback=_record_progress
+        ),
+        turn_id="slow-background-write",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        background_activity_mode=True,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The represented effect completed."
+    invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == "create_concepts"
+    )
+    assert invocation["effect_status"] == "succeeded"
+    assert invocation["transport"]["deadline_policy"] == "attention_only"
+    assert invocation["transport"]["attention_threshold_exceeded"] is True
+    threshold_event = next(
+        item
+        for item in progress_events
+        if item.get("event_kind") == "attention_threshold"
+        and item.get("tool") == "create_concepts"
+    )
+    assert threshold_event["attention_threshold_exceeded"] is True
+    assert "execution is continuing" in threshold_event["result_summary"]
+    heartbeat_event = next(
+        item
+        for item in progress_events
+        if item.get("event_kind") == "heartbeat"
+        and item.get("tool") == "create_concepts"
+    )
+    assert heartbeat_event["status"] == "heartbeat"
+    assert heartbeat_event["call_id"] == "slow-background-write"
+    assert heartbeat_event["attention_observation_kind"] == "activity_heartbeat"
+    assert "still running" in heartbeat_event["result_summary"]
+    diagnostics = gateway.get_diagnostics()
+    assert diagnostics["methods"]["create_concepts"]["timeouts"] == 0
+
+
+def test_background_model_response_after_attention_threshold_is_not_discarded() -> None:
+    clock = _ManualClock()
+    client = _TimedSequenceClient(
+        clock,
+        (12.0, LLMResponse(text_response="The long model response is useful.")),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Think carefully before answering.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        turn_id="background-long-model-response",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        background_activity_mode=True,
+        clock=clock,
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The long model response is useful."
+    assert "request_timeout_seconds" not in client.calls[0]["llm_params"]
+    assert result.llm_calls[0]["request_timeout_seconds"] is None
+    assert result.llm_calls[0]["status"] == "completed"
+    assert not any(
+        item.get("type") == "adaptive_turn_late_model_result"
+        for item in result.aux_llm_calls
+    )
+    assert "background attention threshold does not close" in client.calls[0][
+        "system_message"
+    ]
+    allocation = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_budget_allocation"
+    )
+    assert allocation["model_request_timeout_policy"] == (
+        "explicit_model_parameters_or_provider_default"
+    )
+    assert allocation["research_attempt_timeout_seconds"] is None
+
+
+def test_background_model_call_preserves_explicit_request_timeout() -> None:
+    client = _SequenceClient(LLMResponse(text_response="Explicit timeout retained."))
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Use the explicitly configured provider timeout.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        model_parameters={
+            "request_timeout_seconds": 37.5,
+            "temperature": 0.2,
+        },
+        turn_id="background-explicit-model-timeout",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        background_activity_mode=True,
+    )
+
+    assert result.terminal_status == "completed"
+    assert client.calls[0]["llm_params"]["request_timeout_seconds"] == 37.5
+    assert client.calls[0]["llm_params"]["temperature"] == 0.2
+    assert result.llm_calls[0]["request_timeout_seconds"] == 37.5
+
+
+def test_background_mode_preserves_substantive_answer_with_effect_finality_warning() -> None:
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="background-partial-effect",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {"concepts": [{"name": "Partial result"}]},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response=(
+                "I produced the usable part of the requested analysis, including "
+                "the two concrete findings that were available."
+            )
+        ),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(
+            lambda _name, _arguments: {
+                "success": False,
+                "effect_status": "partial",
+                "changed": True,
+                "error_code": "derived_relation_failed",
+            }
+        ),
+        prompt="Produce the analysis and represent its result.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="background-partial-effect",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        background_activity_mode=True,
+    )
+
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is True
+    assert "usable part of the requested analysis" in result.response_text
+    assert "1 partial" in result.response_text
+    assert "will not claim that nothing changed" in result.response_text
+    assert "Inspect the represented state" in result.response_text
+    fallback = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_effect_finality_fallback"
+    )
+    assert fallback["model_text_preserved"] is True
 
 
 def test_read_only_workflow_not_started_preserves_successful_direct_recovery(

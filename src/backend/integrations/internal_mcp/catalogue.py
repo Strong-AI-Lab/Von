@@ -52,6 +52,9 @@ _JIRA_ISSUE_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _DEFAULT_JIRA_BASE_URL = "https://naoinstitute.atlassian.net"
+_TEXT_RELATIONS_BATCH_MAX_CONCEPT_IDS = 100
+_TEXT_RELATIONS_BATCH_DEFAULT_LIMIT_PER_CONCEPT = 20
+_TEXT_RELATIONS_BATCH_MAX_LIMIT_PER_CONCEPT = 50
 
 
 def _utc_now_iso() -> str:
@@ -2721,6 +2724,192 @@ def _get_text_relations(**kwargs):
         return make_error_response(
             "exception",
             f"Failed to get text relations: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
+
+
+def _get_text_relations_batch(**kwargs):
+    """Retrieve compact text rows for a bounded set of exact concepts."""
+
+    from ...services.text_value_service import get_texts_for_concepts
+
+    raw_concept_ids = kwargs.get("concept_ids")
+    if not isinstance(raw_concept_ids, list):
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_ids' parameter",
+            details={"missing": ["concept_ids"]},
+            suggestions=["Provide a list of exact concept IDs"],
+        )
+
+    concept_ids: list[str] = []
+    seen_concept_ids: set[str] = set()
+    for raw_concept_id in raw_concept_ids:
+        if not isinstance(raw_concept_id, str):
+            continue
+        concept_id = raw_concept_id.strip()
+        if not concept_id or concept_id in seen_concept_ids:
+            continue
+        seen_concept_ids.add(concept_id)
+        concept_ids.append(concept_id)
+    if not concept_ids:
+        return make_error_response(
+            "invalid_parameter",
+            "'concept_ids' must contain at least one exact concept ID",
+            details={"parameter": "concept_ids"},
+        )
+    if len(concept_ids) > _TEXT_RELATIONS_BATCH_MAX_CONCEPT_IDS:
+        return make_error_response(
+            "invalid_parameter",
+            "'concept_ids' supports at most "
+            f"{_TEXT_RELATIONS_BATCH_MAX_CONCEPT_IDS} unique concept IDs per call",
+            details={
+                "parameter": "concept_ids",
+                "maximum": _TEXT_RELATIONS_BATCH_MAX_CONCEPT_IDS,
+            },
+        )
+
+    predicate = kwargs.get("predicate")
+    predicates = kwargs.get("predicates")
+    if predicate and predicates:
+        return make_error_response(
+            "invalid_parameter",
+            "Provide either 'predicate' or 'predicates', not both",
+            details={"parameters": ["predicate", "predicates"]},
+        )
+    language = kwargs.get("language")
+    try:
+        limit_per_concept = int(
+            kwargs.get(
+                "limit_per_concept",
+                _TEXT_RELATIONS_BATCH_DEFAULT_LIMIT_PER_CONCEPT,
+            )
+        )
+    except (TypeError, ValueError):
+        limit_per_concept = 0
+    if not 1 <= limit_per_concept <= _TEXT_RELATIONS_BATCH_MAX_LIMIT_PER_CONCEPT:
+        return make_error_response(
+            "invalid_parameter",
+            "'limit_per_concept' must be between 1 and "
+            f"{_TEXT_RELATIONS_BATCH_MAX_LIMIT_PER_CONCEPT}",
+            details={
+                "parameter": "limit_per_concept",
+                "minimum": 1,
+                "maximum": _TEXT_RELATIONS_BATCH_MAX_LIMIT_PER_CONCEPT,
+            },
+        )
+    recent_first = kwargs.get("recent_first")
+    recent_first = (
+        recent_first
+        if isinstance(recent_first, bool)
+        else str(recent_first or "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="batch text retrieval",
+        ignore_untrusted_payload_identity=True,
+    )
+    if denial is not None:
+        return denial
+    context_view = _internal_mcp_knowledge_context_view(actor_scope)
+    query_diagnostics: dict[str, Any] = {}
+
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            rows_by_concept = get_texts_for_concepts(
+                concept_ids,
+                predicate=(predicate if isinstance(predicate, str) else None),
+                predicates=(predicates if isinstance(predicates, list) else None),
+                lang=(language if isinstance(language, str) else None),
+                limit_per_concept=limit_per_concept,
+                recent_first=recent_first,
+                query_metadata=query_diagnostics,
+                context_view=context_view,
+            )
+
+        global_incomplete = bool(
+            query_diagnostics.get("relation_query_truncated")
+            or query_diagnostics.get("scoped_query_truncated")
+            or query_diagnostics.get("scoped_counts_are_lower_bounds")
+        )
+        scoped_per_concept = query_diagnostics.get("scoped_per_concept")
+        if not isinstance(scoped_per_concept, Mapping):
+            scoped_per_concept = {}
+        items: list[dict[str, Any]] = []
+        total_relations_found = 0
+        for concept_id in concept_ids:
+            raw_rows = rows_by_concept.get(concept_id)
+            if raw_rows is None:
+                continue
+            compact_rows: list[dict[str, Any]] = []
+            for row in raw_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                compact_row = {
+                    key: row.get(key)
+                    for key in (
+                        "predicate",
+                        "text",
+                        "lang",
+                        "row_kind",
+                        "relation_id",
+                        "assertion_id",
+                        "canonical_publication",
+                        "storage_surface",
+                    )
+                    if row.get(key) is not None
+                }
+                compact_rows.append(compact_row)
+            per_concept_diagnostics = scoped_per_concept.get(concept_id)
+            if not isinstance(per_concept_diagnostics, Mapping):
+                per_concept_diagnostics = {}
+            coverage_complete = not bool(
+                global_incomplete
+                or per_concept_diagnostics.get("has_more")
+                or per_concept_diagnostics.get("counts_are_lower_bounds")
+            )
+            total_relations_found += len(compact_rows)
+            items.append(
+                {
+                    "concept_id": concept_id,
+                    "relations_found": len(compact_rows),
+                    "relations": compact_rows,
+                    "coverage_complete": coverage_complete,
+                    **(
+                        {"counts_are_lower_bounds": True}
+                        if not coverage_complete
+                        else {}
+                    ),
+                }
+            )
+
+        omitted_concept_count = len(concept_ids) - len(items)
+        coverage_complete = (
+            omitted_concept_count == 0
+            and not global_incomplete
+            and all(item.get("coverage_complete") is True for item in items)
+        )
+        return {
+            "schema_version": "text_relations_batch.v1",
+            "context_view": context_view,
+            "requested_concept_count": len(concept_ids),
+            "returned_concept_count": len(items),
+            "omitted_concept_count": omitted_concept_count,
+            "relations_found": total_relations_found,
+            "items": items,
+            "coverage_complete": coverage_complete,
+            **(
+                {"counts_are_lower_bounds": True}
+                if not coverage_complete
+                else {}
+            ),
+            "query_diagnostics": query_diagnostics,
+        }
+    except Exception as exc:
+        return make_error_response(
+            "exception",
+            f"Failed to get batch text relations: {exc}",
             details={"exception_type": type(exc).__name__},
         )
 
@@ -9546,6 +9735,53 @@ def _get_text_relations_summary_output_schema() -> Schema:
             "relation_ids and assertion_ids remain separate; row-specific latest "
             "IDs are labelled. In actor_effective view, scoped_query_truncated and "
             "counts_are_lower_bounds make the bounded overlay explicit."
+        ),
+    )
+
+
+def _get_text_relations_batch_input_schema() -> Schema:
+    return Schema(
+        required={"concept_ids": list},
+        optional={
+            "predicate": (str, type(None)),
+            "predicates": (list, type(None)),
+            "language": (str, type(None)),
+            "limit_per_concept": (int, type(None)),
+            "recent_first": (bool, type(None)),
+            # Accepted for compatibility; trusted gateway context, not this
+            # payload field, selects the actor-effective knowledge view.
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "get_text_relations_batch input: concept_ids (1-100 exact IDs), "
+            "predicate or predicates (optional exact filters), language (optional), "
+            "limit_per_concept (1-50, default 20), recent_first (optional)."
+        ),
+    )
+
+
+def _get_text_relations_batch_output_schema() -> Schema:
+    return Schema(
+        required={
+            "schema_version": str,
+            "context_view": str,
+            "requested_concept_count": int,
+            "returned_concept_count": int,
+            "omitted_concept_count": int,
+            "relations_found": int,
+            "items": list,
+            "coverage_complete": bool,
+        },
+        optional={
+            "counts_are_lower_bounds": (bool, type(None)),
+            "query_diagnostics": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Compact actor-scoped text rows grouped by exact concept ID, with "
+            "per-concept and overall completeness diagnostics."
         ),
     )
 
@@ -33904,6 +34140,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "visibility_scope_mode": None,
             },
             ordinary_turn_effect=True,
+            supports_cooperative_cancellation=True,
             description=(
                 "Create one or more concepts (instances, types, or predicates). "
                 "Each concept needs name and kind ('instance' for individuals, "
@@ -34159,6 +34396,20 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ),
         ),
         MethodDefinition(
+            name="get_text_relations_batch",
+            handler=_get_text_relations_batch,
+            input_schema=_get_text_relations_batch_input_schema(),
+            output_schema=_get_text_relations_batch_output_schema(),
+            category="read",
+            description=(
+                "Retrieve compact labelled text-assertion rows for 1-100 known "
+                "concepts in one bounded actor-scoped read. Use after relation or "
+                "type enumeration when status, stage, role, or another scalar text "
+                "fact determines membership; prefer this to a per-concept read loop. "
+                "This is exact read-back, not concept discovery."
+            ),
+        ),
+        MethodDefinition(
             name="update_text_relation",
             handler=_update_text_relation,
             input_schema=_update_text_relation_input_schema(),
@@ -34232,6 +34483,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             },
             ordinary_turn_effect=True,
             effect_admission_window_sec=5.0,
+            supports_cooperative_cancellation=True,
             ordinary_turn_mutation_subject_argument="source_id",
             description=(
                 "Add one concept-to-concept or concept-to-text relationship. "

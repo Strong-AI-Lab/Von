@@ -50,6 +50,24 @@ workflow/route choices, tool activity, evidence sources, model state, and
 failure boundaries. It should not reveal secrets, raw unbounded prompts, or
 private internal scratch reasoning.
 
+Elapsed time is an attention signal, not a task-completion oracle. Crossing an
+attention threshold should make prolonged work visually conspicuous and expose
+an effective Stop control. It must not manufacture a deadline failure while
+the backend is still making bounded, observable progress. Broken network or
+provider operations may retain bounded operation timeouts. A cooperatively
+cancellable background tool must treat an aggregate elapsed threshold as
+attention and progress evidence, not as a reason to abandon useful
+multi-operation work; synchronous or non-cooperative attempts may retain
+terminal isolation deadlines. While a cooperative handler remains observably
+running, sparse liveness heartbeats may refresh the card without claiming a
+new semantic milestone or adding a conversation-situation observation.
+
+Stop is semantic: it requests cancellation of the canonical server-side
+activity and the card remains until cancellation, completion, or another
+terminal state is read back. Closing a browser request is not sufficient.
+Skip should be shown only when the selected workflow explicitly exposes a safe
+skip transition; the frontend must not invent one.
+
 ## User Audiences And Modes
 
 The card should support at least three presentation modes. These modes are not
@@ -176,6 +194,8 @@ The active Thinking card should answer these questions at every moment of a turn
 5. If it changes model or strategy, why did it do that?
 6. If it is using tools instead of, or before, another LLM call, what tool work is being attempted?
 7. If it is stalled, what exact boundary is stalled?
+8. If it has taken unusually long, is it still progressing, and what can I stop
+   or safely skip?
 
 ## What A Useful Thinking Card Would Look Like
 
@@ -371,7 +391,14 @@ The design should be considered met when:
 - cold-start turns show a meaningful objective/object/wait state before terminal
   diagnostics exist;
 - missing telemetry is represented as missing telemetry, not as misleading
-  user-facing progress.
+  user-facing progress;
+- crossing an elapsed-time attention threshold changes presentation and
+  affordances, not the terminal state of an active turn;
+- Stop reaches the canonical server-side activity and remains visibly pending
+  until a terminal state is observed;
+- the conversation situation records the same bounded activity milestones
+  that drive the live card, without fabricating workflow identity for an
+  ordinary adaptive turn.
 
 ## Related Incidents
 

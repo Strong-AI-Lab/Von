@@ -10,9 +10,16 @@ from src.backend.services.background_task_service import TaskStatus
 from src.backend.workflows.durable.models import WorkflowInstanceStatus
 
 
+TEST_USER_ID = "#V#durable_route_user"
+TEST_ORGANISATION_ID = "#V#durable_route_org"
+TEST_NAMESPACE = "#V#durable_route_user@durable_route_org"
+
+
 class _RouteRegistry:
     def __init__(self, status: TaskStatus | None) -> None:
         self.status = status
+        if self.status is not None and self.status.user_id is None:
+            self.status.user_id = TEST_USER_ID
         self.mark_calls: list[dict[str, Any]] = []
 
     def get_task_status(self, _task_id: str) -> TaskStatus | None:
@@ -64,6 +71,14 @@ def _make_app(
         "src.backend.server.routes.von_routes.get_instance_manager",
         lambda: manager,
     )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._get_current_background_task_actor_scope",
+        lambda: {
+            "user_id": TEST_USER_ID,
+            "organisation_id": TEST_ORGANISATION_ID,
+            "namespace": TEST_NAMESPACE,
+        },
+    )
 
     app = Flask(__name__)
     app.secret_key = "test-secret"
@@ -111,6 +126,9 @@ def test_background_status_reconciles_terminal_durable_turn(monkeypatch) -> None
     )
     assert registry.mark_calls[0]["task_id"] == "turn-123"
     assert manager.calls[0]["source_event_id"] == "turn-123"
+    assert manager.calls[0]["user_id"] == TEST_USER_ID
+    assert manager.calls[0]["org_id"] == TEST_ORGANISATION_ID
+    assert manager.calls[0]["namespace"] == TEST_NAMESPACE
 
 
 def test_background_status_does_not_call_lifecycle_completion_user_success(

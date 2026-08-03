@@ -235,12 +235,22 @@ Runtime semantics:
 - internal MCP advisory budgets are telemetry only: a handler that completes
   before its hard deadline remains successful even when the advisory budget was
   exceeded;
-- a hard-deadline expiry is a terminal failed action for the current turn. The
-  action preserves the typed timeout under `mcp_result` and the bounded
-  transport facts under `mcp_transport`, including execution identity,
+- an authenticated interactive background turn may select `attention_only`
+  execution for a method that explicitly declares safe cooperative
+  cancellation. In that mode the configured interval is a non-terminal
+  attention threshold, the user-visible Stop request is propagated to the
+  handler, and the caller waits for the handler's safe boundary and truthful
+  receipt. Sparse liveness heartbeats may follow while the handler remains
+  observably running; they refresh presentation without claiming semantic
+  progress or adding Situation milestones. Methods without that declaration
+  retain terminal hard deadlines;
+- a hard-deadline expiry is a terminal failed action for the current
+  synchronous turn. The action preserves the typed timeout under `mcp_result`
+  and the bounded transport facts under `mcp_transport`, including execution identity,
   queue/handler/transport timing, deadline, timeout phase, and the explicit
   `discard_from_turn` late-result policy;
-- the transport applies the same remaining hard-deadline budget as a PyMongo
+- under terminal deadline policy, the transport applies the same remaining
+  hard-deadline budget as a PyMongo
   client-side operation timeout around the handler. Nested Vontology database
   operations therefore release their bounded isolation worker at the deadline
   instead of continuing under a succession of independent driver timeouts. A
@@ -251,6 +261,11 @@ Runtime semantics:
   expose represented recovery affordances such as bounded retry or alternate
   path selection; writes report an indeterminate mutation outcome and require
   state inspection before any retry;
+- when the bounded attempt has produced a verified durable-submission receipt,
+  the enclosing background turn follows that exact actor-scoped workflow
+  instance through canonical read-back. Elapsed turn time may raise an
+  attention state and expose intervention controls, but MUST NOT turn active
+  durable work into a fabricated terminal failure;
 - when the invoked tool has a represented tool-evidence projection, `result` and `mcp_result` carry that compact projected payload and projection telemetry instead of raw source-specific bulk data;
 - `tool_output_context_mappings` should map fields from `result.<field>` or `mcp_result.<field>` into workflow context for downstream steps and subworkflows.
 

@@ -244,9 +244,13 @@ def test_execution_arguments_bind_workflow_and_actor_server_side():
             "user_id": "#V#spoofed_user",
             "org_id": "#V#spoofed_org",
             "namespace": "#V#spoofed@org",
+            "source_event_type": "model_event",
+            "source_event_id": "model-event-id",
             "inputs": {
                 "record_id": "#V#record",
                 "user_concept_id": "#V#spoofed_user",
+                "source_event_type": "model_input_event",
+                "source_event_id": "model-input-event-id",
             },
             "await_terminal": "false",
             "timeout_seconds": 500,
@@ -261,18 +265,24 @@ def test_execution_arguments_bind_workflow_and_actor_server_side():
         organisation_concept_id="#V#real_org",
         namespace="#V#real_user@real_org",
         maximum_wait_seconds=20,
+        source_event_type="conversation_turn",
+        source_event_id="turn-real",
     )
 
     assert effective["workflow_id"] == "#V#test_workflow"
     assert effective["user_id"] == "#V#real_user"
     assert effective["org_id"] == "#V#real_org"
     assert effective["namespace"] == "#V#real_user@real_org"
+    assert effective["source_event_type"] == "conversation_turn"
+    assert effective["source_event_id"] == "turn-real"
     assert effective["await_terminal"] is False
     assert effective["timeout_seconds"] == 20
     assert effective["inputs"]["record_id"] == "#V#record"
     assert effective["inputs"]["file_copy_concept_id"] == "#V#authorised_file"
     assert effective["inputs"]["user_concept_id"] == "#V#real_user"
     assert effective["inputs"]["organisation_concept_id"] == "#V#real_org"
+    assert "source_event_type" not in effective["inputs"]
+    assert "source_event_id" not in effective["inputs"]
     assert effective["inputs"]["prompt"] == "Process this record."
     assert effective["inputs"]["augmented_context"] == [
         {"role": "user", "content": "Earlier context"}
@@ -280,9 +290,108 @@ def test_execution_arguments_bind_workflow_and_actor_server_side():
     assert diagnostic["ignored_model_arguments"] == [
         "namespace",
         "org_id",
+        "source_event_id",
+        "source_event_type",
         "user_id",
         "workflow_id",
     ]
+
+
+def test_background_activity_mode_forces_submission_only_workflow_execution():
+    from src.backend.services.workflow_turn_capability_service import (
+        build_workflow_execution_arguments,
+    )
+
+    effective, diagnostic = build_workflow_execution_arguments(
+        _capability(),
+        {"await_terminal": True, "timeout_seconds": 45},
+        prompt="Process this record.",
+        context=[],
+        request_workflow_launch_inputs=None,
+        user_concept_id="#V#real_user",
+        organisation_concept_id="#V#real_org",
+        namespace="#V#real_user@real_org",
+        maximum_wait_seconds=20,
+        source_event_type="conversation_turn",
+        source_event_id="turn-workflow",
+        background_activity_mode=True,
+    )
+
+    assert effective["await_terminal"] is False
+    assert effective["source_event_type"] == "conversation_turn"
+    assert effective["source_event_id"] == "turn-workflow"
+    assert diagnostic["background_activity_mode"] is True
+    assert diagnostic["requested_await_terminal"] is True
+
+
+def test_terminal_instance_enriches_submission_receipt_with_canonical_outputs():
+    from types import SimpleNamespace
+
+    from src.backend.services.workflow_turn_capability_service import (
+        enrich_workflow_effect_receipt_from_instance,
+    )
+
+    instance = SimpleNamespace(
+        instance_id="instance-terminal",
+        workflow_id="#V#test_workflow",
+        status=SimpleNamespace(value="completed"),
+        current_state="completed",
+        outputs={"summary": "canonical result"},
+        workflow_data={},
+        execution_trace_id="trace-terminal",
+        error=None,
+        error_step=None,
+        user_id="#V#real_user",
+        org_id="#V#real_org",
+        namespace="#V#real_user@real_org",
+        to_status_dict=lambda: {
+            "instance_id": "instance-terminal",
+            "workflow_id": "#V#test_workflow",
+            "status": "completed",
+            "current_state": "completed",
+            "progress": {
+                "current": 2,
+                "total": 2,
+                "message": "completed",
+                "updated_at": "2026-08-01T12:00:00+00:00",
+            },
+            "execution_trace_id": "trace-terminal",
+        },
+    )
+
+    enriched = enrich_workflow_effect_receipt_from_instance(
+        {
+            "success": False,
+            "status": "timed_out",
+            "error_code": "tool_timeout_after_durable_submission",
+            "error": "submission wait timed out",
+            "timed_out": True,
+            "instance_id": "instance-terminal",
+            "workflow_id": "#V#test_workflow",
+            "workflow_execution": {
+                "instance_id": "instance-terminal",
+                "workflow_id": "#V#test_workflow",
+            },
+        },
+        instance=instance,
+        poll_count=4,
+        wait_duration_ms=12_500,
+    )
+
+    assert enriched["success"] is True
+    assert enriched["status"] == "completed"
+    assert enriched["final_status"] == "completed"
+    assert enriched["timed_out"] is False
+    assert "error_code" not in enriched
+    assert enriched["workflow_instance"]["outputs"] == {
+        "summary": "canonical result"
+    }
+    monitoring = enriched["workflow_execution"]["durable_activity_monitoring"]
+    assert monitoring["poll_count"] == 4
+    assert monitoring["wait_duration_ms"] == 12_500
+    assert enriched["workflow_execution"]["submission_observation"][
+        "error_code"
+    ] == "tool_timeout_after_durable_submission"
 
 
 def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start():

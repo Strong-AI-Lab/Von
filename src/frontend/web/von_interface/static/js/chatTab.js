@@ -132,6 +132,8 @@ let totalHistorySegments = 1;
 let activeChatSessionId = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
+let chatSessionSelectionGeneration = 0;
+let newChatCreationInFlight = null;
 let sessionTabsCache = [];
 let displayedHistorySessionId = null;
 const historyLoadState = {
@@ -1564,6 +1566,7 @@ const THINKING_CARD_MODE_CLASS_NAMES = new Set([
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA = 'thinking_card_progress_view_model.v1';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_EXPLICIT = 'explicit_turn_state';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_DERIVED = 'derived_from_live_telemetry';
+const THINKING_ACTIVITY_WORK_ITEM_LIMIT = 128;
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
 const THINKING_LLM_CALL_LOG_DETAILS_SELECTOR = 'details[data-thinking-llm-call-log-key]';
@@ -3280,6 +3283,7 @@ function syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnos
 
     if (diagnostics.latest_progress && typeof diagnostics.latest_progress === 'object') {
         request.latestProgress = cloneThinkingLatestProgress(diagnostics.latest_progress);
+        captureThinkingActivityProjection(request, request.latestProgress);
         updated = true;
     }
 
@@ -3361,13 +3365,29 @@ function buildSyntheticThinkingTerminalProgress(request) {
     }
 
     const outcomeStatus = normaliseThinkingProgressStatusValue(turnOutcome.status) || 'completed';
-    const terminalStatus = outcomeStatus === 'error'
+    const terminalStatus = outcomeStatus === 'error' || outcomeStatus === 'failed'
         ? 'error'
-        : (outcomeStatus === 'follow_up_required' ? 'follow_up_required' : 'completed');
+        : (
+            outcomeStatus === 'follow_up_required'
+                ? 'follow_up_required'
+                : (
+                    outcomeStatus === 'cancelled' || outcomeStatus === 'canceled' || outcomeStatus === 'aborted'
+                        ? 'cancelled'
+                        : (outcomeStatus === 'terminated' ? 'terminated' : 'completed')
+                )
+        );
     const phaseLabel = normaliseThinkingActivityString(turnOutcome.phase_label)
         || (terminalStatus === 'error'
             ? 'Turn failed'
-            : (terminalStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed'));
+            : (
+                terminalStatus === 'follow_up_required'
+                    ? 'Follow-up required'
+                    : (
+                        terminalStatus === 'cancelled'
+                            ? 'Turn stopped'
+                            : (terminalStatus === 'terminated' ? 'Turn terminated' : 'Turn completed')
+                    )
+            ));
     const resultSummary = normaliseThinkingActivityString(turnOutcome.result_summary)
         || normaliseThinkingActivityString(turnOutcome.summary);
     const thinkingStartedAtMs = Number.isFinite(request.thinkingStartedAtMs)
@@ -3555,6 +3575,7 @@ function applyThinkingProgressUpdate(request, nextProgress) {
     }
 
     request.latestProgress = nextProgress;
+    captureThinkingActivityProjection(request, nextProgress);
     const workflowSelection = buildThinkingWorkflowSelectionSnapshot(nextProgress);
     if (workflowSelection) {
         request.workflowSelection = workflowSelection;
@@ -3671,6 +3692,7 @@ function createThinkingCardHistorySnapshot(request) {
         workflowSelection,
         workflowRoutingDiagnostics,
         workflowStagePath,
+        activityProjection: normaliseThinkingActivityProjection(request.activityProjection),
         stageDiagnostics,
         timingBreakdown,
         timingSummary,
@@ -5434,6 +5456,9 @@ function updateThinkingCardStatusBadge(progress, cardRoot = null) {
 }
 
 function formatToolUseProgressText(progress, request = null) {
+    if (request?.stopRequested === true && request?.foregroundDeliveryCompleted !== true) {
+        return 'Stopping…';
+    }
     const presentation = buildThinkingProgressPresentation(progress, request);
     return presentation.stageText || DEFAULT_THINKING_TEXT;
 }
@@ -5924,6 +5949,13 @@ function deriveThinkingExecutionInterpretation(request = null) {
     const uniqueToolNames = [...new Set(toolHistory
         .map((entry) => normaliseThinkingActivityString(entry?.tool || entry?.workflowTask))
         .filter(Boolean))];
+    const latestProgressStatus = normaliseThinkingActivityString(latestProgress?.status).toLowerCase();
+    const latestProgressTool = latestProgressStatus.startsWith('tool_')
+        ? normaliseThinkingActivityString(latestProgress?.tool)
+        : '';
+    if (latestProgressTool && !uniqueToolNames.includes(latestProgressTool)) {
+        uniqueToolNames.push(latestProgressTool);
+    }
     const stage = normaliseThinkingActivityString(latestProgress?.stage || latestProgress?.phase);
     const stageLabel = normaliseThinkingActivityString(latestProgress?.stage_label || latestProgress?.phase_label)
         || (stage ? formatThinkingActivityFallbackLabel(stage) : null);
@@ -6203,6 +6235,239 @@ function toThinkingCardOptionalNonNegativeInteger(value) {
     return Math.max(0, Math.trunc(parsed));
 }
 
+function toThinkingActivityOptionalNonNegativeInteger(value) {
+    if (value === null || value === undefined || value === '') {
+        return null;
+    }
+    return toThinkingCardOptionalNonNegativeInteger(value);
+}
+
+function normaliseThinkingActivityWorkItem(rawItem) {
+    if (!rawItem || typeof rawItem !== 'object') {
+        return null;
+    }
+    const index = toThinkingActivityOptionalNonNegativeInteger(
+        Number.isInteger(rawItem.index) ? rawItem.index : rawItem.item_index
+    );
+    if (index === null) {
+        return null;
+    }
+    const status = normaliseThinkingActivityString(rawItem.status).toLowerCase();
+    const label = firstThinkingCardText(
+        rawItem.item_label,
+        rawItem.display_label,
+        rawItem.label
+    );
+    const progressFacts = normaliseThinkingProgressFacts(rawItem.progress_facts);
+    if (!status && !label && progressFacts.length === 0) {
+        return null;
+    }
+    return {
+        item_id: normaliseThinkingActivityString(rawItem.item_id) || null,
+        index,
+        item_number: index + 1,
+        total: toThinkingActivityOptionalNonNegativeInteger(rawItem.total),
+        label: label || null,
+        status: status || null,
+        progress_facts: progressFacts
+    };
+}
+
+function normaliseThinkingActivityProjection(rawProjection) {
+    if (!rawProjection || typeof rawProjection !== 'object') {
+        return null;
+    }
+    const rawProgress = (rawProjection.progress && typeof rawProjection.progress === 'object')
+        ? rawProjection.progress
+        : {};
+    const rawLastEvent = (rawProjection.last_event && typeof rawProjection.last_event === 'object')
+        ? rawProjection.last_event
+        : {};
+    const workItemsByIndex = new Map();
+    const rawWorkItems = Array.isArray(rawProjection.work_items)
+        ? rawProjection.work_items.slice(0, THINKING_ACTIVITY_WORK_ITEM_LIMIT)
+        : [];
+    rawWorkItems.forEach((rawItem) => {
+        const item = normaliseThinkingActivityWorkItem(rawItem);
+        if (item) {
+            // A repeated index is one evolving work item, not another display
+            // row. Keep the latest represented status, then sort numerically.
+            workItemsByIndex.set(item.index, item);
+        }
+    });
+    const workItems = [...workItemsByIndex.values()]
+        .sort((left, right) => left.index - right.index);
+    const progress = {
+        current: toThinkingActivityOptionalNonNegativeInteger(rawProgress.current),
+        total: toThinkingActivityOptionalNonNegativeInteger(rawProgress.total),
+        message: normaliseThinkingActivityString(rawProgress.message) || null
+    };
+    const lastEvent = {
+        status: normaliseThinkingActivityString(rawLastEvent.status) || null,
+        state_id: normaliseThinkingActivityString(rawLastEvent.state_id) || null,
+        action_id: normaliseThinkingActivityString(rawLastEvent.action_id) || null,
+        tool: normaliseThinkingActivityString(rawLastEvent.tool) || null
+    };
+    const projection = {
+        schema_version: normaliseThinkingActivityString(rawProjection.schema_version)
+            || 'workflow_activity_projection.v1',
+        instance_id: normaliseThinkingActivityString(rawProjection.instance_id) || null,
+        root_workflow_id: normaliseThinkingActivityString(rawProjection.root_workflow_id) || null,
+        status: normaliseThinkingActivityString(rawProjection.status).toLowerCase() || null,
+        current_state: normaliseThinkingActivityString(
+            rawProjection.current_state || rawProjection.workflow_current_state
+        ) || null,
+        updated_at_utc: normaliseThinkingActivityString(rawProjection.updated_at_utc) || null,
+        progress,
+        progress_facts: normaliseThinkingProgressFacts(rawProjection.progress_facts),
+        last_event: lastEvent,
+        work_items: workItems
+    };
+    const hasContent = Boolean(
+        projection.instance_id
+        || projection.root_workflow_id
+        || projection.status
+        || projection.current_state
+        || projection.progress.message
+        || projection.progress.current !== null
+        || projection.progress.total !== null
+        || projection.progress_facts.length > 0
+        || projection.last_event.status
+        || projection.last_event.state_id
+        || projection.last_event.action_id
+        || projection.work_items.length > 0
+    );
+    return hasContent ? projection : null;
+}
+
+function extractThinkingActivityProjectionFromProgress(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return null;
+    }
+    const explicitProjection = normaliseThinkingActivityProjection(
+        progress.activity_projection || progress.workflow_activity_projection
+    );
+    if (explicitProjection) {
+        return explicitProjection;
+    }
+    if (
+        !Array.isArray(progress.work_items)
+        && !progress.workflow_current_state
+        && !(progress.workflow_progress && typeof progress.workflow_progress === 'object')
+    ) {
+        return null;
+    }
+    return normaliseThinkingActivityProjection({
+        schema_version: 'workflow_activity_projection.v1',
+        instance_id: progress.workflow_instance_id,
+        root_workflow_id: progress.workflow_id,
+        status: progress.workflow_status,
+        current_state: progress.workflow_current_state,
+        progress: progress.workflow_progress,
+        progress_facts: progress.progress_facts,
+        work_items: progress.work_items
+    });
+}
+
+function captureThinkingActivityProjection(request, progress) {
+    if (!request || typeof request !== 'object') {
+        return null;
+    }
+    const projection = extractThinkingActivityProjectionFromProgress(progress);
+    if (projection) {
+        request.activityProjection = projection;
+    }
+    return projection;
+}
+
+function resolveThinkingActivityProjection(rawViewModel = null, request = null) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const candidates = [
+        rawViewModel?.activity_projection,
+        extractThinkingActivityProjectionFromProgress(latestProgress),
+        request?.activityProjection
+    ];
+    for (const candidate of candidates) {
+        const projection = normaliseThinkingActivityProjection(candidate);
+        if (projection) {
+            return projection;
+        }
+    }
+    return null;
+}
+
+function isThinkingActivityProjectionActive(projection) {
+    if (!projection || typeof projection !== 'object') {
+        return false;
+    }
+    const status = normaliseThinkingActivityString(projection.status).toLowerCase();
+    if (['completed', 'failed', 'cancelled', 'terminated'].includes(status)) {
+        return false;
+    }
+    if (['pending', 'queued', 'running', 'active', 'waiting', 'tool_running'].includes(status)) {
+        return true;
+    }
+    return Array.isArray(projection.work_items) && projection.work_items.some((item) => (
+        ['pending', 'queued', 'running', 'active', 'waiting'].includes(
+            normaliseThinkingActivityString(item?.status).toLowerCase()
+        )
+    ));
+}
+
+function buildThinkingActivityProjectionCurrentText(projection) {
+    if (!projection || typeof projection !== 'object') {
+        return '';
+    }
+    const state = normaliseThinkingActivityString(projection.current_state);
+    const stateText = state ? `Workflow state: ${formatThinkingActivityFallbackLabel(state)}` : '';
+    const message = normaliseThinkingActivityString(projection.progress?.message);
+    if (message && message.toLowerCase() !== 'running') {
+        return [message, stateText].filter(Boolean).join(' · ');
+    }
+    return stateText || message;
+}
+
+function formatThinkingGenericToolActivity(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return '';
+    }
+    const status = normaliseThinkingActivityString(progress.status).toLowerCase();
+    if (!['tool_started', 'tool_completed', 'tool_failed', 'tool_blocked'].includes(status)) {
+        return '';
+    }
+    const summary = normaliseThinkingActivityString(progress.result_summary);
+    if (summary) {
+        return summary;
+    }
+    const tool = normaliseThinkingActivityString(progress.tool);
+    if (status === 'tool_started') {
+        return tool ? `Started tool: ${tool}` : 'Started a tool call';
+    }
+    if (status === 'tool_completed') {
+        const prefix = progress.success === false ? 'Tool failed' : 'Completed tool';
+        return tool ? `${prefix}: ${tool}` : `${prefix} call`;
+    }
+    const prefix = status === 'tool_blocked' ? 'Tool blocked' : 'Tool failed';
+    return tool ? `${prefix}: ${tool}` : `${prefix} call`;
+}
+
+function formatThinkingActivityWorkItem(item, mode = THINKING_CARD_MODE_DEFAULT) {
+    if (!item || typeof item !== 'object' || !Number.isInteger(item.index)) {
+        return null;
+    }
+    const total = Number.isInteger(item.total) && item.total > 0 ? item.total : null;
+    const indexLabel = total
+        ? `Item ${item.index + 1} of ${total}`
+        : `Item ${item.index + 1}`;
+    const label = item.label ? `${indexLabel} — ${item.label}` : indexLabel;
+    const status = item.status ? formatThinkingActivityFallbackLabel(item.status) : '';
+    const facts = formatThinkingProgressFactsInline(item.progress_facts, mode, { limit: 3 });
+    const value = [status, facts].filter(Boolean).join(' · ');
+    return value ? { label, value } : null;
+}
+
 function deriveThinkingCardWorkflowExecutionSummary(request) {
     const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
         ? request.latestProgress
@@ -6397,6 +6662,10 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
     const missingTelemetry = normaliseThinkingCardSummaryList(
         rawViewModel.missing_telemetry || rawViewModel.telemetry_gaps
     );
+    const activityProjection = resolveThinkingActivityProjection(rawViewModel, request);
+    const projectedCurrentActivity = isThinkingActivityProjectionActive(activityProjection)
+        ? buildThinkingActivityProjectionCurrentText(activityProjection)
+        : '';
     const workflowExecutionSummary = normaliseThinkingCardWorkflowExecutionSummary(
         rawViewModel.workflow_execution_summary
             || rawViewModel.selected_workflow_execution
@@ -6456,10 +6725,12 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
             rawViewModel.context_summary
         ) || null,
         current_activity: firstThinkingCardText(
+            projectedCurrentActivity,
             rawViewModel.current_activity,
             rawViewModel.activity_summary,
             rawViewModel.stage_summary
         ) || null,
+        activity_projection: activityProjection,
         workflow_execution_summary: workflowExecutionSummary,
         workflow_verification_summary: workflowVerificationSummary,
         execution_interpretation: executionInterpretation,
@@ -6487,6 +6758,8 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
         viewModel.evidence_context_summary,
         viewModel.current_activity,
         viewModel.workflow_execution_summary?.summary_text,
+        viewModel.activity_projection?.current_state,
+        viewModel.activity_projection?.progress?.message,
         viewModel.workflow_verification_summary,
         viewModel.execution_interpretation?.identity_summary,
         viewModel.execution_interpretation?.step_summary,
@@ -6494,7 +6767,9 @@ function normaliseThinkingCardProgressViewModel(rawViewModel, request = null) {
         viewModel.confirmation_requirement,
         viewModel.uncertainty_summary
     ].some(Boolean) || Boolean(viewModel.selected_workflow) || Boolean(viewModel.llm_input_lifecycle)
-        || Boolean(viewModel.wait_state) || viewModel.missing_telemetry.length > 0
+        || Boolean(viewModel.wait_state) || (viewModel.activity_projection?.work_items?.length || 0) > 0
+        || (viewModel.activity_projection?.progress_facts?.length || 0) > 0
+        || viewModel.missing_telemetry.length > 0
         || viewModel.large_llm_call_alerts.length > 0
         || viewModel.expert_details.length > 0 || viewModel.debug_details.length > 0;
 
@@ -6730,15 +7005,21 @@ function buildThinkingCardProgressViewModel(request) {
         selected_workflow_id: routingNarrative.context.selectedWorkflowId,
         selected_workflow_name: routingNarrative.context.selectedWorkflowName
     }, workflowDiscovery);
+    const activityProjection = resolveThinkingActivityProjection(null, request);
+    const projectedCurrentActivity = isThinkingActivityProjectionActive(activityProjection)
+        ? buildThinkingActivityProjectionCurrentText(activityProjection)
+        : '';
     const routeSummary = routingNarrative.text
         || (selectedWorkflow?.label ? `Selected route: ${selectedWorkflow.label}` : '')
         || firstThinkingCardText(latestProgress?.route_summary, latestProgress?.workflow_summary);
     const currentActivity = firstThinkingCardText(
+        projectedCurrentActivity,
         latestProgress?.current_activity,
         latestProgress?.activity_summary,
         latestProgress?.result_summary,
         latestProgress?.subtask,
         latestProgress?.workflow_task,
+        formatThinkingGenericToolActivity(latestProgress),
         presentation?.stageText ? presentation.stageText.replace(/\.{3}$/, '') : ''
     );
     const objectiveSummary = firstThinkingCardText(
@@ -6803,6 +7084,7 @@ function buildThinkingCardProgressViewModel(request) {
         selected_workflow: selectedWorkflow,
         evidence_context_summary: evidenceSummary || null,
         current_activity: currentActivity || null,
+        activity_projection: activityProjection,
         execution_interpretation: executionInterpretation,
         recovery_progress: recoveryProgress,
         large_llm_call_alerts: largeLlmCallAlerts,
@@ -6877,6 +7159,39 @@ function renderThinkingCardProgressSynopsisHTML(viewModel, mode = THINKING_CARD_
     addItem('Route', viewModel.route_summary, viewModel.route_summary_html);
     addItem('Evidence and context', viewModel.evidence_context_summary);
     addItem('Current activity', viewModel.current_activity);
+    const activityProjection = viewModel.activity_projection;
+    if (activityProjection) {
+        const workflowStateBits = [
+            activityProjection.current_state
+                ? formatThinkingActivityFallbackLabel(activityProjection.current_state)
+                : '',
+            activityProjection.status
+                ? formatThinkingActivityFallbackLabel(activityProjection.status)
+                : '',
+            (
+                Number.isInteger(activityProjection.progress?.current)
+                && Number.isInteger(activityProjection.progress?.total)
+                && activityProjection.progress.total > 0
+            )
+                ? `${activityProjection.progress.current} of ${activityProjection.progress.total}`
+                : ''
+        ].filter(Boolean);
+        addItem('Workflow state', workflowStateBits.join(' · '));
+        addItem(
+            'Projected progress',
+            formatThinkingProgressFactsInline(
+                activityProjection.progress_facts,
+                renderMode,
+                { limit: 3 }
+            )
+        );
+        for (const item of activityProjection.work_items || []) {
+            const formattedItem = formatThinkingActivityWorkItem(item, renderMode);
+            if (formattedItem) {
+                addItem(formattedItem.label, formattedItem.value);
+            }
+        }
+    }
     if (renderThinkingCardSynopsisItemHTML({ label: 'Workflow execution', value: viewModel.workflow_execution_summary?.summary_text })) {
         selectedWorkflowRowEmitted = true;
     }
@@ -7278,7 +7593,10 @@ function recordToolUseHistory(request, progress) {
     const phase = typeof progress.phase === 'string' ? progress.phase.trim() : '';
     const phaseLabel = typeof progress.phase_label === 'string' ? progress.phase_label.trim() : '';
     const status = typeof progress.status === 'string' ? progress.status.trim() : '';
-    const resultSummary = typeof progress.result_summary === 'string' ? progress.result_summary.trim() : '';
+    const explicitResultSummary = typeof progress.result_summary === 'string'
+        ? progress.result_summary.trim()
+        : '';
+    const resultSummary = explicitResultSummary || formatThinkingGenericToolActivity(progress);
 
     // Track phase transitions in addition to tool use.
     if (!Array.isArray(request.toolUseProgressHistory)) {
@@ -7324,7 +7642,8 @@ function recordToolUseHistory(request, progress) {
     const lastBatch = last && Number.isFinite(last.batchSize) ? Number(last.batchSize) : null;
 
     // Determine success/fail status
-    const isSuccess = status === 'tool_invoked';
+    const isSuccess = status === 'tool_invoked'
+        || (status === 'tool_completed' && progress.success !== false);
     const isFail = status === 'tool_failed' || status === 'tool_blocked' || status === 'error';
 
     if (lastTool === tool && lastTask === workflowTask && lastBatch === batchSize) {
@@ -12450,6 +12769,74 @@ function normaliseForegroundTaskResultPayload(payload) {
     return null;
 }
 
+function applyForegroundTaskStatusProgress(request, statusPayload) {
+    if (!request || typeof request !== 'object' || !statusPayload || typeof statusPayload !== 'object') {
+        return false;
+    }
+    const currentProgress = (statusPayload.progress && typeof statusPayload.progress === 'object')
+        ? { ...statusPayload.progress }
+        : null;
+    const progressHistory = Array.isArray(statusPayload.progress_history)
+        ? statusPayload.progress_history
+        : [];
+    if (!(request.foregroundTaskProgressHistoryKeys instanceof Set)) {
+        request.foregroundTaskProgressHistoryKeys = new Set();
+    }
+    progressHistory.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') {
+            return;
+        }
+        const historyKey = [
+            entry.sequence_no,
+            entry.recorded_at,
+            entry.status,
+            entry.event_kind,
+            entry.call_id,
+            entry.tool
+        ].map((value) => String(value ?? '')).join('|');
+        if (request.foregroundTaskProgressHistoryKeys.has(historyKey)) {
+            return;
+        }
+        request.foregroundTaskProgressHistoryKeys.add(historyKey);
+        const eventStatus = normaliseThinkingActivityString(entry.status).toLowerCase();
+        if (eventStatus.startsWith('tool_')) {
+            recordToolUseHistory(request, entry);
+        }
+    });
+    const projectionCandidates = [currentProgress, ...progressHistory.slice().reverse()];
+    let projectionCaptured = false;
+    for (const candidate of projectionCandidates) {
+        if (captureThinkingActivityProjection(request, candidate)) {
+            projectionCaptured = true;
+            break;
+        }
+    }
+    if (!currentProgress) {
+        return projectionCaptured;
+    }
+    if (!normaliseThinkingActivityString(currentProgress.request_id)) {
+        currentProgress.request_id = normaliseThinkingActivityString(
+            statusPayload.task_id || request.clientRequestId
+        ) || null;
+    }
+    const accepted = applyThinkingProgressUpdate(request, currentProgress);
+    if (accepted) {
+        syncThinkingCanonicalHistoriesFromProgress(request, currentProgress);
+        recordToolUseHistory(request, currentProgress);
+        if (currentProgress.workflow_stage_path && typeof currentProgress.workflow_stage_path === 'object') {
+            request.workflowStagePath = currentProgress.workflow_stage_path;
+        }
+        if (currentProgress.workflow_discovery && typeof currentProgress.workflow_discovery === 'object') {
+            request.workflowDiscovery = currentProgress.workflow_discovery;
+        }
+    }
+    return accepted || projectionCaptured;
+}
+
+export function __testOnly_applyForegroundTaskStatusProgress(request, statusPayload) {
+    return applyForegroundTaskStatusProgress(request, statusPayload);
+}
+
 function isForegroundTaskStatusTerminal(statusPayload) {
     const status = String(statusPayload?.status || '').trim().toLowerCase();
     return status === 'completed' || status === 'failed' || status === 'cancelled';
@@ -12509,7 +12896,7 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
             method: 'GET',
             signal: poll.abortController?.signal,
             headers: buildChatFetchHeaders(),
-            credentials: 'omit',
+            credentials: 'same-origin',
             timeoutMs: FOREGROUND_TASK_RESULT_POLL_FETCH_TIMEOUT_MS
         });
         if (!resp || typeof resp.json !== 'function') {
@@ -12545,6 +12932,9 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
                 );
                 scheduleNextPoll(poll.nextDelayMs);
                 return;
+            }
+            if (statusResp.ok && applyForegroundTaskStatusProgress(request, statusPayload)) {
+                refreshThinkingCardProgressUi(request);
             }
             if (!statusResp.ok || !isForegroundTaskStatusTerminal(statusPayload)) {
                 poll.nextDelayMs = Math.min(
@@ -12595,7 +12985,7 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
             poll.delivering = true;
             await handlers.onCompleted?.(generateBody, resultPayload, statusPayload);
         } catch (err) {
-            if (err && err.name === 'AbortError') {
+            if (err && err.name === 'AbortError' && err.vonTimeout !== true) {
                 return;
             }
             poll.nextDelayMs = Math.min(
@@ -12606,6 +12996,13 @@ function startForegroundTaskResultPolling(request, handlers = {}) {
         }
     };
 
+    poll.pollNow = () => {
+        if (poll.timeoutId) {
+            clearTimeout(poll.timeoutId);
+            poll.timeoutId = null;
+        }
+        void pollOnce();
+    };
     request.foregroundTaskResultPoll = poll;
     scheduleNextPoll(poll.nextDelayMs);
 }
@@ -22300,6 +22697,7 @@ function setActiveChatSession(sessionId, sessionName) {
     activeChatSessionOwnerId = null;
 
     if (previousSessionId !== activeChatSessionId) {
+        chatSessionSelectionGeneration += 1;
         synchroniseLlmExecutionContext({ reason: 'conversation_session_changed' });
         if (activeChatSessionId) {
             if (conversationSituationStateBySession.has(activeChatSessionId)) {
@@ -23813,7 +24211,7 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
         newTab.setAttribute('aria-label', 'New chat');
         newTab.textContent = '+';
         newTab.addEventListener('click', () => {
-            void promptAndCreateChatSession();
+            void createNewChatSession();
         });
         fragment.appendChild(newTab);
     }
@@ -23877,6 +24275,7 @@ async function refreshChatSessionTabs() {
     if (!container) {
         return;
     }
+    const selectionGenerationAtStart = chatSessionSelectionGeneration;
     await _ensureInviteSessionContext();
 
     const hasCachedTabs = Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0;
@@ -23951,6 +24350,17 @@ async function refreshChatSessionTabs() {
                 renderChatSessionTabsPlaceholder('error');
                 setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
             }
+            return;
+        }
+
+        // A refresh can begin before an explicit session change and return after it.
+        // Never let that stale response erase a chat that was just selected or created.
+        if (chatSessionSelectionGeneration !== selectionGenerationAtStart) {
+            if (Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+                renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+                container.hidden = false;
+            }
+            setTimeout(() => scheduleChatSessionTabsRefresh(true), 0);
             return;
         }
 
@@ -24254,7 +24664,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     newTab.setAttribute('aria-label', 'New chat');
     newTab.textContent = '+';
     newTab.addEventListener('click', () => {
-        void promptAndCreateChatSession();
+        void createNewChatSession();
     });
     newTab.addEventListener('contextmenu', (event) => {
         event.preventDefault();
@@ -24598,7 +25008,7 @@ function buildNewChatContextMenuItems() {
         {
             label: 'New chat',
             onClick: () => {
-                void promptAndCreateChatSession();
+                void createNewChatSession();
             }
         }
     ];
@@ -24729,18 +25139,27 @@ function setupChatTabContextMenu() {
     });
 }
 
-async function promptAndCreateChatSession() {
-    const proposed = window.prompt('Name this chat (optional)', '');
-    if (proposed === null) {
-        return;
+function createNewChatSession() {
+    if (newChatCreationInFlight) {
+        return newChatCreationInFlight;
     }
-    try {
-        await createChatSession(proposed);
-        scheduleChatSessionTabsRefresh(true);
-    } catch (err) {
-        const msg = err?.message ? String(err.message) : 'Unable to create chat.';
-        alert(msg);
-    }
+
+    const creation = (async () => {
+        try {
+            return await createChatSession('', { preserveComposerDraft: true });
+        } catch (err) {
+            console.error('[chatTab] Unable to create chat:', err);
+            const msg = err?.message ? String(err.message) : 'Unable to create chat.';
+            showToast(msg, 'error');
+            return null;
+        } finally {
+            if (newChatCreationInFlight === creation) {
+                newChatCreationInFlight = null;
+            }
+        }
+    })();
+    newChatCreationInFlight = creation;
+    return creation;
 }
 
 async function promptRenameChatSession(sessionId, currentName) {
@@ -24766,7 +25185,7 @@ async function promptRenameChatSession(sessionId, currentName) {
     }
 }
 
-async function createChatSession(sessionName) {
+async function createChatSession(sessionName, options = {}) {
     const payload = {};
     if (typeof sessionName === 'string' && sessionName.trim()) {
         payload.session_name = sessionName.trim();
@@ -24851,7 +25270,10 @@ async function createChatSession(sessionName) {
         });
     }
 
-    setPromptComposerValue('', { focus: true });
+    const composerValue = options.preserveComposerDraft
+        ? String(getPromptInputElement()?.value || '')
+        : '';
+    setPromptComposerValue(composerValue, { focus: true });
 
     document.dispatchEvent(new CustomEvent('von:contextReset', {
         detail: { trigger: 'chat_new_session', session_id: effectiveSessionId, session_name: effectiveName || null }
@@ -25021,6 +25443,15 @@ async function switchToChatSession(sessionId) {
     });
 
     setActiveChatSession(sid, cachedSession?.session_name);
+    const selectionGeneration = chatSessionSelectionGeneration;
+    const isCurrentSelection = () => (
+        chatSessionSelectionGeneration === selectionGeneration
+        && activeChatSessionId === sid
+    );
+    const finishSupersededSwitch = () => {
+        setChatSessionTabLoading(sid, false);
+        return { ok: false, superseded: true };
+    };
     clearSharedSessionUnread(sid);
     clearLatestUnreadBoundary();
     hideNewSharedMessagesIndicator();
@@ -25043,6 +25474,8 @@ async function switchToChatSession(sessionId) {
     }
 
     scrollableField.innerHTML = '<div class="chat-session-loading">Switching chat…</div>';
+    transcriptTurns.length = 0;
+    clearLlmDebugDataEntries();
     displayedHistorySessionId = null;
     clearHistoryLoadState();
     historySegmentsShown = 0;
@@ -25062,6 +25495,9 @@ async function switchToChatSession(sessionId) {
                 body: JSON.stringify({ session_id: sid, include_history: false })
             });
             data = await response.json().catch(() => ({}));
+            if (!isCurrentSelection()) {
+                return finishSupersededSwitch();
+            }
             setSessionMs = Math.round(performance.now() - setSessionStart);
             console.log('[chatTab] switchToChatSession set_chat_session', {
                 ok: response.ok,
@@ -25080,6 +25516,9 @@ async function switchToChatSession(sessionId) {
                 break;
             }
             await new Promise((resolve) => setTimeout(resolve, 320));
+            if (!isCurrentSelection()) {
+                return finishSupersededSwitch();
+            }
         }
 
         if (!response) {
@@ -25109,6 +25548,11 @@ async function switchToChatSession(sessionId) {
                 forceScrollToBottom: true
             });
             return { ok: false, error: msg };
+        }
+
+        const responseSessionId = normaliseHistorySessionId(data?.session_id);
+        if (responseSessionId !== sid) {
+            throw new Error('Conversation switch response did not match the selected session.');
         }
 
         setActiveChatSession(data?.session_id, data?.session_name);
@@ -25144,6 +25588,9 @@ async function switchToChatSession(sessionId) {
                 showResetNotice: false,
                 forceScrollToBottom: true
             });
+            if (!isCurrentSelection()) {
+                return finishSupersededSwitch();
+            }
             const recentMs = Math.round(performance.now() - recentStart);
             console.log('[chatTab] switchToChatSession recent pair', {
                 loaded,
@@ -25155,7 +25602,7 @@ async function switchToChatSession(sessionId) {
             }
 
             setTimeout(() => {
-                if (activeChatSessionId !== sid) {
+                if (!isCurrentSelection()) {
                     setChatSessionTabLoading(sid, false);
                     return;
                 }
@@ -25167,7 +25614,7 @@ async function switchToChatSession(sessionId) {
                     showResetNotice: false
                 });
                 backfillPromise.finally(() => {
-                    if (activeChatSessionId === sid) {
+                    if (isCurrentSelection()) {
                         setChatSessionTabLoading(sid, false);
                     }
                 });
@@ -25193,6 +25640,9 @@ async function switchToChatSession(sessionId) {
         });
         return { ok: true, data };
     } catch (err) {
+        if (!isCurrentSelection()) {
+            return finishSupersededSwitch();
+        }
         console.error('Error switching chat session:', err);
         setActiveChatSession(previousSessionId, previousSessionName);
         if (sessionTabsCache.length > 0) {
@@ -30246,6 +30696,14 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
 
     if (abortButton) {
         abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        const stopPending = Boolean(isThinking && request?.stopRequested === true);
+        abortButton.disabled = stopPending;
+        abortButton.textContent = stopPending ? 'Stopping…' : 'Stop generating';
+        abortButton.setAttribute('aria-label', stopPending ? 'Stop requested' : 'Stop generating');
+        abortButton.setAttribute(
+            'title',
+            stopPending ? 'Stop requested' : 'Stop generating'
+        );
     }
     if (retryButton) {
         retryButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
@@ -30320,28 +30778,87 @@ function restorePromptEditingState(request, options = {}) {
     }
 }
 
-function abortActiveChatRequest(options = {}) {
+async function abortActiveChatRequest(options = {}) {
     if (!activeChatRequest) {
-        return;
+        return false;
     }
 
     const request = activeChatRequest;
-    request.aborted = true;
-    releaseRequestFileCopyBinding(request);
-
-    stopToolUseProgressPolling(request);
-    stopThinkingTooltipTicker(request);
-
-    try {
-        request.abortController?.abort();
-    } catch (_) {
-        // Ignore abort errors.
+    if (
+        request.foregroundDeliveryCompleted === true
+        || request.finalised === true
+        || request.stopRequestInFlight === true
+        || request.stopRequested === true
+    ) {
+        return false;
     }
 
-    setLiveChatRequestForSession(request.sessionId, null);
-    setFinishedThinkingCardForSession(request.sessionId, null);
-    syncActiveChatSessionThinkingState();
-    restorePromptEditingState(request, options);
+    const requestId = normaliseThinkingActivityString(request.clientRequestId);
+    if (!requestId) {
+        return false;
+    }
+
+    request.stopRequested = true;
+    request.restorePromptAfterStop = options.restorePrompt !== false;
+    request.stopRequestInFlight = true;
+    request.stopRequestError = null;
+    const abortButton = getThinkingCardAbortButtonEl();
+    if (abortButton) {
+        abortButton.disabled = true;
+        abortButton.textContent = 'Stopping…';
+        abortButton.setAttribute('aria-label', 'Stop requested');
+        abortButton.setAttribute('title', 'Stop requested');
+    }
+    if (isRequestInActiveChatSession(request)) {
+        setLoadingIndicatorText('Stopping…');
+    }
+
+    try {
+        const response = await fetch(
+            `/von/api/task/cancel/${encodeURIComponent(requestId)}`,
+            {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: buildChatFetchHeaders({
+                    'Content-Type': 'application/json'
+                })
+            }
+        );
+        let body = null;
+        try {
+            body = await response?.json?.();
+        } catch (_) {
+            body = null;
+        }
+        if (!response?.ok || body?.success === false) {
+            throw new Error(
+                normaliseThinkingActivityString(body?.error)
+                || normaliseThinkingActivityString(body?.detail)
+                || `Stop request failed with status ${response?.status || 'unknown'}`
+            );
+        }
+        request.stopRequestAccepted = true;
+        request.foregroundTaskResultPoll?.pollNow?.();
+        return true;
+    } catch (error) {
+        request.stopRequested = false;
+        request.stopRequestAccepted = false;
+        request.stopRequestError = normaliseChatFailureText(error?.message || error)
+            || 'Stop request could not be confirmed.';
+        if (abortButton && isLiveChatRequest(request)) {
+            abortButton.disabled = false;
+            abortButton.textContent = 'Stop generating';
+            abortButton.setAttribute('aria-label', 'Stop generating');
+            abortButton.setAttribute('title', request.stopRequestError);
+        }
+        if (isRequestInActiveChatSession(request)) {
+            setLoadingIndicatorText('Stop not confirmed — still working');
+        }
+        console.warn('[chatTab] Unable to request task cancellation:', error);
+        return false;
+    } finally {
+        request.stopRequestInFlight = false;
+    }
 }
 
 function abortActiveHistoryRequest() {
@@ -30662,7 +31179,7 @@ function retryActiveChatRequest() {
         request.pendingFileCopyDisplayName
     );
     request.attachmentBindingTransferred = !!fileCopyConceptId;
-    abortActiveChatRequest();
+    void abortActiveChatRequest({ restorePrompt: false });
     if (!prompt.trim()) {
         return;
     }
@@ -30797,7 +31314,7 @@ function bindThinkingCardControls(cardRoot = null, options = {}) {
     if (bindAbort && abortButton && abortButton.dataset.bound !== '1') {
         abortButton.dataset.bound = '1';
         abortButton.addEventListener('click', () => {
-            abortActiveChatRequest();
+            void abortActiveChatRequest();
         });
     }
 
@@ -31676,17 +32193,10 @@ async function sendQueuedChatPromptEntryAtIndex(nextIndex) {
         return;
     }
 
-    const targetSessionId = normaliseHistorySessionId(nextEntry.sessionId);
-    if (targetSessionId && targetSessionId !== activeChatSessionId) {
-        const switchResult = await switchToChatSession(targetSessionId);
-        if (!switchResult?.ok) {
-            nextEntry.syncError = switchResult?.error || 'Could not show this queued task conversation.';
-            renderChatTaskQueuePanel();
-            refreshChatSessionTabActivityIndicators();
-            updateSendButtonForCurrentChatState();
-            return;
-        }
-    }
+    // A queued turn is bound to its originating conversation, but executing it
+    // must not navigate the user away from the conversation they are currently
+    // reading. `handleSendPrompt` accepts the explicit target session and keeps
+    // all live/result rendering scoped to that session.
 
     if (nextEntry.queueId) {
         try {
@@ -31902,6 +32412,13 @@ async function handleSendPrompt(options = {}) {
         attachmentBindingTransferred: false,
         attachmentBindingReleased: false,
         aborted: false,
+        stopRequested: false,
+        stopRequestAccepted: false,
+        stopRequestInFlight: false,
+        stopRequestError: null,
+        backgroundAccepted: false,
+        finalised: false,
+        finalisationPromise: null,
         clientRequestId,
         executionContextBinding,
         thinkingStartedAtMs: Date.now(),
@@ -31910,6 +32427,7 @@ async function handleSendPrompt(options = {}) {
         workflowStagePath: null,
         workflowSelection: null,
         workflowRoutingDiagnostics: null,
+        activityProjection: null,
         latestProgress: null,
         progressEvents: [],
         phaseHistory: [],
@@ -32001,18 +32519,28 @@ async function handleSendPrompt(options = {}) {
             turnExecutionDiagnostics?.completion_gate?.decision
             || turnExecutionDiagnostics?.completion_gate_decision
         );
+        const payloadTerminalStatus = normaliseThinkingProgressStatusValue(
+            data?.terminal_status
+        );
         const turnOutcomeStatus = canonicalThinkingTerminalStatus(completionGateDecision)
+            || canonicalThinkingTerminalStatus(payloadTerminalStatus)
+            || (data?.success === false ? THINKING_STATUS_FAILED : null)
             || THINKING_STATUS_COMPLETED;
+        const typedNonSuccess = data?.success === false;
         request.turnOutcome = {
             status: turnOutcomeStatus,
-            phase_label: turnOutcomeStatus === 'error'
-                ? 'Turn failed'
+            phase_label: turnOutcomeStatus === THINKING_STATUS_FAILED
+                ? (typedNonSuccess ? 'Turn incomplete' : 'Turn failed')
                 : (turnOutcomeStatus === 'follow_up_required' ? 'Follow-up required' : 'Turn completed'),
             summary: turnOutcomeStatus === 'follow_up_required'
                 ? 'The turn completed, but a follow-up step is still required.'
-                : 'Response generated'
+                : (
+                    typedNonSuccess
+                        ? `Response returned with status ${payloadTerminalStatus || 'incomplete'}`
+                        : 'Response generated'
+                )
         };
-        if (source === 'task_result') {
+        if (source === 'task_result' && !typedNonSuccess) {
             request.turnOutcome.summary = 'Response generated from completed task result';
         }
         if (turnExecutionDiagnostics) {
@@ -32117,6 +32645,116 @@ async function handleSendPrompt(options = {}) {
         return true;
     };
 
+    const deliverCancelledResponseData = (statusPayload = {}) => {
+        if (!claimForegroundDelivery()) {
+            return false;
+        }
+        const cancellationSummary = normaliseThinkingActivityString(
+            statusPayload?.progress?.result_summary
+            || statusPayload?.result_summary
+            || statusPayload?.detail
+        ) || 'Turn stopped.';
+        request.turnOutcome = {
+            status: THINKING_STATUS_CANCELLED,
+            phase_label: 'Turn stopped',
+            summary: cancellationSummary
+        };
+        const terminalProgress = {
+            ...(request.latestProgress && typeof request.latestProgress === 'object'
+                ? request.latestProgress
+                : {}),
+            ...(statusPayload?.progress && typeof statusPayload.progress === 'object'
+                ? statusPayload.progress
+                : {}),
+            status: THINKING_STATUS_CANCELLED,
+            liveness_state: THINKING_STATUS_CANCELLED,
+            phase: THINKING_STATUS_CANCELLED,
+            stage: THINKING_STATUS_CANCELLED,
+            phase_label: 'Turn stopped',
+            stage_label: 'Turn stopped',
+            result_summary: cancellationSummary,
+            request_id: request.clientRequestId
+        };
+        request.latestProgress = terminalProgress;
+        applyThinkingCardDisplayStateUpdate(request, {
+            type: 'progress_update',
+            progress: terminalProgress
+        });
+        if (isRequestVisible()) {
+            refreshThinkingCardProgressUi(request);
+        }
+        return true;
+    };
+
+    const finaliseLiveChatRequest = () => {
+        if (request.finalisationPromise) {
+            return request.finalisationPromise;
+        }
+        request.finalised = true;
+        request.thinkingFinishedAtMs = Date.now();
+        request.finalisationPromise = (async () => {
+            stopForegroundTaskResultPolling(request);
+            stopToolUseProgressPolling(request);
+            stopThinkingTooltipTicker(request);
+            try {
+                request.abortController?.abort();
+            } catch (_) {
+                // The browser request is transport only once terminal state is known.
+            }
+            releaseRequestFileCopyBinding(request);
+            if (!request?.promptQueueRecordId && request?.promptQueueRecordPromise) {
+                try {
+                    const activeRecord = await request.promptQueueRecordPromise;
+                    request.promptQueueRecordId = activeRecord?.queueId || request.promptQueueRecordId || null;
+                } catch (_) {
+                    // The promise already logs failures; proceed without restart recovery.
+                }
+            }
+            if (request?.promptQueueRecordId) {
+                const outcomeStatus = normaliseThinkingProgressStatusValue(request.turnOutcome?.status);
+                const terminalStatus = outcomeStatus === THINKING_STATUS_CANCELLED
+                    ? CHAT_PROMPT_QUEUE_STATUS_CANCELLED
+                    : (
+                        outcomeStatus === 'error' || outcomeStatus === THINKING_STATUS_FAILED || outcomeStatus === THINKING_STATUS_TERMINATED
+                            ? CHAT_PROMPT_QUEUE_STATUS_FAILED
+                            : CHAT_PROMPT_QUEUE_STATUS_COMPLETED
+                    );
+                const terminalError = terminalStatus === CHAT_PROMPT_QUEUE_STATUS_FAILED
+                    ? (request.turnOutcome?.summary || 'Prompt failed')
+                    : null;
+                try {
+                    await finishPersistedChatPromptQueueRecord(
+                        request.promptQueueRecordId,
+                        terminalStatus,
+                        terminalError
+                    );
+                } catch (error) {
+                    console.warn('[chatTab] Unable to finish persisted prompt queue record:', error);
+                    void refreshChatPromptQueueFromServer({ silent: true });
+                }
+            }
+            if (isLiveChatRequest(request)) {
+                const persisted = persistFinishedThinkingCard(request);
+                if (!persisted) {
+                    setFinishedThinkingCardForSession(request.sessionId, null);
+                }
+                setLiveChatRequestForSession(request.sessionId, null);
+            }
+            if (
+                request.stopRequested === true
+                && request.restorePromptAfterStop !== false
+                && request.turnOutcome?.status === THINKING_STATUS_CANCELLED
+            ) {
+                restorePromptEditingState(request);
+            }
+            syncActiveChatSessionThinkingState();
+            updateHistoryLength();
+            scheduleChatSessionTabsRefresh(true);
+            scheduleQueuedChatPromptDrain();
+        })();
+        return request.finalisationPromise;
+    };
+
     if (!fromQueue) {
         // Clear input only for direct sends; queued execution should preserve current draft text.
         rememberLastSubmittedUserPrompt(promptRaw);
@@ -32159,6 +32797,7 @@ async function handleSendPrompt(options = {}) {
                         file_copy_concept_id: request.pendingFileCopyConceptId
                     }
                 } : {}),
+                background: true,
                 presenter_mode: presenterMode,
                 thinking_card_mode: getThinkingCardMode()
             })
@@ -32167,27 +32806,19 @@ async function handleSendPrompt(options = {}) {
         startForegroundTaskResultPolling(request, {
             onCompleted: async (generateBody) => {
                 request.attachmentBindingAccepted = true;
-                const delivered = deliverSuccessfulResponseData(generateBody, 'task_result');
-                if (delivered) {
-                    try {
-                        request.abortController.abort();
-                    } catch (_) {
-                        // Ignore; the original fetch may already be resolving.
-                    }
-                }
+                deliverSuccessfulResponseData(generateBody, 'task_result');
+                await finaliseLiveChatRequest();
             },
             onFailed: async (statusPayload, status) => {
-                const message = status === 'cancelled'
-                    ? 'Task was cancelled before the response reached the chat UI.'
-                    : 'Task failed before the response reached the chat UI.';
-                const delivered = deliverErrorResponseData(statusPayload, message);
-                if (delivered) {
-                    try {
-                        request.abortController.abort();
-                    } catch (_) {
-                        // Ignore; the original fetch may already be resolving.
-                    }
+                if (status === 'cancelled') {
+                    deliverCancelledResponseData(statusPayload);
+                } else {
+                    deliverErrorResponseData(
+                        statusPayload,
+                        'Task failed before the response reached the chat UI.'
+                    );
                 }
+                await finaliseLiveChatRequest();
             }
         });
         // Give an already-available first progress response a chance to land
@@ -32204,10 +32835,8 @@ async function handleSendPrompt(options = {}) {
         // `response.json()` so we surface a friendly server error message instead
         // of falling through to the network-error catch path.
         if (!response || typeof response.json !== 'function') {
-            request.resultTurnId = `e-${Date.now()}`;
-            if (isRequestVisible()) {
-                appendMessage('Error', 'Server error', request.resultTurnId);
-            }
+            deliverErrorResponseData({ error: 'Server error' }, 'Server error');
+            await finaliseLiveChatRequest();
             return;
         }
 
@@ -32229,74 +32858,35 @@ async function handleSendPrompt(options = {}) {
             return;
         }
 
+        const backgroundAcknowledged = response.ok && (
+            response.status === 202
+            || data?.background === true
+        );
+        if (backgroundAcknowledged) {
+            request.backgroundAccepted = true;
+            request.foregroundTaskResultPoll?.pollNow?.();
+            return;
+        }
+
         if (response.ok) {
             deliverSuccessfulResponseData(data, 'generate_response');
         } else {
             deliverErrorResponseData(data, 'An error occurred');
         }
+        await finaliseLiveChatRequest();
     } catch (error) {
         if (request?.foregroundDeliveryCompleted) {
+            await finaliseLiveChatRequest();
             return;
         }
         if (request && (request.aborted || (error && error.name === 'AbortError'))) {
             return;
         }
         const failureSummary = resolveGenerateCatchFailureSummary(request, error);
-        request.turnOutcome = {
-            status: 'error',
-            phase_label: 'Turn failed',
-            summary: failureSummary
-        };
         retainGenerateFailureSummaryInLatestProgress(request, failureSummary);
         console.error('Error:', error);
-        request.resultTurnId = `e-${Date.now()}`;
-        if (isRequestVisible()) {
-            appendMessage('Error', failureSummary, request.resultTurnId);
-        }
-    } finally {
-        releaseRequestFileCopyBinding(request);
-        stopForegroundTaskResultPolling(request);
-        if (!request?.promptQueueRecordId && request?.promptQueueRecordPromise) {
-            try {
-                const activeRecord = await request.promptQueueRecordPromise;
-                request.promptQueueRecordId = activeRecord?.queueId || request.promptQueueRecordId || null;
-            } catch (_) {
-                // The promise already logs failures; proceed without restart recovery.
-            }
-        }
-        if (request?.promptQueueRecordId) {
-            const terminalStatus = request.aborted
-                ? CHAT_PROMPT_QUEUE_STATUS_CANCELLED
-                : (request.turnOutcome?.status === 'error'
-                    ? CHAT_PROMPT_QUEUE_STATUS_FAILED
-                    : CHAT_PROMPT_QUEUE_STATUS_COMPLETED);
-            const terminalError = terminalStatus === CHAT_PROMPT_QUEUE_STATUS_FAILED
-                ? (request.turnOutcome?.summary || 'Prompt failed')
-                : null;
-            try {
-                await finishPersistedChatPromptQueueRecord(
-                    request.promptQueueRecordId,
-                    terminalStatus,
-                    terminalError
-                );
-            } catch (error) {
-                console.warn('[chatTab] Unable to finish persisted prompt queue record:', error);
-                void refreshChatPromptQueueFromServer({ silent: true });
-            }
-        }
-        if (isLiveChatRequest(request)) {
-            stopToolUseProgressPolling(request);
-            stopThinkingTooltipTicker(request);
-            const persisted = !request.aborted && persistFinishedThinkingCard(request);
-            if (!persisted) {
-                setFinishedThinkingCardForSession(request.sessionId, null);
-            }
-            setLiveChatRequestForSession(request.sessionId, null);
-        }
-        syncActiveChatSessionThinkingState();
-        updateHistoryLength();
-        scheduleChatSessionTabsRefresh(true);
-        scheduleQueuedChatPromptDrain();
+        deliverErrorResponseData({ error: failureSummary }, failureSummary);
+        await finaliseLiveChatRequest();
     }
 }
 

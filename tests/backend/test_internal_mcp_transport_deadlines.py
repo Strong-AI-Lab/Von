@@ -35,6 +35,7 @@ def _gateway_for(
     output_schema: Schema | None = None,
     timeout_sec: float | None = None,
     effect_admission_window_sec: float | None = None,
+    supports_cooperative_cancellation: bool = False,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
@@ -46,6 +47,7 @@ def _gateway_for(
             category=category,
             timeout_sec=timeout_sec,
             effect_admission_window_sec=effect_admission_window_sec,
+            supports_cooperative_cancellation=supports_cooperative_cancellation,
         )
     )
     return InternalMCPGateway(
@@ -95,6 +97,149 @@ def test_handler_before_hard_deadline_remains_success_after_advisory_budget() ->
     method_metrics = diagnostics["methods"]["synthetic_fast_read"]
     assert method_metrics["last_outcome"] == "completed"
     assert method_metrics["timeouts"] == 0
+
+
+def test_attention_only_threshold_observes_but_does_not_abort_handler(
+    monkeypatch,
+) -> None:
+    aggregate_mongo_timeouts: list[float] = []
+    attention_observations: list[dict] = []
+    handler_release = Event()
+
+    @contextmanager
+    def _capture_timeout(seconds: float):
+        aggregate_mongo_timeouts.append(seconds)
+        yield
+
+    monkeypatch.setattr(transport_mod, "pymongo_timeout", _capture_timeout)
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.02,
+        write_advisory_timeout_sec=0.01,
+    )
+
+    def _handler() -> dict[str, object]:
+        scope = get_internal_mcp_execution_scope()
+        assert scope is not None
+        assert scope.deadline_monotonic is None
+        assert scope.remaining_seconds == float("inf")
+        assert handler_release.wait(timeout=1.0)
+        return {"success": True, "changed": True}
+
+    def _observe_attention(observation: dict) -> None:
+        attention_observations.append(observation)
+        if observation.get("observation_no") == 3:
+            handler_release.set()
+
+    gateway = _gateway_for(
+        method_name="synthetic_background_write",
+        handler=_handler,
+        transport=transport,
+        category="write",
+        supports_cooperative_cancellation=True,
+    )
+
+    result = gateway.invoke(
+        "synthetic_background_write",
+        {},
+        deadline_policy="attention_only",
+        attention_threshold_observer=_observe_attention,
+    )
+
+    assert result.outcome == "completed"
+    assert result.payload == {"success": True, "changed": True}
+    assert result.deadline_policy == "attention_only"
+    assert result.timeout_sec is None
+    assert result.configured_hard_timeout_sec is None
+    assert result.attention_threshold_sec == pytest.approx(0.02)
+    assert result.attention_threshold_exceeded is True
+    assert result.advisory_budget_exceeded is True
+    assert aggregate_mongo_timeouts == []
+    assert [item["observation_no"] for item in attention_observations] == [1, 2, 3]
+    assert [item["observation_kind"] for item in attention_observations] == [
+        "threshold_crossed",
+        "activity_heartbeat",
+        "activity_heartbeat",
+    ]
+    assert all(item["handler_state"] == "running" for item in attention_observations)
+    assert all(item["terminal"] is False for item in attention_observations)
+    assert all(
+        item["action"] == "continue_until_completion_or_user_cancellation"
+        for item in attention_observations
+    )
+    diagnostics = gateway.get_diagnostics()
+    assert diagnostics["methods"]["synthetic_background_write"]["timeouts"] == 0
+    assert diagnostics["transport"]["timeout_count"] == 0
+
+
+def test_attention_only_stop_waits_for_cooperative_handler_receipt() -> None:
+    handler_started = Event()
+    cancellation_seen = Event()
+    stop_requested = Event()
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.2,
+        write_advisory_timeout_sec=0.01,
+    )
+
+    def _handler() -> dict[str, object]:
+        handler_started.set()
+        while not internal_mcp_cancellation_requested():
+            time.sleep(0.002)
+        cancellation_seen.set()
+        return {
+            "success": False,
+            "effect_status": "partial",
+            "changed": True,
+            "completed_items": ["first"],
+        }
+
+    gateway = _gateway_for(
+        method_name="synthetic_cooperative_write",
+        handler=_handler,
+        transport=transport,
+        category="write",
+        supports_cooperative_cancellation=True,
+    )
+    stopper = Thread(
+        target=lambda: (
+            handler_started.wait(timeout=1.0),
+            stop_requested.set(),
+        )
+    )
+    stopper.start()
+
+    result = gateway.invoke(
+        "synthetic_cooperative_write",
+        {},
+        deadline_policy="attention_only",
+        cancellation_checker=stop_requested.is_set,
+    )
+    stopper.join(timeout=1.0)
+
+    assert cancellation_seen.is_set()
+    assert result.outcome == "completed"
+    assert result.payload["effect_status"] == "partial"
+    assert result.payload["completed_items"] == ["first"]
+    assert result.timed_out is False
+
+
+def test_attention_only_requires_explicit_handler_cancellation_support() -> None:
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.1,
+        write_advisory_timeout_sec=0.01,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_non_cooperative_write",
+        handler=lambda: {"success": True},
+        transport=transport,
+        category="write",
+    )
+
+    with pytest.raises(ValueError, match="does not support cooperative"):
+        gateway.invoke(
+            "synthetic_non_cooperative_write",
+            {},
+            deadline_policy="attention_only",
+        )
 
 
 def test_hard_deadline_returns_typed_timeout_and_requests_cooperative_cancel() -> None:
