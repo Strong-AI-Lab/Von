@@ -10848,6 +10848,12 @@ button.prompt-vontology-cartouche {
     color: #991b1b;
 }
 
+@media (max-width: 760px) {
+    .server-build-info {
+        display: none;
+    }
+}
+
 .footer-separator {
     margin: 0 4px;
     opacity: 0.5;
