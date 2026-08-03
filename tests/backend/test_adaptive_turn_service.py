@@ -152,7 +152,7 @@ def _gateway(handler: Any) -> InternalMCPGateway:
     )
 
 
-def test_scope_message_contains_boundaries_not_selection_policy() -> None:
+def test_scope_message_contains_boundaries_and_preserves_request_scope() -> None:
     message = _scope_message(
         TrustedTurnScope(
             user_concept_id="#V#person",
@@ -167,6 +167,9 @@ def test_scope_message_contains_boundaries_not_selection_policy() -> None:
     assert "Effect boundary:" in message
     assert "least costly" not in message
     assert "representedness" not in message
+    assert "requested outcome and effect cardinality" in message
+    assert "smallest bounded candidate set" in message
+    assert "must not create, update, or otherwise act on more" in message
 
 
 def _gmail_gateway(handler: Any) -> InternalMCPGateway:
@@ -6575,6 +6578,13 @@ def test_represented_workflow_retry_reuses_same_turn_idempotency_key(
         "partial",
         "partial",
     ]
+    assert len(client.calls) == 4
+    assert all(
+        "requested outcome and effect cardinality" in call["system_message"]
+        and "must not create, update, or otherwise act on more"
+        in call["system_message"]
+        for call in client.calls
+    )
 
 
 def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
