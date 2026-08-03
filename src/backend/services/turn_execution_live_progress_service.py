@@ -6,10 +6,13 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from .namespace_service import derive_actor_context_from_namespace
 from ..workflows.terminal_outcome_receipts import (
     build_terminal_outcome_receipt_projection,
     terminal_outcome_receipt_projection_from_record,
+)
+from .namespace_service import derive_actor_context_from_namespace
+from .thinking_semantic_projection_service import (
+    normalise_semantic_operation_projection,
 )
 
 _DEFAULT_SECTION_LIMIT = 20
@@ -22,11 +25,13 @@ _LIVE_PROGRESS_DETAIL_SECTIONS = frozenset(
         "diagnostic_events",
         "llm_request",
         "progress_events",
+        "semantic_operation",
         "selected_workflow_execution",
         "stage_diagnostics",
         "terminal_outcome_receipt_projection",
         "thinking_interpretability",
         "timing_spans",
+        "tool_history",
         "turn_timing_trace",
         "workflow_routing_diagnostics",
         "workflow_stage_path",
@@ -226,6 +231,10 @@ def _build_bounded_live_progress_payload(
         else:
             timing_summary = None
 
+    semantic_operation = normalise_semantic_operation_projection(
+        payload.get("semantic_operation") or payload.get("semanticOperation")
+    )
+
     return {
         "schema_version": "turn_live_progress_snapshot.v1",
         "success": True,
@@ -242,6 +251,7 @@ def _build_bounded_live_progress_payload(
         "liveness_state": compact_summary.get("liveness_state"),
         "liveness_reason": compact_summary.get("liveness_reason"),
         "stall_detected": compact_summary.get("stall_detected"),
+        "semantic_operation": semantic_operation,
         "progress_events": _tail_list(
             payload.get("progress_events"),
             _DEFAULT_RECENT_EVENT_LIMIT,

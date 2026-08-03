@@ -39,13 +39,13 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     ToolResult,
 )
 from src.backend.security.access_control import override_current_actor
+from src.backend.services.thinking_semantic_projection_service import (
+    build_semantic_operation_projection,
+)
 from src.backend.services.turn_evidence_store import (
     EVIDENCE_SLICE_SCHEMA_VERSION,
     TrustedTurnScope,
     TurnEvidenceStore,
-)
-from src.backend.services.thinking_semantic_projection_service import (
-    build_semantic_operation_projection,
 )
 
 _CAPABILITY_TOOL_NAME = "turn_capabilities"
@@ -4770,6 +4770,7 @@ def execute_adaptive_turn(
                         "execution_method": execution_method_name,
                         "call_id": call.call_id,
                         "result_summary": semantic_operation["summary"],
+                        "semantic_operation": semantic_operation,
                     },
                 )
                 with override_current_actor(
@@ -5321,6 +5322,7 @@ def execute_adaptive_turn(
                         "call_id": call.call_id,
                         "success": status == "ok",
                         "result_summary": semantic_operation["summary"],
+                        "semantic_operation": semantic_operation,
                     },
                 )
 

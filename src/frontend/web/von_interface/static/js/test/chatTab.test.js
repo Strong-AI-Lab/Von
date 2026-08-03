@@ -3193,6 +3193,221 @@ describe('thinking activity history normalisation', () => {
         expect((html.match(/<div class="thinking-card-tool">/g) || [])).toHaveLength(1);
     });
 
+    test('adds bounded semantic IDs and verification in Expert, then execution details only in Debug', () => {
+        const semanticOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-semantic-relation',
+            lifecycle_status: 'completed',
+            capability: {
+                id: 'add_relationship',
+                label: 'Add Relationship',
+                kind: 'registered_tool',
+                execution_method: 'vontology.add_relationship'
+            },
+            arguments: [
+                {
+                    role: 'subject',
+                    label: 'Subject',
+                    source_argument: 'subject_concept_id',
+                    value_kind: 'concept',
+                    value: '#V#nathan_young_doctoral_candidature_situation',
+                    display: 'Nathan Young Doctoral Candidature Situation',
+                    concept_id: '#V#nathan_young_doctoral_candidature_situation'
+                },
+                {
+                    role: 'predicate',
+                    label: 'Relation',
+                    source_argument: 'predicate',
+                    value_kind: 'predicate',
+                    value: '#V#has_doctoral_supervisor',
+                    display: 'Has Doctoral Supervisor',
+                    concept_id: '#V#has_doctoral_supervisor'
+                },
+                {
+                    role: 'object',
+                    label: 'Object',
+                    source_argument: 'target_concept_id',
+                    value_kind: 'concept',
+                    value: '#V#robert_amor',
+                    display: 'Robert Amor',
+                    concept_id: '#V#robert_amor'
+                }
+            ],
+            summary: 'Add Relationship reported that no change was needed: '
+                + 'Subject: Nathan Young Doctoral Candidature Situation; '
+                + 'Relation: Has Doctoral Supervisor; Object: Robert Amor.',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'receipt_only',
+                canonical_read_back_present: false,
+                source: 'effect_receipt'
+            },
+            outcome: {
+                status: 'completed',
+                success: true,
+                changed: false,
+                effect_status: 'completed',
+                effect_id: 'effect-semantic-relation',
+                evidence_id: 'evidence-semantic-relation',
+                outcome_finality: 'effect_receipt'
+            }
+        };
+        const createRequest = (mode) => ({
+            thinkingCardMode: mode,
+            promptRaw: 'Re-assert the existing supervision relationship.',
+            latestProgress: {
+                status: 'completed',
+                stage: 'adaptive_research',
+                semantic_operation: semanticOperation,
+                tool_history: [{
+                    tool: 'add_relationship',
+                    phase: 'adaptive_research',
+                    resultSummary: semanticOperation.summary,
+                    success: true,
+                    callId: 'call-semantic-relation',
+                    semanticOperation
+                }]
+            }
+        });
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('default'));
+        expect(defaultHtml).toContain('Add Relationship reported that no change was needed');
+        expect(defaultHtml).not.toContain('Subject ID');
+        expect(defaultHtml).not.toContain('#V#nathan_young_doctoral_candidature_situation');
+        expect(defaultHtml).not.toContain('effect-semantic-relation');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('expert'));
+        expect(expertHtml).toContain('Add Relationship reported that no change was needed');
+        expect(expertHtml).toContain('Subject ID');
+        expect(expertHtml).toContain('#V#nathan_young_doctoral_candidature_situation');
+        expect(expertHtml).toContain('Relation ID');
+        expect(expertHtml).toContain('#V#has_doctoral_supervisor');
+        expect(expertHtml).toContain('Object ID');
+        expect(expertHtml).toContain('#V#robert_amor');
+        expect(expertHtml).toContain('Tool receipt only; canonical read-back not recorded');
+        expect(expertHtml).toContain('Reported change');
+        expect(expertHtml).not.toContain('effect-semantic-relation');
+        expect(expertHtml).not.toContain('vontology.add_relationship');
+
+        const debugHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('debug'));
+        expect(debugHtml).toContain('Add Relationship reported that no change was needed');
+        expect(debugHtml).toContain('Tool call ID');
+        expect(debugHtml).toContain('call-semantic-relation');
+        expect(debugHtml).toContain('Semantic operation ID');
+        expect(debugHtml).toContain('operation-semantic-relation');
+        expect(debugHtml).toContain('Semantic schema');
+        expect(debugHtml).toContain('thinking_semantic_operation.v1');
+        expect(debugHtml).not.toContain('effect-semantic-relation');
+        expect(debugHtml).not.toContain('evidence-semantic-relation');
+        expect(debugHtml).toContain('Lifecycle');
+        expect(debugHtml).toContain('Execution method');
+        expect(debugHtml).toContain('vontology.add_relationship');
+        expect(debugHtml).toContain('Visibility');
+        expect(debugHtml).toContain('conversation_scope');
+    });
+
+    test('keeps a completed semantic receipt in history without replacing later current activity', () => {
+        const semanticOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-completed-relation',
+            lifecycle_status: 'completed',
+            capability: {
+                id: 'add_relationship',
+                label: 'Add Relationship'
+            },
+            arguments: [],
+            summary: 'Add Relationship reported the doctoral supervisor relation.',
+            visibility: 'conversation_scope'
+        };
+        const request = {
+            promptRaw: 'Represent the supervision information.',
+            latestProgress: {
+                status: 'heartbeat',
+                stage: 'final_synthesis',
+                result_summary: 'Synthesising from accumulated evidence.',
+                semantic_operation: semanticOperation,
+                tool_history: [{
+                    tool: 'add_relationship',
+                    phase: 'adaptive_research',
+                    resultSummary: semanticOperation.summary,
+                    success: true,
+                    semanticOperation
+                }]
+            }
+        };
+
+        const viewModel = __testOnly_buildThinkingCardProgressViewModel(request);
+        expect(viewModel.current_activity).toBe('Synthesising from accumulated evidence.');
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Synthesising from accumulated evidence.');
+        expect(html).toContain('Add Relationship reported the doctoral supervisor relation.');
+    });
+
+    test('escapes and bounds semantic receipt values, and ignores unsupported structures', () => {
+        const longId = `#V#${'x'.repeat(600)}`;
+        const semanticOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-unsafe-display',
+            lifecycle_status: 'completed',
+            capability: {
+                id: 'add_relationship',
+                label: '<img src=x onerror=alert(1)>',
+                kind: 'registered_tool',
+                execution_method: 'add_relationship'
+            },
+            arguments: [{
+                role: 'subject',
+                source_argument: 'subject_concept_id',
+                value_kind: 'concept',
+                value: longId,
+                display: '<script>alert(1)</script>',
+                concept_id: longId
+            }],
+            summary: '<img src=x onerror=alert(1)> worked',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'verified',
+                canonical_read_back_present: true,
+                source: 'canonical_read_back'
+            },
+            outcome: { status: 'completed', success: true }
+        };
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'expert',
+            latestProgress: {
+                tool_history: [{
+                    tool: 'add_relationship',
+                    success: true,
+                    semantic_operation: semanticOperation
+                }]
+            }
+        });
+
+        expect(html).not.toContain('<img src=x');
+        expect(html).not.toContain('<script>alert(1)</script>');
+        expect(html).toContain('&lt;img src=x onerror=alert(1)&gt; worked');
+        expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+        expect(html).not.toContain(longId);
+        expect(html).toContain('Canonical read-back verified');
+
+        const fallbackHtml = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'expert',
+            toolUseProgressHistory: [{
+                tool: 'fetch_concept',
+                resultSummary: 'Fetched the concept.',
+                success: true,
+                semanticOperation: {
+                    ...semanticOperation,
+                    schema_version: 'thinking_semantic_operation.v2'
+                }
+            }]
+        });
+        expect(fallbackHtml).toContain('Fetched the concept.');
+        expect(fallbackHtml).not.toContain('Canonical read-back verified');
+        expect(fallbackHtml).not.toContain('Subject ID');
+    });
+
     test('prefers canonical latest progress tool history over stale local tool history', () => {
         const request = {
             toolUseProgressHistory: [{
