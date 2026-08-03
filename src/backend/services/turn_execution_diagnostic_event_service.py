@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from src.backend.services.thinking_semantic_projection_service import (
+    normalise_semantic_operation_projection,
+)
 
 _TOOL_START_STATUSES = frozenset({"tool_call_start"})
 _TOOL_SUCCESS_STATUSES = frozenset({"tool_invoked"})
@@ -61,8 +66,13 @@ def _normalise_tool_history_entry(entry: Mapping[str, Any]) -> dict[str, Any] | 
     )
     call_id = _safe_str(entry.get("callId")) or _safe_str(entry.get("call_id"))
     success = entry.get("success")
+    semantic_operation = normalise_semantic_operation_projection(
+        entry.get("semanticOperation")
+        if "semanticOperation" in entry
+        else entry.get("semantic_operation")
+    )
 
-    return {
+    normalised: dict[str, Any] = {
         "tool": tool_name,
         "workflowTask": workflow_task or "",
         "batchSize": _normalise_batch_size(
@@ -73,6 +83,9 @@ def _normalise_tool_history_entry(entry: Mapping[str, Any]) -> dict[str, Any] | 
         "success": success if isinstance(success, bool) else None,
         "callId": call_id,
     }
+    if semantic_operation is not None:
+        normalised["semanticOperation"] = semantic_operation
+    return normalised
 
 
 def _finalise_tool_observation_summary(
@@ -251,7 +264,9 @@ def update_tool_observation_summary(
 
     status = (_safe_str(event.get("status")) or "").lower()
     event_kind = (_safe_str(event.get("event_kind")) or "").lower()
-    is_tool_start = status in _TOOL_START_STATUSES or event_kind in _TOOL_START_EVENT_KINDS
+    is_tool_start = (
+        status in _TOOL_START_STATUSES or event_kind in _TOOL_START_EVENT_KINDS
+    )
     is_tool_terminal = (
         status in _TOOL_SUCCESS_STATUSES
         or status in _TOOL_FAILURE_STATUSES
@@ -279,6 +294,11 @@ def update_tool_observation_summary(
     phase = _safe_str(event.get("phase")) or _safe_str(event.get("stage")) or ""
     result_summary = _safe_str(event.get("result_summary")) or ""
     workflow_task = _safe_str(event.get("workflow_task")) or ""
+    semantic_operation = normalise_semantic_operation_projection(
+        event.get("semantic_operation")
+        if "semantic_operation" in event
+        else event.get("semanticOperation")
+    )
     key = call_id or f"{tool_name.lower()}::{batch_size!r}"
 
     history_index: int | None = None
@@ -312,6 +332,8 @@ def update_tool_observation_summary(
         history_entry["resultSummary"] = result_summary
     if call_id and not history_entry.get("callId"):
         history_entry["callId"] = call_id
+    if semantic_operation is not None:
+        history_entry["semanticOperation"] = semantic_operation
 
     if status in _TOOL_SUCCESS_STATUSES:
         history_entry["success"] = True

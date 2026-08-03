@@ -1566,6 +1566,26 @@ const THINKING_CARD_MODE_CLASS_NAMES = new Set([
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA = 'thinking_card_progress_view_model.v1';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_EXPLICIT = 'explicit_turn_state';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_DERIVED = 'derived_from_live_telemetry';
+const THINKING_SEMANTIC_OPERATION_SCHEMA_VERSION = 'thinking_semantic_operation.v1';
+const THINKING_SEMANTIC_OPERATION_MAX_ARGUMENTS = 8;
+const THINKING_SEMANTIC_OPERATION_MAX_TEXT_CHARS = 240;
+const THINKING_SEMANTIC_OPERATION_MAX_SUMMARY_CHARS = 1024;
+const THINKING_SEMANTIC_ARGUMENT_LABELS = new Map([
+    ['subject', 'Subject'],
+    ['predicate', 'Relation'],
+    ['object', 'Object'],
+    ['value', 'Value'],
+    ['workflow', 'Workflow'],
+    ['instance', 'Workflow instance'],
+    ['name', 'Name']
+]);
+const THINKING_SEMANTIC_ARGUMENT_VALUE_KINDS = new Set([
+    'concept',
+    'predicate',
+    'text',
+    'workflow',
+    'identifier'
+]);
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
 const THINKING_LLM_CALL_LOG_DETAILS_SELECTOR = 'details[data-thinking-llm-call-log-key]';
@@ -3192,13 +3212,206 @@ function toggleThinkingCardExpanded(request = getThinkingCardDisplayRequest(), c
     applyThinkingCardDisplayStateUpdate(request, { type: 'manual_toggle' }, cardRoot);
 }
 
+function normaliseThinkingSemanticText(value, maxChars = THINKING_SEMANTIC_OPERATION_MAX_TEXT_CHARS) {
+    return truncateThinkingCardSummary(value, Math.max(1, Number(maxChars) || THINKING_SEMANTIC_OPERATION_MAX_TEXT_CHARS));
+}
+
+function normaliseThinkingSemanticScalar(value, maxChars = THINKING_SEMANTIC_OPERATION_MAX_TEXT_CHARS) {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+    if (Number.isFinite(value)) {
+        return Number(value);
+    }
+    const text = normaliseThinkingSemanticText(value, maxChars);
+    return text || null;
+}
+
+function normaliseThinkingSemanticArgument(rawArgument) {
+    if (!rawArgument || typeof rawArgument !== 'object') {
+        return null;
+    }
+    const role = normaliseThinkingSemanticText(rawArgument.role, 40).toLowerCase();
+    const label = THINKING_SEMANTIC_ARGUMENT_LABELS.get(role);
+    if (!label) {
+        return null;
+    }
+    const value = normaliseThinkingSemanticScalar(rawArgument.value);
+    if (value === null) {
+        return null;
+    }
+    const valueKind = normaliseThinkingSemanticText(rawArgument.value_kind || rawArgument.valueKind, 40).toLowerCase();
+    if (!THINKING_SEMANTIC_ARGUMENT_VALUE_KINDS.has(valueKind)) {
+        return null;
+    }
+    const display = normaliseThinkingSemanticText(rawArgument.display) || String(value);
+    const conceptId = normaliseThinkingSemanticText(rawArgument.concept_id || rawArgument.conceptId);
+    return {
+        role,
+        label,
+        sourceArgument: normaliseThinkingSemanticText(
+            rawArgument.source_argument || rawArgument.sourceArgument,
+            80
+        ),
+        valueKind,
+        value,
+        display,
+        conceptId
+    };
+}
+
+function normaliseThinkingSemanticOutcome(rawOutcome) {
+    if (!rawOutcome || typeof rawOutcome !== 'object') {
+        return null;
+    }
+    const outcome = {};
+    const textFields = [
+        ['status', 'status'],
+        ['effectStatus', 'effect_status'],
+        ['mutationOutcome', 'mutation_outcome'],
+        ['outcomeFinality', 'outcome_finality'],
+        ['errorCode', 'error_code'],
+        ['workflowId', 'workflow_id'],
+        ['instanceId', 'instance_id'],
+        ['finalStatus', 'final_status']
+    ];
+    for (const [targetKey, sourceKey] of textFields) {
+        const value = normaliseThinkingSemanticText(rawOutcome[sourceKey] ?? rawOutcome[targetKey]);
+        if (value) {
+            outcome[targetKey] = value;
+        }
+    }
+    if (typeof rawOutcome.success === 'boolean') {
+        outcome.success = rawOutcome.success;
+    }
+    if (typeof rawOutcome.changed === 'boolean') {
+        outcome.changed = rawOutcome.changed;
+    }
+    const targetIds = Array.isArray(rawOutcome.result_target_ids)
+        ? rawOutcome.result_target_ids
+        : rawOutcome.resultTargetIds;
+    if (Array.isArray(targetIds)) {
+        outcome.resultTargetIds = targetIds
+            .slice(0, THINKING_SEMANTIC_OPERATION_MAX_ARGUMENTS)
+            .map((value) => normaliseThinkingSemanticText(value))
+            .filter(Boolean);
+    }
+    return Object.keys(outcome).length > 0 ? outcome : null;
+}
+
+function normaliseThinkingSemanticVerification(rawVerification) {
+    if (!rawVerification || typeof rawVerification !== 'object') {
+        return null;
+    }
+    const status = normaliseThinkingSemanticText(rawVerification.status, 40).toLowerCase();
+    const source = normaliseThinkingSemanticText(rawVerification.source, 40);
+    const readBackPresent = rawVerification.canonical_read_back_present
+        ?? rawVerification.canonicalReadBackPresent;
+    if (typeof readBackPresent !== 'boolean') {
+        return null;
+    }
+    const isValid = (
+        status === 'verified'
+        && readBackPresent
+        && source === 'canonical_read_back'
+    ) || (
+        status === 'receipt_only'
+        && source === 'effect_receipt'
+    ) || (
+        status === 'unknown'
+        && !readBackPresent
+        && source === 'none'
+    );
+    return isValid
+        ? { status, source, canonicalReadBackPresent: readBackPresent }
+        : null;
+}
+
+function normaliseThinkingSemanticOperation(rawOperation) {
+    if (!rawOperation || typeof rawOperation !== 'object') {
+        return null;
+    }
+    const schemaVersion = normaliseThinkingSemanticText(rawOperation.schema_version || rawOperation.schemaVersion, 80);
+    const visibility = normaliseThinkingSemanticText(rawOperation.visibility, 40).toLowerCase();
+    if (schemaVersion !== THINKING_SEMANTIC_OPERATION_SCHEMA_VERSION || visibility !== 'conversation_scope') {
+        return null;
+    }
+    const rawCapability = rawOperation.capability && typeof rawOperation.capability === 'object'
+        ? rawOperation.capability
+        : {};
+    const capabilityId = normaliseThinkingSemanticText(rawCapability.id);
+    const operationId = normaliseThinkingSemanticText(rawOperation.operation_id || rawOperation.operationId);
+    const lifecycleStatus = normaliseThinkingSemanticText(
+        rawOperation.lifecycle_status || rawOperation.lifecycleStatus,
+        80
+    );
+    if (!operationId || !lifecycleStatus || !capabilityId) {
+        return null;
+    }
+    const capability = {
+        id: capabilityId,
+        label: normaliseThinkingSemanticText(rawCapability.label) || formatThinkingActivityFallbackLabel(capabilityId),
+        kind: normaliseThinkingSemanticText(rawCapability.kind, 80),
+        executionMethod: normaliseThinkingSemanticText(
+            rawCapability.execution_method || rawCapability.executionMethod
+        )
+    };
+    const seenRoles = new Set();
+    const argumentsList = [];
+    if (Array.isArray(rawOperation.arguments)) {
+        for (const rawArgument of rawOperation.arguments.slice(0, THINKING_SEMANTIC_OPERATION_MAX_ARGUMENTS)) {
+            const argument = normaliseThinkingSemanticArgument(rawArgument);
+            if (!argument || seenRoles.has(argument.role)) {
+                continue;
+            }
+            seenRoles.add(argument.role);
+            argumentsList.push(argument);
+        }
+    }
+    const operation = {
+        schemaVersion,
+        operationId,
+        lifecycleStatus,
+        capability,
+        arguments: argumentsList,
+        summary: normaliseThinkingSemanticText(rawOperation.summary, THINKING_SEMANTIC_OPERATION_MAX_SUMMARY_CHARS),
+        visibility,
+        outcome: normaliseThinkingSemanticOutcome(rawOperation.outcome),
+        verification: normaliseThinkingSemanticVerification(
+            rawOperation.verification || rawOperation.outcome?.verification
+        )
+    };
+    if (!operation.summary && argumentsList.length === 0) {
+        return null;
+    }
+    return operation;
+}
+
+function getThinkingSemanticOperation(source) {
+    if (!source || typeof source !== 'object') {
+        return null;
+    }
+    return normaliseThinkingSemanticOperation(source.semanticOperation || source.semantic_operation);
+}
+
+function cloneThinkingToolHistoryEntry(entry) {
+    const copy = { ...entry };
+    const semanticOperation = getThinkingSemanticOperation(entry);
+    delete copy.semantic_operation;
+    delete copy.semanticOperation;
+    if (semanticOperation) {
+        copy.semanticOperation = semanticOperation;
+    }
+    return copy;
+}
+
 function cloneThinkingToolHistory(history) {
     if (!Array.isArray(history)) {
         return [];
     }
     return history
         .filter((entry) => entry && typeof entry === 'object')
-        .map((entry) => ({ ...entry }));
+        .map((entry) => cloneThinkingToolHistoryEntry(entry));
 }
 
 function cloneThinkingStructuredHistory(history) {
@@ -3573,7 +3786,7 @@ function applyThinkingProgressUpdate(request, nextProgress) {
         return false;
     }
 
-    request.latestProgress = nextProgress;
+    request.latestProgress = cloneThinkingLatestProgress(nextProgress) || nextProgress;
     const workflowSelection = buildThinkingWorkflowSelectionSnapshot(nextProgress);
     if (workflowSelection) {
         request.workflowSelection = workflowSelection;
@@ -6810,10 +7023,12 @@ function buildThinkingCardProgressViewModel(request) {
     const routeSummary = routingNarrative.text
         || (selectedWorkflow?.label ? `Selected route: ${selectedWorkflow.label}` : '')
         || firstThinkingCardText(latestProgress?.route_summary, latestProgress?.workflow_summary);
+    const latestSemanticOperation = getThinkingSemanticOperation(latestProgress);
     const currentActivity = firstThinkingCardText(
         latestProgress?.current_activity,
         latestProgress?.activity_summary,
         latestProgress?.result_summary,
+        latestSemanticOperation?.summary,
         latestProgress?.subtask,
         latestProgress?.workflow_task,
         presentation?.stageText ? presentation.stageText.replace(/\.{3}$/, '') : ''
@@ -7155,6 +7370,15 @@ function cloneThinkingLatestProgress(progress) {
         return null;
     }
     const copy = { ...progress };
+    const semanticOperation = getThinkingSemanticOperation(progress);
+    delete copy.semantic_operation;
+    delete copy.semanticOperation;
+    if (semanticOperation) {
+        copy.semanticOperation = semanticOperation;
+    }
+    if (Array.isArray(progress.tool_history)) {
+        copy.tool_history = cloneThinkingToolHistory(progress.tool_history);
+    }
     const timingSummary = cloneThinkingTimingSummary(progress.timing_summary);
     if (timingSummary) {
         copy.timing_summary = timingSummary;
@@ -7360,6 +7584,7 @@ function recordToolUseHistory(request, progress) {
     const phaseLabel = typeof progress.phase_label === 'string' ? progress.phase_label.trim() : '';
     const status = typeof progress.status === 'string' ? progress.status.trim() : '';
     const resultSummary = typeof progress.result_summary === 'string' ? progress.result_summary.trim() : '';
+    const semanticOperation = getThinkingSemanticOperation(progress);
 
     // Track phase transitions in addition to tool use.
     if (!Array.isArray(request.toolUseProgressHistory)) {
@@ -7417,11 +7642,22 @@ function recordToolUseHistory(request, progress) {
             if (isSuccess || isFail) {
                 last.success = isSuccess;
             }
+            if (semanticOperation) {
+                last.semanticOperation = semanticOperation;
+            }
         }
         return;
     }
 
-    history.push({ tool, workflowTask, batchSize, phase, resultSummary, success: isSuccess ? true : (isFail ? false : null) });
+    history.push({
+        tool,
+        workflowTask,
+        batchSize,
+        phase,
+        resultSummary,
+        success: isSuccess ? true : (isFail ? false : null),
+        ...(semanticOperation ? { semanticOperation } : {})
+    });
 }
 
 function normaliseThinkingActivityString(value) {
@@ -7801,6 +8037,56 @@ function formatThinkingDuration(elapsedMs) {
     return `${totalSeconds}s`;
 }
 
+function describeThinkingSemanticVerification(operation) {
+    if (!operation || typeof operation !== 'object') {
+        return '';
+    }
+    const verification = operation.verification && typeof operation.verification === 'object'
+        ? operation.verification
+        : null;
+    const status = normaliseThinkingActivityString(verification?.status).toLowerCase();
+    if (
+        status === 'verified'
+        && verification?.canonicalReadBackPresent === true
+        && verification?.source === 'canonical_read_back'
+    ) {
+        return 'Canonical read-back verified';
+    }
+    if (verification?.canonicalReadBackPresent === true) {
+        return 'Canonical read-back recorded; verification not confirmed';
+    }
+    if (status === 'receipt_only' && verification?.canonicalReadBackPresent === false) {
+        return 'Tool receipt only; canonical read-back not recorded';
+    }
+    if (status === 'receipt_only') {
+        return 'Tool receipt only; canonical read-back did not verify the outcome';
+    }
+    const lifecycleStatus = normaliseThinkingActivityString(operation.lifecycleStatus).toLowerCase();
+    if (lifecycleStatus === 'running' || lifecycleStatus === 'pending') {
+        return 'Canonical read-back pending';
+    }
+    if (operation.outcome) {
+        return 'Tool receipt only; canonical read-back not recorded';
+    }
+    return 'Canonical read-back status unavailable';
+}
+
+function getThinkingSemanticArgumentCanonicalId(argument) {
+    if (!argument || typeof argument !== 'object') {
+        return '';
+    }
+    const explicitId = normaliseThinkingActivityString(argument.conceptId);
+    if (explicitId) {
+        return explicitId;
+    }
+    if (normaliseThinkingActivityString(argument.valueKind).toLowerCase() === 'text') {
+        return '';
+    }
+    return typeof argument.value === 'string'
+        ? normaliseThinkingActivityString(argument.value)
+        : '';
+}
+
 /**
  * Render the tool history as structured HTML for the thinking card body.
  * No longer shows phase history (phases are in the header).
@@ -7826,6 +8112,8 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
         }
         const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
         const resultSummary = entry && typeof entry.resultSummary === 'string' ? entry.resultSummary : '';
+        const semanticOperation = getThinkingSemanticOperation(entry);
+        const semanticSummary = normaliseThinkingActivityString(semanticOperation?.summary);
         const success = entry.success;
 
         // Status icon and class
@@ -7841,13 +8129,13 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
             : (workflowTask ? `Workflow task: ${workflowTask}` : '');
         items.push(renderThinkingDiagnosticRowHTML({
             label: toolLabel,
-            detail: resultSummary,
+            detail: semanticSummary || resultSummary,
             detailHtml: '',
             state: statusClass,
             diagnosticKey: buildThinkingDiagnosticKey('tool', tool || workflowTask, batchSize || ''),
             diagnosticHtml: renderMode === THINKING_CARD_MODE_DEFAULT
                 ? ''
-                : buildToolHistoryDiagnosticsHTML(entry)
+                : buildToolHistoryDiagnosticsHTML(entry, renderMode)
         }, 'thinking-card-tool'));
     }
 
@@ -10085,19 +10373,21 @@ function buildThinkingActivityDiagnosticsHTML(entry) {
     return renderThinkingDiagnosticPanelHTML({ facts });
 }
 
-function buildToolHistoryDiagnosticsHTML(entry) {
+function buildToolHistoryDiagnosticsHTML(entry, mode = THINKING_CARD_MODE_EXPERT) {
     if (!entry || typeof entry !== 'object') {
         return '';
     }
 
+    const renderMode = normaliseThinkingCardMode(mode);
     const tool = normaliseThinkingActivityString(entry.tool);
     const workflowTask = normaliseThinkingActivityString(entry.workflowTask);
+    const semanticOperation = getThinkingSemanticOperation(entry);
     const facts = [
         { label: 'Tool', value: tool },
         { label: 'Workflow task', value: workflowTask },
         { label: 'Phase', value: entry.phase ? formatThinkingActivityFallbackLabel(entry.phase) : '' },
         { label: 'Batch size', value: entry.batchSize },
-        { label: 'Result', value: entry.resultSummary },
+        { label: 'Result', value: semanticOperation?.summary || entry.resultSummary },
         {
             label: 'Outcome',
             value: typeof entry.success === 'boolean'
@@ -10105,6 +10395,52 @@ function buildToolHistoryDiagnosticsHTML(entry) {
                 : 'Pending'
         }
     ];
+
+    if (semanticOperation) {
+        for (const argument of semanticOperation.arguments) {
+            const label = normaliseThinkingActivityString(argument.label);
+            const display = normaliseThinkingActivityString(argument.display)
+                || formatThinkingDiagnosticFactValue(argument.value);
+            if (!label || !display) {
+                continue;
+            }
+            facts.push({ label, value: display });
+            const canonicalId = getThinkingSemanticArgumentCanonicalId(argument);
+            if (canonicalId) {
+                facts.push({ label: `${label} ID`, value: canonicalId });
+            }
+            if (renderMode === THINKING_CARD_MODE_DEBUG && argument.sourceArgument) {
+                facts.push({ label: `${label} source argument`, value: argument.sourceArgument });
+            }
+        }
+        facts.push({
+            label: 'Verification',
+            value: describeThinkingSemanticVerification(semanticOperation)
+        });
+        if (semanticOperation.outcome && typeof semanticOperation.outcome.changed === 'boolean') {
+            facts.push({
+                label: 'Reported change',
+                value: semanticOperation.outcome.changed ? 'Yes' : 'No'
+            });
+        }
+    }
+
+    if (renderMode === THINKING_CARD_MODE_DEBUG) {
+        const outcome = semanticOperation?.outcome || null;
+        facts.push(
+            { label: 'Tool call ID', value: entry.callId || entry.call_id },
+            { label: 'Semantic operation ID', value: semanticOperation?.operationId },
+            { label: 'Semantic schema', value: semanticOperation?.schemaVersion },
+            { label: 'Lifecycle', value: semanticOperation?.lifecycleStatus },
+            { label: 'Capability ID', value: semanticOperation?.capability?.id },
+            { label: 'Capability kind', value: semanticOperation?.capability?.kind },
+            { label: 'Execution method', value: semanticOperation?.capability?.executionMethod },
+            { label: 'Effect status', value: outcome?.effectStatus },
+            { label: 'Outcome finality', value: outcome?.outcomeFinality },
+            { label: 'Verification source', value: semanticOperation?.verification?.source },
+            { label: 'Visibility', value: semanticOperation?.visibility }
+        );
+    }
 
     return renderThinkingDiagnosticPanelHTML({ facts });
 }
@@ -30521,7 +30857,7 @@ function buildThinkingDiagnosticsPayload(request) {
         progress_view_model: progressViewModel,
         elapsed_ms: elapsedMs,
         prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
-        latest_progress: latestProgress,
+        latest_progress: cloneThinkingLatestProgress(latestProgress),
         activity_history: Array.isArray(request.activityHistory)
             ? request.activityHistory.slice(-THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT)
             : [],

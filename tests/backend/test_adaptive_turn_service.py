@@ -4956,11 +4956,22 @@ def test_relation_progress_emits_one_human_start_and_terminal_summary(
     )
     assert relation_events[1]["success"] is True
     assert relation_events[1]["result_summary"] == (
-        "Add Relationship confirmed no change was needed: "
+        "Add Relationship reported that no change was needed: "
         "Subject: Nathan Young Doctoral Candidature Situation; "
         "Relation: Has Doctoral Supervisor; Object: Robert Amor."
     )
-    assert "semantic_operation" not in relation_events[0]
+    assert relation_events[0]["semantic_operation"]["lifecycle_status"] == "running"
+    assert relation_events[0]["semantic_operation"]["verification"] == {
+        "status": "unknown",
+        "canonical_read_back_present": False,
+        "source": "none",
+    }
+    assert relation_events[1]["semantic_operation"]["outcome"]["changed"] is False
+    assert relation_events[1]["semantic_operation"]["verification"] == {
+        "status": "receipt_only",
+        "canonical_read_back_present": False,
+        "source": "effect_receipt",
+    }
     assert result.tool_invocations[0]["changed"] is False
 
 

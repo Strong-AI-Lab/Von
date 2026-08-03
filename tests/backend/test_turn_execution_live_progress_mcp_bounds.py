@@ -12,6 +12,66 @@ from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 
+def _semantic_operation() -> dict[str, Any]:
+    return {
+        "schema_version": "thinking_semantic_operation.v1",
+        "operation_id": "call-supervisor-edge",
+        "lifecycle_status": "succeeded",
+        "capability": {
+            "id": "add_relationship",
+            "label": "Add Relationship",
+            "kind": "registered_tool",
+            "execution_method": "add_relationship",
+        },
+        "arguments": [
+            {
+                "role": "subject",
+                "label": "Subject",
+                "source_argument": "source_id",
+                "value_kind": "concept",
+                "value": "#V#candidate_situation",
+                "display": "Candidate Situation",
+                "concept_id": "#V#candidate_situation",
+            },
+            {
+                "role": "predicate",
+                "label": "Relation",
+                "source_argument": "predicate",
+                "value_kind": "predicate",
+                "value": "#V#has_doctoral_supervisor",
+                "display": "Has Doctoral Supervisor",
+                "concept_id": "#V#has_doctoral_supervisor",
+            },
+            {
+                "role": "object",
+                "label": "Object",
+                "source_argument": "target",
+                "value_kind": "concept",
+                "value": "#V#robert_amor",
+                "display": "Robert Amor",
+                "concept_id": "#V#robert_amor",
+            },
+        ],
+        "summary": (
+            "Add Relationship reported that no change was needed: Subject: "
+            "Candidate Situation; Relation: Has Doctoral Supervisor; Object: "
+            "Robert Amor."
+        ),
+        "visibility": "conversation_scope",
+        "verification": {
+            "status": "receipt_only",
+            "canonical_read_back_present": False,
+            "source": "effect_receipt",
+        },
+        "outcome": {
+            "status": "succeeded",
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": False,
+        },
+    }
+
+
 def _large_serialised_progress_payload() -> dict[str, Any]:
     return {
         "request_id": "req-large-live-progress",
@@ -25,6 +85,13 @@ def _large_serialised_progress_payload() -> dict[str, Any]:
         "stall_detected": False,
         "activity_idle_ms": 250,
         "stage_idle_ms": 125,
+        "semantic_operation": _semantic_operation(),
+        "tool_history": [
+            {
+                "tool": "add_relationship",
+                "resultSummary": "The relation tool reported no change.",
+            }
+        ],
         "diagnostic_summary": {"event_count": 500},
         "counters": {
             "tokens_streamed": 42,
@@ -165,6 +232,9 @@ def test_live_progress_default_projection_is_bounded(monkeypatch) -> None:
     assert result["success"] is True
     assert result["projection"] == "bounded_snapshot"
     assert result["status"] == "workflow_step_complete"
+    assert result["semantic_operation"]["operation_id"] == "call-supervisor-edge"
+    assert result["semantic_operation"]["verification"]["status"] == "receipt_only"
+    assert result["semantic_operation"]["visibility"] == "conversation_scope"
     assert "diagnostic_events" not in result
     assert "stage_diagnostics" not in result
     assert "llm_request" not in result
@@ -174,6 +244,7 @@ def test_live_progress_default_projection_is_bounded(monkeypatch) -> None:
     assert result["timing_summary"]["slowest_spans"][0]["duration_ms"] == 42000
     assert result["section_counts"]["diagnostic_events"] == 30
     assert result["section_counts"]["timing_spans"] == 12
+    assert result["section_counts"]["tool_history"] == 1
     assert result["detail_access"]["arguments"]["section"] == "<one of available_sections>"
     assert len(json.dumps(result, indent=2, default=str)) < 20_000
 

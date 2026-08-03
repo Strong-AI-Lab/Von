@@ -109,6 +109,9 @@ from ...services.turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
     update_tool_observation_summary,
 )
+from ...services.thinking_semantic_projection_service import (
+    normalise_semantic_operation_projection,
+)
 from ...services.tool_observation_ledger_service import build_tool_observation_ledger
 from ...services.tool_evidence_projection_service import (
     project_nested_workflow_progress_evidence,
@@ -1166,6 +1169,15 @@ def _serialise_tool_progress_state(
     payload = dict(state)
     payload.update(_derive_progress_liveness(payload, now_epoch=now_epoch))
 
+    semantic_operation = normalise_semantic_operation_projection(
+        payload.get("semantic_operation") or payload.get("semanticOperation")
+    )
+    payload.pop("semanticOperation", None)
+    if semantic_operation is not None:
+        payload["semantic_operation"] = semantic_operation
+    else:
+        payload.pop("semantic_operation", None)
+
     payload.pop("updated_at_epoch", None)
     payload.pop("request_started_epoch", None)
     payload.pop("last_activity_epoch", None)
@@ -1173,9 +1185,21 @@ def _serialise_tool_progress_state(
 
     events = payload.get("diagnostic_events")
     if isinstance(events, list):
-        payload["diagnostic_events"] = list(
-            events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
-        )
+        normalised_events: list[dict[str, Any]] = []
+        for raw_event in events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]:
+            if not isinstance(raw_event, Mapping):
+                continue
+            event = dict(raw_event)
+            event_semantic_operation = normalise_semantic_operation_projection(
+                event.get("semantic_operation") or event.get("semanticOperation")
+            )
+            event.pop("semanticOperation", None)
+            if event_semantic_operation is not None:
+                event["semantic_operation"] = event_semantic_operation
+            else:
+                event.pop("semantic_operation", None)
+            normalised_events.append(event)
+        payload["diagnostic_events"] = normalised_events
 
     workflow_stage_path = _extract_workflow_stage_path_from_progress(payload)
     if workflow_stage_path is not None:
@@ -3794,6 +3818,7 @@ def _build_turn_execution_diagnostics(
         "tool",
         "batch_size",
         "result_summary",
+        "semantic_operation",
         "success",
         "error",
         "error_class",
@@ -3842,6 +3867,7 @@ def _build_turn_execution_diagnostics(
                 "call_id",
                 "batch_size",
                 "result_summary",
+                "semantic_operation",
                 "duration_ms",
                 "model",
                 "success",
@@ -5180,6 +5206,17 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
                 return
 
         safe_update = dict(update or {})
+        incoming_semantic_operation: dict[str, Any] | None = None
+        if "semantic_operation" in safe_update or "semanticOperation" in safe_update:
+            incoming_semantic_operation = normalise_semantic_operation_projection(
+                safe_update.get("semantic_operation")
+                or safe_update.get("semanticOperation")
+            )
+            safe_update.pop("semanticOperation", None)
+            if incoming_semantic_operation is not None:
+                safe_update["semantic_operation"] = incoming_semantic_operation
+            else:
+                safe_update.pop("semantic_operation", None)
         status = _progress_str(safe_update.get("status")) or _progress_str(
             existing.get("status")
         )
@@ -5423,6 +5460,8 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "liveness_reason": liveness.get("liveness_reason"),
             "stall_detected": liveness.get("stall_detected"),
         }
+        if incoming_semantic_operation is not None:
+            event_entry["semantic_operation"] = incoming_semantic_operation
         progress_facts = _normalise_progress_facts(safe_update.get("progress_facts"))
         if "progress_facts" in safe_update:
             if progress_facts:

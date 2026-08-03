@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from flask import Flask
 
 from src.backend.server.routes import von_routes
+from src.backend.services.thinking_semantic_projection_service import (
+    build_semantic_operation_projection,
+)
 from src.backend.services.tool_progress_store_service import (
     clear_tool_progress_documents_for_tests,
     flush_queued_tool_progress_states,
@@ -36,6 +39,28 @@ def _progress_app() -> Flask:
     app.secret_key = "test-secret"
     app.register_blueprint(von_routes.von_bp, url_prefix="/von")
     return app
+
+
+def _relation_semantic_operation(
+    *,
+    lifecycle_status: str,
+    success: bool | None = None,
+    result: dict | None = None,
+) -> dict:
+    return build_semantic_operation_projection(
+        operation_id="call-semantic-relation",
+        capability_name="add_relationship",
+        execution_method="add_relationship",
+        capability_kind="registered_tool",
+        arguments={
+            "source_id": "#V#nathan_young_doctoral_candidature_situation",
+            "predicate": "#V#has_doctoral_supervisor",
+            "target": "#V#robert_amor",
+        },
+        lifecycle_status=lifecycle_status,
+        success=success,
+        result=result,
+    )
 
 
 def setup_function() -> None:
@@ -238,6 +263,7 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
     )
 
     scope_key = "user:#V#test_user"
+    semantic_operation = _relation_semantic_operation(lifecycle_status="running")
     von_routes._set_tool_progress(
         scope_key,
         "req-persisted",
@@ -247,6 +273,7 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
             "phase_label": "Reading evidence",
             "request_id": "req-persisted",
             "goal_label": "Summarise the represented evidence",
+            "semantic_operation": semantic_operation,
         },
     )
     flush_queued_tool_progress_states(force=True)
@@ -261,6 +288,8 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
     assert body.get("stage") == "evidence_read"
     assert body.get("phase_label") == "Reading evidence"
     assert body.get("goal_label") == "Summarise the represented evidence"
+    assert body.get("semantic_operation") == semantic_operation
+    assert body["diagnostic_events"][-1]["semantic_operation"] == semantic_operation
 
 
 def test_get_tool_progress_prefers_live_memory_before_persisted_fetch(
@@ -963,9 +992,15 @@ def test_relation_start_and_end_collapse_to_one_human_tool_row(monkeypatch) -> N
         "Relation: Has Doctoral Supervisor; Object: Robert Amor (in progress)."
     )
     terminal_summary = (
-        "Add Relationship confirmed no change was needed: "
+        "Add Relationship reported that no change was needed: "
         "Subject: Nathan Young Doctoral Candidature Situation; "
         "Relation: Has Doctoral Supervisor; Object: Robert Amor."
+    )
+    running_operation = _relation_semantic_operation(lifecycle_status="running")
+    terminal_operation = _relation_semantic_operation(
+        lifecycle_status="succeeded",
+        success=True,
+        result={"effect_status": "succeeded", "changed": False},
     )
 
     von_routes._set_tool_progress(
@@ -978,6 +1013,7 @@ def test_relation_start_and_end_collapse_to_one_human_tool_row(monkeypatch) -> N
             "tool": "add_relationship",
             "call_id": call_id,
             "result_summary": running_summary,
+            "semantic_operation": running_operation,
             "request_id": request_id,
         },
     )
@@ -993,6 +1029,7 @@ def test_relation_start_and_end_collapse_to_one_human_tool_row(monkeypatch) -> N
             "call_id": call_id,
             "success": True,
             "result_summary": terminal_summary,
+            "semantic_operation": terminal_operation,
             "request_id": request_id,
         },
     )
@@ -1006,6 +1043,13 @@ def test_relation_start_and_end_collapse_to_one_human_tool_row(monkeypatch) -> N
     assert snapshot["tool_call_count"] == 1
     assert snapshot["tool_success_count"] == 1
     assert snapshot["tool_pending_count"] == 0
+    assert snapshot["semantic_operation"] == terminal_operation
+    semantic_events = [
+        event["semantic_operation"]
+        for event in snapshot["diagnostic_events"]
+        if "semantic_operation" in event
+    ]
+    assert semantic_events == [running_operation, terminal_operation]
     assert snapshot["tool_history"] == [
         {
             "tool": "add_relationship",
@@ -1015,8 +1059,20 @@ def test_relation_start_and_end_collapse_to_one_human_tool_row(monkeypatch) -> N
             "resultSummary": terminal_summary,
             "success": True,
             "callId": call_id,
+            "semanticOperation": terminal_operation,
         }
     ]
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id=request_id,
+        prompt_text="Reassert the represented supervision relation.",
+        tool_progress_state=snapshot,
+    )
+    assert diagnostics["latest_progress"]["semantic_operation"] == terminal_operation
+    assert diagnostics["latest_progress"]["diagnostic_events"][-1][
+        "semantic_operation"
+    ] == terminal_operation
+    assert diagnostics["tool_history"][0]["semanticOperation"] == terminal_operation
 
 
 def test_serialisation_exposes_a_bounded_timing_trace(monkeypatch) -> None:
