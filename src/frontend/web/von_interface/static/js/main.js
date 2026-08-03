@@ -650,6 +650,8 @@ function startHealthPolling() {
   const publicIpSpan = document.getElementById('serverPublicIpValue');
   const pidSpan = document.getElementById('serverPidValue');
   const uptimeSpan = document.getElementById('serverUptimeValue');
+  const buildInfo = document.getElementById('serverBuildInfo');
+  const buildSpan = document.getElementById('serverBuildValue');
   const ragSpan = document.getElementById('ragIndexingValue');
   const ragDetailsBtn = document.getElementById('ragIndexingValue');
   const ragModal = document.getElementById('ragStatusModal');
@@ -1165,6 +1167,39 @@ function startHealthPolling() {
       const newLocalIp = data.local_ip || null;
       const newPublicIp = data.public_ip || null;
       const ragPending = (typeof data.rag_pending_count !== 'undefined') ? data.rag_pending_count : null;
+      const versionDetails = (data.version_details && typeof data.version_details === 'object')
+        ? data.version_details
+        : {};
+      const version = (typeof data.version === 'string' && data.version.trim())
+        ? data.version.trim()
+        : '';
+      const shortCommit = (typeof versionDetails.git_short_commit === 'string')
+        ? versionDetails.git_short_commit.trim()
+        : '';
+      const commitTimestamp = (typeof versionDetails.git_commit_timestamp === 'string')
+        ? versionDetails.git_commit_timestamp.trim()
+        : '';
+      const parsedCommitTime = commitTimestamp ? new Date(commitTimestamp) : null;
+      const compactCommitTime = parsedCommitTime && !Number.isNaN(parsedCommitTime.getTime())
+        ? new Intl.DateTimeFormat('en-NZ', {
+          day: '2-digit', month: 'short', year: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false
+        }).format(parsedCommitTime).replace(',', '')
+        : '';
+      const dirtyMarker = versionDetails.git_dirty === true ? '*' : '';
+      const compactBuildId = shortCommit ? `${shortCommit.slice(0, 8)}${dirtyMarker}` : version;
+
+      if (buildInfo && buildSpan) {
+        const buildText = [compactBuildId, compactCommitTime].filter(Boolean).join(' · ');
+        buildSpan.textContent = buildText;
+        buildInfo.hidden = !buildText;
+        buildInfo.title = [
+          version ? `Build ${version}` : null,
+          shortCommit ? `Commit ${shortCommit}` : null,
+          commitTimestamp ? `Commit time ${commitTimestamp}` : null,
+          versionDetails.git_dirty === true ? 'Working tree dirty' : null
+        ].filter(Boolean).join(' | ');
+      }
 
       if (localIpSpan) {
         localIpSpan.textContent = newLocalIp || '?';
