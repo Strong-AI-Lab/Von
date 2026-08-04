@@ -85,6 +85,54 @@ def test_default_catalogue_exposes_calibrated_effect_admission_windows():
     assert snapshot["add_relationship"]["effect_admission_window_sec"] == 5.0
 
 
+def test_remote_file_import_has_observed_liveness_headroom():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    definition = build_default_catalogue().get("import_url_file_copy")
+
+    assert definition.advisory_timeout_sec == 220.0
+    assert definition.timeout_sec == 350.0
+    assert definition.hard_timeout_enabled is True
+
+
+def test_paper_download_cold_start_window_covers_observed_blob_rehydration():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    definition = build_default_catalogue().get("download_paper")
+
+    assert definition.advisory_timeout_sec == 85.0
+    assert definition.timeout_sec == 140.0
+    assert definition.hard_timeout_enabled is True
+
+
+def test_workflow_execute_uses_its_bounded_await_without_an_outer_hard_timeout():
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    definition = build_default_catalogue().get("workflow_execute")
+
+    assert definition.advisory_timeout_sec == 75.0
+    assert definition.hard_timeout_enabled is False
+    assert definition.resolved_timeout(InternalMCPTransport()) is None
+
+
+def test_workflow_instance_await_is_a_model_visible_soft_checkpoint():
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    definition = build_default_catalogue().get("workflow_get_instance")
+
+    assert definition.advisory_timeout_sec == 75.0
+    assert definition.hard_timeout_enabled is False
+    assert definition.resolved_timeout(InternalMCPTransport()) is None
+    assert "await_terminal" in definition.input_schema.optional
+    assert "never cancels or retries" in definition.description
+
+
 def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     from src.backend.integrations.internal_mcp import (
         InternalMCPGateway,
@@ -152,6 +200,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }.isdisjoint(actor_mail_reads)
     assert delegated_effects == {
         "create_concepts",
+        "record_source_processing_marker",
         "retract_scoped_assertion",
         "upsert_scoped_assertion",
         "upsert_text_relation",
@@ -172,6 +221,15 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "scope_mode": "user_org_default",
         "visibility_scope_mode": None,
     }
+    marker_definition = catalogue.get("record_source_processing_marker")
+    assert marker_definition.ordinary_turn_trusted_argument_bindings == {
+        "namespace": "turn_namespace",
+        "created_by_concept_id": "actor_user_concept_id",
+    }
+    assert marker_definition.ordinary_turn_fixed_arguments == {
+        "organisation_concept_id": None,
+    }
+    assert marker_definition.ordinary_turn_effect is True
     assert catalogue.get("upsert_text_relation").ordinary_turn_fixed_arguments == {
         "provenance": None,
     }
@@ -852,10 +910,32 @@ def test_source_processing_marker_tools_registered_as_vontology_surfaces():
 
     assert snapshot["get_source_processing_marker"]["category"] == "read"
     assert snapshot["record_source_processing_marker"]["category"] == "write"
+    assert snapshot["record_source_processing_marker"]["ordinary_turn_effect"] is True
     assert snapshot["get_source_processing_marker"]["input_schema"]["required"] == [
         "source_item_id",
         "source_system",
     ]
+    assert "source_profile" in snapshot["get_source_processing_marker"][
+        "input_schema"
+    ]["optional"]
+    assert snapshot["record_source_processing_marker"]["input_schema"][
+        "required"
+    ] == ["source_item_id", "source_profile", "source_system"]
+    assert "historical profileless marker" in snapshot[
+        "get_source_processing_marker"
+    ]["input_schema"]["description"]
+    assert "exact stable profile identifier" in snapshot[
+        "record_source_processing_marker"
+    ]["input_schema"]["description"]
+    assert "do not omit, translate, canonicalise, or invent it" in snapshot[
+        "record_source_processing_marker"
+    ]["input_schema"]["description"]
+    assert snapshot["record_source_processing_marker"]["input_schema"][
+        "aliases"
+    ] == {
+        "profile": "source_profile",
+        "profile_id": "source_profile",
+    }
     assert (
         "represented_outputs"
         in snapshot["record_source_processing_marker"]["input_schema"]["optional"]

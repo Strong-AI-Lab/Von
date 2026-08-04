@@ -493,11 +493,24 @@ def record_source_processing_marker(
     source_system_clean = _clean_text(source_system)
     source_item_clean = _clean_text(source_item_id)
     source_profile_clean = _clean_text(source_profile)
-    if not source_system_clean or not source_item_clean:
+    if not source_system_clean or not source_profile_clean or not source_item_clean:
+        missing = [
+            field
+            for field, value in (
+                ("source_system", source_system_clean),
+                ("source_profile", source_profile_clean),
+                ("source_item_id", source_item_clean),
+            )
+            if not value
+        ]
         return {
             "success": False,
             "error_code": "missing_source_processing_marker_key",
-            "error": "source_system and source_item_id are required.",
+            "error": (
+                "source_system, source_profile, and source_item_id are required "
+                "before recording a source-processing marker."
+            ),
+            "missing": missing,
         }
 
     marker_concept_id = source_processing_marker_concept_id(

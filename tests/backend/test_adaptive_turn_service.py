@@ -22,7 +22,9 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     LLMContinuation,
     LLMResponse,
     StructuredToolContextLimitError,
+    StructuredToolProtocolError,
     ToolCall,
+    ToolCallError,
     ToolResult,
 )
 from src.backend.security.access_control import (
@@ -370,7 +372,12 @@ def _effect_gateway(
     )
 
 
-def _workflow_gateway(handler: Any) -> InternalMCPGateway:
+def _workflow_gateway(
+    handler: Any,
+    *,
+    hard_timeout_enabled: bool = True,
+    instance_handler: Any | None = None,
+) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
     catalogue.register(
         MethodDefinition(
@@ -381,6 +388,27 @@ def _workflow_gateway(handler: Any) -> InternalMCPGateway:
             ordinary_turn_public=True,
         )
     )
+    if instance_handler is not None:
+        catalogue.register(
+            MethodDefinition(
+                name="workflow_get_instance",
+                handler=instance_handler,
+                input_schema=Schema(
+                    required={"instance_id": str},
+                    optional={
+                        "await_terminal": bool,
+                        "timeout_seconds": (int, float),
+                        "poll_interval_seconds": (int, float),
+                    },
+                    allow_unknown=False,
+                ),
+                output_schema=Schema(
+                    required={"success": bool},
+                    allow_unknown=True,
+                ),
+                category="read",
+            )
+        )
     catalogue.register(
         MethodDefinition(
             name="workflow_execute",
@@ -407,6 +435,7 @@ def _workflow_gateway(handler: Any) -> InternalMCPGateway:
             output_schema=Schema(required={"success": bool}, allow_unknown=True),
             category="write",
             timeout_sec=1.0,
+            hard_timeout_enabled=hard_timeout_enabled,
             effect_admission_window_sec=0.01,
         )
     )
@@ -486,17 +515,17 @@ class _TimedSequenceClient(_SequenceClient):
         return super().generate_with_tools(prompt, available_tools, **kwargs)
 
 
-class _HydrationDeadlineClient:
+class _HydrationAdvisoryClient:
     def __init__(
         self,
         clock: _ManualClock,
         *,
         native_continuation: bool,
-        research_deadline: float,
+        research_advisory_at: float,
     ) -> None:
         self.clock = clock
         self.native_continuation = native_continuation
-        self.research_deadline = research_deadline
+        self.research_advisory_at = research_advisory_at
         self.calls: list[dict[str, Any]] = []
         self.received_evidence_outputs: list[dict[str, Any]] = []
 
@@ -563,6 +592,7 @@ class _HydrationDeadlineClient:
         if call_number == 1:
             envelope = self._latest_tool_output(kwargs)
             self.received_evidence_outputs.append(envelope)
+            self.clock.now = self.research_advisory_at + 0.5
             return LLMResponse(
                 text_response="",
                 tool_calls=[
@@ -581,11 +611,12 @@ class _HydrationDeadlineClient:
         if call_number == 2:
             hydrated_slice = self._latest_tool_output(kwargs)
             self.received_evidence_outputs.append(hydrated_slice)
-            self.clock.now = self.research_deadline + 0.5
-            raise TimeoutError("research request ended after receiving hydration")
-        return LLMResponse(
-            text_response="The final answer uses the explicitly hydrated evidence."
-        )
+            return LLMResponse(
+                text_response=(
+                    "The final answer uses the explicitly hydrated evidence."
+                )
+            )
+        raise AssertionError("unexpected extra model call")
 
 
 class _RootAliasHydrationClient:
@@ -1287,7 +1318,7 @@ def test_effect_delegation_is_authenticated_and_exactly_metadata_marked() -> Non
     assert "other_write" not in delegated
 
 
-def test_effect_catalogue_and_scope_project_resolved_remaining_windows() -> None:
+def test_effect_catalogue_and_scope_project_method_liveness_boundaries() -> None:
     gateway = _effect_gateway(
         lambda _name, _arguments: {"success": True},
         write_timeout_sec=0.5,
@@ -1334,9 +1365,9 @@ def test_effect_catalogue_and_scope_project_resolved_remaining_windows() -> None
         clock=clock,
     )
 
-    assert (
-        "Remaining effect-capable window before the protected final-answer "
-        "reserve: 8.000 seconds." in client.calls[0]["system_message"]
+    assert "Elapsed-time budgets are advisory" in client.calls[0]["system_message"]
+    assert "Individual model and capability calls retain hard liveness" in (
+        client.calls[0]["system_message"]
     )
 
 
@@ -1360,10 +1391,7 @@ def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
         clock=clock,
     )
 
-    assert (
-        "Remaining effect-capable window before the protected final-answer "
-        "reserve: 6.000 seconds." in client.calls[0]["system_message"]
-    )
+    assert "Elapsed-time budgets are advisory" in client.calls[0]["system_message"]
     allocation = next(
         item
         for item in result.aux_llm_calls
@@ -1372,6 +1400,8 @@ def test_default_final_answer_reserve_is_nonzero_and_clamped() -> None:
     assert allocation["effective_final_answer_reserve_seconds"] == 4.0
     assert allocation["final_answer_reserve_source"] == "environment_or_default"
     assert allocation["explicit_zero_override"] is False
+    assert allocation["enforcement"] == "advisory"
+    assert allocation["model_call_liveness_timeout_seconds"] == 120.0
 
 
 def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> None:
@@ -1448,6 +1478,113 @@ def test_create_effect_scope_is_hidden_and_server_overrides_spoofed_values() -> 
     assert seen["org_id"] is None
     assert seen["scope_mode"] == "user_org_default"
     assert seen["visibility_scope_mode"] is None
+
+
+def test_invalid_effect_arguments_are_returned_for_correction_without_poisoning_turn() -> None:
+    invoked: list[dict[str, Any]] = []
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="record_source_processing_marker",
+            handler=lambda **arguments: (
+                invoked.append(dict(arguments))
+                or {
+                    "success": True,
+                    "effect_status": "succeeded",
+                    "changed": True,
+                }
+            ),
+            input_schema=Schema(
+                required={
+                    "source_system": str,
+                    "source_profile": str,
+                    "source_item_id": str,
+                },
+                allow_unknown=False,
+                description="Record one source-processing marker.",
+            ),
+            category="write",
+            ordinary_turn_effect=True,
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(write_timeout_sec=1.0),
+        enabled=True,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="marker-without-profile",
+                    payload={
+                        "name": "record_source_processing_marker",
+                        "arguments": {
+                            "source_system": "gmail",
+                            "source_item_id": "message-1",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="marker-with-profile",
+                    payload={
+                        "name": "record_source_processing_marker",
+                        "arguments": {
+                            "source_system": "gmail",
+                            "source_profile": "personal-gmail",
+                            "source_item_id": "message-1",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The corrected marker write succeeded."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Record the exact source marker.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="correct-invalid-effect-arguments",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert invoked == [
+        {
+            "source_system": "gmail",
+            "source_profile": "personal-gmail",
+            "source_item_id": "message-1",
+        }
+    ]
+    validation_message = next(
+        item
+        for item in client.calls[1]["context"]
+        if item.get("tool_call_id") == "marker-without-profile"
+    )
+    validation_result = json.loads(validation_message["content"])
+    assert validation_result["status"] == "not_started"
+    assert validation_result["changed"] is False
+    assert validation_result["error_code"] == "capability_arguments_invalid"
+    assert "source_profile" in validation_result["preview"]
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The corrected marker write succeeded."
+    assert result.tool_invocations[0]["effect_status"] == "not_started"
+    assert result.tool_invocations[0]["turn_finality_required"] is False
+    assert result.tool_invocations[1]["effect_status"] == "succeeded"
 
 
 def test_effect_subject_authority_matches_actor_or_organisation_scope(
@@ -1714,21 +1851,16 @@ def test_post_handler_output_validation_failure_is_indeterminate() -> None:
 
 
 @pytest.mark.parametrize(
-    ("answer_reserve", "effect_finished_at", "expected_tool_names"),
+    ("answer_reserve", "effect_finished_at"),
     [
-        (
-            0.0,
-            8.1,
-            {"turn_list_evidence", "turn_read_evidence"},
-        ),
-        (2.0, 8.5, set()),
+        (0.0, 8.1),
+        (2.0, 8.5),
     ],
     ids=["evidence-capable-final", "answer-only-final"],
 )
 def test_effect_removes_false_draft_from_fresh_final_context(
     answer_reserve: float,
     effect_finished_at: float,
-    expected_tool_names: set[str],
 ) -> None:
     started = time.monotonic()
     clock = _ManualClock(started)
@@ -1782,80 +1914,17 @@ def test_effect_removes_false_draft_from_fresh_final_context(
     final_call = client.calls[1]
     assert {
         tool.name for tool in final_call["available_tools"]
-    } == expected_tool_names
+    } == {
+        "turn_capabilities",
+        "turn_invoke_capability",
+        "turn_list_evidence",
+        "turn_read_evidence",
+    }
     assert not any(
         item.get("role") == "assistant" and item.get("content") == false_draft
         for item in final_call["context"]
     )
     assert false_draft not in json.dumps(final_call["context"])
-
-
-def test_post_effect_draft_remains_available_to_answer_only_recovery() -> None:
-    started = time.monotonic()
-    clock = _ManualClock(started)
-    useful_draft = "USEFUL POST-EFFECT DRAFT"
-
-    def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
-        clock.now = started + 8.1
-        return {
-            "success": True,
-            "effect_status": "succeeded",
-            "changed": True,
-        }
-
-    client = _SequenceClient(
-        LLMResponse(
-            text_response="I have not changed anything.",
-            tool_calls=[
-                ToolCall(
-                    tool_name="turn_invoke_capability",
-                    call_id="effect-before-useful-draft",
-                    payload={
-                        "name": "create_concepts",
-                        "arguments": {
-                            "concepts": [{"name": "A represented concept"}]
-                        },
-                    },
-                )
-            ],
-        ),
-        LLMResponse(
-            text_response=useful_draft,
-            tool_calls=[
-                ToolCall(
-                    tool_name="turn_list_evidence",
-                    call_id="list-after-effect",
-                    payload={},
-                )
-            ],
-        ),
-        TimeoutError("evidence-capable synthesis failed"),
-        LLMResponse(text_response="Recovered from the useful draft."),
-    )
-
-    result = execute_adaptive_turn(
-        gateway=_effect_gateway(handler),
-        prompt="Represent this concept.",
-        context=[],
-        llm_client=client,
-        model="test-model",
-        user_namespace="#V#person@org",
-        user_concept_id="#V#person",
-        org_concept_id="#V#org",
-        turn_id="post-effect-draft",
-        turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=2,
-        final_answer_reserve_seconds=1,
-        clock=clock,
-    )
-
-    assert result.response_text == "Recovered from the useful draft."
-    answer_only_call = client.calls[-1]
-    assert answer_only_call["available_tools"] == []
-    assert any(
-        item.get("role") == "assistant" and item.get("content") == useful_draft
-        for item in answer_only_call["context"]
-    )
 
 
 def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
@@ -1941,77 +2010,11 @@ def test_late_effect_completion_is_persisted_without_rewriting_terminal_result(
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
 
 
-def test_effect_is_not_started_without_its_minimum_admission_window() -> None:
-    invoked: list[str] = []
-
-    def handler(name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
-        invoked.append(name)
-        return {
-            "success": True,
-            "effect_status": "succeeded",
-            "changed": True,
-        }
-
-    client = _SequenceClient(
-        LLMResponse(
-            text_response="",
-            tool_calls=[
-                ToolCall(
-                    tool_name="turn_invoke_capability",
-                    call_id="effect-with-clipped-window",
-                    payload={
-                        "name": "create_concepts",
-                        "arguments": {
-                            "concepts": [{"name": "Must not start late"}]
-                        },
-                    },
-                )
-            ],
-        ),
-        LLMResponse(
-            text_response=(
-                "The write was not started because its full bounded window "
-                "was no longer available."
-            )
-        ),
-    )
-
-    result = execute_adaptive_turn(
-        gateway=_effect_gateway(handler, write_timeout_sec=0.2),
-        prompt="Represent this concept.",
-        context=[],
-        llm_client=client,
-        model="test-model",
-        user_namespace="#V#person@org",
-        user_concept_id="#V#person",
-        org_concept_id="#V#org",
-        turn_id="effect-window-admission",
-        turn_budget_seconds=0.2,
-        final_synthesis_reserve_seconds=0.15,
-        final_answer_reserve_seconds=0.15,
-    )
-
-    assert invoked == []
-    assert result.terminal_status == "effect_not_started"
-    assert result.effect_finality_fallback is True
-    assert "1 not_started" in result.response_text
-    assert "was not dispatched and reports no change" in result.response_text
-    assert "it can be retried in a new turn" in result.response_text
-    assert "will not claim that nothing changed" not in result.response_text
-    assert "The write was not started" not in result.response_text
-    assert result.tool_invocations[0]["effect_status"] == "not_started"
-    assert result.tool_invocations[0]["changed"] is False
-    assert "insufficient_effect_window" in (
-        result.tool_invocations[0]["evidence"]["preview"]
-    )
-    assert "not_started" in result.tool_invocations[0]["evidence"]["preview"]
-
-
-def test_research_effect_uses_window_through_protected_answer_deadline(
+def test_effect_uses_its_method_liveness_window_not_a_turn_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _ManualClock()
-    observed_deadlines: list[float] = []
+    observed_deadlines: list[float | None] = []
     gateway = _effect_gateway(
         lambda _name, _arguments: {"success": True},
         write_timeout_sec=3.0,
@@ -2022,7 +2025,7 @@ def test_research_effect_uses_window_through_protected_answer_deadline(
         method_name: str,
         _arguments: dict[str, Any],
         *,
-        deadline_monotonic: float,
+        deadline_monotonic: float | None,
         **_kwargs: Any,
     ) -> SimpleNamespace:
         observed_deadlines.append(deadline_monotonic)
@@ -2082,7 +2085,7 @@ def test_research_effect_uses_window_through_protected_answer_deadline(
     )
 
     assert result.response_text == "The effect completed."
-    assert observed_deadlines == [pytest.approx(8.0)]
+    assert observed_deadlines == [None]
     invocation = result.tool_invocations[0]
     assert invocation["effect_status"] == "succeeded"
     assert invocation["mutation_outcome"] == "completed"
@@ -2096,7 +2099,7 @@ def test_mixed_effect_batch_preserves_order_with_independent_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _ManualClock()
-    observed: list[tuple[str, float]] = []
+    observed: list[tuple[str, float | None]] = []
     gateway = _effect_gateway(
         lambda _name, _arguments: {"success": True},
         write_timeout_sec=0.05,
@@ -2107,7 +2110,7 @@ def test_mixed_effect_batch_preserves_order_with_independent_admission(
         method_name: str,
         _arguments: dict[str, Any],
         *,
-        deadline_monotonic: float,
+        deadline_monotonic: float | None,
         **_kwargs: Any,
     ) -> SimpleNamespace:
         observed.append((method_name, deadline_monotonic))
@@ -2176,7 +2179,7 @@ def test_mixed_effect_batch_preserves_order_with_independent_admission(
         "add_relationship",
         "general_read",
     ]
-    assert [item[1] for item in observed] == pytest.approx([0.8] * 5)
+    assert [item[1] for item in observed] == [None] * 5
 
 
 def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
@@ -4726,9 +4729,26 @@ def test_bounded_effect_result_preserves_exact_partial_receipt() -> None:
     assert bounded[0].output["outcome_finality"] == "terminal_for_turn"
 
 
-def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier() -> None:
+def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     raw_tail = "z" * 50_000
     seen_actor: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "src.backend.services.tool_evidence_projection_service."
+        "project_tool_payload_for_llm",
+        lambda tool_name, payload: (
+            {
+                "_llm_view": "test_projection.v1",
+                "relationships": {
+                    "has_file": ["#V#existing_file_copy"],
+                },
+            }
+            if tool_name == "general_read" and payload.get("answer") == "found"
+            else None
+        ),
+    )
 
     def handler(**kwargs: Any) -> dict[str, Any]:
         seen_actor.update(
@@ -4790,8 +4810,17 @@ def test_model_can_invoke_any_delegated_read_without_a_prompt_classifier() -> No
     envelope = result.evidence_index[0]
     assert envelope["preview_truncated"] is True
     assert envelope["sha256"]
-    assert "z" * 10_000 not in client.calls[1]["context"][-1]["content"]
-    assert len(client.calls[1]["context"][-1]["content"]) < 10_000
+    model_evidence_text = client.calls[1]["context"][-1]["content"]
+    model_evidence = json.loads(model_evidence_text)
+    assert model_evidence["projected_payload"]["relationships"]["has_file"] == [
+        "#V#existing_file_copy"
+    ]
+    assert model_evidence["preview_truncated"] is True
+    assert model_evidence["evidence_id"] == envelope["evidence_id"]
+    assert "json_pointer" in model_evidence["available_selectors"]
+    assert "z" * 10_000 not in model_evidence_text
+    assert len(model_evidence_text) < 10_000
+    assert "projected_payload" not in envelope
     assert "effective_payload" not in result.tool_invocations[0]
     assert raw_tail not in json.dumps(result.tool_invocations)
     assert all(
@@ -4981,6 +5010,7 @@ def test_relation_progress_emits_one_human_start_and_terminal_summary(
 def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> None:
     seen_cases: list[str] = []
     progress_events: list[dict[str, Any]] = []
+    release_timeout_handler = Event()
 
     def handler(_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         case = str(arguments["case"])
@@ -5000,7 +5030,9 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
                 "error_code": "rejected",
             }
         if case == "timeout":
-            time.sleep(0.1)
+            while not internal_mcp_cancellation_requested():
+                time.sleep(0.001)
+            assert release_timeout_handler.wait(timeout=1.0)
         return {"success": True, "effect_status": "succeeded", "changed": True}
 
     calls = [
@@ -5036,6 +5068,7 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout()
             check_cancellation=lambda: None,
         ),
     )
+    release_timeout_handler.set()
 
     assert seen_cases == ["succeeded", "partial", "failed", "timeout"]
     assert result.terminal_status == "effect_outcome_indeterminate"
@@ -5366,409 +5399,377 @@ def test_context_limit_does_not_retry_an_unchanged_request() -> None:
     assert recovery["changed"] is False
 
 
-def test_research_deadline_failure_preserves_final_synthesis_reserve() -> None:
-    clock = _ManualClock()
-    client = _DeadlineClient(
-        clock,
-        TimeoutError("research model deadline"),
-        LLMResponse(text_response="A bounded final answer."),
+def _wrapped_model_timeout(message: str = "OpenAI call failed") -> ToolCallError:
+    try:
+        raise TimeoutError("provider request deadline exhausted")
+    except TimeoutError as cause:
+        try:
+            raise ToolCallError(message) from cause
+        except ToolCallError as wrapped:
+            return wrapped
+
+
+def test_model_timeout_retries_once_with_smaller_faithful_context() -> None:
+    client = _SequenceClient(
+        _wrapped_model_timeout(),
+        LLMResponse(text_response="Recovered after the request timeout."),
     )
 
     result = execute_adaptive_turn(
-        gateway=None,
-        prompt="Use the available time sensibly.",
-        context=[],
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Keep the actual task.",
+        context=[
+            {"role": "system", "content": "trusted instruction"},
+            {"role": "assistant", "content": "old context " * 10_000},
+        ],
         llm_client=client,
         model="test-model",
-        turn_id="turn-research-deadline",
+        turn_id="turn-model-timeout-recovery",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
-        final_answer_reserve_seconds=0,
-        clock=clock,
     )
 
-    assert result.response_text == "A bounded final answer."
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Recovered after the request timeout."
     assert len(client.calls) == 2
-    assert client.calls[0]["llm_params"]["request_timeout_seconds"] == 8.0
-    assert client.calls[1]["llm_params"]["request_timeout_seconds"] == 2.0
-    assert {
-        tool.name for tool in client.calls[1]["available_tools"]
-    } == {"turn_list_evidence", "turn_read_evidence"}
-    allocation = next(
-        item
-        for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_budget_allocation"
+    assert len(_json_bytes(client.calls[1]["context"])) < len(
+        _json_bytes(client.calls[0]["context"])
     )
-    assert allocation["final_answer_reserve_source"] == "caller"
-    assert allocation["explicit_zero_override"] is True
-    assert result.llm_calls[1]["mode"] == "evidence_capable"
     recovery = next(
         item
         for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_research_deadline_recovery"
+        if item.get("type") == "adaptive_turn_model_liveness_recovery"
     )
-    assert recovery["action"] == "fresh_final_synthesis_from_available_evidence"
+    assert recovery["changed"] is True
+    assert recovery["reason"] == "fresh_smaller_faithful_context"
+    assert recovery["after_bytes"] < recovery["before_bytes"]
+    assert result.llm_calls[0]["status"] == "failed"
 
 
-def test_final_answer_checkpoint_preempts_repeated_evidence_cycles() -> None:
-    clock = _ManualClock()
-    client = _TimedSequenceClient(
-        clock,
-        (6.0, TimeoutError("research deadline")),
-        (
-            6.4,
-            LLMResponse(
-                text_response="A useful draft based on the evidence page.",
-                tool_calls=[
-                    ToolCall(
-                        tool_name="turn_list_evidence",
-                        call_id="list-before-checkpoint",
-                        payload={"offset": 0, "limit": 20},
-                    )
-                ]
+def test_model_timeout_recovery_retains_existing_tool_evidence() -> None:
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-before-timeout",
+                    payload={
+                        "name": "general_read",
+                        "arguments": {"query": "canonical record"},
+                    },
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="test",
+                api_surface="responses",
+                model="test-model",
+                response_id="response-before-timeout",
             ),
         ),
-        (
-            8.0,
-            LLMResponse(
-                text_response="",
-                tool_calls=[
-                    ToolCall(
-                        tool_name="turn_list_evidence",
-                        call_id="list-at-checkpoint",
-                        payload={"offset": 0, "limit": 20},
-                    )
-                ]
-            ),
-        ),
-        (8.2, LLMResponse(text_response="The protected final answer.")),
+        _wrapped_model_timeout(),
+        LLMResponse(text_response="Recovered from the retained evidence."),
     )
 
     result = execute_adaptive_turn(
-        gateway=None,
-        prompt="Research, then answer.",
-        context=[],
+        gateway=_gateway(
+            lambda **_kwargs: {
+                "success": True,
+                "record": {
+                    "summary": "The exact canonical record.",
+                    "raw": "z" * 50_000,
+                },
+            }
+        ),
+        prompt="Read the canonical record and answer.",
+        context=[{"role": "assistant", "content": "old context " * 10_000}],
         llm_client=client,
         model="test-model",
-        turn_id="turn-answer-checkpoint",
+        turn_id="turn-model-timeout-evidence-recovery",
         turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=4,
-        final_answer_reserve_seconds=2,
-        clock=clock,
+        final_synthesis_reserve_seconds=2,
     )
 
-    assert result.response_text == "The protected final answer."
-    assert [call["mode"] for call in result.llm_calls] == [
-        "research",
-        "evidence_capable",
-        "evidence_capable",
-        "answer_only",
-    ]
-    assert [tool.name for tool in client.calls[1]["available_tools"]] == [
-        "turn_read_evidence",
-        "turn_list_evidence",
-    ]
-    assert client.calls[-1]["available_tools"] == []
-    assert client.calls[-1]["llm_params"]["request_timeout_seconds"] == 2.0
-    final_context = client.calls[-1]["context"]
-    assert final_context[0] == {
-        "role": "assistant",
-        "content": "A useful draft based on the evidence page.",
-    }
-    evidence_contexts = [
-        json.loads(item["content"])
-        for item in final_context
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Recovered from the retained evidence."
+    assert len(client.calls) == 3
+    assert client.calls[1]["continuation"].response_id == "response-before-timeout"
+    assert "continuation" not in client.calls[-1]
+    assert "tool_results" not in client.calls[-1]
+    recovery_context = client.calls[-1]["context"]
+    evidence_messages = [
+        item
+        for item in recovery_context
         if item.get("role") == "user"
         and isinstance(item.get("content"), str)
         and item["content"].startswith("{")
     ]
-    assert len(evidence_contexts) == 1
-    assert evidence_contexts[0]["evidence_views"][0]["schema_version"] == (
-        "adaptive_turn_evidence_index_page.v1"
-    )
-    assert not any(
-        item.get("call_id") == "list-at-checkpoint"
-        for item in result.tool_invocations
-    )
-    checkpoint = next(
-        item
-        for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
-    )
-    assert checkpoint["reason"] == "late_evidence_result"
-    assert checkpoint["effective_answer_reserve_seconds"] == 2.0
-    assert checkpoint["reserve_clamped"] is False
+    assert len(evidence_messages) == 1
+    evidence_payload = json.loads(evidence_messages[0]["content"])
+    assert evidence_payload["schema_version"] == "adaptive_turn_context_recovery.v1"
+    assert evidence_payload["evidence"][0]["call_id"] == "read-before-timeout"
+    assert "z" * 5_000 not in evidence_messages[0]["content"]
 
 
-def test_final_evidence_failure_recovers_to_answer_only() -> None:
-    clock = _ManualClock()
-    client = _TimedSequenceClient(
-        clock,
-        (6.0, TimeoutError("research deadline")),
-        (6.5, TimeoutError("evidence-capable final call failed")),
-        (6.6, LLMResponse(text_response="Answered from retained evidence.")),
+def test_model_timeout_does_not_retry_without_changed_context() -> None:
+    client = _SequenceClient(
+        ToolCallError("OpenAI call failed: Request timed out."),
     )
 
     result = execute_adaptive_turn(
         gateway=None,
-        prompt="Answer despite a final evidence-call failure.",
+        prompt="A short request.",
         context=[],
         llm_client=client,
         model="test-model",
-        turn_id="turn-final-evidence-failure",
+        turn_id="turn-model-timeout-unchanged",
         turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=4,
-        final_answer_reserve_seconds=2,
-        clock=clock,
+        final_synthesis_reserve_seconds=2,
     )
 
-    assert result.response_text == "Answered from retained evidence."
-    assert client.calls[1]["available_tools"]
-    assert client.calls[2]["available_tools"] == []
-    assert result.llm_calls[1]["status"] == "failed"
-    checkpoint = next(
+    assert len(client.calls) == 1
+    assert result.terminal_status == "model_error"
+    recovery = next(
         item
         for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+        if item.get("type") == "adaptive_turn_model_liveness_recovery"
     )
-    assert checkpoint["reason"] == "evidence_call_failed"
-    assert checkpoint["remaining_ms"] == 3_500.0
+    assert recovery["changed"] is False
+    assert recovery["reason"] == "no_smaller_faithful_context"
 
 
-def test_final_evidence_overrun_records_actual_remaining_answer_time() -> None:
+def test_model_timeout_allows_only_one_changed_context_retry() -> None:
+    client = _SequenceClient(
+        _wrapped_model_timeout(),
+        _wrapped_model_timeout(),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Keep the task while shedding old context.",
+        context=[{"role": "assistant", "content": "old context " * 10_000}],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-single-model-timeout-recovery",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(client.calls) == 2
+    assert result.terminal_status == "model_error"
+    recoveries = [
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_model_liveness_recovery"
+    ]
+    assert [item["changed"] for item in recoveries] == [True, False]
+    assert recoveries[-1]["reason"] == "single_fresh_context_retry_already_used"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ToolCallError("OpenAI call failed: authentication rejected."),
+        ValueError("request_timeout_seconds must be positive"),
+        StructuredToolProtocolError(
+            "Provider call lineage was unavailable after a deadline."
+        ),
+        ToolCallError("OpenAI call failed: provider returned 500."),
+    ],
+    ids=["authentication", "configuration", "protocol", "generic-provider"],
+)
+def test_non_liveness_model_failure_is_not_retried_after_compaction(
+    error: Exception,
+) -> None:
+    client = _SequenceClient(
+        error,
+        LLMResponse(text_response="This response must not be requested."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=None,
+        prompt="Do not retry an authentication failure.",
+        context=[{"role": "assistant", "content": "old context " * 10_000}],
+        llm_client=client,
+        model="test-model",
+        turn_id="turn-non-liveness-model-failure",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(client.calls) == 1
+    assert result.terminal_status == "model_error"
+    assert not any(
+        item.get("type") == "adaptive_turn_model_liveness_recovery"
+        for item in result.aux_llm_calls
+    )
+
+
+def test_elapsed_thresholds_are_one_time_model_advisories_without_removing_tools() -> None:
     clock = _ManualClock()
+    progress_events: list[dict[str, Any]] = []
+    all_tool_names = {
+        "turn_capabilities",
+        "turn_invoke_capability",
+        "turn_list_evidence",
+        "turn_read_evidence",
+    }
     client = _TimedSequenceClient(
         clock,
-        (6.0, TimeoutError("research deadline")),
         (
-            9.5,
+            6.1,
             LLMResponse(
                 text_response="",
                 tool_calls=[
                     ToolCall(
                         tool_name="turn_list_evidence",
-                        call_id="late-list",
-                        payload={"offset": 0, "limit": 20},
+                        call_id="after-research-advisory",
+                        payload={},
                     )
                 ],
             ),
         ),
-        (9.6, LLMResponse(text_response="Answered in the actual time left.")),
-    )
-
-    result = execute_adaptive_turn(
-        gateway=None,
-        prompt="Finish from the available evidence.",
-        context=[],
-        llm_client=client,
-        model="test-model",
-        turn_id="turn-final-evidence-overrun",
-        turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=4,
-        final_answer_reserve_seconds=2,
-        clock=clock,
-    )
-
-    assert result.response_text == "Answered in the actual time left."
-    assert client.calls[-1]["llm_params"]["request_timeout_seconds"] == 0.5
-    checkpoint = next(
-        item
-        for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
-    )
-    assert checkpoint["reason"] == "late_evidence_result"
-    assert checkpoint["remaining_ms"] == 500.0
-    assert result.llm_calls[1]["status"] == "late_result_discarded"
-
-
-def test_small_final_reserve_is_a_recorded_answer_only_checkpoint() -> None:
-    clock = _ManualClock()
-    client = _TimedSequenceClient(
-        clock,
-        (8.0, TimeoutError("research model deadline")),
-        (8.5, LLMResponse(text_response="A bounded answer.")),
-    )
-
-    result = execute_adaptive_turn(
-        gateway=None,
-        prompt="Answer within the caller's small reserve.",
-        context=[],
-        llm_client=client,
-        model="test-model",
-        turn_id="turn-small-final-reserve",
-        turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=2,
-        final_answer_reserve_seconds=20,
-        clock=clock,
-    )
-
-    assert result.response_text == "A bounded answer."
-    assert len(client.calls) == 2
-    assert client.calls[1]["available_tools"] == []
-    assert client.calls[1]["llm_params"]["request_timeout_seconds"] == 2.0
-    checkpoint = next(
-        item
-        for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
-    )
-    assert checkpoint["reason"] == "direct_final_entry"
-    assert checkpoint["requested_answer_reserve_seconds"] == 20.0
-    assert checkpoint["effective_answer_reserve_seconds"] == 2.0
-    assert checkpoint["evidence_capable_reserve_seconds"] == 0.0
-    assert checkpoint["reserve_clamped"] is True
-
-
-def test_answer_checkpoint_can_be_enabled_from_candidate_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(
-        "VON_ADAPTIVE_TURN_FINAL_ANSWER_RESERVE_SEC",
-        "1.5",
-    )
-    clock = _ManualClock()
-    client = _TimedSequenceClient(
-        clock,
-        (8.0, TimeoutError("research model deadline")),
-        (8.5, LLMResponse(text_response="A late evidence-capable draft.")),
-        (8.6, LLMResponse(text_response="The candidate answer.")),
-    )
-
-    result = execute_adaptive_turn(
-        gateway=None,
-        prompt="Exercise the candidate allocation seam.",
-        context=[],
-        llm_client=client,
-        model="test-model",
-        turn_id="turn-env-answer-checkpoint",
-        turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=2,
-        clock=clock,
-    )
-
-    assert result.response_text == "The candidate answer."
-    assert client.calls[1]["llm_params"]["request_timeout_seconds"] == 0.5
-    assert {
-        tool.name for tool in client.calls[1]["available_tools"]
-    } == {"turn_list_evidence", "turn_read_evidence"}
-    assert client.calls[2]["available_tools"] == []
-    checkpoint = next(
-        item
-        for item in result.aux_llm_calls
-        if item.get("type") == "adaptive_turn_final_answer_reserve_entered"
-    )
-    assert checkpoint["effective_answer_reserve_seconds"] == 1.5
-    assert checkpoint["reserve_clamped"] is False
-
-
-def test_final_evidence_tools_remain_available_before_answer_checkpoint() -> None:
-    clock = _ManualClock()
-    client = _TimedSequenceClient(
-        clock,
-        (6.0, TimeoutError("research deadline")),
         (
-            6.5,
+            8.1,
             LLMResponse(
                 text_response="",
                 tool_calls=[
                     ToolCall(
                         tool_name="turn_list_evidence",
-                        call_id="list-final-evidence",
-                        payload={"offset": 0, "limit": 20},
+                        call_id="after-answer-advisory",
+                        payload={},
                     )
-                ]
+                ],
             ),
         ),
-        (6.6, LLMResponse(text_response="Answered before the checkpoint.")),
+        (
+            10.1,
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_list_evidence",
+                        call_id="after-turn-advisory",
+                        payload={},
+                    )
+                ],
+            ),
+        ),
+        (10.2, LLMResponse(text_response="Completed after the advisory budget.")),
     )
 
     result = execute_adaptive_turn(
         gateway=None,
-        prompt="Use final evidence only if it helps.",
+        prompt="Keep working while progress is useful.",
         context=[],
         llm_client=client,
         model="test-model",
-        turn_id="turn-final-evidence-window",
+        model_parameters={"request_timeout_seconds": 7.0},
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event))
+        ),
+        turn_id="turn-elapsed-advisories",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=4,
         final_answer_reserve_seconds=2,
         clock=clock,
     )
 
-    assert result.response_text == "Answered before the checkpoint."
-    assert {
-        tool.name for tool in client.calls[1]["available_tools"]
-    } == {"turn_list_evidence", "turn_read_evidence"}
-    assert result.tool_invocations[0]["call_id"] == "list-final-evidence"
-    assert not any(
-        item.get("type") == "adaptive_turn_final_answer_reserve_entered"
+    assert result.terminal_status == "completed"
+    assert result.response_text == "Completed after the advisory budget."
+    assert len(client.calls) == 4
+    assert all(
+        {tool.name for tool in call["available_tools"]} == all_tool_names
+        for call in client.calls
+    )
+    assert all(
+        call["llm_params"]["request_timeout_seconds"] == 7.0
+        for call in client.calls
+    )
+    advisory_events = [
+        item
         for item in result.aux_llm_calls
-    )
+        if item.get("type") == "adaptive_turn_elapsed_time_advisory"
+    ]
+    assert [item["advisory_kind"] for item in advisory_events] == [
+        "research_interval",
+        "answer_reserve",
+        "turn_budget",
+    ]
+    assert all(item["capabilities_removed"] is False for item in advisory_events)
+    system_messages = [call["system_message"] for call in client.calls]
+    for notice in (
+        "The planned research interval has elapsed.",
+        "The planned final-answer reserve has begun.",
+        "The planned turn budget has elapsed.",
+    ):
+        assert sum(notice in message for message in system_messages) == 1
+    progress_advisories = [
+        event
+        for event in progress_events
+        if event.get("stage") == "elapsed_time_advisory"
+    ]
+    assert len(progress_advisories) == 3
+    assert [item["call_id"] for item in result.tool_invocations] == [
+        "after-research-advisory",
+        "after-answer-advisory",
+        "after-turn-advisory",
+    ]
 
 
-def test_answer_checkpoint_can_be_disabled_for_an_adaptive_caller() -> None:
+def test_model_result_returned_after_turn_advisory_remains_usable() -> None:
     clock = _ManualClock()
-    client = _TimedSequenceClient(
-        clock,
-        (6.0, TimeoutError("research deadline")),
-        (9.0, LLMResponse(text_response="The caller retained adaptive time.")),
-    )
-
-    result = execute_adaptive_turn(
-        gateway=None,
-        prompt="Use the final interval adaptively.",
-        context=[],
-        llm_client=client,
-        model="test-model",
-        turn_id="turn-disabled-answer-checkpoint",
-        turn_budget_seconds=10,
-        final_synthesis_reserve_seconds=4,
-        final_answer_reserve_seconds=0,
-        clock=clock,
-    )
-
-    assert result.response_text == "The caller retained adaptive time."
-    assert {
-        tool.name for tool in client.calls[1]["available_tools"]
-    } == {"turn_list_evidence", "turn_read_evidence"}
-    assert client.calls[1]["llm_params"]["request_timeout_seconds"] == 4.0
-    assert not any(
-        item.get("type") == "adaptive_turn_final_answer_reserve_entered"
-        for item in result.aux_llm_calls
-    )
-
-
-def test_model_result_returned_after_turn_deadline_is_discarded() -> None:
-    clock = _ManualClock()
+    progress_events: list[dict[str, Any]] = []
     client = _LateResponseClient(
         clock,
         0.2,
-        LLMResponse(text_response="A late answer that must not become terminal."),
+        LLMResponse(text_response="A useful answer after the advisory."),
     )
 
     result = execute_adaptive_turn(
         gateway=None,
-        prompt="Answer within the bounded turn.",
+        prompt="Answer when ready.",
         context=[],
         llm_client=client,
         model="test-model",
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event))
+        ),
         turn_id="turn-late-model-result",
         turn_budget_seconds=0.05,
         final_synthesis_reserve_seconds=0.01,
         clock=clock,
     )
 
-    assert result.terminal_status == "turn_deadline_exceeded"
-    assert "late answer" not in result.response_text
-    assert result.llm_calls[0]["status"] == "late_result_discarded"
-    late_event = next(
+    assert result.terminal_status == "completed"
+    assert result.response_text == "A useful answer after the advisory."
+    assert result.llm_calls[0]["status"] == "completed"
+    allocation = next(
         event
         for event in result.aux_llm_calls
-        if event.get("type") == "adaptive_turn_late_model_result"
+        if event.get("type") == "adaptive_turn_budget_allocation"
     )
-    assert late_event["late_result_policy"] == "discard_from_terminal_result"
+    assert allocation["enforcement"] == "advisory"
+    advisories = [
+        event
+        for event in result.aux_llm_calls
+        if event.get("type") == "adaptive_turn_elapsed_time_advisory"
+    ]
+    assert [event["advisory_kind"] for event in advisories] == [
+        "research_interval",
+        "answer_reserve",
+        "turn_budget",
+    ]
+    assert len(
+        [
+            event
+            for event in progress_events
+            if event.get("stage") == "elapsed_time_advisory"
+        ]
+    ) == 3
 
 
-def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -> None:
+def test_elapsed_advisory_preserves_native_continuation_and_bounded_evidence() -> None:
     started = time.monotonic()
     clock = _ManualClock(started)
     raw_tail = "z" * 50_000
@@ -5787,7 +5788,7 @@ def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -
             tool_calls=[
                 ToolCall(
                     tool_name="turn_invoke_capability",
-                    call_id="call-final-evidence",
+                    call_id="call-advisory-evidence",
                     payload={
                         "name": "general_read",
                         "arguments": {"query": "the useful thing"},
@@ -5810,7 +5811,7 @@ def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -
         context=[],
         llm_client=client,
         model="test-model",
-        turn_id="turn-final-evidence",
+        turn_id="turn-advisory-evidence",
         turn_budget_seconds=10,
         final_synthesis_reserve_seconds=2,
         final_answer_reserve_seconds=0,
@@ -5820,37 +5821,21 @@ def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -
     assert result.response_text == "The final answer uses usable evidence."
     assert len(client.calls) == 2
     final_call = client.calls[1]
-    assert {
-        tool.name for tool in final_call["available_tools"]
-    } == {"turn_list_evidence", "turn_read_evidence"}
-    assert "continuation" not in final_call
-    assert "tool_results" not in final_call
-    assert len(final_call["context"]) == 1
-    evidence_context = final_call["context"][0]
-    assert evidence_context["role"] == "user"
-    evidence_payload = json.loads(evidence_context["content"])
-    assert (
-        evidence_payload["schema_version"]
-        == "adaptive_turn_final_synthesis_evidence.v1"
-    )
-    assert evidence_payload["trust_boundary"] == "untrusted_tool_output"
-    assert evidence_payload["evidence"][0]["call_id"] == "call-final-evidence"
-    assert evidence_payload["evidence_views"][0]["call_id"] == (
-        "call-final-evidence"
-    )
-    assert "usable evidence" in evidence_payload["evidence_views"][0]["preview"]
-    assert evidence_payload["evidence_view_projection"] == {
-        "schema_version": "adaptive_turn_evidence_view_projection.v1",
-        "order": "content_bearing_evidence_slices_first_stable_within_class",
-        "deduplication": "exact_canonical_output",
-        "total_count": 1,
-        "included_count": 1,
-        "omitted_count": 0,
-        "read_tool": "turn_read_evidence",
-        "list_tool": "turn_list_evidence",
+    assert {tool.name for tool in final_call["available_tools"]} == {
+        "turn_capabilities",
+        "turn_invoke_capability",
+        "turn_list_evidence",
+        "turn_read_evidence",
     }
-    assert raw_tail not in evidence_context["content"]
-    assert len(evidence_context["content"]) < 10_000
+    assert final_call["continuation"].response_id == "response-1"
+    assert len(final_call["tool_results"]) == 1
+    tool_output = final_call["tool_results"][0].output
+    assert tool_output["call_id"] == "call-advisory-evidence"
+    assert "usable evidence" in tool_output["preview"]
+    assert raw_tail not in json.dumps(tool_output)
+    assert "The planned research interval has elapsed." in (
+        final_call["system_message"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -5858,16 +5843,16 @@ def test_final_synthesis_receives_bounded_evidence_after_native_continuation() -
     [True, False],
     ids=["native-continuation", "stateless-context"],
 )
-def test_final_reset_carries_exact_hydrated_evidence_for_provider_styles(
+def test_hydrated_evidence_survives_research_advisory_for_provider_styles(
     native_continuation: bool,
 ) -> None:
     started = time.monotonic()
-    research_deadline = started + 8.0
+    research_advisory_at = started + 8.0
     clock = _ManualClock(started)
-    client = _HydrationDeadlineClient(
+    client = _HydrationAdvisoryClient(
         clock,
         native_continuation=native_continuation,
-        research_deadline=research_deadline,
+        research_advisory_at=research_advisory_at,
     )
     raw_tail = "z" * 50_000
 
@@ -5878,7 +5863,7 @@ def test_final_reset_carries_exact_hydrated_evidence_for_provider_styles(
                 "record": {
                     "a_raw": raw_tail,
                     "z_summary": (
-                        "The specifically hydrated result survives a fresh request."
+                        "The specifically hydrated result remains available."
                     ),
                 },
             }
@@ -5900,41 +5885,37 @@ def test_final_reset_carries_exact_hydrated_evidence_for_provider_styles(
     assert result.response_text == (
         "The final answer uses the explicitly hydrated evidence."
     )
-    assert len(client.calls) == 4
+    assert len(client.calls) == 3
     assert len(client.received_evidence_outputs) == 2
     delivered_envelope, delivered_slice = client.received_evidence_outputs
     assert delivered_envelope["schema_version"] == "turn_evidence_envelope.v1"
     assert delivered_slice["schema_version"] == "turn_evidence_slice.v1"
     assert delivered_slice["content"] == (
-        "The specifically hydrated result survives a fresh request."
+        "The specifically hydrated result remains available."
     )
 
     final_call = client.calls[-1]
-    assert "continuation" not in final_call
-    assert "tool_results" not in final_call
-    assert {
-        tool.name for tool in final_call["available_tools"]
-    } == {"turn_list_evidence", "turn_read_evidence"}
-    assert len(final_call["context"]) == 1
-    evidence_message = final_call["context"][0]
-    assert evidence_message["role"] == "user"
-    assert "z" * 5_000 not in evidence_message["content"]
-    assert len(_json_bytes(evidence_message)) <= 24_000
-    payload = json.loads(evidence_message["content"])
-    assert payload["evidence_views"] == [
-        delivered_slice,
-        delivered_envelope,
-    ]
-    retained_slice = payload["evidence_views"][0]
-    assert retained_slice["selector"] == {
-        "json_pointer": "/record/z_summary",
-        "offset": 0,
-        "max_chars": 4_000,
+    assert {tool.name for tool in final_call["available_tools"]} == {
+        "turn_capabilities",
+        "turn_invoke_capability",
+        "turn_list_evidence",
+        "turn_read_evidence",
     }
-    assert retained_slice["source_sha256"] == delivered_envelope["sha256"]
-    assert retained_slice["provenance"] == delivered_envelope["provenance"]
-    assert payload["evidence_view_projection"]["total_count"] == 2
-    assert payload["evidence_view_projection"]["omitted_count"] == 0
+    assert "The planned research interval has elapsed." in (
+        final_call["system_message"]
+    )
+    if native_continuation:
+        assert final_call["continuation"].response_id == "response-hydration"
+        assert final_call["tool_results"][0].output == delivered_slice
+    else:
+        assert "continuation" not in final_call
+        tool_messages = [
+            item
+            for item in final_call["context"]
+            if item.get("role") == "tool"
+        ]
+        assert json.loads(tool_messages[-1]["content"]) == delivered_slice
+    assert raw_tail not in json.dumps(final_call, default=str)
 
 
 def test_many_read_results_share_one_model_context_budget() -> None:
@@ -6218,7 +6199,10 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
             "final_status": "completed",
         }
 
-    gateway = _workflow_gateway(_execute_workflow)
+    gateway = _workflow_gateway(
+        _execute_workflow,
+        hard_timeout_enabled=False,
+    )
     assert "workflow_execute" not in ordinary_turn_capability_delegation(
         gateway,
         user_concept_id="#V#real_user",
@@ -6255,6 +6239,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
                                 "record_id": "#V#record",
                                 "user_concept_id": "#V#spoofed_user",
                             },
+                            "timeout_seconds": 180.0,
                         },
                     },
                 )
@@ -6305,6 +6290,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert seen_arguments["inputs"]["authorised_record"] == "#V#request_record"
     assert seen_arguments["source_event_type"] == "conversation_turn"
     assert seen_arguments["source_event_id"] == "turn-represented-workflow"
+    assert seen_arguments["timeout_seconds"] == 90.0
     assert seen_arguments["event_idempotency_key"].startswith(
         "conversation_turn_workflow:"
     )
@@ -6333,6 +6319,408 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert selection_trace["selection_policy"]["representedness_priority"] is False
     assert selection_trace["plan_profile"]["shape"] == ("represented_workflow")
     assert result.response_text == "The represented work product was completed."
+
+
+def test_represented_workflow_nonfinite_wait_is_typed_not_started_feedback(
+    monkeypatch,
+) -> None:
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_invalid_wait_test",
+        workflow_id="#V#represented_invalid_wait_workflow",
+        display_name="Represented invalid-wait workflow",
+        description="Produce a represented work product.",
+        relevance_score=0.94,
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+
+    def _unexpected_execution(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("invalid wait arguments must not submit a workflow")
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-invalid-wait-workflow",
+                    payload={"query": "produce the represented work product"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-invalid-wait-workflow",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {"timeout_seconds": float("inf")},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="I corrected the invalid wait without an effect."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_workflow_gateway(
+            _unexpected_execution,
+            hard_timeout_enabled=False,
+        ),
+        prompt="Produce the represented work product.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        turn_id="turn-represented-workflow-invalid-wait",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == workflow_capability.name
+    )
+    assert invocation["error_code"] == (
+        "invalid_workflow_capability_arguments"
+    )
+    assert invocation["effect_status"] == "not_started"
+    assert invocation["changed"] is False
+    assert invocation["mutation_outcome"] == "not_started"
+    assert result.terminal_status == "completed"
+
+
+@pytest.mark.parametrize(
+    (
+        "read_workflow_id",
+        "read_status",
+        "expected_effect_status",
+        "expected_terminal_status",
+        "expected_fallback",
+    ),
+    [
+        (
+            "#V#represented_readback_workflow",
+            "completed",
+            "succeeded",
+            "completed",
+            False,
+        ),
+        (
+            "#V#represented_readback_workflow",
+            "running",
+            "partial",
+            "effect_partially_completed",
+            True,
+        ),
+        (
+            "#V#represented_readback_workflow",
+            "failed",
+            "failed",
+            "effect_failed",
+            True,
+        ),
+        (
+            "#V#different_workflow",
+            "completed",
+            "partial",
+            "effect_partially_completed",
+            True,
+        ),
+    ],
+    ids=["completed", "non-terminal", "failed", "workflow-mismatch"],
+)
+def test_workflow_instance_readback_reconciles_only_exact_terminal_effect(
+    monkeypatch,
+    read_workflow_id: str,
+    read_status: str,
+    expected_effect_status: str,
+    expected_terminal_status: str,
+    expected_fallback: bool,
+) -> None:
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_readback_test",
+        workflow_id="#V#represented_readback_workflow",
+        display_name="Represented read-back workflow",
+        description="Produce a durable work product and verify its terminal state.",
+        relevance_score=0.95,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "inputs": {"type": "object", "additionalProperties": True},
+                "timeout_seconds": {"type": "number"},
+            },
+            "additionalProperties": False,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+    instance_reads: list[dict[str, Any]] = []
+
+    def _execute_workflow(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "instance_id": "workflow-instance-readback-1",
+            "workflow_id": workflow_capability.workflow_id,
+            "created_new": True,
+            "final_status": "running",
+            "timed_out": True,
+            "workflow_execution": {
+                "timeout_seconds": 90.0,
+                "poll_interval_seconds": 0.5,
+            },
+        }
+
+    def _read_instance(**kwargs: Any) -> dict[str, Any]:
+        instance_reads.append(dict(kwargs))
+        return {
+            "success": True,
+            "instance_id": "workflow-instance-readback-1",
+            "workflow_id": read_workflow_id,
+            "status": read_status,
+            "outputs": {"verified": True},
+            "timed_out": False,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-readback-workflow",
+                    payload={"query": "produce and verify the durable work product"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-readback-workflow",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {"timeout_seconds": 90.0},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="await-readback-workflow",
+                    payload={
+                        "name": "workflow_get_instance",
+                        "arguments": {
+                            "instance_id": "workflow-instance-readback-1",
+                            "await_terminal": True,
+                            "timeout_seconds": 90.0,
+                            "poll_interval_seconds": 0.5,
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="repeat-readback-workflow",
+                    payload={
+                        "name": "workflow_get_instance",
+                        "arguments": {
+                            "instance_id": "workflow-instance-readback-1",
+                            "await_terminal": True,
+                            "timeout_seconds": 90.0,
+                            "poll_interval_seconds": 0.5,
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The durable work product was verified."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_workflow_gateway(
+            _execute_workflow,
+            hard_timeout_enabled=False,
+            instance_handler=_read_instance,
+        ),
+        prompt="Produce and verify the durable work product.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        turn_id="turn-represented-workflow-readback",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    expected_instance_read = {
+        "instance_id": "workflow-instance-readback-1",
+        "await_terminal": True,
+        "timeout_seconds": 90.0,
+        "poll_interval_seconds": 0.5,
+    }
+    assert instance_reads == [
+        expected_instance_read,
+        expected_instance_read,
+    ]
+    workflow_invocation = next(
+        item
+        for item in result.tool_invocations
+        if item.get("tool") == workflow_capability.name
+    )
+    assert workflow_invocation["effect_status"] == expected_effect_status
+    if expected_effect_status in {"succeeded", "failed"}:
+        canonical_readback = workflow_invocation["canonical_readback"]
+        assert {
+            key: canonical_readback.get(key)
+            for key in ("capability", "instance_id", "workflow_id", "status")
+        } == {
+            "capability": "workflow_get_instance",
+            "instance_id": "workflow-instance-readback-1",
+            "workflow_id": workflow_capability.workflow_id,
+            "status": read_status,
+        }
+        assert isinstance(canonical_readback.get("evidence_id"), str)
+    else:
+        assert "canonical_readback" not in workflow_invocation
+    assert result.terminal_status == expected_terminal_status
+    assert result.effect_finality_fallback is expected_fallback
+    if expected_fallback:
+        assert result.response_text != "The durable work product was verified."
+    else:
+        assert result.response_text == "The durable work product was verified."
+
+
+def test_workflow_instance_readback_does_not_reconcile_unrelated_effect() -> None:
+    instance_id = "shared-looking-instance-id"
+    workflow_id = "#V#shared-looking-workflow-id"
+
+    def _effect_handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": False,
+            "effect_status": "partial",
+            "changed": True,
+            "instance_id": instance_id,
+            "workflow_id": workflow_id,
+        }
+
+    gateway = _effect_gateway(_effect_handler)
+    gateway._catalogue.register(
+        MethodDefinition(
+            name="workflow_get_instance",
+            handler=lambda **_kwargs: {
+                "success": True,
+                "instance_id": instance_id,
+                "workflow_id": workflow_id,
+                "status": "completed",
+            },
+            input_schema=Schema(required={"instance_id": str}),
+            output_schema=Schema(required={"success": bool}, allow_unknown=True),
+            category="read",
+        )
+    )
+    gateway.register_metrics_if_missing("workflow_get_instance")
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-unrelated-effect",
+                    payload={
+                        "name": "create_concepts",
+                        "arguments": {"concepts": [{"name": "Partial result"}]},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read-lookalike-workflow",
+                    payload={
+                        "name": "workflow_get_instance",
+                        "arguments": {"instance_id": instance_id},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Everything completed."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Complete the bounded effect.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="turn-unrelated-workflow-lookalike",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    effect_invocation = next(
+        item for item in result.tool_invocations if item.get("tool") == "create_concepts"
+    )
+    assert effect_invocation["capability_kind"] == "registered_tool"
+    assert effect_invocation["effect_status"] == "partial"
+    assert "canonical_readback" not in effect_invocation
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is True
+    assert result.response_text != "Everything completed."
 
 
 def test_read_only_workflow_not_started_preserves_successful_direct_recovery(

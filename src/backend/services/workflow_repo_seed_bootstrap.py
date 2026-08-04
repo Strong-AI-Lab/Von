@@ -17,6 +17,7 @@ from .text_value_service import (
     upsert_singleton_text_relation,
     upsert_text_for_concept,
 )
+from .workflow_capability_service import invalidate_workflow_capability_index
 from .workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
@@ -429,6 +430,12 @@ def _materialise_support_concepts(
         if isinstance(concept_doc, Mapping):
             existing_concept_ids.append(concept_id)
             if not update_existing:
+                if spec.get("preserve_existing_authority") is True:
+                    # Some workflow dependencies are shared canonical concepts,
+                    # not authority owned by this repo seed.  Create them on an
+                    # empty installation, but never use the workflow bundle to
+                    # reinterpret or migrate an existing representation.
+                    continue
                 try:
                     authority_exact, authority_resumable = (
                         _support_concept_authority_status(
@@ -3188,6 +3195,10 @@ def bootstrap_repo_seed_workflow_bundle(
                 )
 
     if should_apply_seed_bundle_mutations:
+        invalidate_workflow_capability_index(
+            reason="repo_seed_workflow_bundle_published",
+            reset_backend_namespace=True,
+        )
         invalidate_workflow_discovery_executability_caches()
     return {
         "asset_path": str(bundle.get("asset_path") or Path(asset_path)),

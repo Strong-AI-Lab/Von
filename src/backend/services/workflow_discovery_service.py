@@ -2526,6 +2526,41 @@ def discover_workflows(
             )
             logger.warning(f"Vontology workflow discovery failed: {e}")
 
+    # The primary index can finish its background build while the slower
+    # fallback searches are running. Reconcile that exact observed race once,
+    # without another wait, so a stale early snapshot cannot become a false
+    # "no represented workflows" result after the index is already ready.
+    if bool(capability_index_state.get("build_in_progress")):
+        reconciliation_started_at = time.perf_counter()
+        reconciled_index_state = (
+            _get_latency_sensitive_capability_index_runtime_state()
+        )
+        if bool(reconciled_index_state.get("ready")):
+            reconciled_capability_matches = _search_workflow_capabilities(
+                search_query,
+                limit=max_results * 3,
+                max_wait_seconds=0.0,
+                workflow_registry=workflow_registry,
+            )
+            all_matches.extend(reconciled_capability_matches)
+            search_sources.append("capability_index_reconciliation")
+            reconciliation_status = "recovered"
+        else:
+            reconciled_capability_matches = []
+            reconciliation_status = "still_building"
+        _record_discovery_stage_timing(
+            stage_timings,
+            stage="capability_index_reconciliation",
+            started_at=reconciliation_started_at,
+            status=reconciliation_status,
+            match_count=len(reconciled_capability_matches),
+            runtime_ready=bool(reconciled_index_state.get("ready")),
+            build_in_progress=bool(
+                reconciled_index_state.get("build_in_progress")
+            ),
+            waited=False,
+        )
+
     # Every search substrate, including exact registry and future sources, must
     # converge through the same actor-visibility boundary before descriptions,
     # routing projections, or readiness metadata are enriched and serialised.

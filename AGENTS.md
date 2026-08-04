@@ -153,7 +153,21 @@ never be forced onto newer evidence.
 10. **Preserve opportunity.** Support layers should expose typed facts,
     bounded actions, evidence, retry/recovery options, and partial progress so a
     capable model can still succeed. A safety requirement may close an unsafe
-    path; it should not erase safe alternatives.
+    path; it should not erase safe alternatives. Treat elapsed-time thresholds
+    as advisory by default: surface the crossing and let the model or durable
+    controller decide whether to continue, wait, recover, or answer. A hard
+    cutoff must protect a named liveness, authority, external-resource, or
+    materially unacceptable-outcome boundary; it must not merely abandon
+    authorised recoverable work, discard a usable late result, or substitute an
+    arbitrary number for progress observation and reconciliation. Calibrate a
+    justified hard liveness cutoff from the capability's declared inner bounds
+    and observed successful durations with conservative headroom—for example,
+    twice the longest recent successful use where no tighter resource boundary
+    applies—and revisit it as operational evidence changes. Calibrate the
+    corresponding advisory crossing from the same capability-specific evidence
+    with a smaller margin so it warns about unusually slow progress before the
+    hard boundary; neither threshold should be inherited from a whole-task
+    budget or copied unchanged between unlike capabilities.
 11. **Minimal imposition.** Use available context and tools before interrupting
     the user. Prefer low-burden, reversible progress, and treat needless
     refusal, clarification, or confirmation as real failures. Ask when

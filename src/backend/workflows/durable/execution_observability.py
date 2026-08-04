@@ -109,13 +109,19 @@ def await_workflow_terminal_state(
                 poll_count=poll_count,
                 timed_out=False,
             )
-        if monotonic() >= deadline:
+        observed_at = monotonic()
+        if observed_at >= deadline:
             return AwaitedWorkflowTerminalResult(
                 instance=latest_instance,
                 poll_count=poll_count,
                 timed_out=True,
             )
-        sleep(max(0.0, float(poll_interval_seconds)))
+        sleep(
+            min(
+                max(0.0, float(poll_interval_seconds)),
+                max(0.0, deadline - observed_at),
+            )
+        )
 
 
 def build_workflow_instance_payload(

@@ -945,6 +945,14 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert any(
         isinstance(item, dict)
         and item.get("target_context_key") == "arxiv_ids"
+        and item.get("source_expression") == "inputs.arxiv_id"
+        and item.get("extractor") == "arxiv_id_list"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_ids"
         and item.get("source_expression") == "inputs.augmented_context"
         and item.get("extractor") == "arxiv_id_list"
         and item.get("required") is False
@@ -1052,7 +1060,12 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="normalise_arxiv_source",
     )
-    normalise_action = arxiv_definition.states[normalise_state_id].actions[0]
+    inspect_existing_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="inspect_existing_state",
+    )
+    normalise_state = arxiv_definition.states[normalise_state_id]
+    normalise_action = normalise_state.actions[0]
     assert normalise_action.inputs.get("arxiv_id") == {
         "$context_key": "arxiv_id",
         "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_arxiv_id_to_arxiv_id_parameter",
@@ -1067,6 +1080,36 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "$context_key": "prompt",
         "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_prompt_to_prompt_parameter",
         "$required": False,
+    }
+    normalise_transitions = {
+        transition.reason: transition.to_state
+        for transition in normalise_state.transitions
+    }
+    assert normalise_transitions["next_step"] == inspect_existing_state_id
+    inspect_existing_state = arxiv_definition.states[inspect_existing_state_id]
+    inspect_existing_action = inspect_existing_state.actions[0]
+    assert inspect_existing_action.action_id == "arxiv.inspect_existing_state"
+    assert inspect_existing_action.inputs.get("arxiv_id") == {
+        "$context_key": "arxiv_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_inspect_existing_state_arxiv_id_to_arxiv_id_parameter",
+        "$required": True,
+    }
+    inspect_existing_transitions = {
+        transition.reason: transition.to_state
+        for transition in inspect_existing_state.transitions
+    }
+    assert inspect_existing_transitions["next_step"] == fetch_metadata_state_id
+    inspect_output_mappings = inspect_existing_state.metadata[
+        "tool_output_context_mappings"
+    ]
+    assert {
+        (mapping["tool_output_field"], mapping["context_key"])
+        for mapping in inspect_output_mappings
+    } == {
+        ("arxiv_id", "arxiv_id"),
+        ("paper_concept_id", "paper_concept_id"),
+        ("file_copy_concept_id", "file_copy_concept_id"),
+        ("inspected_existing_state", "inspected_existing_state"),
     }
     fetch_metadata_action = arxiv_definition.states[fetch_metadata_state_id].actions[0]
     assert fetch_metadata_action.action_id == "get_paper_metadata"
@@ -1441,6 +1484,7 @@ def _build_source_neutral_execution_registry(
             handler=_stub_handler("file_copy"),
         )
     )
+
     return registry, calls
 
 
@@ -1639,7 +1683,6 @@ def test_source_neutral_paper_reference_launch_contract_and_exemplars_are_source
     assert resolution.resolved_inputs["source_context"] == {
         "source_kind": "direct_prompt"
     }
-
     exemplars, source = resolve_workflow_discovery_exemplars(
         SOURCE_NEUTRAL_PAPER_REFERENCE_INGESTION_WORKFLOW_ID
     )
@@ -1810,6 +1853,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     }
     assert {
         "inputs.arxiv_ids",
+        "inputs.arxiv_id",
         "inputs.prompt",
         "inputs.augmented_context",
         "inputs.turn_expected_outcome_contract.summary",
@@ -1827,7 +1871,7 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
         for row in marker_rows
         if isinstance(row.get("text"), str)
     ]
-    assert any(payload.get("seed_version") == "17" for payload in marker_payloads)
+    assert any(payload.get("seed_version") == "21" for payload in marker_payloads)
 
     refreshed_definition = load_workflow_definition_from_vontology(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -1848,6 +1892,104 @@ def test_bootstrap_seed_version_refresh_repairs_old_arxiv_launch_contract(
     assert required_effect["targets_extractor"] == "arxiv_id_list"
     assert "workflow_discovery_result.discovery_query_input" in (
         required_effect["targets_source_expressions"]
+    )
+
+
+def test_arxiv_launch_contract_explicit_singular_target_is_not_widened_by_ambient_context(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    launch_contract, launch_source = resolve_workflow_launch_input_contract(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert launch_source == "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    assert isinstance(launch_contract, dict)
+
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        contract=launch_contract,
+        contract_source=launch_source,
+        inputs={
+            "prompt": "Represent the paper I selected and keep its evidence.",
+            "arxiv_id": "2605.26340",
+            "augmented_context": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Earlier evidence also mentioned arXiv:2607.27844, "
+                        "arXiv:2607.28607, and arXiv:2607.15776."
+                    ),
+                }
+            ],
+        },
+    )
+
+    assert resolution.unresolved_required_inputs == ()
+    assert resolution.resolved_inputs["arxiv_id"] == "2605.26340"
+    assert resolution.resolved_inputs["arxiv_ids"] == ["2605.26340"]
+    mappings = resolution.diagnostics.get("mappings") or []
+    assert any(
+        mapping.get("target_context_key") == "arxiv_ids"
+        and mapping.get("source_expression") == "inputs.arxiv_id"
+        and mapping.get("resolution_reason") == "resolved"
+        for mapping in mappings
+    )
+    assert any(
+        mapping.get("target_context_key") == "arxiv_ids"
+        and mapping.get("source_expression") == "inputs.augmented_context"
+        and mapping.get("resolution_reason") == "target_already_resolved"
+        for mapping in mappings
+    )
+
+
+def test_arxiv_launch_contract_explicit_batch_target_remains_authoritative(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    launch_contract, launch_source = resolve_workflow_launch_input_contract(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert launch_source == "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    assert isinstance(launch_contract, dict)
+
+    explicit_batch = ["2605.26340", "2607.27844"]
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        contract=launch_contract,
+        contract_source=launch_source,
+        inputs={
+            "prompt": "Represent these two selected papers.",
+            "arxiv_id": "2605.26340",
+            "arxiv_ids": explicit_batch,
+            "augmented_context": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Unrelated earlier evidence mentioned arXiv:2607.28607 "
+                        "and arXiv:2607.15776."
+                    ),
+                }
+            ],
+        },
+    )
+
+    assert resolution.unresolved_required_inputs == ()
+    assert resolution.resolved_inputs["arxiv_id"] == "2605.26340"
+    assert resolution.resolved_inputs["arxiv_ids"] == explicit_batch
+    mappings = resolution.diagnostics.get("mappings") or []
+    assert any(
+        mapping.get("target_context_key") == "arxiv_ids"
+        and mapping.get("source_expression") == "inputs.arxiv_ids"
+        and mapping.get("resolution_reason") == "resolved"
+        for mapping in mappings
+    )
+    assert any(
+        mapping.get("target_context_key") == "arxiv_ids"
+        and mapping.get("source_expression") == "inputs.arxiv_id"
+        and mapping.get("resolution_reason") == "target_already_resolved"
+        for mapping in mappings
     )
 
 
@@ -1969,6 +2111,19 @@ def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
             },
         )
 
+    def _inspect_existing_state(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "arxiv_id": request.inputs.get("arxiv_id"),
+                "paper_concept_id": None,
+                "file_copy_concept_id": None,
+                "inspected_existing_state": True,
+            },
+        )
+
     def _decide_acquisition(
         _request: WorkflowActionRequest,
     ) -> WorkflowActionResult:
@@ -2064,6 +2219,7 @@ def test_arxiv_workflow_routes_external_mcp_failure_to_workflow_url_import(
 
     for action_id, handler in {
         "arxiv.normalise_source": _normalise_source,
+        "arxiv.inspect_existing_state": _inspect_existing_state,
         "get_paper_metadata": _get_metadata,
         "arxiv.decide_acquisition_mode": _decide_acquisition,
         "download_paper": _download_failure,

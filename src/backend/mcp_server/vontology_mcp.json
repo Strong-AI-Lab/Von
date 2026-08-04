@@ -2503,12 +2503,6 @@
                     "source_item_id": {
                         "type": "string"
                     },
-                    "source_profile": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
-                    },
                     "workflow_id": {
                         "type": [
                             "string",
@@ -2544,6 +2538,12 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "source_profile": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -2551,7 +2551,11 @@
                     "source_item_id"
                 ],
                 "additionalProperties": true,
-                "description": "source processing marker input: source_system and source_item_id identify the source item. record_source_processing_marker may include represented artefact, paper, file-copy, arXiv ids, or represented_outputs to mine for compact IDs."
+                "description": "source processing marker lookup: source_system and source_item_id identify the source item. Supply the exact stable source_profile for profile-scoped markers; omit it only to read an historical profileless marker.",
+                "x-von-argument-aliases": {
+                    "profile": "source_profile",
+                    "profile_id": "source_profile"
+                }
             }
         },
         {
@@ -2741,7 +2745,7 @@
         },
         {
             "name": "gmail_get_message",
-            "description": "Fetch a Gmail message for a profile using message_id from gmail_list_messages. The 'profile' parameter accepts either the configured profile alias or the authorised Gmail address. Supports Gmail API formats metadata|full|raw|minimal and returns normalised sender, subject, date, and snippet fields when available. Set include_body=true only for an explicit user request for body text; that returns a bounded plain-text body and truncation flag. Read-only; profile token required.",
+            "description": "Fetch a Gmail message for a profile using message_id from gmail_list_messages. The 'profile' parameter accepts either the configured profile alias or the authorised Gmail address. Supports Gmail API formats metadata|full|raw|minimal and returns normalised sender, subject, date, and snippet fields when available. Set include_body=true whenever bounded body inspection is needed to fulfil an explicitly authorised, content-dependent request, including identifying cited resources. Read-only; profile token required.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2763,7 +2767,7 @@
                     "message_id"
                 ],
                 "additionalProperties": false,
-                "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal). Set include_body=true only when the user explicitly requests message body text; this forces format=full and returns bounded plain-text body evidence.",
+                "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal). Set include_body=true when bounded body inspection is needed to fulfil an explicitly authorised, content-dependent request; this forces format=full and returns bounded plain-text body evidence.",
                 "x-von-argument-aliases": {
                     "profile_id": "profile",
                     "identity": "profile",
@@ -3978,7 +3982,7 @@
         },
         {
             "name": "record_source_processing_marker",
-            "description": "Create or update a durable Vontology marker that records a source item as processed into represented artefacts. This is additive Vontology state and should be called only when the represented workflow has verified processing success.",
+            "description": "Create or update a durable Vontology marker that records a source item as processed into represented artefacts. This is additive Vontology state and should be called only after durable representation and read-back have verified processing success. It does not mutate the source system.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3989,10 +3993,7 @@
                         "type": "string"
                     },
                     "source_profile": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
+                        "type": "string"
                     },
                     "workflow_id": {
                         "type": [
@@ -4091,10 +4092,15 @@
                 },
                 "required": [
                     "source_system",
-                    "source_item_id"
+                    "source_item_id",
+                    "source_profile"
                 ],
                 "additionalProperties": true,
-                "description": "source processing marker input: source_system and source_item_id identify the source item. record_source_processing_marker may include represented artefact, paper, file-copy, arXiv ids, or represented_outputs to mine for compact IDs."
+                "description": "source processing marker input: source_system, source_profile, and source_item_id identify the source item. Copy the exact stable profile identifier supplied by the source capability or workflow context; do not omit, translate, canonicalise, or invent it. Use that same value in lookup and record calls because it participates in marker identity. record_source_processing_marker may include represented artefact, paper, file-copy, arXiv ids, or represented_outputs to mine for compact IDs.",
+                "x-von-argument-aliases": {
+                    "profile": "source_profile",
+                    "profile_id": "source_profile"
+                }
             }
         },
         {
@@ -6748,7 +6754,7 @@
         },
         {
             "name": "workflow_execute",
-            "description": "Create a durable workflow instance via the verified submission pathway and optionally wait for a bounded terminal result with structured telemetry and optional trace retrieval.",
+            "description": "Create a durable workflow instance via the verified submission pathway and optionally wait for one bounded observation interval of at most 90 seconds. Expiry returns partial/current state so the model can choose another wait; it does not cancel, retry, or relaunch the instance.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6848,7 +6854,7 @@
                     "workflow_id"
                 ],
                 "additionalProperties": true,
-                "description": "Launch a durable workflow instance and optionally await a terminal result."
+                "description": "Launch a durable workflow instance and optionally await one bounded observation interval. timeout_seconds is clamped to 90; expiry returns partial/current state and the model may choose another wait without cancelling or relaunching."
             }
         },
         {
@@ -6877,19 +6883,39 @@
         },
         {
             "name": "workflow_get_instance",
-            "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors.",
+            "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors. Set await_terminal=true to make a bounded observation wait on an existing instance; expiry returns its current state to the model and never cancels or retries the workflow.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "instance_id": {
                         "type": "string"
+                    },
+                    "await_terminal": {
+                        "type": [
+                            "boolean",
+                            "string",
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "timeout_seconds": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "poll_interval_seconds": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
                     }
                 },
                 "required": [
                     "instance_id"
                 ],
                 "additionalProperties": true,
-                "description": "Get a workflow instance by ID."
+                "description": "Get a workflow instance by ID, optionally waiting for one bounded observation interval. timeout_seconds is clamped to 90; expiry returns partial/current state and the model may choose another wait without cancelling or retrying it."
             }
         },
         {

@@ -8,6 +8,7 @@ interface.  It does not select a workflow or interpret request semantics.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -20,6 +21,7 @@ WORKFLOW_TURN_RECEIPT_SCHEMA_VERSION = "workflow_turn_effect_receipt.v1"
 CAPABILITY_PLAN_PROFILE_SCHEMA_VERSION = "capability_plan_profile.v1"
 CAPABILITY_EFFECT_PROFILE_SCHEMA_VERSION = "capability_effect_profile.v1"
 CAPABILITY_COST_PROFILE_SCHEMA_VERSION = "capability_cost_profile.v1"
+WORKFLOW_OBSERVATION_MAX_SECONDS = 90.0
 
 _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS = frozenset(
     {
@@ -307,8 +309,11 @@ def _workflow_model_input_schema(
             "timeout_seconds": {
                 "type": "number",
                 "minimum": 0.1,
+                "maximum": WORKFLOW_OBSERVATION_MAX_SECONDS,
                 "description": (
-                    "Maximum bounded terminal wait, further capped by the turn."
+                    "One bounded observation interval of at most 90 seconds. "
+                    "Expiry returns partial/current state; the model may choose "
+                    "another wait."
                 ),
             },
             "poll_interval_seconds": {
@@ -628,7 +633,7 @@ def build_workflow_execution_arguments(
     user_concept_id: str,
     organisation_concept_id: str | None,
     namespace: str,
-    maximum_wait_seconds: float,
+    maximum_wait_seconds: float | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Bind workflow identity/actor and build verified-submission arguments."""
 
@@ -698,18 +703,32 @@ def build_workflow_execution_arguments(
         requested_wait = float(model_arguments.get("timeout_seconds", 60.0))
     except (TypeError, ValueError):
         requested_wait = 60.0
+    if not math.isfinite(requested_wait):
+        raise ValueError("timeout_seconds must be finite")
     effective_wait = max(
         0.1,
         min(
             requested_wait if requested_wait > 0.0 else 0.1,
-            max(0.1, float(maximum_wait_seconds)),
-            90.0,
+            WORKFLOW_OBSERVATION_MAX_SECONDS,
         ),
     )
+    if maximum_wait_seconds is not None:
+        try:
+            bounded_maximum_wait = float(maximum_wait_seconds)
+        except (TypeError, ValueError):
+            bounded_maximum_wait = WORKFLOW_OBSERVATION_MAX_SECONDS
+        if not math.isfinite(bounded_maximum_wait):
+            bounded_maximum_wait = WORKFLOW_OBSERVATION_MAX_SECONDS
+        effective_wait = min(
+            effective_wait,
+            max(0.1, bounded_maximum_wait),
+        )
     try:
         poll_interval = float(model_arguments.get("poll_interval_seconds", 0.5))
     except (TypeError, ValueError):
         poll_interval = 0.5
+    if not math.isfinite(poll_interval):
+        raise ValueError("poll_interval_seconds must be finite")
     try:
         max_retries = int(model_arguments.get("max_retries", 3))
     except (TypeError, ValueError):
@@ -845,11 +864,57 @@ def normalise_workflow_effect_receipt(
     if effect_status != "succeeded":
         recovery_affordances = list(receipt.get("recovery_affordances") or [])
         if instance_id is not None:
+            workflow_execution = receipt.get("workflow_execution")
+            prior_wait_seconds = (
+                workflow_execution.get("timeout_seconds")
+                if isinstance(workflow_execution, Mapping)
+                else None
+            )
+            prior_poll_interval = (
+                workflow_execution.get("poll_interval_seconds")
+                if isinstance(workflow_execution, Mapping)
+                else None
+            )
+            wait_arguments: dict[str, Any] = {"instance_id": instance_id}
+            if effect_status == "partial":
+                wait_arguments["await_terminal"] = True
+                if isinstance(prior_wait_seconds, (int, float)) and not isinstance(
+                    prior_wait_seconds,
+                    bool,
+                ) and math.isfinite(float(prior_wait_seconds)):
+                    wait_arguments["timeout_seconds"] = max(
+                        0.1,
+                        min(
+                            float(prior_wait_seconds),
+                            WORKFLOW_OBSERVATION_MAX_SECONDS,
+                        ),
+                    )
+                if isinstance(prior_poll_interval, (int, float)) and not isinstance(
+                    prior_poll_interval,
+                    bool,
+                ) and math.isfinite(float(prior_poll_interval)):
+                    wait_arguments["poll_interval_seconds"] = max(
+                        0.0,
+                        float(prior_poll_interval),
+                    )
             recovery_affordances.append(
                 {
-                    "action_type": "inspect_workflow_instance",
+                    "action_type": (
+                        "await_or_inspect_workflow_instance"
+                        if effect_status == "partial"
+                        else "inspect_workflow_instance"
+                    ),
                     "capability": "workflow_get_instance",
-                    "arguments": {"instance_id": instance_id},
+                    "arguments": wait_arguments,
+                    "semantic_effect": (
+                        (
+                            "observe the already-submitted instance until it is "
+                            "terminal or the chosen wait elapses"
+                            if effect_status == "partial"
+                            else "inspect the terminal workflow instance"
+                        )
+                        + "; do not cancel, retry, or create another instance"
+                    ),
                 }
             )
         else:

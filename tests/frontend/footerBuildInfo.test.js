@@ -26,6 +26,22 @@ describe('footer build information', () => {
         expect(mainSource).toContain("shortCommit.slice(0, 8)");
     });
 
+    test('identifies dirty runtimes as experimental and labels the commit as their base', () => {
+        expect(mainSource).toContain('const isExperimentalBuild = versionDetails.git_dirty === true;');
+        expect(mainSource).toContain("['Experimental', compactRuntimeStart, compactBaseBuildId]");
+        expect(mainSource).toContain('`Runtime start ${newStart}`');
+        expect(mainSource).toContain('`Build version ${version}`');
+        expect(mainSource).toContain('`Branch ${versionDetails.git_branch}`');
+        expect(mainSource).toContain('`Base commit ${shortCommit}`');
+        expect(mainSource).toContain('`Base commit time ${commitTimestamp}`');
+    });
+
+    test('retains the commit and commit time as the clean-build display', () => {
+        expect(mainSource).toContain("[compactBuildId, compactCommitTime].filter(Boolean).join(' · ')");
+        expect(mainSource).toContain('shortCommit ? `Commit ${shortCommit}` : null');
+        expect(mainSource).toContain('commitTimestamp ? `Commit time ${commitTimestamp}` : null');
+    });
+
     test('hides build information, but not uptime, below the footer crowding threshold', () => {
         expect(styles).toMatch(
             /@media \(max-width:\s*760px\)\s*\{\s*\.server-build-info\s*\{\s*display:\s*none;/

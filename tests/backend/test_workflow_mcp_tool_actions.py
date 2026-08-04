@@ -355,6 +355,40 @@ def test_workflow_mcp_action_preserves_typed_transport_timeout_and_timings() -> 
     assert result.outputs["mcp_transport_overhead_ms"] is not None
 
 
+def test_workflow_mcp_bridge_preserves_dispatched_write_timeout_as_unknown() -> None:
+    from src.backend.workflows.mcp_tool_bridge import (
+        workflow_action_result_from_mcp_payload,
+    )
+
+    result = workflow_action_result_from_mcp_payload(
+        tool_name="synthetic_slow_write",
+        payload={
+            "success": False,
+            "status": "timed_out",
+            "error": "The dispatched write exceeded its hard liveness limit.",
+            "error_code": "tool_timeout_outcome_unknown",
+            "mutation_outcome": "unknown",
+            "retryable": False,
+            "outcome_finality": "terminal_for_turn",
+        },
+        duration_ms=30.0,
+        transport_metadata={
+            "schema_version": "internal_mcp_transport.v1",
+            "outcome": "timed_out",
+            "timeout_phase": "handler",
+            "late_result_policy": "discard_from_turn",
+        },
+    )
+
+    assert result.status == "unknown"
+    assert result.outputs["mcp_result"]["error_code"] == (
+        "tool_timeout_outcome_unknown"
+    )
+    assert result.outputs["mcp_result"]["mutation_outcome"] == "unknown"
+    assert result.outputs["mcp_transport"]["outcome"] == "timed_out"
+    assert result.outputs["mcp_transport"]["timeout_phase"] == "handler"
+
+
 def test_workflow_mcp_action_omits_namespace_for_strict_schema_without_namespace():
     strict_schema = SimpleNamespace(required={}, optional={}, allow_unknown=False)
     gateway = _SchemaAwareGateway(
