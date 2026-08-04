@@ -1051,6 +1051,139 @@ class TestDiscoverWorkflowsForTurn:
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+        return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology",
+        return_value=[],
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_semantic",
+        return_value=[],
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
+    def test_reconciles_index_that_finishes_during_fallback_search(
+        self,
+        mock_capability_state: MagicMock,
+        mock_capability: MagicMock,
+        _mock_semantic: MagicMock,
+        _mock_vontology: MagicMock,
+        _mock_classify: MagicMock,
+        _mock_has_authoritative_text: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.side_effect = [
+            [],
+            [
+                WorkflowMatch(
+                    "#V#represented_workflow",
+                    "Represented workflow",
+                    relevance_score=0.92,
+                    match_source="capability_index",
+                )
+            ],
+        ]
+        mock_capability_state.side_effect = [
+            {
+                "ready": False,
+                "build_in_progress": True,
+                "last_error": None,
+            },
+            {
+                "ready": True,
+                "build_in_progress": False,
+                "last_error": None,
+            },
+        ]
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows(
+            "Produce the represented work product with retained source evidence",
+            max_results=1,
+        )
+
+        assert [match.concept_id for match in result.routing_matches or []] == [
+            "#V#represented_workflow"
+        ]
+        assert mock_capability.call_count == 2
+        assert mock_capability.call_args_list[1].kwargs["max_wait_seconds"] == 0.0
+        assert "capability_index_reconciliation" in result.search_sources
+        assert result.match_absence_reason is None
+        assert any(
+            timing.get("stage") == "capability_index_reconciliation"
+            and timing.get("status") == "recovered"
+            and timing.get("waited") is False
+            for timing in result.stage_timings
+        )
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology",
+        return_value=[],
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_semantic",
+        return_value=[],
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
+    def test_does_not_requery_index_while_background_build_is_still_running(
+        self,
+        mock_capability_state: MagicMock,
+        mock_capability: MagicMock,
+        _mock_semantic: MagicMock,
+        _mock_vontology: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.return_value = []
+        mock_capability_state.side_effect = [
+            {
+                "ready": False,
+                "build_in_progress": True,
+                "last_error": None,
+            },
+            {
+                "ready": False,
+                "build_in_progress": True,
+                "last_error": None,
+            },
+        ]
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows(
+            "Produce the represented work product with retained source evidence",
+            max_results=1,
+        )
+
+        assert mock_capability.call_count == 1
+        assert result.routing_matches == []
+        assert (
+            result.match_absence_reason
+            == "capability_index_wait_timed_out_build_in_progress"
+        )
+        assert any(
+            timing.get("stage") == "capability_index_reconciliation"
+            and timing.get("status") == "still_building"
+            and timing.get("waited") is False
+            for timing in result.stage_timings
+        )
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch(
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")

@@ -1830,7 +1830,7 @@ class TestWorkflowInstanceManager:
         """Active user work is prioritised without reviving the retired controller."""
         manager = WorkflowInstanceManager()
 
-        stale_conversation_instance_id = manager.create_instance(
+        retired_conversation_instance_id = manager.create_instance(
             "#V#conversation_turn_execution_workflow",
             user_id="user-1",
             org_id="org-1",
@@ -1840,7 +1840,18 @@ class TestWorkflowInstanceManager:
         collection = manager._get_instances_collection()
         assert collection is not None
         collection.update_one(
-            {"instance_id": stale_conversation_instance_id},
+            {"instance_id": retired_conversation_instance_id},
+            {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(days=2)}},
+        )
+        stale_live_conversation_instance_id = manager.create_instance(
+            "#V#tool_calling_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            source_event_type="conversation_turn",
+        )
+        collection.update_one(
+            {"instance_id": stale_live_conversation_instance_id},
             {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(days=2)}},
         )
         background_instance_id = manager.create_instance(
@@ -1858,18 +1869,36 @@ class TestWorkflowInstanceManager:
             source_event_type="conversation_turn",
         )
 
-        claimed = manager.find_and_claim_instance("worker-priority-test")
+        eligible_build = {
+            "capabilities": ["durable_exact_workflow_authority_snapshot.v1"]
+        }
+        claimed = manager.find_and_claim_instance(
+            "worker-priority-test",
+            worker_build_identity=eligible_build,
+        )
 
         assert claimed is not None
         assert claimed.instance_id == conversation_instance_id
         assert claimed.workflow_id == "#V#chat_assistant_workflow"
 
-        second_claim = manager.find_and_claim_instance("worker-priority-test-2")
+        second_claim = manager.find_and_claim_instance(
+            "worker-priority-test-2",
+            worker_build_identity=eligible_build,
+        )
 
         assert second_claim is not None
-        assert second_claim.instance_id == background_instance_id
-        assert second_claim.workflow_id == "#V#episode_evaluation_workflow"
-        retired = manager.get_instance(stale_conversation_instance_id)
+        assert second_claim.instance_id == stale_live_conversation_instance_id
+        assert second_claim.workflow_id == "#V#tool_calling_workflow"
+
+        third_claim = manager.find_and_claim_instance(
+            "worker-priority-test-3",
+            worker_build_identity=eligible_build,
+        )
+
+        assert third_claim is not None
+        assert third_claim.instance_id == background_instance_id
+        assert third_claim.workflow_id == "#V#episode_evaluation_workflow"
+        retired = manager.get_instance(retired_conversation_instance_id)
         assert retired is not None
         assert retired.status == WorkflowInstanceStatus.PENDING
 

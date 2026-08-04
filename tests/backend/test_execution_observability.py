@@ -49,6 +49,33 @@ def test_await_workflow_terminal_state_retries_transient_get_instance() -> None:
     assert manager.get_instance.call_count == 2
 
 
+def test_await_workflow_terminal_state_does_not_sleep_past_observation_deadline(
+) -> None:
+    manager = SimpleNamespace(
+        get_instance=MagicMock(return_value=SimpleNamespace(status="running"))
+    )
+
+    with (
+        patch(
+            "src.backend.workflows.durable.execution_observability.monotonic",
+            side_effect=[0.0, 0.0, 90.0],
+        ),
+        patch(
+            "src.backend.workflows.durable.execution_observability.sleep"
+        ) as sleep_mock,
+    ):
+        result = await_workflow_terminal_state(
+            manager,
+            "instance-1",
+            timeout_seconds=90,
+            poll_interval_seconds=1000,
+        )
+
+    assert result.timed_out is True
+    assert manager.get_instance.call_count == 2
+    sleep_mock.assert_called_once_with(90.0)
+
+
 def test_trace_summary_surfaces_terminal_outcome_receipt_from_action_outputs() -> None:
     receipt = {
         "schema_version": "terminal_outcome_receipt.v1",

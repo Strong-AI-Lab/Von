@@ -1179,26 +1179,42 @@ function startHealthPolling() {
       const commitTimestamp = (typeof versionDetails.git_commit_timestamp === 'string')
         ? versionDetails.git_commit_timestamp.trim()
         : '';
-      const parsedCommitTime = commitTimestamp ? new Date(commitTimestamp) : null;
-      const compactCommitTime = parsedCommitTime && !Number.isNaN(parsedCommitTime.getTime())
-        ? new Intl.DateTimeFormat('en-NZ', {
-          day: '2-digit', month: 'short', year: '2-digit',
-          hour: '2-digit', minute: '2-digit', hour12: false
-        }).format(parsedCommitTime).replace(',', '')
-        : '';
-      const dirtyMarker = versionDetails.git_dirty === true ? '*' : '';
-      const compactBuildId = shortCommit ? `${shortCommit.slice(0, 8)}${dirtyMarker}` : version;
+      const formatCompactBuildTime = (timestamp) => {
+        const parsedTime = timestamp ? new Date(timestamp) : null;
+        return parsedTime && !Number.isNaN(parsedTime.getTime())
+          ? new Intl.DateTimeFormat('en-NZ', {
+            day: '2-digit', month: 'short', year: '2-digit',
+            hour: '2-digit', minute: '2-digit', hour12: false
+          }).format(parsedTime).replace(',', '')
+          : '';
+      };
+      const compactCommitTime = formatCompactBuildTime(commitTimestamp);
+      const compactRuntimeStart = formatCompactBuildTime(newStart);
+      const isExperimentalBuild = versionDetails.git_dirty === true;
+      const compactBuildId = shortCommit ? shortCommit.slice(0, 8) : version;
+      const compactBaseBuildId = shortCommit ? `base ${shortCommit.slice(0, 8)}` : '';
 
       if (buildInfo && buildSpan) {
-        const buildText = [compactBuildId, compactCommitTime].filter(Boolean).join(' · ');
+        const buildText = isExperimentalBuild
+          ? ['Experimental', compactRuntimeStart, compactBaseBuildId].filter(Boolean).join(' · ')
+          : [compactBuildId, compactCommitTime].filter(Boolean).join(' · ');
         buildSpan.textContent = buildText;
         buildInfo.hidden = !buildText;
-        buildInfo.title = [
-          version ? `Build ${version}` : null,
-          shortCommit ? `Commit ${shortCommit}` : null,
-          commitTimestamp ? `Commit time ${commitTimestamp}` : null,
-          versionDetails.git_dirty === true ? 'Working tree dirty' : null
-        ].filter(Boolean).join(' | ');
+        buildInfo.title = (isExperimentalBuild
+          ? [
+            'Experimental runtime',
+            newStart ? `Runtime start ${newStart}` : null,
+            version ? `Build version ${version}` : null,
+            versionDetails.git_branch ? `Branch ${versionDetails.git_branch}` : null,
+            shortCommit ? `Base commit ${shortCommit}` : null,
+            commitTimestamp ? `Base commit time ${commitTimestamp}` : null,
+            'Working tree dirty'
+          ]
+          : [
+            version ? `Build ${version}` : null,
+            shortCommit ? `Commit ${shortCommit}` : null,
+            commitTimestamp ? `Commit time ${commitTimestamp}` : null
+          ]).filter(Boolean).join(' | ');
       }
 
       if (localIpSpan) {

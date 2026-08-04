@@ -1658,31 +1658,30 @@ class WorkflowInstanceManager:
             "#V#chat_assistant_workflow",
             "#V#tool_calling_workflow",
         ]
+        # Age controls priority only. It must never make authorised durable work
+        # unclaimable: an old pending turn is recovery work, not expired work.
         try:
-            conversation_turn_max_age_seconds = max(
+            conversation_turn_priority_age_seconds = max(
                 0.0,
                 float(
                     os.getenv(
-                        "VON_DURABLE_CONVERSATION_TURN_AUTO_CLAIM_MAX_AGE_SECONDS",
-                        "86400",
+                        "VON_DURABLE_CONVERSATION_TURN_PRIORITY_AGE_SECONDS",
+                        os.getenv(
+                            "VON_DURABLE_CONVERSATION_TURN_AUTO_CLAIM_MAX_AGE_SECONDS",
+                            "86400",
+                        ),
                     )
                 ),
             )
         except (TypeError, ValueError):
-            conversation_turn_max_age_seconds = 86400.0
+            conversation_turn_priority_age_seconds = 86400.0
         recent_conversation_cutoff = now - timedelta(
-            seconds=conversation_turn_max_age_seconds
+            seconds=conversation_turn_priority_age_seconds
         )
         conversation_turn_filter: dict[str, Any] = {
             "$or": [
                 {"source_event_type": "conversation_turn"},
                 {"workflow_id": {"$in": priority_workflow_ids}},
-            ]
-        }
-        stale_conversation_turn_filter: dict[str, Any] = {
-            "$and": [
-                conversation_turn_filter,
-                {"created_at": {"$lt": recent_conversation_cutoff}},
             ]
         }
 
@@ -1754,13 +1753,8 @@ class WorkflowInstanceManager:
             return None
 
         if doc is None:
-            general_query = query
-            if not workflow_ids:
-                general_query = {
-                    "$and": [query, {"$nor": [stale_conversation_turn_filter]}]
-                }
             doc = _claim_matching_instance(
-                general_query,
+                query,
                 claim_sort=[("created_at", 1), ("instance_id", 1)],
             )
 

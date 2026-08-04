@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
@@ -1226,6 +1228,170 @@ def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     assert detail.get("inputs") == {"seed": "value"}
 
 
+def test_workflow_get_instance_can_await_without_restarting_instance(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "inputs": {"seed": "value"},
+        },
+    ).payload
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+    awaited: dict[str, object] = {}
+
+    def _await_existing(
+        awaited_manager,
+        awaited_instance_id,
+        *,
+        timeout_seconds,
+        poll_interval_seconds,
+    ):
+        awaited.update(
+            {
+                "manager": awaited_manager,
+                "instance_id": awaited_instance_id,
+                "timeout_seconds": timeout_seconds,
+                "poll_interval_seconds": poll_interval_seconds,
+            }
+        )
+        instance = awaited_manager.get_instance(awaited_instance_id)
+        assert instance is not None
+        instance.status = WorkflowInstanceStatus.COMPLETED
+        instance.outputs = {"reused": True}
+        return SimpleNamespace(instance=instance, poll_count=4, timed_out=False)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.execution_observability.await_workflow_terminal_state",
+        _await_existing,
+    )
+
+    detail = gateway.invoke(
+        "workflow_get_instance",
+        {
+            "instance_id": instance_id,
+            "await_terminal": True,
+            "timeout_seconds": 100,
+            "poll_interval_seconds": 0.5,
+        },
+    ).payload
+
+    assert manager._counter == 1
+    assert awaited == {
+        "manager": manager,
+        "instance_id": instance_id,
+        "timeout_seconds": 90.0,
+        "poll_interval_seconds": 0.5,
+    }
+    assert detail.get("success") is True
+    assert detail.get("status") == "completed"
+    assert detail.get("outputs") == {"reused": True}
+    assert detail.get("await_terminal") is True
+    assert detail.get("poll_count") == 4
+    assert detail.get("timed_out") is False
+
+
+def test_workflow_get_instance_wait_expiry_returns_current_state_without_restart(
+    monkeypatch,
+):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+        },
+    ).payload
+    instance_id = created["instance_id"]
+    awaited: list[dict[str, object]] = []
+
+    def _await_existing(
+        awaited_manager,
+        awaited_instance_id,
+        *,
+        timeout_seconds,
+        poll_interval_seconds,
+    ):
+        awaited.append(
+            {
+                "manager": awaited_manager,
+                "instance_id": awaited_instance_id,
+                "timeout_seconds": timeout_seconds,
+                "poll_interval_seconds": poll_interval_seconds,
+            }
+        )
+        return SimpleNamespace(
+            instance=awaited_manager.get_instance(awaited_instance_id),
+            poll_count=3,
+            timed_out=True,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.execution_observability.await_workflow_terminal_state",
+        _await_existing,
+    )
+
+    detail = gateway.invoke(
+        "workflow_get_instance",
+        {
+            "instance_id": instance_id,
+            "await_terminal": True,
+            "timeout_seconds": 0,
+            "poll_interval_seconds": 0,
+        },
+    ).payload
+
+    assert manager._counter == 1
+    assert awaited == [
+        {
+            "manager": manager,
+            "instance_id": instance_id,
+            "timeout_seconds": 0.0,
+            "poll_interval_seconds": 0.05,
+        }
+    ]
+    assert detail.get("success") is True
+    assert detail.get("status") == "pending"
+    assert detail.get("poll_count") == 3
+    assert detail.get("timed_out") is True
+
+    for field, value in (
+        ("timeout_seconds", float("inf")),
+        ("poll_interval_seconds", float("nan")),
+    ):
+        invalid = gateway.invoke(
+            "workflow_get_instance",
+            {
+                "instance_id": instance_id,
+                "await_terminal": True,
+                field: value,
+            },
+        ).payload
+        assert invalid.get("success") is False
+        assert invalid.get("error_code") == "invalid_parameter"
+        assert invalid.get("error_details") == {"invalid": [field]}
+        assert invalid.get("status") == "not_started"
+        assert invalid.get("mutation_outcome") == "not_started"
+        assert invalid.get("changed") is False
+    assert len(awaited) == 1
+
+
 def test_workflow_get_instance_exposes_failed_outputs(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
@@ -1304,6 +1470,14 @@ def test_workflow_instance_tools_are_exactly_scoped_to_preexisting_actor(
     own_id = own["instance_id"]
     foreign_id = foreign["instance_id"]
 
+    def _unexpected_wait(*_args, **_kwargs):
+        raise AssertionError("an unauthorised instance must be rejected before waiting")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.execution_observability.await_workflow_terminal_state",
+        _unexpected_wait,
+    )
+
     with access_control.override_current_actor(
         user_concept_id="#V#shared_user",
         organisation_concept_id="#V#own_org",
@@ -1312,7 +1486,7 @@ def test_workflow_instance_tools_are_exactly_scoped_to_preexisting_actor(
         denied = [
             gateway.invoke(
                 "workflow_get_instance",
-                {"instance_id": foreign_id},
+                {"instance_id": foreign_id, "await_terminal": True},
             ).payload,
             gateway.invoke(
                 "workflow_cancel_instance",
@@ -1329,6 +1503,57 @@ def test_workflow_instance_tools_are_exactly_scoped_to_preexisting_actor(
     assert all(result["success"] is False for result in denied)
     assert all(result["error_code"] == "not_found" for result in denied)
     assert manager.instances[foreign_id].status == WorkflowInstanceStatus.PENDING
+
+
+def test_workflow_get_instance_revalidates_actor_after_wait(monkeypatch):
+    from src.backend.security import access_control
+
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+    own = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#shared_user",
+            "org_id": "#V#own_org",
+            "namespace": "#V#shared_user@own_org",
+        },
+    ).payload
+    own_id = own["instance_id"]
+
+    def _await_then_change_actor(
+        awaited_manager,
+        awaited_instance_id,
+        *,
+        timeout_seconds,
+        poll_interval_seconds,
+    ):
+        instance = awaited_manager.get_instance(awaited_instance_id)
+        instance.org_id = "#V#foreign_org"
+        instance.namespace = "#V#shared_user@foreign_org"
+        return SimpleNamespace(instance=instance, poll_count=1, timed_out=False)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.execution_observability.await_workflow_terminal_state",
+        _await_then_change_actor,
+    )
+
+    with access_control.override_current_actor(
+        user_concept_id="#V#shared_user",
+        organisation_concept_id="#V#own_org",
+    ):
+        detail = gateway.invoke(
+            "workflow_get_instance",
+            {"instance_id": own_id, "await_terminal": True},
+        ).payload
+
+    assert detail.get("success") is False
+    assert detail.get("error_code") == "not_found"
 
 
 def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
@@ -1760,7 +1985,7 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
             "namespace": "#V#user@org",
             "inputs": {"fixture_id": "fixture-1"},
             "await_terminal": "yes",
-            "timeout_seconds": 5,
+            "timeout_seconds": 500,
             "poll_interval_seconds": 0,
             "include_step_result_envelopes": "yes",
             "include_trace": 1,
@@ -1771,6 +1996,7 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
     assert payload.get("success") is True
     assert execution.get("instance_id") == "#V#wf_instance_1"
     assert execution.get("await_terminal") is True
+    assert execution.get("timeout_seconds") == 90.0
     assert execution.get("final_status") == "completed"
     assert execution.get("poll_count") == 1
     assert execution.get("timed_out") is False
@@ -1804,6 +2030,49 @@ def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
     assert boolean_fields["include_step_result_envelopes"]["raw_type"] == "str"
     assert boolean_fields["include_trace"]["normalised"] is True
     assert boolean_fields["include_trace"]["raw_type"] == "int"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("timeout_seconds", float("inf")),
+        ("timeout_seconds", float("nan")),
+        ("poll_interval_seconds", float("-inf")),
+    ],
+)
+def test_workflow_execute_rejects_nonfinite_wait_before_submission(
+    monkeypatch,
+    field_name: str,
+    invalid_value: float,
+):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    payload = gateway.invoke(
+        "workflow_execute",
+        {
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+            "await_terminal": True,
+            field_name: invalid_value,
+        },
+    ).payload
+
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "invalid_parameter"
+    assert payload.get("error_details") == {"invalid": [field_name]}
+    assert payload.get("status") == "not_started"
+    assert payload.get("effect_status") == "not_started"
+    assert payload.get("mutation_outcome") == "not_started"
+    assert payload.get("changed") is False
+    assert manager._counter == 0
 
 
 def test_workflow_execute_outer_timeout_preserves_durable_instance_receipt(

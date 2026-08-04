@@ -3,7 +3,7 @@
 The engine deliberately owns only the mechanics needed for an adaptive
 model/tool exchange: trusted actor projection, capability discovery,
 provider-native call/result correlation, bounded evidence hydration, elapsed
-deadlines, and truthful terminal results.  It does not infer required tools,
+advisories, and truthful terminal results.  It does not infer required tools,
 select a workflow, prescribe a tool order, or judge whether the user's task was
 semantically complete.
 """
@@ -34,7 +34,9 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     LLMContinuation,
     LLMResponse,
     StructuredToolContextLimitError,
+    StructuredToolTransportError,
     ToolCall,
+    ToolCallError,
     ToolDefinition,
     ToolResult,
 )
@@ -46,6 +48,10 @@ from src.backend.services.turn_evidence_store import (
     EVIDENCE_SLICE_SCHEMA_VERSION,
     TrustedTurnScope,
     TurnEvidenceStore,
+)
+from src.backend.workflows.conversation_turn_llm_timeout import (
+    coerce_conversation_turn_llm_timeout_sec,
+    default_conversation_turn_llm_timeout_sec,
 )
 
 _CAPABILITY_TOOL_NAME = "turn_capabilities"
@@ -1018,6 +1024,51 @@ def _request_fingerprint(
     return hashlib.sha256(serialised).hexdigest(), len(serialised)
 
 
+def _is_transient_model_request_liveness_failure(exc: BaseException) -> bool:
+    """Recognise request timeouts without retrying semantic/provider failures."""
+
+    timeout_class_names = {
+        "timeout",
+        "timeouterror",
+        "timeoutexception",
+        "apitimeouterror",
+        "connecttimeout",
+        "readtimeout",
+        "writetimeout",
+        "pooltimeout",
+        "deadlineexceeded",
+    }
+    timeout_messages = (
+        "request timed out",
+        "request timeout",
+        "request deadline exhausted",
+        "deadline exceeded",
+        "deadline was exceeded",
+    )
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        # These errors describe a known capability, context, or correlation
+        # failure. They need their own recovery semantics, even when a nested
+        # provider exception happens to mention a deadline.
+        if isinstance(current, StructuredToolTransportError):
+            return False
+        class_name = re.sub(
+            r"[^a-z0-9]",
+            "",
+            type(current).__name__.lower(),
+        )
+        if isinstance(current, TimeoutError) or class_name in timeout_class_names:
+            return True
+        if isinstance(current, ToolCallError):
+            message = str(current).strip().lower()
+            if any(marker in message for marker in timeout_messages):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _evidence_context_message(
     evidence_index: Sequence[Mapping[str, Any]],
     *,
@@ -1549,7 +1600,7 @@ def _scope_message(
     delegated_count: int,
     final_synthesis: bool,
     answer_only: bool = False,
-    remaining_effect_capable_seconds: float = 0.0,
+    elapsed_time_advisories: Sequence[str] | None = None,
     conversation_id: str | None = None,
     conversation_situation: str | None = None,
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
@@ -1567,8 +1618,11 @@ def _scope_message(
         "capabilities.\n"
         "- Effect boundary: only explicitly marked bounded effects are available; "
         "all other writes are unavailable.\n"
-        "- Remaining effect-capable window before the protected final-answer "
-        f"reserve: {max(0.0, remaining_effect_capable_seconds):.3f} seconds.\n"
+        "- Elapsed-time budgets are advisory. Crossing one does not remove "
+        "capabilities or decide that the task is complete; use the current "
+        "evidence and progress to decide whether to continue, wait, recover, "
+        "or answer. Individual model and capability calls retain hard liveness "
+        "bounds.\n"
         f"- {_INVOKE_TOOL_NAME} invokes any named delegated capability.\n"
         f"- {_EVIDENCE_INDEX_TOOL_NAME} pages every evidence handle recorded "
         "for this turn.\n"
@@ -1601,6 +1655,12 @@ def _scope_message(
         "permission when authority is missing or materially consequential "
         "alternatives genuinely require the user's choice."
     )
+    if elapsed_time_advisories:
+        message += "\n- Elapsed-time advisory notices:\n" + "\n".join(
+            f"  - {str(notice).strip()}"
+            for notice in elapsed_time_advisories
+            if str(notice).strip()
+        )
     situation_enabled = bool(
         (isinstance(conversation_id, str) and conversation_id.strip())
         or conversation_situation is not None
@@ -1680,9 +1740,10 @@ def _scope_message(
         )
     elif final_synthesis:
         message += (
-            "\n- The research deadline has ended. Answer now from the evidence "
-            "already obtained. You may list or hydrate existing evidence, but "
-            "do not request another external capability."
+            "\n- The turn entered bounded evidence synthesis after a concrete "
+            "context or correlation recovery. Answer from the evidence already "
+            "obtained. You may list or hydrate existing evidence, but do not "
+            "request another external capability."
         )
     return message
 
@@ -2850,9 +2911,10 @@ def _effect_requires_turn_finality(
     """Keep operational workflow bookkeeping from becoming semantic failure.
 
     Represented workflows always use effect-grade dispatch because invoking one
-    may create or advance a durable instance. An attempt rejected before any
-    instance was created and reporting known no change, however, has no effect
-    whose finality can invalidate a successfully recovered answer.
+    may create or advance a durable instance. An input-schema rejection never
+    reaches a handler, and a represented-workflow attempt rejected before any
+    instance was created reports known no change; neither has an effect whose
+    finality can invalidate a successfully recovered answer.
     """
 
     instance_id = (
@@ -2860,6 +2922,16 @@ def _effect_requires_turn_finality(
         if isinstance(raw_payload, Mapping)
         else ""
     )
+    if (
+        effect_status == "not_started"
+        and changed is False
+        and isinstance(raw_payload, Mapping)
+        and raw_payload.get("error_code") == "capability_arguments_invalid"
+    ):
+        # Input validation runs before the handler.  The rejected call is useful
+        # feedback to the model, but there is no effect whose finality can poison
+        # a corrected invocation later in the same turn.
+        return False
     if capability_kind != "represented_workflow":
         return True
     return not (
@@ -3093,9 +3165,21 @@ def execute_adaptive_turn(
         requested_final_answer_reserve,
         final_reserve,
     )
-    turn_deadline = started + turn_budget
-    research_deadline = turn_deadline - final_reserve
-    final_answer_deadline = turn_deadline - final_answer_reserve
+    turn_advisory_at = started + turn_budget
+    research_advisory_at = turn_advisory_at - final_reserve
+    answer_advisory_at = turn_advisory_at - final_answer_reserve
+
+    raw_model_call_timeout = None
+    if isinstance(model_parameters, Mapping):
+        raw_model_call_timeout = model_parameters.get("request_timeout_seconds")
+        if raw_model_call_timeout is None:
+            raw_model_call_timeout = model_parameters.get("timeout_seconds")
+    model_call_timeout = (
+        coerce_conversation_turn_llm_timeout_sec(raw_model_call_timeout)
+        or default_conversation_turn_llm_timeout_sec(
+            os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
+        )
+    )
 
     scope = TrustedTurnScope(
         user_concept_id=user_concept_id,
@@ -3153,13 +3237,18 @@ def execute_adaptive_turn(
                 final_answer_reserve_seconds is not None
                 and requested_final_answer_reserve == 0.0
             ),
+            "enforcement": "advisory",
+            "model_call_liveness_timeout_seconds": model_call_timeout,
         }
     ]
     usage_totals: dict[str, float] = {}
     seen_request_digests: set[str] = set()
+    model_liveness_recovery_used = False
     last_partial_text = ""
     final_synthesis = False
     answer_only = False
+    pending_elapsed_time_advisories: list[str] = []
+    elapsed_time_advisory_kinds: set[str] = set()
     final_context_base: list[dict[str, Any]] | None = None
     terminal_status = "completed"
     evidence_views: list[dict[str, Any]] = []
@@ -3289,7 +3378,10 @@ def execute_adaptive_turn(
         effect_status: str,
         changed: bool | None,
         turn_finality_required: bool = True,
+        capability_kind: str | None = None,
         execution_id: str | None = None,
+        instance_id: str | None = None,
+        workflow_id: str | None = None,
         late_observation: Mapping[str, Any] | None = None,
         evidence_id: str | None = None,
     ) -> None:
@@ -3303,7 +3395,10 @@ def execute_adaptive_turn(
                 "effect_status": effect_status,
                 "changed": changed,
                 "turn_finality_required": turn_finality_required,
+                "capability_kind": capability_kind,
                 "execution_id": execution_id,
+                "instance_id": instance_id,
+                "workflow_id": workflow_id,
                 "evidence_id": evidence_id,
             }
             if late_observation is not None:
@@ -3323,6 +3418,14 @@ def execute_adaptive_turn(
                     if key in late_observation
                 }
             if existing is not None:
+                for identity_field in (
+                    "capability_kind",
+                    "execution_id",
+                    "instance_id",
+                    "workflow_id",
+                ):
+                    if not state.get(identity_field) and existing.get(identity_field):
+                        state[identity_field] = existing[identity_field]
                 for recovery_field in (
                     "recovered_by_effect_id",
                     "recovery_status",
@@ -3331,6 +3434,67 @@ def execute_adaptive_turn(
                         state[recovery_field] = existing[recovery_field]
             effect_states[effect_id] = state
             effect_state_generation += 1
+
+    def reconcile_workflow_instance_readback(
+        *,
+        capability_name: str,
+        payload: Any,
+        evidence_id: str | None,
+    ) -> None:
+        """Resolve an earlier workflow effect from an exact canonical instance read."""
+
+        nonlocal effect_state_generation
+        if capability_name != "workflow_get_instance" or not isinstance(
+            payload,
+            Mapping,
+        ):
+            return
+        if payload.get("success") is False:
+            return
+        instance_id = str(payload.get("instance_id") or "").strip()
+        workflow_id = str(payload.get("workflow_id") or "").strip()
+        terminal_status = str(payload.get("status") or "").strip().lower()
+        if not instance_id or terminal_status not in {
+            "completed",
+            "succeeded",
+            "success",
+            "failed",
+            "cancelled",
+            "canceled",
+        }:
+            return
+        reconciled_status = (
+            "succeeded"
+            if terminal_status in {"completed", "succeeded", "success"}
+            else "failed"
+        )
+        with effect_state_lock:
+            for state in effect_states.values():
+                if state.get("capability_kind") != "represented_workflow":
+                    continue
+                if state.get("instance_id") != instance_id:
+                    continue
+                state_workflow_id = str(state.get("workflow_id") or "").strip()
+                if workflow_id and state_workflow_id and workflow_id != state_workflow_id:
+                    continue
+                if state.get("effect_status") == reconciled_status and int(
+                    state.get("phase") or 0
+                ) >= 2:
+                    continue
+                state.update(
+                    {
+                        "phase": 2,
+                        "effect_status": reconciled_status,
+                        "canonical_readback": {
+                            "capability": capability_name,
+                            "instance_id": instance_id,
+                            "workflow_id": workflow_id or state_workflow_id or None,
+                            "status": terminal_status,
+                            "evidence_id": evidence_id,
+                        },
+                    }
+                )
+                effect_state_generation += 1
 
     def persist_effect_observation_phase(
         *,
@@ -3437,7 +3601,18 @@ def execute_adaptive_turn(
                 effect_status=effect_status,
                 changed=changed,
                 turn_finality_required=turn_finality_required,
+                capability_kind=capability_kind,
                 execution_id=execution_id,
+                instance_id=(
+                    str(payload.get("instance_id") or "").strip() or None
+                    if isinstance(payload, Mapping)
+                    else None
+                ),
+                workflow_id=(
+                    str(payload.get("workflow_id") or "").strip() or None
+                    if isinstance(payload, Mapping)
+                    else None
+                ),
                 late_observation=observed,
                 evidence_id=envelope.evidence_id,
             )
@@ -3536,6 +3711,10 @@ def execute_adaptive_turn(
                     )
                 if isinstance(state.get("late_observation"), Mapping):
                     invocation["late_completion"] = dict(state["late_observation"])
+                if isinstance(state.get("canonical_readback"), Mapping):
+                    invocation["canonical_readback"] = dict(
+                        state["canonical_readback"]
+                    )
             reconciled_invocations.append(invocation)
 
         relevant_effects = [
@@ -3674,6 +3853,76 @@ def execute_adaptive_turn(
                 return ""
             return last_partial_text
 
+    def note_elapsed_time_advisory(
+        *,
+        kind: str,
+        threshold_seconds: float,
+        notice: str,
+    ) -> None:
+        """Expose an elapsed planning threshold without changing capability."""
+
+        if kind in elapsed_time_advisory_kinds:
+            return
+        elapsed_time_advisory_kinds.add(kind)
+        pending_elapsed_time_advisories.append(notice)
+        aux_calls.append(
+            {
+                "type": "adaptive_turn_elapsed_time_advisory",
+                "schema_version": "adaptive_turn_elapsed_time_advisory.v1",
+                "advisory_kind": kind,
+                "threshold_seconds": threshold_seconds,
+                "elapsed_seconds": max(0.0, clock() - started),
+                "capabilities_removed": False,
+                "action": "model_decides_continue_wait_recover_or_answer",
+            }
+        )
+        _emit(
+            progress_tracker,
+            {
+                "status": "thinking",
+                "stage": "elapsed_time_advisory",
+                "phase": "elapsed_time_advisory",
+                "phase_label": "Time advisory",
+                "result_summary": notice,
+            },
+        )
+
+    def note_crossed_elapsed_time_advisories(now: float) -> None:
+        """Record every planning threshold crossed since the last observation."""
+
+        if now >= research_advisory_at:
+            note_elapsed_time_advisory(
+                kind="research_interval",
+                threshold_seconds=turn_budget - final_reserve,
+                notice=(
+                    "The planned research interval has elapsed. Work is still "
+                    "authorised and capabilities remain available; decide from "
+                    "the current progress whether more evidence is useful or it "
+                    "is time to answer."
+                ),
+            )
+        if final_answer_reserve > 0.0 and now >= answer_advisory_at:
+            note_elapsed_time_advisory(
+                kind="answer_reserve",
+                threshold_seconds=turn_budget - final_answer_reserve,
+                notice=(
+                    "The planned final-answer reserve has begun. This is an "
+                    "advisory, not a forced synthesis checkpoint; decide whether "
+                    "to continue, wait, recover, or answer."
+                ),
+            )
+        if now >= turn_advisory_at:
+            note_elapsed_time_advisory(
+                kind="turn_budget",
+                threshold_seconds=turn_budget,
+                notice=(
+                    "The planned turn budget has elapsed. Work is continuing "
+                    "under per-call liveness bounds; decide whether further "
+                    "progress is worthwhile, whether to wait or recover, or "
+                    "whether to answer now."
+                ),
+            )
+
     def enter_final_synthesis() -> None:
         nonlocal final_synthesis
         nonlocal answer_only
@@ -3741,7 +3990,7 @@ def execute_adaptive_turn(
                 ),
                 "remaining_ms": max(
                     0.0,
-                    (turn_deadline - clock()) * 1000.0,
+                    (turn_advisory_at - clock()) * 1000.0,
                 ),
             }
         )
@@ -3749,20 +3998,7 @@ def execute_adaptive_turn(
     while True:
         _check_cancellation(progress_tracker)
         now = clock()
-        if not final_synthesis and now >= research_deadline:
-            if now >= final_answer_deadline:
-                enter_answer_only("direct_final_entry")
-            else:
-                enter_final_synthesis()
-        elif final_synthesis and not answer_only and now >= final_answer_deadline:
-            enter_answer_only("deadline_reached")
-        if now >= turn_deadline:
-            terminal_status = "turn_deadline_exceeded"
-            text = last_partial_text.strip() or (
-                "I could not produce a useful response before this turn's "
-                "elapsed-time deadline."
-            )
-            return finish(text, status=terminal_status)
+        note_crossed_elapsed_time_advisories(now)
 
         stage = "final_synthesis" if final_synthesis else "adaptive_research"
         mode = (
@@ -3798,16 +4034,9 @@ def execute_adaptive_turn(
         )
         seen_request_digests.add(request_digest)
         request_started = clock()
-        stage_deadline = (
-            turn_deadline
-            if answer_only
-            else (final_answer_deadline if final_synthesis else research_deadline)
-        )
         effective_params = dict(model_parameters or {})
-        effective_params["request_timeout_seconds"] = max(
-            0.001,
-            stage_deadline - request_started,
-        )
+        effective_params.pop("timeout_seconds", None)
+        effective_params["request_timeout_seconds"] = model_call_timeout
         with effect_state_lock:
             request_effect_generation = effect_state_generation
         request_tools = (
@@ -3815,29 +4044,27 @@ def execute_adaptive_turn(
             if answer_only
             else (final_synthesis_tools if final_synthesis else available_tools)
         )
+        turn_system_message = _scope_message(
+            scope,
+            delegated_count=(
+                len(delegated_names) + len(workflow_capabilities_by_name)
+            ),
+            final_synthesis=final_synthesis,
+            answer_only=answer_only,
+            elapsed_time_advisories=tuple(pending_elapsed_time_advisories),
+            conversation_id=conversation_id,
+            conversation_situation=conversation_situation,
+            conversation_observations=conversation_observations,
+            conversation_observation_state=conversation_observation_state,
+        )
+        pending_elapsed_time_advisories.clear()
         try:
             response: LLMResponse = llm_client.generate_with_tools(
                 "" if continuation is not None else prompt,
                 request_tools,
                 context=current_context,
                 model=model,
-                system_message=_scope_message(
-                    scope,
-                    delegated_count=(
-                        len(delegated_names) + len(workflow_capabilities_by_name)
-                    ),
-                    final_synthesis=final_synthesis,
-                    answer_only=answer_only,
-                    remaining_effect_capable_seconds=(
-                        0.0
-                        if final_synthesis or answer_only
-                        else max(0.0, final_answer_deadline - request_started)
-                    ),
-                    conversation_id=conversation_id,
-                    conversation_situation=conversation_situation,
-                    conversation_observations=conversation_observations,
-                    conversation_observation_state=conversation_observation_state,
-                ),
+                system_message=turn_system_message,
                 llm_params=effective_params,
                 **(
                     {
@@ -3950,22 +4177,71 @@ def execute_adaptive_turn(
             if final_synthesis and not answer_only:
                 enter_answer_only("evidence_call_failed")
                 continue
-            if not final_synthesis and call_failed_at >= research_deadline:
-                if call_failed_at >= final_answer_deadline:
-                    enter_answer_only("direct_final_entry")
+            if not final_synthesis and _is_transient_model_request_liveness_failure(
+                exc
+            ):
+                if model_liveness_recovery_used:
+                    aux_calls.append(
+                        {
+                            "type": "adaptive_turn_model_liveness_recovery",
+                            "before_digest": request_digest,
+                            "after_digest": None,
+                            "before_bytes": request_size,
+                            "after_bytes": None,
+                            "changed": False,
+                            "reason": "single_fresh_context_retry_already_used",
+                            "error": str(exc),
+                            "error_class": type(exc).__name__,
+                        }
+                    )
                 else:
-                    enter_final_synthesis()
-                aux_calls.append(
-                    {
-                        "type": "adaptive_turn_research_deadline_recovery",
-                        "schema_version": (
-                            "adaptive_turn_research_deadline_recovery.v1"
-                        ),
-                        "failed_call_error_class": type(exc).__name__,
-                        "action": "fresh_final_synthesis_from_available_evidence",
-                    }
-                )
-                continue
+                    fresh_context = _compact_context_after_limit(
+                        prompt=prompt,
+                        context=current_context,
+                        evidence_index=evidence_store.index(),
+                        before_size=request_size,
+                        evidence_views=evidence_views,
+                    )
+                    after_digest: str | None = None
+                    after_size: int | None = None
+                    changed = False
+                    reason = "faithful_evidence_reference_did_not_fit"
+                    if fresh_context is not None:
+                        after_digest, after_size = _request_fingerprint(
+                            prompt=prompt,
+                            context=fresh_context,
+                            continuation=None,
+                            tool_results=(),
+                        )
+                        changed = (
+                            after_digest != request_digest
+                            and after_size < request_size
+                            and after_digest not in seen_request_digests
+                        )
+                        reason = (
+                            "fresh_smaller_faithful_context"
+                            if changed
+                            else "no_smaller_faithful_context"
+                        )
+                    aux_calls.append(
+                        {
+                            "type": "adaptive_turn_model_liveness_recovery",
+                            "before_digest": request_digest,
+                            "after_digest": after_digest,
+                            "before_bytes": request_size,
+                            "after_bytes": after_size,
+                            "changed": changed,
+                            "reason": reason,
+                            "error": str(exc),
+                            "error_class": type(exc).__name__,
+                        }
+                    )
+                    if changed and fresh_context is not None:
+                        model_liveness_recovery_used = True
+                        current_context = fresh_context
+                        continuation = None
+                        pending_results = []
+                        continue
             terminal_status = "model_error"
             text = last_partial_text.strip() or (
                 "I could not complete the request because the model call failed: "
@@ -3975,57 +4251,7 @@ def execute_adaptive_turn(
 
         response_received_at = clock()
         _check_cancellation(progress_tracker)
-        if response_received_at >= stage_deadline:
-            _usage_add(usage_totals, response.usage)
-            llm_calls.append(
-                {
-                    "type": "adaptive_turn_model_call",
-                    "stage": stage,
-                    "mode": mode,
-                    "model": response.model or model,
-                    "request_timeout_seconds": effective_params[
-                        "request_timeout_seconds"
-                    ],
-                    "duration_ms": max(
-                        0.0,
-                        (response_received_at - request_started) * 1000.0,
-                    ),
-                    "usage": dict(response.usage) if response.usage else None,
-                    "status": "late_result_discarded",
-                    "success": False,
-                    "transport": dict(response.transport_metadata),
-                    "tool_call_count": len(response.tool_calls),
-                }
-            )
-            aux_calls.append(
-                {
-                    "type": "adaptive_turn_late_model_result",
-                    "schema_version": "adaptive_turn_late_model_result.v1",
-                    "stage": stage,
-                    "mode": mode,
-                    "late_result_policy": "discard_from_terminal_result",
-                }
-            )
-            if (
-                final_synthesis
-                and not answer_only
-                and response_received_at < turn_deadline
-            ):
-                enter_answer_only("late_evidence_result")
-                continue
-            if answer_only or response_received_at >= turn_deadline:
-                terminal_status = "turn_deadline_exceeded"
-                text = last_partial_text.strip() or (
-                    "I could not produce a useful response before this turn's "
-                    "elapsed-time deadline."
-                )
-                return finish(text, status=terminal_status)
-            if response_received_at >= final_answer_deadline:
-                enter_answer_only("direct_final_entry")
-            else:
-                enter_final_synthesis()
-            continue
-
+        note_crossed_elapsed_time_advisories(response_received_at)
         call_duration_ms = max(
             0.0,
             (response_received_at - request_started) * 1000.0,
@@ -4051,35 +4277,6 @@ def execute_adaptive_turn(
             last_partial_text = response.text_response.strip()
             last_partial_effect_generation = request_effect_generation
         calls = list(response.tool_calls)
-        if not final_synthesis and clock() >= research_deadline and calls:
-            if clock() >= final_answer_deadline:
-                enter_answer_only("direct_final_entry")
-            else:
-                enter_final_synthesis()
-            aux_calls.append(
-                {
-                    "type": "adaptive_turn_research_deadline_recovery",
-                    "schema_version": "adaptive_turn_research_deadline_recovery.v1",
-                    "discarded_expired_tool_call_count": len(calls),
-                    "action": "fresh_final_synthesis_from_available_evidence",
-                }
-            )
-            continue
-        if (
-            final_synthesis
-            and not answer_only
-            and clock() >= final_answer_deadline
-            and calls
-        ):
-            aux_calls.append(
-                {
-                    "type": "adaptive_turn_expired_final_evidence_calls",
-                    "schema_version": ("adaptive_turn_expired_final_evidence_calls.v1"),
-                    "discarded_tool_call_count": len(calls),
-                }
-            )
-            enter_answer_only("deadline_reached")
-            continue
         if not calls:
             if response.text_response.strip():
                 return finish(response.text_response.strip())
@@ -4187,10 +4384,7 @@ def execute_adaptive_turn(
                             discover_turn_workflow_capabilities,
                         )
 
-                        remaining_discovery_seconds = max(
-                            0.1,
-                            min(5.0, research_deadline - clock()),
-                        )
+                        remaining_discovery_seconds = 5.0
                         try:
                             requested_workflow_limit = int(
                                 call.payload.get("limit") or 5
@@ -4464,6 +4658,14 @@ def execute_adaptive_turn(
                 )
 
                 try:
+                    workflow_hard_timeout = gateway.get_method_timeout_sec(
+                        "workflow_execute"
+                    )
+                    workflow_maximum_wait_seconds = (
+                        max(0.1, workflow_hard_timeout - 1.0)
+                        if workflow_hard_timeout is not None
+                        else None
+                    )
                     (
                         trusted_arguments,
                         binding_diagnostics,
@@ -4476,17 +4678,21 @@ def execute_adaptive_turn(
                         user_concept_id=scope.user_concept_id,
                         organisation_concept_id=scope.organisation_concept_id,
                         namespace=scope.namespace,
-                        maximum_wait_seconds=max(
-                            0.1,
-                            final_answer_deadline - clock() - 1.0,
-                        ),
+                        maximum_wait_seconds=workflow_maximum_wait_seconds,
                     )
                 except (TypeError, ValueError) as exc:
                     raw_capability_results[index] = _ContainedCapabilityResult(
-                        raw_payload=_error_payload(
-                            "invalid_workflow_capability_arguments",
-                            str(exc),
-                        ),
+                        raw_payload={
+                            **_error_payload(
+                                "invalid_workflow_capability_arguments",
+                                str(exc),
+                            ),
+                            "status": "not_started",
+                            "effect_status": "not_started",
+                            "mutation_outcome": "not_started",
+                            "outcome_finality": "terminal_for_turn",
+                            "changed": False,
+                        },
                         transport_result=None,
                         arguments={},
                         capability_name=capability_name,
@@ -4581,7 +4787,7 @@ def execute_adaptive_turn(
         def invoke_and_contain(
             item: _PreparedCapabilityCall,
             *,
-            deadline_monotonic: float,
+            deadline_monotonic: float | None,
             effect_window_denial: Mapping[str, Any] | None = None,
         ) -> tuple[int, _ContainedCapabilityResult]:
             nonlocal successful_effect_mutation_generation
@@ -4818,6 +5024,14 @@ def execute_adaptive_turn(
                 )
                 if output_invalid and is_effect:
                     raw_payload["mutation_outcome"] = "unknown"
+                elif not output_invalid:
+                    raw_payload.update(
+                        {
+                            "status": "not_started",
+                            "mutation_outcome": "not_started",
+                            "changed": False,
+                        }
+                    )
                 transport_result = None
             except Exception as exc:  # noqa: BLE001
                 raw_payload = _error_payload(
@@ -4965,7 +5179,7 @@ def execute_adaptive_turn(
                     }
                 result_index, contained = invoke_and_contain(
                     item,
-                    deadline_monotonic=final_answer_deadline,
+                    deadline_monotonic=None,
                     effect_window_denial=effect_window_denial,
                 )
                 raw_capability_results[result_index] = contained
@@ -5002,7 +5216,7 @@ def execute_adaptive_turn(
                         context_snapshot.run,
                         invoke_and_contain,
                         item,
-                        deadline_monotonic=research_deadline,
+                        deadline_monotonic=None,
                     )
                     futures.append(future)
                 for future in futures:
@@ -5114,6 +5328,20 @@ def execute_adaptive_turn(
                     status=effect_status or status,
                 )
                 envelope_payload = envelope.to_mapping()
+                if isinstance(raw_payload, Mapping):
+                    try:
+                        from src.backend.services.tool_evidence_projection_service import (
+                            project_tool_payload_for_llm,
+                        )
+
+                        projected_payload = project_tool_payload_for_llm(
+                            canonical_name,
+                            raw_payload,
+                        )
+                    except Exception:  # noqa: BLE001 - projection is advisory
+                        projected_payload = None
+                    if projected_payload is not None:
+                        envelope_payload["projected_payload"] = projected_payload
                 result_target_ids = _effect_result_target_ids(raw_payload)
                 if result_target_ids:
                     envelope_payload["result_target_ids"] = result_target_ids
@@ -5124,6 +5352,7 @@ def execute_adaptive_turn(
                         effect_status=effect_status,
                         changed=changed,
                         turn_finality_required=bool(turn_finality_required),
+                        capability_kind=contained_result.capability_kind,
                         execution_id=(
                             str(
                                 getattr(
@@ -5134,6 +5363,16 @@ def execute_adaptive_turn(
                                 or ""
                             ).strip()
                             or None
+                        ),
+                        instance_id=(
+                            str(raw_payload.get("instance_id") or "").strip() or None
+                            if isinstance(raw_payload, Mapping)
+                            else None
+                        ),
+                        workflow_id=(
+                            str(raw_payload.get("workflow_id") or "").strip() or None
+                            if isinstance(raw_payload, Mapping)
+                            else None
                         ),
                     )
                     remember_recovery_affordance(
@@ -5169,6 +5408,12 @@ def execute_adaptive_turn(
                             receipt_value = raw_payload.get(receipt_key)
                             if isinstance(receipt_value, (str, int, float, bool)):
                                 envelope_payload[receipt_key] = receipt_value
+                else:
+                    reconcile_workflow_instance_readback(
+                        capability_name=canonical_name,
+                        payload=raw_payload,
+                        evidence_id=envelope.evidence_id,
+                    )
                 batch_results[index] = ToolResult(
                     call_id=call.call_id,
                     tool_name=call.tool_name,

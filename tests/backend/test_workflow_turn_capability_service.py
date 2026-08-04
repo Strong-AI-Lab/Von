@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 
 def _capability():
     from src.backend.services.workflow_turn_capability_service import (
@@ -285,6 +287,56 @@ def test_execution_arguments_bind_workflow_and_actor_server_side():
     ]
 
 
+def test_workflow_wait_is_one_bounded_observation_interval():
+    from src.backend.services.workflow_turn_capability_service import (
+        build_workflow_execution_arguments,
+    )
+
+    effective, _diagnostic = build_workflow_execution_arguments(
+        _capability(),
+        {"timeout_seconds": 180},
+        prompt="Process this record.",
+        context=None,
+        request_workflow_launch_inputs=None,
+        user_concept_id="#V#real_user",
+        organisation_concept_id="#V#real_org",
+        namespace="#V#real_user@real_org",
+        maximum_wait_seconds=None,
+    )
+
+    assert effective["timeout_seconds"] == 90
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("timeout_seconds", float("inf")),
+        ("timeout_seconds", float("nan")),
+        ("poll_interval_seconds", float("-inf")),
+    ],
+)
+def test_workflow_wait_rejects_nonfinite_observation_parameters(
+    field_name: str,
+    invalid_value: float,
+):
+    from src.backend.services.workflow_turn_capability_service import (
+        build_workflow_execution_arguments,
+    )
+
+    with pytest.raises(ValueError, match=field_name):
+        build_workflow_execution_arguments(
+            _capability(),
+            {field_name: invalid_value},
+            prompt="Process this record.",
+            context=None,
+            request_workflow_launch_inputs=None,
+            user_concept_id="#V#real_user",
+            organisation_concept_id="#V#real_org",
+            namespace="#V#real_user@real_org",
+            maximum_wait_seconds=None,
+        )
+
+
 def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start():
     from src.backend.services.workflow_turn_capability_service import (
         normalise_workflow_effect_receipt,
@@ -307,6 +359,10 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
             "created_new": True,
             "final_status": "running",
             "timed_out": True,
+            "workflow_execution": {
+                "timeout_seconds": 100.0,
+                "poll_interval_seconds": 0.5,
+            },
         },
         capability=capability,
     )
@@ -352,8 +408,14 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
     assert completed["changed"] is True
     assert partial["effect_status"] == "partial"
     assert partial["recovery_affordances"][0]["arguments"] == {
-        "instance_id": "instance-2"
+        "instance_id": "instance-2",
+        "await_terminal": True,
+        "timeout_seconds": 90.0,
+        "poll_interval_seconds": 0.5,
     }
+    assert partial["recovery_affordances"][0]["action_type"] == (
+        "await_or_inspect_workflow_instance"
+    )
     assert terminal_failure["effect_status"] == "failed"
     assert terminal_failure["changed"] is True
     assert terminal_failure["mutation_outcome"] == "partial"
@@ -373,5 +435,6 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
     assert durable_timeout["changed"] is False
     assert durable_timeout["mutation_outcome"] == "partial"
     assert durable_timeout["recovery_affordances"][0]["arguments"] == {
-        "instance_id": "instance-4"
+        "instance_id": "instance-4",
+        "await_terminal": True,
     }

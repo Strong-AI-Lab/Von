@@ -6,11 +6,12 @@ handler from occupying the workflow worker indefinitely while preserving the
 caller's context variables (actor scope, AgentTest fault scope, and similar
 request-local authority).
 
-Deadlines have two deliberately separate meanings:
+Elapsed thresholds have two deliberately separate meanings:
 
 * the advisory budget is telemetry only and never changes a successful result;
-* the hard deadline is terminal for the current turn and returns a typed MCP
-  timeout payload.  A handler that later completes cannot rewrite that outcome.
+* an explicitly enabled hard deadline is terminal for the current turn and
+  returns a typed MCP timeout payload. A handler that later completes cannot
+  rewrite that outcome.
   Reads and calls without an observer discard the late payload; an explicitly
   observed handler-started write may emit one bounded out-of-band completion
   observation.
@@ -19,7 +20,9 @@ The pool and its queue are both bounded.  Python cannot forcibly stop an
 arbitrary running thread, so handlers may also use the cooperative cancellation
 helpers in this module.  Non-cooperative late handlers remain isolated to the
 fixed-size daemon pool instead of leaking an unbounded number of threads or
-queued calls.
+queued calls. A capability may be advisory-only when a durable outer
+coordinator owns liveness and recovery; in that case the caller retains the
+running handler's usable result rather than detaching at an arbitrary time.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -386,6 +390,8 @@ class _HandlerTask:
         token = _ACTIVE_EXECUTION_SCOPE.set(scope)
         try:
             remaining_seconds = scope.remaining_seconds
+            if math.isinf(remaining_seconds):
+                return self.handler(**self.payload)
             if remaining_seconds <= 0.0:
                 raise InternalMCPHandlerDeadlineExceeded(
                     f"Internal MCP execution {scope.execution_id} reached its "
@@ -878,7 +884,7 @@ class InternalMCPTransport:
         method_name: str,
         execution_id: str,
         category: str,
-        timeout_sec: float,
+        timeout_sec: float | None,
         advisory_timeout_sec: float,
     ) -> Dict[str, Any]:
         is_write = str(category or "").strip().lower() == "write"
@@ -909,7 +915,7 @@ class InternalMCPTransport:
         method_name: str,
         execution_id: str,
         category: str,
-        configured_hard_timeout_sec: float,
+        configured_hard_timeout_sec: float | None,
         minimum_window_sec: float,
         effective_window_sec: float,
         remaining_window_sec: float,
@@ -965,8 +971,9 @@ class InternalMCPTransport:
         minimum_execution_window_sec: float | None = None,
         log_tag: str = "[mcp_gateway]",
         late_completion_observer: LateCompletionObserver | None = None,
+        hard_timeout_enabled: bool = True,
     ) -> TransportResult:
-        """Execute a handler within a bounded hard deadline.
+        """Execute a handler with an advisory and optional hard deadline.
 
         The returned result is immutable for the current turn.  If the handler
         ignores cooperative cancellation and completes late, the terminal
@@ -974,25 +981,32 @@ class InternalMCPTransport:
         the late payload.  A dispatched write with an observer emits exactly
         one bounded observation out of band after the handler starts.  A write
         cancelled while still queued reports ``not_started`` and cannot promise
-        an observation.  A caller may provide an absolute monotonic deadline to
-        shorten, but never extend, the method's configured hard timeout.
+        an observation. A caller-provided absolute monotonic deadline remains a
+        hard boundary even for an otherwise advisory-only method.
         """
 
-        configured_hard_timeout_sec = float(
-            timeout_sec
-            if timeout_sec is not None and float(timeout_sec) > 0.0
-            else (
-                self._write_timeout_sec
-                if str(category or "").strip().lower() == "write"
-                else self._read_timeout_sec
+        configured_hard_timeout_sec = (
+            float(
+                timeout_sec
+                if timeout_sec is not None and float(timeout_sec) > 0.0
+                else (
+                    self._write_timeout_sec
+                    if str(category or "").strip().lower() == "write"
+                    else self._read_timeout_sec
+                )
             )
+            if hard_timeout_enabled
+            else None
         )
         minimum_window_sec: float | None = None
         if minimum_execution_window_sec is not None:
             minimum_window_sec = float(minimum_execution_window_sec)
             if minimum_window_sec <= 0.0:
                 raise ValueError("minimum_execution_window_sec must be positive")
-            if minimum_window_sec > configured_hard_timeout_sec:
+            if (
+                configured_hard_timeout_sec is not None
+                and minimum_window_sec > configured_hard_timeout_sec
+            ):
                 raise ValueError(
                     "minimum_execution_window_sec cannot exceed the configured "
                     "hard timeout"
@@ -1001,21 +1015,39 @@ class InternalMCPTransport:
         submitted_monotonic = time.monotonic()
         hard_timeout_sec = configured_hard_timeout_sec
         if deadline_monotonic is not None:
-            hard_timeout_sec = min(
-                configured_hard_timeout_sec,
-                max(0.0, float(deadline_monotonic) - submitted_monotonic),
+            caller_window_sec = max(
+                0.0,
+                float(deadline_monotonic) - submitted_monotonic,
+            )
+            hard_timeout_sec = (
+                min(configured_hard_timeout_sec, caller_window_sec)
+                if configured_hard_timeout_sec is not None
+                else caller_window_sec
             )
         advisory_sec = float(
             advisory_timeout_sec
             if advisory_timeout_sec is not None and advisory_timeout_sec > 0.0
             else self.advisory_timeout_sec(
                 category,
-                hard_timeout_sec=configured_hard_timeout_sec,
+                hard_timeout_sec=float(
+                    configured_hard_timeout_sec
+                    if configured_hard_timeout_sec is not None
+                    else (
+                        self._write_timeout_sec
+                        if str(category or "").strip().lower() == "write"
+                        else self._read_timeout_sec
+                    )
+                ),
             )
         )
-        advisory_sec = min(advisory_sec, hard_timeout_sec)
+        if hard_timeout_sec is not None:
+            advisory_sec = min(advisory_sec, hard_timeout_sec)
         execution_id = f"mcp_{uuid.uuid4().hex}"
-        handler_deadline_monotonic = submitted_monotonic + hard_timeout_sec
+        handler_deadline_monotonic = (
+            submitted_monotonic + hard_timeout_sec
+            if hard_timeout_sec is not None
+            else math.inf
+        )
         observe_late_write = (
             str(category or "").strip().lower() == "write"
             and late_completion_observer is not None
@@ -1028,6 +1060,7 @@ class InternalMCPTransport:
 
         if (
             minimum_window_sec is not None
+            and hard_timeout_sec is not None
             and hard_timeout_sec < minimum_window_sec
         ):
             payload = self._admission_denied_payload(
@@ -1057,7 +1090,7 @@ class InternalMCPTransport:
                 minimum_execution_window_sec=minimum_window_sec,
             )
 
-        if hard_timeout_sec <= 0.0:
+        if hard_timeout_sec is not None and hard_timeout_sec <= 0.0:
             with self._diagnostics_lock:
                 self._timeout_count += 1
             timeout_payload = self._timeout_payload(
@@ -1103,11 +1136,11 @@ class InternalMCPTransport:
             ),
         )
         logger.info(
-            "%s invoking %s (advisory=%.1fs, hard_deadline=%.1fs, execution_id=%s)",
+            "%s invoking %s (advisory=%.1fs, hard_deadline=%s, execution_id=%s)",
             log_tag,
             method_name,
             advisory_sec,
-            hard_timeout_sec,
+            f"{hard_timeout_sec:.1f}s" if hard_timeout_sec is not None else "none",
             execution_id,
         )
 
@@ -1138,7 +1171,37 @@ class InternalMCPTransport:
                 minimum_execution_window_sec=minimum_window_sec,
             )
 
-        completed = task.done_event.wait(timeout=hard_timeout_sec)
+        completed = task.done_event.wait(timeout=advisory_sec)
+        if not completed and hard_timeout_sec is None:
+            logger.warning(
+                "%s %s exceeded its %.1fs advisory budget; the running "
+                "handler has no elapsed-time hard boundary (execution_id=%s)",
+                log_tag,
+                method_name,
+                advisory_sec,
+                execution_id,
+            )
+            task.done_event.wait()
+            completed = True
+        elif (
+            not completed
+            and hard_timeout_sec is not None
+            and advisory_sec < hard_timeout_sec
+        ):
+            logger.warning(
+                "%s %s exceeded its %.1fs advisory budget; continuing until "
+                "the %.1fs hard liveness boundary (execution_id=%s)",
+                log_tag,
+                method_name,
+                advisory_sec,
+                hard_timeout_sec,
+                execution_id,
+            )
+            remaining_hard_window_sec = max(
+                0.0,
+                handler_deadline_monotonic - time.monotonic(),
+            )
+            completed = task.done_event.wait(timeout=remaining_hard_window_sec)
         terminal_at = time.perf_counter()
         with task.lock:
             completed_within_deadline = bool(
@@ -1225,6 +1288,10 @@ class InternalMCPTransport:
             )
 
         if not task_completed:
+            # Advisory-only calls wait for handler completion above. Reaching
+            # this branch therefore proves either a configured or caller hard
+            # boundary was active.
+            assert hard_timeout_sec is not None
             with self._diagnostics_lock:
                 self._timeout_count += 1
             timeout_phase = "handler" if started_at is not None else "queue"

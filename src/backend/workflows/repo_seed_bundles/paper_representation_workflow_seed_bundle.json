@@ -2,13 +2,26 @@
   "family_id": "paper_representation_workflow_seed_bundle",
   "managed_by": "paper_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "17",
+  "seed_version": "21",
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#arxiv_paper_representation_workflow": {
+      "18": [
+        "bfc761fc3407b0ffdbe7bb5a6662a0c49755ccd6c25df1d8eaede247bacbcfb1"
+      ]
+    },
+    "#V#source_neutral_paper_reference_ingestion_workflow": {
+      "19": [
+        "c87c88b27cc9c78a7313822784890d7afba4ef57bdf5581d3c51aad8995dbbc0"
+      ]
+    }
+  },
   "source_tag": "JVNAUTOSCI-2434",
   "supported_action_ids": [
     "scholarly_paper.normalise_inputs",
     "scholarly_paper.resolve_authors",
     "scholarly_paper.verify_representation",
     "arxiv.normalise_source",
+    "arxiv.inspect_existing_state",
     "arxiv.decide_acquisition_mode",
     "download_paper",
     "finalise_cached_paper",
@@ -1663,6 +1676,13 @@
             "target_context_key": "arxiv_ids"
           },
           {
+            "description": "Keep an explicitly supplied single arXiv target singular when no explicit multi-paper target set was supplied.",
+            "extractor": "arxiv_id_list",
+            "required": false,
+            "source_expression": "inputs.arxiv_id",
+            "target_context_key": "arxiv_ids"
+          },
+          {
             "description": "Resolve the primary arXiv identifier from direct request text before consulting prior-turn context.",
             "extractor": "arxiv_id",
             "required": false,
@@ -1931,7 +1951,7 @@
               }
             ],
             "execution_mode": "deterministic",
-            "next_state": "fetch_arxiv_metadata",
+            "next_state": "inspect_existing_state",
             "on_failure_state": "failed",
             "state_id": "normalise_arxiv_source",
             "tool_output_mapping_specs": [
@@ -1950,6 +1970,48 @@
                 "context_key": "verification_profile",
                 "tool_output_field": "verification_profile"
               }
+            ]
+          },
+          {
+            "action_id": "arxiv.inspect_existing_state",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_inspect_existing_state_arxiv_id_to_arxiv_id_parameter",
+                "context_key": "arxiv_id",
+                "required": true,
+                "tool_param": "arxiv_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "fetch_arxiv_metadata",
+            "on_failure_state": "failed",
+            "state_id": "inspect_existing_state",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_inspect_existing_state_arxiv_id_to_arxiv_id",
+                "context_key": "arxiv_id",
+                "tool_output_field": "arxiv_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_inspect_existing_state_paper_concept_id_to_paper_concept_id",
+                "context_key": "paper_concept_id",
+                "tool_output_field": "paper_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_inspect_existing_state_file_copy_concept_id_to_file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "file_copy_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_inspect_existing_state_inspected_existing_state_to_inspected_existing_state",
+                "context_key": "inspected_existing_state",
+                "tool_output_field": "inspected_existing_state"
+              }
+            ],
+            "writes_context_keys": [
+              "paper_concept_id",
+              "file_copy_concept_id",
+              "inspected_existing_state"
             ]
           },
           {
@@ -2236,7 +2298,8 @@
             "execution_mode": "deterministic",
             "retry_policy": {
               "backoff_policy": "fixed",
-              "delay_ms": 1000,
+              "initial_delay_ms": 1000,
+              "max_delay_ms": 1000,
               "max_attempts": 2,
               "retry_on_outcomes": [
                 "failure"
@@ -2324,6 +2387,11 @@
               }
             ],
             "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "arxiv_pdf_file_copy_additive_import",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
             "next_state": "delegate_to_general_paper_workflow",
             "on_failure_state": "record_pdf_import_skipped",
             "state_id": "import_arxiv_pdf_from_url",
@@ -3543,6 +3611,7 @@
         "#V#thing"
       ],
       "create_as_instance": false,
+      "preserve_existing_authority": true,
       "description": "A work produced in scholarly or research contexts.",
       "system_tags": [
         "scholarly",
@@ -3556,6 +3625,7 @@
         "#V#scholarly_work"
       ],
       "create_as_instance": false,
+      "preserve_existing_authority": true,
       "description": "A scholarly work represented from article metadata, source identifiers, and optional source artefacts.",
       "system_tags": [
         "scholarly",
@@ -3570,6 +3640,7 @@
         "#V#predicate"
       ],
       "create_as_instance": true,
+      "preserve_existing_authority": true,
       "description": "Predicate for a DOI text relation that records the authoritative Digital Object Identifier supplied for a scholarly work.",
       "system_tags": [
         "ontology",

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import os
 import re
 from contextlib import contextmanager
@@ -52,6 +53,7 @@ _JIRA_ISSUE_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _DEFAULT_JIRA_BASE_URL = "https://naoinstitute.atlassian.net"
+_WORKFLOW_OBSERVATION_MAX_SECONDS = 90.0
 
 
 def _utc_now_iso() -> str:
@@ -9593,8 +9595,11 @@ def _upsert_singleton_text_relation_output_schema() -> Schema:
 
 
 def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema:
+    required: dict[str, Any] = {
+        "source_system": str,
+        "source_item_id": str,
+    }
     optional: dict[str, Any] = {
-        "source_profile": (str, type(None)),
         "workflow_id": (str, type(None)),
         "namespace": (str, type(None)),
         "created_by_concept_id": (str, type(None)),
@@ -9602,7 +9607,12 @@ def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema
         "source_fingerprint": (str, type(None)),
         "processing_authority_fingerprint": (str, type(None)),
     }
-    if not read_only:
+    if read_only:
+        # Historical markers predate profile-scoped identity. Keep their exact
+        # read path available without weakening the key required for new writes.
+        optional["source_profile"] = (str, type(None))
+    else:
+        required["source_profile"] = str
         optional.update(
             {
                 "processing_status": (str, type(None)),
@@ -9616,18 +9626,32 @@ def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema
             }
         )
     return Schema(
-        required={
-            "source_system": str,
-            "source_item_id": str,
-        },
+        required=required,
         optional=optional,
         allow_unknown=True,
         description=(
-            "source processing marker input: source_system and source_item_id identify "
-            "the source item. record_source_processing_marker may include represented "
-            "artefact, paper, file-copy, arXiv ids, or represented_outputs to mine for "
-            "compact IDs."
+            (
+                "source processing marker lookup: source_system and source_item_id "
+                "identify the source item. Supply the exact stable source_profile for "
+                "profile-scoped markers; omit it only to read an historical "
+                "profileless marker."
+            )
+            if read_only
+            else (
+                "source processing marker input: source_system, source_profile, and "
+                "source_item_id identify the source item. Copy the exact stable "
+                "profile identifier supplied by the source capability or workflow "
+                "context; do not omit, translate, canonicalise, or invent it. Use "
+                "that same value in lookup and record calls because it participates "
+                "in marker identity. record_source_processing_marker may include "
+                "represented artefact, paper, file-copy, arXiv ids, or "
+                "represented_outputs to mine for compact IDs."
+            )
         ),
+        aliases={
+            "profile": "source_profile",
+            "profile_id": "source_profile",
+        },
     )
 
 
@@ -19946,6 +19970,27 @@ def _workflow_actor_scope_error_response(exc: Exception) -> dict[str, Any]:
     )
 
 
+def _workflow_observation_parameter_error(field_name: str) -> dict[str, Any]:
+    """Return typed no-effect feedback before any workflow submission/wait."""
+
+    payload = make_error_response(
+        "invalid_parameter",
+        f"{field_name} must be finite.",
+        details={"invalid": [field_name]},
+        suggestions=[f"Provide a finite {field_name} value."],
+    )
+    payload.update(
+        {
+            "status": "not_started",
+            "effect_status": "not_started",
+            "mutation_outcome": "not_started",
+            "outcome_finality": "terminal_for_turn",
+            "changed": False,
+        }
+    )
+    return payload
+
+
 def _workflow_create_instance(**kwargs):
     """Create a new durable workflow instance."""
     from ...workflows.durable import WorkflowInstanceManager
@@ -20110,12 +20155,21 @@ def _workflow_execute(**kwargs):
         )
     except (TypeError, ValueError):
         timeout_seconds = 60.0 if await_terminal else 0.0
+    if not math.isfinite(timeout_seconds):
+        return _workflow_observation_parameter_error("timeout_seconds")
     timeout_seconds = max(0.0, timeout_seconds)
+    if await_terminal:
+        timeout_seconds = min(
+            timeout_seconds,
+            _WORKFLOW_OBSERVATION_MAX_SECONDS,
+        )
 
     try:
         poll_interval_seconds = float(kwargs.get("poll_interval_seconds", 1.0))
     except (TypeError, ValueError):
         poll_interval_seconds = 1.0
+    if not math.isfinite(poll_interval_seconds):
+        return _workflow_observation_parameter_error("poll_interval_seconds")
     poll_interval_seconds = max(0.0, poll_interval_seconds)
 
     try:
@@ -20645,8 +20699,11 @@ def _workflow_list_instances(**kwargs):
 
 
 def _workflow_get_instance(**kwargs):
-    """Get details of a specific workflow instance."""
+    """Get, or boundedly await, details of a specific workflow instance."""
     from ...workflows.durable import WorkflowInstanceManager
+    from ...workflows.durable.execution_observability import (
+        await_workflow_terminal_state,
+    )
 
     instance_id = kwargs.get("instance_id")
     if not isinstance(instance_id, str) or not instance_id.strip():
@@ -20670,6 +20727,47 @@ def _workflow_get_instance(**kwargs):
             f"Workflow instance not found: {instance_id}",
         )
 
+    await_terminal = _coerce_bool_input(
+        kwargs.get("await_terminal"),
+        default=False,
+    )
+    try:
+        timeout_seconds = float(kwargs.get("timeout_seconds", 60.0))
+    except (TypeError, ValueError):
+        timeout_seconds = 60.0
+    if not math.isfinite(timeout_seconds):
+        return _workflow_observation_parameter_error("timeout_seconds")
+    timeout_seconds = min(
+        max(0.0, timeout_seconds),
+        _WORKFLOW_OBSERVATION_MAX_SECONDS,
+    )
+    try:
+        poll_interval_seconds = float(kwargs.get("poll_interval_seconds", 1.0))
+    except (TypeError, ValueError):
+        poll_interval_seconds = 1.0
+    if not math.isfinite(poll_interval_seconds):
+        return _workflow_observation_parameter_error("poll_interval_seconds")
+    poll_interval_seconds = max(0.05, poll_interval_seconds)
+
+    poll_count: int | None = None
+    timed_out = False
+    if await_terminal:
+        wait_result = await_workflow_terminal_state(
+            manager,
+            instance_id.strip(),
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        if wait_result.instance is not None:
+            instance = wait_result.instance
+        poll_count = wait_result.poll_count
+        timed_out = wait_result.timed_out
+        if not _workflow_persisted_record_matches_internal_actor(instance):
+            return make_error_response(
+                "not_found",
+                f"Workflow instance not found: {instance_id}",
+            )
+
     result = instance.to_status_dict()
     result["success"] = True
     result["inputs"] = instance.inputs
@@ -20680,6 +20778,16 @@ def _workflow_get_instance(**kwargs):
     result["error_step"] = instance.error_step
     result["schedule_id"] = instance.schedule_id
     result["workflow_data"] = instance.workflow_data
+    if await_terminal:
+        result.update(
+            {
+                "await_terminal": True,
+                "timeout_seconds": timeout_seconds,
+                "poll_interval_seconds": poll_interval_seconds,
+                "poll_count": poll_count,
+                "timed_out": timed_out,
+            }
+        )
 
     return result
 
@@ -33949,11 +34057,18 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_source_processing_marker_input_schema(),
             output_schema=_source_processing_marker_output_schema(),
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+                "created_by_concept_id": "actor_user_concept_id",
+            },
+            ordinary_turn_fixed_arguments={"organisation_concept_id": None},
+            ordinary_turn_effect=True,
             description=(
                 "Create or update a durable Vontology marker that records a source "
                 "item as processed into represented artefacts. This is additive "
-                "Vontology state and should be called only when the represented "
-                "workflow has verified processing success."
+                "Vontology state and should be called only after durable "
+                "representation and read-back have verified processing success. It "
+                "does not mutate the source system."
             ),
         ),
         *build_spreadsheet_record_tool_definitions(),
@@ -34481,9 +34596,10 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         allow_unknown=False,
         description=(
             "Fetch a Gmail message for a profile (formats: "
-            "metadata|full|raw|minimal). Set include_body=true only when the "
-            "user explicitly requests message body text; this forces format=full "
-            "and returns bounded plain-text body evidence."
+            "metadata|full|raw|minimal). Set include_body=true when bounded body "
+            "inspection is needed to fulfil an explicitly authorised, "
+            "content-dependent request; this forces format=full and returns "
+            "bounded plain-text body evidence."
         ),
         aliases={
             "profile_id": "profile",
@@ -34605,7 +34721,10 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_download_paper_input_schema(),
             output_schema=_download_paper_output_schema(),
             category="write",
-            timeout_sec=60.0,
+            # 140s is just over twice the observed 68.321s late-completion path;
+            # 85s warns before that capability-specific liveness boundary.
+            timeout_sec=140.0,
+            advisory_timeout_sec=85.0,
             description="Download PDF of an arXiv paper, then store it in the configured blob store (local, OpenStack Swift, or S3-compatible object storage). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri and may register a #V#computer_file_copy when authenticated. Use when user asks to download/save/fetch a paper. This tool does not materialise the scholarly-paper concept.",
         ),
         MethodDefinition(
@@ -34782,7 +34901,10 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_import_url_file_copy_input_schema(),
             output_schema=_import_url_file_copy_output_schema(),
             category="write",
-            timeout_sec=45.0,
+            # 350s is just over twice the observed 173.641s successful path;
+            # 220s warns before that capability-specific liveness boundary.
+            timeout_sec=350.0,
+            advisory_timeout_sec=220.0,
             description=(
                 "Fetch a remote artefact directly from an http/https URL, persist its bytes "
                 "to the configured blob store, and register a #V#computer_file_copy concept "
@@ -35065,9 +35187,10 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "Supports Gmail API formats "
                 "metadata|full|raw|minimal and returns normalised sender, "
                 "subject, date, and snippet fields when available. Set "
-                "include_body=true only for an explicit user request for body "
-                "text; that returns a bounded plain-text body and truncation flag. Read-only; "
-                "profile token required."
+                "include_body=true whenever bounded body inspection is needed "
+                "to fulfil an explicitly authorised, content-dependent request, "
+                "including identifying cited resources. Read-only; profile token "
+                "required."
             ),
         ),
         MethodDefinition(
@@ -38311,7 +38434,12 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "include_trace": (bool, str, int, float),
                 },
                 allow_unknown=True,
-                description="Launch a durable workflow instance and optionally await a terminal result.",
+                description=(
+                    "Launch a durable workflow instance and optionally await one "
+                    "bounded observation interval. timeout_seconds is clamped to "
+                    "90; expiry returns partial/current state and the model may "
+                    "choose another wait without cancelling or relaunching."
+                ),
             ),
             output_schema=Schema(
                 required={"success": bool},
@@ -38332,11 +38460,15 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Structured awaited workflow execution result and telemetry.",
             ),
             category="write",
-            timeout_sec=120.0,
+            timeout_sec=None,
+            advisory_timeout_sec=75.0,
+            hard_timeout_enabled=False,
             effect_admission_window_sec=5.0,
             description=(
                 "Create a durable workflow instance via the verified submission pathway and optionally "
-                "wait for a bounded terminal result with structured telemetry and optional trace retrieval."
+                "wait for one bounded observation interval of at most 90 seconds. "
+                "Expiry returns partial/current state so the model can choose "
+                "another wait; it does not cancel, retry, or relaunch the instance."
             ),
         ),
         MethodDefinition(
@@ -38561,9 +38693,18 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             handler=_workflow_get_instance,
             input_schema=Schema(
                 required={"instance_id": str},
-                optional={},
+                optional={
+                    "await_terminal": (bool, str, int, float),
+                    "timeout_seconds": (int, float),
+                    "poll_interval_seconds": (int, float),
+                },
                 allow_unknown=True,
-                description="Get a workflow instance by ID.",
+                description=(
+                    "Get a workflow instance by ID, optionally waiting for one "
+                    "bounded observation interval. timeout_seconds is clamped to "
+                    "90; expiry returns partial/current state and the model may "
+                    "choose another wait without cancelling or retrying it."
+                ),
             ),
             output_schema=Schema(
                 required={"success": bool},
@@ -38577,14 +38718,24 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "outputs": (dict, type(None)),
                     "error": (str, type(None)),
                     "error_code": (str, type(None)),
+                    "await_terminal": bool,
+                    "timeout_seconds": (int, float),
+                    "poll_interval_seconds": (int, float),
+                    "poll_count": int,
+                    "timed_out": bool,
                 },
                 allow_unknown=True,
                 description="Full workflow instance details.",
             ),
             category="read",
+            timeout_sec=None,
+            advisory_timeout_sec=75.0,
+            hard_timeout_enabled=False,
             description=(
                 "Get detailed status of a durable workflow instance including current state, "
-                "inputs, outputs, and any errors."
+                "inputs, outputs, and any errors. Set await_terminal=true to make a "
+                "bounded observation wait on an existing instance; expiry returns its "
+                "current state to the model and never cancels or retries the workflow."
             ),
         ),
         MethodDefinition(

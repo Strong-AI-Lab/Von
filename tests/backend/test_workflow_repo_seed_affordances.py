@@ -219,6 +219,7 @@ def test_support_concept_bootstrap_preserves_existing_represented_authority(
             {
                 "concept_id": "#V#represented_prompt",
                 "name": "Represented Prompt",
+                "preserve_existing_authority": True,
                 "relationships": {"#V#hasPolicy": ["#V#repo_policy"]},
                 "text_relations": [
                     {"predicate": "#V#hasPromptText", "text": "repo prompt"}
@@ -231,6 +232,7 @@ def test_support_concept_bootstrap_preserves_existing_represented_authority(
     )
 
     assert report["existing_concept_ids"] == ["#V#represented_prompt"]
+    assert report["errors"] == []
     assert report["relationship_updated_concept_ids"] == []
     assert report["text_relation_updated_concept_ids"] == []
     assert existing["relationships"] == {"#V#hasPolicy": ["#V#human_policy"]}
@@ -423,8 +425,8 @@ def test_repo_seed_workflow_definitions_include_gmail_arxiv_discovery_metadata()
     assert metadata["description_source"].startswith("repo_seed_text_relation:")
     assert metadata["discovery_exemplars_source"].startswith("repo_seed_text_relation:")
     exemplars = metadata["discovery_exemplars"]
-    assert "recent email messages about arxiv papers" in exemplars["keywords"]
-    assert any("recent email messages" in item for item in exemplars["examples"])
+    assert "batch email messages about arxiv papers" in exemplars["keywords"]
+    assert any("every returned" in item for item in exemplars["examples"])
     assert metadata["routing_profile"]["execution_mode"] == "tool_pipeline"
     assert metadata["launch_input_contract"]["schema_version"] == (
         "workflow_launch_input_contract.v1"
@@ -525,6 +527,7 @@ def test_repo_seed_version_gate_skips_equal_vontology_version_without_republishi
         ],
     }
     invalidations: list[bool] = []
+    capability_invalidations: list[dict[str, Any]] = []
     validation_calls: list[dict] = []
 
     monkeypatch.setattr(
@@ -581,6 +584,11 @@ def test_repo_seed_version_gate_skips_equal_vontology_version_without_republishi
         "invalidate_workflow_discovery_executability_caches",
         lambda: invalidations.append(True),
     )
+    monkeypatch.setattr(
+        seed_bootstrap,
+        "invalidate_workflow_capability_index",
+        lambda **kwargs: capability_invalidations.append(dict(kwargs)),
+    )
 
     result = seed_bootstrap.bootstrap_repo_seed_workflow_bundle(
         asset_path="seed_bundle.json"
@@ -598,6 +606,7 @@ def test_repo_seed_version_gate_skips_equal_vontology_version_without_republishi
     ]
     assert validation_calls
     assert invalidations == []
+    assert capability_invalidations == []
     assert result["support_concepts"]["skipped"] is False
     assert "#V#represented_prompt" in (
         result["support_concepts"]["created_concept_ids"]
@@ -797,6 +806,7 @@ def test_repo_seed_newer_version_accepts_known_legacy_digest_with_stale_marker_s
     live_state = {"payload": legacy_payload}
     marker_updates: list[dict] = []
     invalidations: list[bool] = []
+    capability_invalidations: list[dict[str, Any]] = []
     publications: list[dict] = []
     text_updates: list[dict] = []
 
@@ -918,6 +928,11 @@ def test_repo_seed_newer_version_accepts_known_legacy_digest_with_stale_marker_s
         "invalidate_workflow_discovery_executability_caches",
         lambda: invalidations.append(True),
     )
+    monkeypatch.setattr(
+        seed_bootstrap,
+        "invalidate_workflow_capability_index",
+        lambda **kwargs: capability_invalidations.append(dict(kwargs)),
+    )
 
     result = seed_bootstrap.bootstrap_repo_seed_workflow_bundle(
         asset_path="seed_bundle.json"
@@ -962,6 +977,12 @@ def test_repo_seed_newer_version_accepts_known_legacy_digest_with_stale_marker_s
         }
     ]
     assert invalidations == [True]
+    assert capability_invalidations == [
+        {
+            "reason": "repo_seed_workflow_bundle_published",
+            "reset_backend_namespace": True,
+        }
+    ]
 
 
 def test_sibling_migration_does_not_republish_altered_equal_version_workflow(

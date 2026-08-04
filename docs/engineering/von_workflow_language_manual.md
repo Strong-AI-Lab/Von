@@ -232,10 +232,10 @@ Runtime semantics:
 - the action returns the workflow-visible MCP payload under `result` and `mcp_result`, with `mcp_tool`, `mcp_requested_tool`, `mcp_resolved_tool`, and `mcp_duration_ms` diagnostics;
 - the action reports `event_workflow_launch_suppression_requested` so traces
   distinguish an authored suppression request from ordinary tool execution;
-- internal MCP advisory budgets are telemetry only: a handler that completes
-  before its hard deadline remains successful even when the advisory budget was
-  exceeded;
-- a hard-deadline expiry is a terminal failed action for the current turn. The
+- internal MCP advisory budgets are telemetry only. Crossing one records and
+  exposes slow progress without changing a successful result;
+- where a named liveness boundary justifies a hard policy, hard-deadline expiry
+  is a terminal failed action for the current turn. The
   action preserves the typed timeout under `mcp_result` and the bounded
   transport facts under `mcp_transport`, including execution identity,
   queue/handler/transport timing, deadline, timeout phase, and the explicit

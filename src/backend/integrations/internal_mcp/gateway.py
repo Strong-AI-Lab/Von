@@ -88,6 +88,12 @@ class MethodDefinition:
     output_schema: Schema | None = None
     category: str = "read"
     timeout_sec: float | None = None
+    advisory_timeout_sec: float | None = None
+    # Compatibility defaults remain bounded while legacy catalogue entries are
+    # reviewed. Long-running capabilities with a durable outer coordinator can
+    # explicitly make elapsed time advisory-only instead of discarding a live
+    # handler result at an arbitrary wall-clock boundary.
+    hard_timeout_enabled: bool = True
     description: str | None = None
     write_guardrail: Mapping[str, Any] | None = None
     ordinary_turn_public: bool = False
@@ -114,6 +120,8 @@ class MethodDefinition:
     ordinary_turn_mutation_subject_argument: str | None = None
 
     def resolved_timeout(self, transport: InternalMCPTransport) -> float | None:
+        if not self.hard_timeout_enabled:
+            return None
         if self.timeout_sec is not None:
             return self.timeout_sec
         if self.category == "write":
@@ -121,6 +129,26 @@ class MethodDefinition:
         if self.category == "read":
             return transport.read_timeout_sec
         return transport.read_timeout_sec
+
+    def resolved_advisory_timeout(
+        self,
+        transport: InternalMCPTransport,
+    ) -> float:
+        if self.advisory_timeout_sec is not None:
+            value = float(self.advisory_timeout_sec)
+            if value <= 0.0:
+                raise ValueError("advisory_timeout_sec must be positive")
+            return value
+        hard_timeout = self.resolved_timeout(transport)
+        fallback_timeout = (
+            transport.write_timeout_sec
+            if self.category == "write"
+            else transport.read_timeout_sec
+        )
+        return transport.advisory_timeout_sec(
+            self.category,
+            hard_timeout_sec=float(hard_timeout or fallback_timeout),
+        )
 
     def resolved_effect_admission_window(
         self,
@@ -228,6 +256,8 @@ class MethodCatalogue:
             name: {
                 "category": definition.category,
                 "timeout_sec": definition.timeout_sec,
+                "advisory_timeout_sec": definition.advisory_timeout_sec,
+                "hard_timeout_enabled": definition.hard_timeout_enabled,
                 "has_output_schema": definition.output_schema is not None,
                 "description": definition.description,
                 "write_guardrail": (
@@ -415,14 +445,11 @@ class InternalMCPGateway:
             raise SchemaValidationError(error_message, stage="input_schema")
 
         timeout = definition.resolved_timeout(self._transport)
+        advisory_timeout = definition.resolved_advisory_timeout(self._transport)
         minimum_execution_window = (
             definition.resolved_effect_admission_window(self._transport)
             if require_effect_admission_window
             else None
-        )
-        advisory_timeout = self._transport.advisory_timeout_sec(
-            definition.category,
-            hard_timeout_sec=float(timeout or self._transport.read_timeout_sec),
         )
         observed_late_completion = late_completion_observer
         if late_completion_observer is not None:
@@ -560,6 +587,7 @@ class InternalMCPGateway:
                         minimum_execution_window_sec=minimum_execution_window,
                         log_tag=self._log_tag,
                         late_completion_observer=observed_late_completion,
+                        hard_timeout_enabled=definition.hard_timeout_enabled,
                     )
             finally:
                 _PREEXISTING_ACTOR_CONTEXT.reset(preexisting_actor_token)
@@ -682,7 +710,7 @@ class InternalMCPGateway:
             return None
 
     def get_method_timeout_sec(self, method_name: str) -> float | None:
-        """Return the configured hard window for one registered method."""
+        """Return the configured hard window, or ``None`` for advisory-only."""
 
         definition = self.get_method_definition(method_name)
         return (

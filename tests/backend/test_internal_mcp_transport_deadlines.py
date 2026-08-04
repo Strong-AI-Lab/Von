@@ -34,6 +34,8 @@ def _gateway_for(
     category: str = "read",
     output_schema: Schema | None = None,
     timeout_sec: float | None = None,
+    advisory_timeout_sec: float | None = None,
+    hard_timeout_enabled: bool = True,
     effect_admission_window_sec: float | None = None,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
@@ -45,6 +47,8 @@ def _gateway_for(
             output_schema=output_schema,
             category=category,
             timeout_sec=timeout_sec,
+            advisory_timeout_sec=advisory_timeout_sec,
+            hard_timeout_enabled=hard_timeout_enabled,
             effect_admission_window_sec=effect_admission_window_sec,
         )
     )
@@ -55,7 +59,9 @@ def _gateway_for(
     )
 
 
-def test_handler_before_hard_deadline_remains_success_after_advisory_budget() -> None:
+def test_handler_before_hard_deadline_remains_success_after_advisory_budget(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     transport = InternalMCPTransport(
         read_timeout_sec=0.25,
         read_advisory_timeout_sec=0.01,
@@ -90,11 +96,35 @@ def test_handler_before_hard_deadline_remains_success_after_advisory_budget() ->
     assert result.handler_duration_ms >= 20.0
     assert result.queue_duration_ms is not None
     assert result.transport_overhead_ms is not None
+    assert "exceeded its 0.0s advisory budget; continuing" in caplog.text
 
     diagnostics = gateway.get_diagnostics()
     method_metrics = diagnostics["methods"]["synthetic_fast_read"]
     assert method_metrics["last_outcome"] == "completed"
     assert method_metrics["timeouts"] == 0
+
+
+def test_advisory_only_handler_keeps_usable_completion_after_warning() -> None:
+    transport = InternalMCPTransport(
+        write_timeout_sec=0.02,
+        write_advisory_timeout_sec=0.005,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_soft_window_write",
+        handler=lambda: (time.sleep(0.03), {"success": True, "changed": True})[1],
+        transport=transport,
+        category="write",
+        advisory_timeout_sec=0.005,
+        hard_timeout_enabled=False,
+    )
+
+    result = gateway.invoke("synthetic_soft_window_write", {})
+
+    assert result.outcome == "completed"
+    assert result.timeout_sec is None
+    assert result.configured_hard_timeout_sec is None
+    assert result.advisory_budget_exceeded is True
+    assert result.payload == {"success": True, "changed": True}
 
 
 def test_hard_deadline_returns_typed_timeout_and_requests_cooperative_cancel() -> None:

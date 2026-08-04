@@ -235,6 +235,41 @@ def test_source_processing_marker_missing_read_is_typed(monkeypatch) -> None:
     assert result["source_processing_evidence"] == {}
 
 
+@pytest.mark.parametrize("source_profile", [None, "", "   "])
+def test_source_processing_marker_write_rejects_missing_profile_before_write(
+    monkeypatch,
+    source_profile,
+) -> None:
+    from src.backend.services import source_processing_marker_service as service
+
+    monkeypatch.setattr(
+        service.concept_service,
+        "create_concept",
+        lambda **_kwargs: pytest.fail("marker write must not start"),
+    )
+    monkeypatch.setattr(
+        service,
+        "upsert_singleton_text_relation",
+        lambda **_kwargs: pytest.fail("marker evidence write must not start"),
+    )
+
+    result = service.record_source_processing_marker(
+        source_system="gmail",
+        source_profile=source_profile,
+        source_item_id="msg-1",
+    )
+
+    assert result == {
+        "success": False,
+        "error_code": "missing_source_processing_marker_key",
+        "error": (
+            "source_system, source_profile, and source_item_id are required "
+            "before recording a source-processing marker."
+        ),
+        "missing": ["source_profile"],
+    }
+
+
 def test_source_processing_marker_compares_and_supersedes_fingerprints(
     monkeypatch,
 ) -> None:

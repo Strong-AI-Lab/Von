@@ -394,8 +394,20 @@ def workflow_action_result_from_mcp_payload(
         )
     outputs.update(projection_metadata)
     if isinstance(payload, Mapping) and payload.get("success") is False:
+        mutation_outcome = str(payload.get("mutation_outcome") or "").strip().lower()
+        error_code = str(payload.get("error_code") or "").strip().lower()
+        action_status = (
+            "unknown"
+            if mutation_outcome in {"unknown", "indeterminate"}
+            or error_code
+            in {
+                "tool_timeout_outcome_unknown",
+                "tool_timeout_after_durable_submission",
+            }
+            else "failed"
+        )
         return WorkflowActionResult(
-            status="failed",
+            status=action_status,
             error=_coerce_mcp_error_message(tool_name=tool_name, payload=payload),
             outputs=dict(outputs),
             duration_ms=duration_ms,
