@@ -7280,7 +7280,32 @@ describe('thinking card toggle accessibility', () => {
                     ok: true,
                     json: async () => ({
                         response: 'Done',
-                        llm_debug: { model: 'gpt-5.2' }
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            llm_usage_cost_summary: {
+                                schema_version: 'llm_usage_cost_summary.v1',
+                                call_count: 1,
+                                unique_call_count: 1,
+                                usage: {
+                                    status: 'reported',
+                                    input_tokens: 120,
+                                    output_tokens: 8,
+                                    total_tokens: 128
+                                },
+                                estimated_cost: {
+                                    status: 'estimated',
+                                    amount: 0.001234,
+                                    known_amount: 0.001234,
+                                    currency: 'USD'
+                                },
+                                model_identities: [{
+                                    provider: 'openai',
+                                    effective_model: 'gpt-5.2',
+                                    model_identity_source: 'provider_response',
+                                    call_count: 1
+                                }]
+                            }
+                        }
                     })
                 });
             }
@@ -7300,6 +7325,11 @@ describe('thinking card toggle accessibility', () => {
         expect(retained.toggleButton.getAttribute('title')).toBe('Expand thinking details');
         expect(retained.detail.getAttribute('aria-hidden')).toBe('true');
         expect(retained.detail.innerHTML).toContain('search_knowledge_base');
+        expect(retained.detail.innerHTML).toContain('Model usage');
+        expect(retained.detail.innerHTML).toContain('openai/gpt-5.2');
+        expect(retained.detail.innerHTML).toContain('120 input');
+        expect(retained.detail.innerHTML).toContain('8 output');
+        expect(retained.detail.innerHTML).toMatch(/estimated .*0\.001234/);
         expect(retained.copyButton.getAttribute('aria-hidden')).toBe('false');
 
         retained.copyButton.click();
