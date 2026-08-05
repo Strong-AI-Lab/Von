@@ -5,6 +5,32 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def resolved_rag_runtime(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_embedder_setting",
+        lambda: {
+            "status": "resolved",
+            "effective": {
+                "provider": "ollama",
+                "model": "bge-m3",
+                "host": "http://127.0.0.1:11434",
+            },
+            "selection_source": "explicit_setting",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_llm_setting",
+        lambda: {
+            "status": "disabled",
+            "effective": None,
+            "selection_source": "configured_disabled",
+            "reason": "disabled_by_setting",
+        },
+    )
+
+
 @pytest.fixture()
 def tmp_rag_storage(workspace_tmp_path: Path):
     storage = workspace_tmp_path / "rag_storage"

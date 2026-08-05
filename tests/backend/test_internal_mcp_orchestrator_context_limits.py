@@ -357,6 +357,53 @@ def test_format_tool_result_shapes_search_knowledge_base_payload_for_live_follow
     assert "source systems" in payload["retrieval_diagnostics"]["note"].lower()
 
 
+def test_format_tool_result_preserves_bounded_rag_concept_frontier():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=8_000,
+        max_tool_result_field_chars=2_000,
+        max_context_chars=80_000,
+    )
+    concept_ids = [f"#V#candidate_{index:02d}" for index in range(18)]
+
+    encoded = orchestrator._format_tool_result(
+        "search_knowledge_base",
+        {
+            "query": "current represented candidates",
+            "count": len(concept_ids),
+            "results": [
+                {
+                    "id": f"text_relation:{index}",
+                    "text": f"Candidate {index}",
+                    "score": 1.0 - (index / 100),
+                    "metadata": {
+                        "concept_id": concept_id,
+                        "predicate": "hasDescription",
+                        "type": "text_relation",
+                        "item_kind": "rag_chunk",
+                        "source_system": "rag.llamaindex",
+                    },
+                }
+                for index, concept_id in enumerate(concept_ids)
+            ],
+            "retrieval_state": {
+                "status": "results_available",
+                "candidate_count": len(concept_ids),
+                "candidate_limit_reached": True,
+            },
+        },
+        1.0,
+        "ok",
+    )
+
+    payload = json.loads(encoded)["payload"]
+    assert len(payload["results"]) == 5
+    assert payload["concept_ids"] == concept_ids
+    assert payload["omitted_result_count"] == 13
+    assert payload["retrieval_state"]["candidate_limit_reached"] is True
+
+
 def test_format_tool_result_shapes_jira_search_payload_for_live_follow_up():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),
@@ -734,6 +781,68 @@ def test_format_tool_result_projects_unique_related_entities_in_both_directions(
     assert payload["hits"][1]["related_name"] == "Related Two"
     assert payload["hits"][1]["related_type_ids"] == ["#V#requested_type"]
     assert payload["compacted_duplicate_hit_count"] == 1
+
+
+def test_format_tool_result_preserves_relation_frontier_and_completeness_signals():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=8_000,
+        max_tool_result_field_chars=2_000,
+        max_context_chars=80_000,
+    )
+    related_ids = [f"#V#assignment_{index:02d}" for index in range(18)]
+
+    encoded = orchestrator._format_tool_result(
+        "find_relations_with_argument",
+        {
+            "concept_id": "#V#focal_entity",
+            "context_view": "actor_effective",
+            "total_hits": len(related_ids),
+            "total_hits_is_lower_bound": True,
+            "hits": [
+                {
+                    "source_concept_id": related_id,
+                    "predicate_concept_id": "#V#has_role_filler",
+                    "relation_kind": "binary",
+                    "argument_indexes": [2],
+                    "target_value": "#V#focal_entity",
+                    "source_concept_preview": {
+                        "concept_id": related_id,
+                        "name": related_id.removeprefix("#V#"),
+                    },
+                    "target_concept_preview": {
+                        "concept_id": "#V#focal_entity",
+                        "name": "Focal Entity",
+                    },
+                }
+                for related_id in related_ids
+            ],
+            "paging": {
+                "limit": 100,
+                "offset": 0,
+                "returned": len(related_ids),
+                "total_available": len(related_ids),
+                "total_available_is_lower_bound": True,
+                "continuation_supported": False,
+            },
+            "continuation": {
+                "status": "bounded_overlay_incomplete",
+                "can_continue_with_offset": False,
+            },
+        },
+        1.0,
+        "ok",
+    )
+
+    payload = json.loads(encoded)["payload"]
+    assert payload["context_view"] == "actor_effective"
+    assert payload["total_hits_is_lower_bound"] is True
+    assert payload["shown_hit_count"] == 5
+    assert payload["related_concept_ids"] == related_ids
+    assert payload["paging"]["total_available_is_lower_bound"] is True
+    assert payload["paging"]["continuation_supported"] is False
+    assert payload["continuation"]["can_continue_with_offset"] is False
 
 
 def test_turn_scoped_tool_payload_support_applies_workflow_tool_argument_defaults():

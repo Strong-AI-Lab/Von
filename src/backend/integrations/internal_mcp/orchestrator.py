@@ -20961,6 +20961,7 @@ class InternalMCPChatOrchestrator:
 
         selected_hits: list[Mapping[str, Any]] = []
         seen_related_concept_ids: set[str] = set()
+        related_concept_ids: list[str] = []
         related_predicates_by_concept_id: dict[str, list[str]] = {}
         related_directions_by_concept_id: dict[str, list[str]] = {}
         compacted_duplicate_hit_count = 0
@@ -21021,6 +21022,7 @@ class InternalMCPChatOrchestrator:
                     compacted_duplicate_hit_count += 1
                     continue
                 seen_related_concept_ids.add(related_concept_id)
+                related_concept_ids.append(related_concept_id)
             if len(selected_hits) >= max_hits:
                 continue
             selected_hits.append(hit)
@@ -21169,11 +21171,16 @@ class InternalMCPChatOrchestrator:
         compact_payload: dict[str, Any] = {
             "_llm_view": "find_relations_with_argument_results.v1",
             "concept_id": concept_id,
+            "context_view": payload.get("context_view"),
             "total_hits": int(total_hits),
+            "total_hits_is_lower_bound": payload.get("total_hits_is_lower_bound"),
             "shown_hit_count": len(compact_hits),
             "omitted_hit_count": max(0, int(total_hits) - len(compact_hits)),
+            "related_concept_ids": related_concept_ids,
             "predicates": predicate_values[:12],
             "hits": compact_hits,
+            "paging": payload.get("paging"),
+            "continuation": payload.get("continuation"),
             "retrieval_diagnostics": {"note": diagnostics_note},
         }
         omitted_related_concept_count = max(
@@ -21533,37 +21540,43 @@ class InternalMCPChatOrchestrator:
                 )[:6]
             ]
 
-        for row in results[:max_results]:
+        for row_index, row in enumerate(results):
+            include_detail = row_index < max_results
             compact_row: dict[str, Any] = {}
             row_id = row.get("id")
-            if isinstance(row_id, str) and row_id.strip():
+            if include_detail and isinstance(row_id, str) and row_id.strip():
                 compact_row["id"] = row_id.strip()
             score = row.get("score")
-            if isinstance(score, (int, float)):
+            if include_detail and isinstance(score, (int, float)):
                 compact_row["score"] = round(float(score), 3)
             text = row.get("text")
-            if isinstance(text, str) and text.strip():
+            if include_detail and isinstance(text, str) and text.strip():
                 compact_row["text_preview"] = text.strip()[:max_text_chars]
 
             metadata = row.get("metadata")
             metadata_map = metadata if isinstance(metadata, Mapping) else None
-            title = cls._extract_search_knowledge_base_result_title(row, metadata_map)
-            if title:
+            title = (
+                cls._extract_search_knowledge_base_result_title(row, metadata_map)
+                if include_detail
+                else None
+            )
+            if include_detail and title:
                 compact_row["title"] = title[:120]
 
             if isinstance(metadata_map, Mapping):
-                for field_name in (
-                    "item_kind",
-                    "source_system",
-                    "type",
-                    "predicate",
-                    "concept_id",
-                    "subject_concept_id",
-                    "target_concept_id",
-                ):
-                    field_value = metadata_map.get(field_name)
-                    if isinstance(field_value, str) and field_value.strip():
-                        compact_row[field_name] = field_value.strip()
+                if include_detail:
+                    for field_name in (
+                        "item_kind",
+                        "source_system",
+                        "type",
+                        "predicate",
+                        "concept_id",
+                        "subject_concept_id",
+                        "target_concept_id",
+                    ):
+                        field_value = metadata_map.get(field_name)
+                        if isinstance(field_value, str) and field_value.strip():
+                            compact_row[field_name] = field_value.strip()
                 _bump(source_system_counts, metadata_map.get("source_system"))
                 _bump(item_kind_counts, metadata_map.get("item_kind"))
                 _bump(type_counts, metadata_map.get("type"))
@@ -21584,7 +21597,7 @@ class InternalMCPChatOrchestrator:
                 ):
                     concept_ids.append(concept_id.strip())
 
-            if compact_row:
+            if include_detail and compact_row:
                 compact_results.append(compact_row)
 
         total_count = payload.get("count")
@@ -21655,7 +21668,7 @@ class InternalMCPChatOrchestrator:
             "item_kind_counts": item_kind_counts_payload,
             "type_counts": type_counts_payload,
             "predicates": predicates[:12],
-            "concept_ids": concept_ids[:12],
+            "concept_ids": concept_ids,
             "results": compact_results,
             "retrieval_state": retrieval_state,
             "retrieval_diagnostics": {"note": diagnostics_note},
