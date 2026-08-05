@@ -3939,6 +3939,10 @@ function createThinkingCardHistorySnapshot(request) {
         stageDiagnostics,
         timingBreakdown,
         timingSummary,
+        llmUsageCostSummary: (
+            request.llmUsageCostSummary
+            && typeof request.llmUsageCostSummary === 'object'
+        ) ? { ...request.llmUsageCostSummary } : null,
         criticOutput: criticOutput ? cloneThinkingCriticObject(criticOutput) : null,
         thinkingCriticPanelOpen: request.thinkingCriticPanelOpen === true,
         thinkingCriticPanelId: request.thinkingCriticPanelId || null,
