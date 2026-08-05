@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Governing instructions for work in this repository, subordinate
   to current explicit user direction and higher-level safety rules
-- **Last reviewed:** 1 August 2026
+- **Last reviewed:** 5 August 2026
 - **Review trigger:** A material change to Von's product focus, authority model,
   security posture, or acceptance doctrine
 
@@ -12,6 +12,17 @@ This file contains Von's durable engineering invariants. It is intentionally
 compact. Operational recipes, incident records, detailed language references,
 and dated implementation claims belong in the documents routed through
 [`docs/design_index.md`](docs/design_index.md), not here.
+
+## Temporary Sol model cost block
+
+Until Michael explicitly lifts this restriction, agents working in this
+repository must not select or enable any Sol-family model (including
+`gpt-5.6-sol`), and must not invoke or cause Von to invoke one through Codex,
+subagents, automated evaluations, or browser-controlled conversations. If an
+execution surface currently resolves to Sol, switch it to an allowed non-Sol
+model before submitting work. Read-only inspection and reporting of existing
+Sol configuration or historical Sol telemetry is allowed, provided it does not
+issue a model request.
 
 ## 1. Product and research purpose
 
