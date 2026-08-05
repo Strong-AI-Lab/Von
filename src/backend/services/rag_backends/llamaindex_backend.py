@@ -263,6 +263,8 @@ class LlamaIndexRAGService(RAGService):
         self._runtime_configuration: Dict[str, Any] | None = None
         self._runtime_configuration_serialized: str | None = None
         self._runtime_configuration_refreshed_monotonic: float = 0.0
+        self._runtime_embed_model: Any = None
+        self._runtime_llm: Any = None
 
         # Ensure base persistence directory exists
         os.makedirs(self.persistence_dir, exist_ok=True)
@@ -452,32 +454,25 @@ class LlamaIndexRAGService(RAGService):
                 embed_model=embed_model,
                 llm=runtime_llm,
             )
+            self._runtime_embed_model = embed_model
+            self._runtime_llm = runtime_llm
             self._apply_runtime_components(embed_model=embed_model, llm=runtime_llm)
             self._runtime_configuration = runtime_configuration
             self._runtime_configuration_serialized = serialised
             self._runtime_configuration_refreshed_monotonic = now
 
-    def _index_runtime_kwargs(self) -> Dict[str, Any]:
-        self._refresh_runtime_configuration()
+    def _index_runtime_kwargs(self, *, embed_model: Any) -> Dict[str, Any]:
         if self.service_context is not None:
             return {"service_context": self.service_context}
-        return {}
+        return {"embed_model": embed_model}
 
     def _get_runtime_component(self, component_name: str) -> Any:
         self._refresh_runtime_configuration()
-        if self.service_context is not None:
-            component = getattr(self.service_context, component_name, None)
-            if component is not None:
-                return component
-
-        settings_obj = getattr(self, "llamaindex_settings", None)
-        if settings_obj is None:
-            return None
-
-        try:
-            return getattr(settings_obj, component_name, None)
-        except Exception:
-            return None
+        if component_name == "embed_model":
+            return self._runtime_embed_model
+        if component_name == "llm":
+            return self._runtime_llm
+        return None
 
     def get_runtime_embed_model(self) -> Any:
         return self._get_runtime_component("embed_model")
@@ -610,13 +605,54 @@ class LlamaIndexRAGService(RAGService):
             return None
         return payload if isinstance(payload, dict) else None
 
-    def _write_namespace_metadata(self, namespace: str) -> None:
-        runtime_summary = self.get_runtime_configuration_summary()
+    def _capture_embedding_runtime(
+        self,
+        namespace: str,
+    ) -> tuple[dict[str, Any], Any, Dict[str, Any]]:
+        with self._runtime_configuration_lock:
+            self._refresh_runtime_configuration()
+            runtime_summary = dict(self._runtime_configuration or {})
+            embedding_signature = runtime_summary.get("embedding_signature")
+            embed_model = self._runtime_embed_model
+            if isinstance(embedding_signature, Mapping) and embed_model is not None:
+                return (
+                    runtime_summary,
+                    embed_model,
+                    self._index_runtime_kwargs(embed_model=embed_model),
+                )
+
+            embedder_resolution = runtime_summary.get("embedder_resolution")
+            reason = (
+                str(embedder_resolution.get("reason") or "").strip()
+                if isinstance(embedder_resolution, Mapping)
+                else ""
+            )
+            raise RuntimeError(
+                reason
+                or (
+                    "RAG index mutation requires a resolved embedding configuration "
+                    f"for namespace '{namespace}'."
+                )
+            )
+
+    def _write_namespace_metadata(
+        self,
+        namespace: str,
+        *,
+        runtime_summary: Mapping[str, Any] | None = None,
+    ) -> None:
+        if runtime_summary is None:
+            runtime_summary, _, _ = self._capture_embedding_runtime(namespace)
+        embedding_signature = runtime_summary.get("embedding_signature")
+        if not isinstance(embedding_signature, Mapping):
+            raise RuntimeError(
+                "RAG index metadata requires a resolved embedding signature."
+            )
         payload = {
             "schema_version": "rag_index_metadata.v1",
             "namespace": namespace,
             "written_at_utc": datetime.now(timezone.utc).isoformat(),
-            "embedding_signature": runtime_summary.get("embedding_signature"),
+            "embedding_signature": dict(embedding_signature),
             "llm_signature": runtime_summary.get("llm_signature"),
         }
         persist_dir = self._namespace_persist_dir(namespace)
@@ -647,6 +683,39 @@ class LlamaIndexRAGService(RAGService):
                         os.remove(temp_path)
                     except OSError:
                         pass
+
+    def _require_namespace_mutation_compatible(
+        self,
+        namespace: str,
+        *,
+        embedding_signature: Mapping[str, Any],
+    ) -> None:
+        persist_dir = self._namespace_persist_dir(namespace)
+        try:
+            has_persisted_index = os.path.isdir(persist_dir) and bool(
+                os.listdir(persist_dir)
+            )
+        except Exception:
+            has_persisted_index = os.path.isdir(persist_dir)
+        if not has_persisted_index:
+            return
+
+        metadata = self._read_namespace_metadata(namespace)
+        stored_signature = (
+            metadata.get("embedding_signature")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if not isinstance(stored_signature, Mapping):
+            raise RuntimeError(
+                "rebuild_required: persisted RAG index metadata has no verified "
+                f"embedding signature for namespace '{namespace}'."
+            )
+        if dict(stored_signature) != dict(embedding_signature):
+            raise RuntimeError(
+                "rebuild_required: persisted RAG index embeddings do not match "
+                f"the configured embedder for namespace '{namespace}'."
+            )
 
     def _get_current_embedding_signature(self) -> dict[str, Any] | None:
         runtime_summary = self.get_runtime_configuration_summary()
@@ -849,11 +918,23 @@ class LlamaIndexRAGService(RAGService):
             state = self._namespace_retrieval_states.get(effective_namespace)
             return dict(state) if isinstance(state, dict) else None
 
-    def _maybe_load_index(self, namespace: str) -> Any:
+    def _maybe_load_index(
+        self,
+        namespace: str,
+        *,
+        runtime_index_kwargs: Mapping[str, Any] | None = None,
+        expected_embedding_signature: Mapping[str, Any] | None = None,
+    ) -> Any:
         with self._get_namespace_lock(namespace):
-            state = self.get_namespace_runtime_state(namespace)
-            if not bool(state.get("compatible", False)):
-                return None
+            if expected_embedding_signature is not None:
+                self._require_namespace_mutation_compatible(
+                    namespace,
+                    embedding_signature=expected_embedding_signature,
+                )
+            else:
+                state = self.get_namespace_runtime_state(namespace)
+                if not bool(state.get("compatible", False)):
+                    return None
 
             if namespace in self._indices:
                 return self._indices[namespace]
@@ -870,9 +951,13 @@ class LlamaIndexRAGService(RAGService):
                 return None
 
             try:
+                if runtime_index_kwargs is None:
+                    _, _, runtime_index_kwargs = self._capture_embedding_runtime(
+                        namespace
+                    )
                 storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
                 index = load_index_from_storage(
-                    storage_context, **self._index_runtime_kwargs()
+                    storage_context, **dict(runtime_index_kwargs)
                 )
             except Exception:
                 return None
@@ -880,22 +965,42 @@ class LlamaIndexRAGService(RAGService):
             self._indices[namespace] = index
             return index
 
-    def _get_or_create_index(self, namespace: str, documents: List[Any]) -> Any:
+    def _get_or_create_index(
+        self,
+        namespace: str,
+        documents: List[Any],
+        *,
+        runtime_summary: Mapping[str, Any],
+        runtime_index_kwargs: Mapping[str, Any],
+    ) -> Any:
         with self._get_namespace_lock(namespace):
-            state = self.get_namespace_runtime_state(namespace)
-            if state.get("status") in {"signature_missing", "embedding_signature_mismatch"}:
-                self.reset_namespace(namespace)
-            index = self._maybe_load_index(namespace)
+            embedding_signature = runtime_summary.get("embedding_signature")
+            if not isinstance(embedding_signature, Mapping):
+                raise RuntimeError(
+                    "RAG index creation requires a resolved embedding signature."
+                )
+            self._require_namespace_mutation_compatible(
+                namespace,
+                embedding_signature=embedding_signature,
+            )
+            index = self._maybe_load_index(
+                namespace,
+                runtime_index_kwargs=runtime_index_kwargs,
+                expected_embedding_signature=embedding_signature,
+            )
             if index is not None:
                 return index
 
             persist_dir = self._namespace_persist_dir(namespace)
             os.makedirs(persist_dir, exist_ok=True)
             index = VectorStoreIndex.from_documents(
-                documents, **self._index_runtime_kwargs()
+                documents, **dict(runtime_index_kwargs)
             )
             index.storage_context.persist(persist_dir=persist_dir)
-            self._write_namespace_metadata(namespace)
+            self._write_namespace_metadata(
+                namespace,
+                runtime_summary=runtime_summary,
+            )
             self._indices[namespace] = index
             return index
 
@@ -912,12 +1017,10 @@ class LlamaIndexRAGService(RAGService):
         For this implementation, we will convert dicts to Documents and insert them.
         """
         effective_namespace = self._resolve_effective_namespace(namespace)
-        if self.get_runtime_embed_model() is None:
-            state = self.get_namespace_runtime_state(effective_namespace)
-            raise RuntimeError(
-                state.get("detail")
-                or "Embeddings unavailable: LlamaIndex embed_model is not configured."
-            )
+        runtime_summary, _, runtime_index_kwargs = self._capture_embedding_runtime(
+            effective_namespace
+        )
+        embedding_signature = runtime_summary["embedding_signature"]
 
         llama_docs: List[Any] = []
         for doc in docs:
@@ -945,51 +1048,68 @@ class LlamaIndexRAGService(RAGService):
         if not llama_docs:
             return (0, 0)
 
-        index = self._maybe_load_index(effective_namespace)
-        if index is None:
-            index = self._get_or_create_index(effective_namespace, llama_docs)
-            return (len(llama_docs), 0)
+        with self._get_namespace_lock(effective_namespace):
+            self._require_namespace_mutation_compatible(
+                effective_namespace,
+                embedding_signature=embedding_signature,
+            )
+            index = self._maybe_load_index(
+                effective_namespace,
+                runtime_index_kwargs=runtime_index_kwargs,
+                expected_embedding_signature=embedding_signature,
+            )
+            if index is None:
+                index = self._get_or_create_index(
+                    effective_namespace,
+                    llama_docs,
+                    runtime_summary=runtime_summary,
+                    runtime_index_kwargs=runtime_index_kwargs,
+                )
+                return (len(llama_docs), 0)
 
-        success = 0
-        failed = 0
+            success = 0
+            failed = 0
 
-        def _persist() -> None:
-            with self._get_namespace_lock(effective_namespace):
+            def _persist() -> None:
                 index.storage_context.persist(
                     persist_dir=self._namespace_persist_dir(effective_namespace)
                 )
-                self._write_namespace_metadata(effective_namespace)
+                self._write_namespace_metadata(
+                    effective_namespace,
+                    runtime_summary=runtime_summary,
+                )
 
-        # Prefer bulk insertion when supported (significantly faster for embedding-backed indices).
-        try:
-            insert_documents = getattr(index, "insert_documents", None)
-            if callable(insert_documents):
-                insert_documents(llama_docs)
-                success = len(llama_docs)
-                _persist()
-                return (success, failed)
-        except Exception:
-            # Fall back to per-document insertion below.
-            pass
-
-        # Fallback: per-document insertion, optionally allowing partial failures.
-        for l_doc in llama_docs:
+            # Prefer bulk insertion when supported (significantly faster for
+            # embedding-backed indices).
             try:
-                index.insert(l_doc)
-                success += 1
+                insert_documents = getattr(index, "insert_documents", None)
+                if callable(insert_documents):
+                    insert_documents(llama_docs)
+                    success = len(llama_docs)
+                    _persist()
+                    return (success, failed)
             except Exception:
-                failed += 1
-                if not allow_partial_failures:
-                    raise
-
-        if success > 0:
-            try:
-                _persist()
-            except Exception:
-                # Persist failures should not mask successful indexing.
+                # Fall back to per-document insertion below.
                 pass
 
-        return (success, failed)
+            # Fallback: per-document insertion, optionally allowing partial failures.
+            for l_doc in llama_docs:
+                try:
+                    index.insert(l_doc)
+                    success += 1
+                except Exception:
+                    failed += 1
+                    if not allow_partial_failures:
+                        raise
+
+            if success > 0:
+                try:
+                    _persist()
+                except Exception:
+                    # Persist failures should not mask successful indexing.
+                    pass
+
+            return (success, failed)
 
     def delete_documents(
         self,

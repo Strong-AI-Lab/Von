@@ -105,6 +105,34 @@ def test_paper_download_cold_start_window_covers_observed_blob_rehydration():
     assert definition.hard_timeout_enabled is True
 
 
+def test_ordinary_semantic_reads_use_advisory_only_transport_timing():
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    catalogue = build_default_catalogue()
+    transport = InternalMCPTransport()
+
+    for method_name in (
+        "fetch_concept",
+        "find_relations_with_argument",
+        "get_predicate_incidence",
+        "get_related_concepts",
+        "get_text_relations",
+        "get_text_relations_summary",
+        "rag_list_indexed",
+        "resolve_concept_by_name",
+        "search_concepts",
+        "search_concept_descriptions",
+        "search_knowledge_base",
+        "vontology_concept_search",
+    ):
+        definition = catalogue.get(method_name)
+        assert definition.hard_timeout_enabled is False
+        assert definition.resolved_timeout(transport) is None
+
+
 def test_workflow_execute_uses_its_bounded_await_without_an_outer_hard_timeout():
     from src.backend.integrations.internal_mcp import (
         InternalMCPTransport,

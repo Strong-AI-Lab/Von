@@ -149,8 +149,15 @@ def test_get_rag_service_llamaindex(mock_llamaindex):
     assert type(service).__name__ == "LlamaIndexRAGService"
 
 
-def test_upsert_documents(mock_llamaindex):
-    service = get_rag_service("llamaindex")
+def test_upsert_documents(mock_llamaindex, monkeypatch, workspace_tmp_path):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    service = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
     docs = [{"id": "doc1", "text": "content", "metadata": {"meta": "data"}}]
 
     success, failed = service.upsert_documents(docs)
@@ -527,6 +534,163 @@ def test_llamaindex_runtime_configuration_tracks_embedding_signature_and_mismatc
     state = rag.get_namespace_runtime_state("workflow_capabilities")
 
     assert state["compatible"] is False
+    assert state["status"] == "embedding_signature_mismatch"
+    assert state["current_embedding_signature"]["model"] == "nomic-embed-text"
+
+
+def test_llamaindex_upsert_rejects_unresolved_embedder_before_index_mutation(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_embedder_setting",
+        lambda *args, **kwargs: {
+            "status": "unresolved",
+            "effective": None,
+            "selection_source": "unavailable",
+            "reason": "embedding_provider_unavailable",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_llm_setting",
+        lambda *args, **kwargs: {
+            "status": "disabled",
+            "effective": None,
+            "selection_source": "configured_disabled",
+            "reason": "disabled_by_setting",
+        },
+    )
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    # LlamaIndex may expose a truthy MockEmbedding when no real embedder was
+    # resolved. Mutation authority comes from the resolved configuration, not
+    # from that compatibility fallback object.
+    assert rag.llamaindex_settings.embed_model is not None
+
+    with pytest.raises(RuntimeError, match="embedding_provider_unavailable"):
+        rag.upsert_documents(
+            [{"id": "doc1", "text": "content", "metadata": {}}],
+            namespace="#V#user@org",
+        )
+
+    mock_llamaindex["index_cls"].from_documents.assert_not_called()
+    assert not (workspace_tmp_path / "rag_storage" / "namespaces").exists()
+
+
+@pytest.mark.parametrize(
+    "persisted_signature",
+    ["different", "missing"],
+)
+def test_llamaindex_upsert_requires_explicit_rebuild_for_incompatible_signature(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+    persisted_signature,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    rag.upsert_documents(
+        [{"id": "doc1", "text": "first", "metadata": {}}],
+        namespace="#V#user@org",
+    )
+    metadata_path = next(
+        (workspace_tmp_path / "rag_storage").rglob("index_metadata.json")
+    )
+    if persisted_signature == "missing":
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["embedding_signature"] = None
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    else:
+        monkeypatch.setattr(
+            "src.backend.services.settings_service.resolve_rag_embedder_setting",
+            lambda *args, **kwargs: {
+                "status": "resolved",
+                "effective": {
+                    "provider": "ollama",
+                    "model": "nomic-embed-text",
+                    "host": "http://localhost:11434",
+                },
+                "selection_source": "explicit_setting",
+                "reason": None,
+            },
+        )
+        rag.invalidate_runtime_configuration_cache()
+    metadata_before = metadata_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="rebuild_required"):
+        rag.upsert_documents(
+            [{"id": "doc2", "text": "second", "metadata": {}}],
+            namespace="#V#user@org",
+        )
+
+    assert metadata_path.read_bytes() == metadata_before
+    assert mock_llamaindex["index_cls"].from_documents.call_count == 1
+    mock_llamaindex["index"].insert_documents.assert_not_called()
+
+
+def test_llamaindex_metadata_uses_embedder_captured_before_index_creation(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+    from src.backend.services.rag_backends import llamaindex_backend as backend
+
+    backend.ServiceContext.from_defaults.side_effect = ValueError(
+        "ServiceContext is deprecated. Use llama_index.settings.Settings instead."
+    )
+    rag = backend.LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+
+    def _create_index_after_configuration_change(*args, **kwargs):
+        monkeypatch.setattr(
+            "src.backend.services.settings_service.resolve_rag_embedder_setting",
+            lambda *inner_args, **inner_kwargs: {
+                "status": "resolved",
+                "effective": {
+                    "provider": "ollama",
+                    "model": "nomic-embed-text",
+                    "host": "http://localhost:11434",
+                },
+                "selection_source": "explicit_setting",
+                "reason": None,
+            },
+        )
+        rag.invalidate_runtime_configuration_cache()
+        return mock_llamaindex["index"]
+
+    mock_llamaindex["index_cls"].from_documents.side_effect = (
+        _create_index_after_configuration_change
+    )
+
+    rag.upsert_documents(
+        [{"id": "doc1", "text": "content", "metadata": {}}],
+        namespace="#V#user@org",
+    )
+
+    call_kwargs = mock_llamaindex["index_cls"].from_documents.call_args.kwargs
+    assert call_kwargs["embed_model"].model_name == "text-embedding-3-small"
+    metadata_path = next(
+        (workspace_tmp_path / "rag_storage").rglob("index_metadata.json")
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["embedding_signature"]["model"] == "text-embedding-3-small"
+
+    state = rag.get_namespace_runtime_state("#V#user@org")
     assert state["status"] == "embedding_signature_mismatch"
     assert state["current_embedding_signature"]["model"] == "nomic-embed-text"
 

@@ -32,7 +32,6 @@ from difflib import SequenceMatcher
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from bson import ObjectId
-from pymongo import timeout
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import (
@@ -66,8 +65,6 @@ DESCRIPTION_TEXT_PREDICATE_PRECEDENCE = (
 )
 TEXT_RELATION_DEFAULT_TEXT_VALUE_LIMIT = 500
 TEXT_RELATION_DEFAULT_RELATION_LIMIT = 1000
-CONCEPT_SEARCH_QUERY_MAX_TIME_MS = 5_000
-CONCEPT_SEARCH_OPERATION_TIMEOUT_SECONDS = 5.0
 TEXT_VALUE_ID_PROJECTION: Dict[str, int] = {"_id": 1}
 
 
@@ -84,16 +81,9 @@ class InvalidSearchParameters(ConceptSearchError):
 
 
 def _consume_search_cursor(cursor) -> list[dict[str, Any]]:
-    """Materialise one bounded Mongo cursor under a total client deadline.
+    """Materialise one cursor without imposing a local wall-clock cutoff."""
 
-    ``maxTimeMS`` bounds server execution but does not include topology
-    selection, connection acquisition, or network reads. PyMongo CSOT covers
-    that complete operation while the existing server deadline remains useful
-    to Atlas for early cancellation.
-    """
-
-    with timeout(CONCEPT_SEARCH_OPERATION_TIMEOUT_SECONDS):
-        return list(cursor)
+    return list(cursor)
 
 
 def _determine_concept_kind(concept_doc: Dict[str, Any]) -> str:
@@ -291,7 +281,6 @@ def _fetch_text_relation_concept_docs(
         query,
         projection=SEARCH_RESULT_PROJECTION,
         limit=max(limit * 2, len(ordered_ids)),
-        max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
     )
     return _consume_search_cursor(cursor)
 
@@ -328,7 +317,6 @@ def _find_text_values_by_fingerprint(
             },
             projection=TEXT_VALUE_ID_PROJECTION,
             limit=limit,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
 
@@ -370,7 +358,6 @@ def _scan_text_values_for_match(
             {"predicate": {"$in": predicates}},
             projection={"object_text_id": 1},
             limit=limit,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
 
@@ -393,7 +380,6 @@ def _scan_text_values_for_match(
         TextValuesRepository.find(
             {"_id": {"$in": candidate_ids}},
             limit=limit,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
 
@@ -469,7 +455,6 @@ def _search_text_relations(
                 text_query,
                 projection=TEXT_VALUE_ID_PROJECTION,
                 limit=text_value_limit,
-                max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
             )
         )
     elif not matching_texts and not exact:
@@ -480,7 +465,6 @@ def _search_text_relations(
                     text_search_query,
                     projection=TEXT_VALUE_ID_PROJECTION,
                     limit=text_value_limit,
-                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
             )
         except Exception as e:
@@ -493,7 +477,6 @@ def _search_text_relations(
                     substring_query,
                     projection=TEXT_VALUE_ID_PROJECTION,
                     limit=text_value_limit,
-                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
             )
 
@@ -527,7 +510,6 @@ def _search_text_relations(
             },
             projection={"subject_concept_id": 1},
             limit=relation_limit,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
 
@@ -698,7 +680,6 @@ def _semantic_search(
         concepts_cursor = ConceptsRepository.find(
             {"concept_id": {"$in": concept_ids}},
             projection=SEARCH_RESULT_PROJECTION,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
 
         # Post-filter and build results
@@ -907,7 +888,6 @@ def search_concepts(
                 base_query,
                 projection=SEARCH_RESULT_PROJECTION,
                 limit=limit,
-                max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
             )
 
             for concept_doc in _consume_search_cursor(all_instances_cursor):
@@ -970,7 +950,6 @@ def search_concepts(
                 base_query,
                 projection=SEARCH_RESULT_PROJECTION,
                 limit=1000,  # Broader fetch for similarity scoring
-                max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
             )
 
             candidates = _consume_search_cursor(candidates_cursor)
@@ -1012,7 +991,6 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=fetch_limit,
-                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
                 substring_added = False
@@ -1065,7 +1043,6 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
-                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
                 for concept_doc in _consume_search_cursor(prefix_cursor):
@@ -1094,7 +1071,6 @@ def search_concepts(
                         combined_query,
                         projection=SEARCH_RESULT_PROJECTION,
                         limit=max(remaining, fetch_limit),
-                        max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                     )
 
                     for concept_doc in _consume_search_cursor(substring_cursor):
@@ -1118,7 +1094,6 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
-                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
                 for concept_doc in _consume_search_cursor(substring_cursor):
@@ -1142,7 +1117,6 @@ def search_concepts(
                     combined_query,
                     projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
-                    max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                 )
 
                 for concept_doc in _consume_search_cursor(concepts_cursor):
@@ -1231,7 +1205,6 @@ def search_concepts(
                             "predicate": "hasName",
                         },
                         limit=1000,
-                        max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                     )
                 )
 
@@ -1261,7 +1234,6 @@ def search_concepts(
                                 }
                             },
                             limit=1000,
-                            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
                         )
                     )
 

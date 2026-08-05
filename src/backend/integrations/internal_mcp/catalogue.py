@@ -33959,6 +33959,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_concept_fetch_input_schema(),
             output_schema=None,
             category="read",
+            hard_timeout_enabled=False,
             description=(
                 "Fetch full details of one concept by exact ID. An authenticated "
                 "actor receives actor_effective scoped enrichment; identity or "
@@ -33972,6 +33973,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_find_relations_with_argument_input_schema(),
             output_schema=_find_relations_with_argument_output_schema(),
             category="read",
+            hard_timeout_enabled=False,
             description=(
                 "Find relation assertions where a concept appears in one or more argument "
                 "positions. The anchor entity must be supplied in concept_id; use "
@@ -34086,6 +34088,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=concept_search_input_schema,
             output_schema=concept_search_output_schema,
             category="read",
+            hard_timeout_enabled=False,
             description="Find concepts. For 'list instances of X': use instance_of='#V#type' param (e.g., instance_of='#V#researcher'). For 'find X': use query param. Other key params: filter_kind=['individual'|'type'], include_hierarchy_path=true (shows paths), match_type='exact'|'substring'|'similarity'.",
         ),
         MethodDefinition(
@@ -34108,6 +34111,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_predicate_incidence_input_schema(),
             output_schema=_predicate_incidence_output_schema(),
             category="read",
+            hard_timeout_enabled=False,
             description=(
                 "Discover predicates actually used around a known anchor or type when "
                 "relationship coverage is uncertain. The anchor entity goes in concept_id. "
@@ -34152,6 +34156,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=concept_search_input_schema,
             output_schema=concept_search_output_schema,
             category="read",
+            hard_timeout_enabled=False,
             description=(
                 "Search Vontology concept names and descriptions, including "
                 "predicates and types. Use as schema discovery when a represented "
@@ -34167,6 +34172,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_resolve_concept_by_name_input_schema(),
             output_schema=_resolve_concept_by_name_output_schema(),
             category="read",
+            hard_timeout_enabled=False,
             description=(
                 "Resolve a Vontology concept deterministically from a user-provided surface form. "
                 "Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. "
@@ -34264,6 +34270,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_get_text_relations_input_schema(),
             output_schema=_get_text_relations_output_schema(),
             category="read",
+            hard_timeout_enabled=False,
             description=(
                 "Retrieve labelled text-assertion rows for a concept, optionally "
                 "filtered by predicate/language. The serving authority boundary "
@@ -34295,6 +34302,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_get_text_relations_summary_input_schema(),
             output_schema=_get_text_relations_summary_output_schema(),
             category="read",
+            hard_timeout_enabled=False,
             description=(
                 "Return a lightweight, context-labelled text-assertion summary "
                 "grouped by predicate/language (no full text bodies). The serving "
@@ -35285,6 +35293,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             output_schema=_search_knowledge_base_output_schema(),
             category="read",
             timeout_sec=30.0,
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
                 "user_concept_id": "actor_user_concept_id",
@@ -35301,6 +35310,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             output_schema=_search_concept_descriptions_output_schema(),
             category="read",
             timeout_sec=30.0,
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
                 "user_concept_id": "actor_user_concept_id",
@@ -35320,6 +35330,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             output_schema=_get_related_concepts_output_schema(),
             category="read",
             timeout_sec=30.0,
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
                 "user_concept_id": "actor_user_concept_id",
@@ -35993,6 +36004,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             ),
             output_schema=None,
             category="read",
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
             },
