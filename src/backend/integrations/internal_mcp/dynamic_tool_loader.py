@@ -495,7 +495,8 @@ def load_dynamic_method_definitions(
 
         timeout_sec = target_definition.timeout_sec
         timeout_override = attributes.get("dynamic_timeout_sec")
-        if timeout_override not in (None, ""):
+        has_timeout_override = timeout_override not in (None, "")
+        if has_timeout_override:
             if (
                 isinstance(timeout_override, (int, float))
                 and not isinstance(timeout_override, bool)
@@ -561,6 +562,17 @@ def load_dynamic_method_definitions(
             output_schema=target_definition.output_schema,
             category=target_definition.category,
             timeout_sec=timeout_sec,
+            advisory_timeout_sec=target_definition.advisory_timeout_sec,
+            hard_timeout_enabled=(
+                True
+                if has_timeout_override
+                else target_definition.hard_timeout_enabled
+            ),
+            successful_duration_bootstrap_sec=(
+                None
+                if has_timeout_override
+                else target_definition.successful_duration_bootstrap_sec
+            ),
             description=description,
             ordinary_turn_public=target_definition.ordinary_turn_public,
             ordinary_turn_excluded_reason=ordinary_turn_excluded_reason,

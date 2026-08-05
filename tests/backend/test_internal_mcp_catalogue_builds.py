@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     from src.backend.integrations.internal_mcp import build_default_catalogue
 
@@ -86,23 +89,55 @@ def test_default_catalogue_exposes_calibrated_effect_admission_windows():
 
 
 def test_remote_file_import_has_observed_liveness_headroom():
-    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
 
     definition = build_default_catalogue().get("import_url_file_copy")
 
-    assert definition.advisory_timeout_sec == 220.0
-    assert definition.timeout_sec == 350.0
+    assert definition.advisory_timeout_sec is None
+    assert definition.timeout_sec is None
     assert definition.hard_timeout_enabled is True
+    assert definition.successful_duration_bootstrap_sec == pytest.approx(173.641)
+    assert definition.resolved_advisory_timeout(
+        InternalMCPTransport()
+    ) == pytest.approx(173.641 * 1.25)
+    assert definition.resolved_timeout(InternalMCPTransport()) == pytest.approx(
+        173.641 * 2.0
+    )
 
 
 def test_paper_download_cold_start_window_covers_observed_blob_rehydration():
-    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
 
     definition = build_default_catalogue().get("download_paper")
 
-    assert definition.advisory_timeout_sec == 85.0
-    assert definition.timeout_sec == 140.0
+    assert definition.advisory_timeout_sec is None
+    assert definition.timeout_sec is None
     assert definition.hard_timeout_enabled is True
+    assert definition.successful_duration_bootstrap_sec == pytest.approx(68.321)
+    assert definition.resolved_advisory_timeout(
+        InternalMCPTransport()
+    ) == pytest.approx(68.321 * 1.25)
+    assert definition.resolved_timeout(InternalMCPTransport()) == pytest.approx(
+        68.321 * 2.0
+    )
+
+
+def test_adaptive_deadline_history_is_limited_to_observed_long_running_imports():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+
+    snapshot = build_default_catalogue().snapshot()
+
+    assert {
+        name
+        for name, definition in snapshot.items()
+        if definition["successful_duration_bootstrap_sec"] is not None
+    } == {"download_paper", "import_url_file_copy"}
 
 
 def test_ordinary_semantic_reads_use_advisory_only_transport_timing():
@@ -121,6 +156,8 @@ def test_ordinary_semantic_reads_use_advisory_only_transport_timing():
         "get_related_concepts",
         "get_text_relations",
         "get_text_relations_summary",
+        "rag_get_item",
+        "rag_list_collections",
         "rag_list_indexed",
         "resolve_concept_by_name",
         "search_concepts",
@@ -131,6 +168,33 @@ def test_ordinary_semantic_reads_use_advisory_only_transport_timing():
         definition = catalogue.get(method_name)
         assert definition.hard_timeout_enabled is False
         assert definition.resolved_timeout(transport) is None
+
+
+def test_frequent_gmail_and_scoped_assertion_paths_use_advisory_only_timing():
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPTransport,
+        build_default_catalogue,
+    )
+
+    catalogue = build_default_catalogue()
+    transport = InternalMCPTransport()
+    expected_advisory_seconds = {
+        "gmail_get_auth_config": 10.0,
+        "gmail_list_messages": 20.0,
+        "gmail_get_message": 20.0,
+        "gmail_get_attachment": 20.0,
+        "gmail_list_labels": 15.0,
+        "upsert_scoped_assertion": 20.0,
+        "list_scoped_assertions": 20.0,
+    }
+
+    for method_name, advisory_seconds in expected_advisory_seconds.items():
+        definition = catalogue.get(method_name)
+        assert definition.timeout_sec is None
+        assert definition.advisory_timeout_sec == advisory_seconds
+        assert definition.hard_timeout_enabled is False
+        assert definition.resolved_timeout(transport) is None
+        assert definition.resolved_advisory_timeout(transport) == advisory_seconds
 
 
 def test_workflow_execute_uses_its_bounded_await_without_an_outer_hard_timeout():

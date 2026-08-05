@@ -392,13 +392,16 @@ def _get_vontology_tree(**kwargs):
 
 
 def _get_concept_by_concept_id(**kwargs):
-    from ...services.concept_relation_service import build_concept_relations_payload
-    from ...services.concept_service import (
-        enrich_concept_with_text_relations,
-        get_concept_by_concept_id,
-    )
     from ...security.access_control import describe_concept_access
+    from ...services.concept_relation_service import build_concept_relations_payload
+    from ...services.concept_rename_service import resolve_concept_by_alias
+    from ...services.concept_service import (
+        ConceptNotFoundError,
+        enrich_concept_with_text_relations,
+        get_concept_by_concept_id_exact,
+    )
     from ...services.relationship_write_service import detect_vacuous_typing
+    from ...vontology.code_concepts_registry import build_virtual_concept_doc
 
     concept_id = kwargs.get("concept_id")
     if not concept_id:
@@ -426,12 +429,49 @@ def _get_concept_by_concept_id(**kwargs):
                 ],
             )
 
-        concept = get_concept_by_concept_id(concept_id=concept_id)
+        try:
+            concept = get_concept_by_concept_id_exact(concept_id=concept_id)
+        except ConceptNotFoundError:
+            concept = build_virtual_concept_doc(concept_id)
+            if isinstance(concept, dict) and concept.get("concept_id"):
+                concept = {**concept}
+                concept.setdefault("id", f"virtual:{concept_id}")
+                concept.setdefault(
+                    "kind",
+                    concept.get("metadata", {}).get("concept_type", "unknown"),
+                )
+            else:
+                resolved_id = resolve_concept_by_alias(concept_id)
+                if resolved_id and resolved_id != concept_id:
+                    try:
+                        concept = get_concept_by_concept_id_exact(
+                            concept_id=resolved_id
+                        )
+                    except ConceptNotFoundError:
+                        concept = None
+                else:
+                    concept = None
 
-        # Use shared enrichment logic (migrate-on-read + fetch names from text relations)
         if not concept:
-            return concept
+            return make_error_response(
+                "concept_not_found",
+                f"Concept not found: {concept_id}",
+                details={
+                    "concept_id": concept_id,
+                    "status": "not_found",
+                    "lookup_modes": ["exact_concept_id", "exact_code_alias"],
+                },
+                suggestions=[
+                    (
+                        "Use resolve_concept_by_name for a human-readable name "
+                        "or legacy variant"
+                    ),
+                    "Use search_concepts when the exact concept ID is unknown",
+                ],
+                related_concept_ids=[concept_id],
+            )
 
+        # Use shared enrichment logic (migrate-on-read plus text-relation names).
         concept = enrich_concept_with_text_relations(concept)
 
         scoped_assertion_rows: list[dict[str, Any]] = []
@@ -441,7 +481,7 @@ def _get_concept_by_concept_id(**kwargs):
             )
 
             scoped_assertion_rows = list_visible_scoped_assertions(
-                subject_concept_ids=[concept_id],
+                subject_concept_ids=[concept.get("concept_id", concept_id)],
                 limit=101,
             )
         scoped_assertions_truncated = len(scoped_assertion_rows) > 100
@@ -3443,9 +3483,11 @@ def _add_relationship(**kwargs):
         repo = ConceptsRepository
 
         from ...services.relationship_write_service import (
+            CORE_RELATIONSHIP_TEXT_PREDICATES,
             add_relationship,
             is_structural_predicate,
             normalise_structural_predicate,
+            resolve_existing_predicate_value_kind,
             validate_predicate_concept,
         )
         from ...utils.concept_id_utils import canonicalise_vontology_concept_id
@@ -3474,7 +3516,7 @@ def _add_relationship(**kwargs):
         predicate_normalised = (
             predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
         )
-        well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
+        well_known_text_predicates = CORE_RELATIONSHIP_TEXT_PREDICATES
         if (
             not predicate_str.startswith("#V#")
             and predicate_normalised not in well_known_text_predicates
@@ -3874,19 +3916,9 @@ def _add_relationship(**kwargs):
                 ),
             }
 
-        # Determine if this is a text predicate (binary_text_predicate instance)
-        is_text_predicate = False
-        if predicate_str.startswith("#V#"):
-            pred_doc = repo.find_one(
-                {"concept_id": predicate_str}, {"relationships.is_an_instance_of": 1}
-            )
-            if pred_doc:
-                instance_of = pred_doc.get("relationships", {}).get(
-                    "is_an_instance_of", []
-                )
-                if isinstance(instance_of, str):
-                    instance_of = [instance_of]
-                is_text_predicate = "#V#binary_text_predicate" in instance_of
+        is_text_predicate = (
+            resolve_existing_predicate_value_kind(predicate_str, repo) == "text"
+        )
 
         # Handle text predicates (target is text value, not concept)
         if is_text_predicate:
@@ -34185,6 +34217,8 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_upsert_scoped_assertion_input_schema(),
             output_schema=_upsert_scoped_assertion_output_schema(),
             category="write",
+            advisory_timeout_sec=20.0,
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
                 "organisation_concept_id": "actor_organisation_concept_id",
@@ -34232,6 +34266,8 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             input_schema=_list_scoped_assertions_input_schema(),
             output_schema=_list_scoped_assertions_output_schema(),
             category="read",
+            advisory_timeout_sec=20.0,
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "acting_user_concept_id": "actor_user_concept_id",
                 "organisation_concept_id": "actor_organisation_concept_id",
@@ -34729,10 +34765,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_download_paper_input_schema(),
             output_schema=_download_paper_output_schema(),
             category="write",
-            # 140s is just over twice the observed 68.321s late-completion path;
-            # 85s warns before that capability-specific liveness boundary.
-            timeout_sec=140.0,
-            advisory_timeout_sec=85.0,
+            # Seed adaptive windows from the observed 68.321s cold completion.
+            successful_duration_bootstrap_sec=68.321,
             description="Download PDF of an arXiv paper, then store it in the configured blob store (local, OpenStack Swift, or S3-compatible object storage). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri and may register a #V#computer_file_copy when authenticated. Use when user asks to download/save/fetch a paper. This tool does not materialise the scholarly-paper concept.",
         ),
         MethodDefinition(
@@ -34909,10 +34943,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             input_schema=_import_url_file_copy_input_schema(),
             output_schema=_import_url_file_copy_output_schema(),
             category="write",
-            # 350s is just over twice the observed 173.641s successful path;
-            # 220s warns before that capability-specific liveness boundary.
-            timeout_sec=350.0,
-            advisory_timeout_sec=220.0,
+            # Seed adaptive windows from the observed 173.641s cold completion.
+            successful_duration_bootstrap_sec=173.641,
             description=(
                 "Fetch a remote artefact directly from an http/https URL, persist its bytes "
                 "to the configured blob store, and register a #V#computer_file_copy concept "
@@ -35116,7 +35148,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "profile_id": "gmail_profile",
             },
-            timeout_sec=10.0,
+            advisory_timeout_sec=10.0,
+            hard_timeout_enabled=False,
             description=(
                 "Return the OAuth scope and token status for a configured Gmail "
                 "profile. Resolves scope from Vontology (authoritative) with the "
@@ -35156,7 +35189,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "profile": "gmail_profile",
             },
-            timeout_sec=20.0,
+            advisory_timeout_sec=20.0,
+            hard_timeout_enabled=False,
             description=(
                 "List Gmail messages for a profile with optional query and label "
                 "filters. The 'profile' parameter accepts either the configured "
@@ -35187,7 +35221,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "profile": "gmail_profile",
             },
-            timeout_sec=20.0,
+            advisory_timeout_sec=20.0,
+            hard_timeout_enabled=False,
             description=(
                 "Fetch a Gmail message for a profile using message_id from "
                 "gmail_list_messages. The 'profile' parameter accepts either "
@@ -35234,7 +35269,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "profile": "gmail_profile",
             },
-            timeout_sec=20.0,
+            advisory_timeout_sec=20.0,
+            hard_timeout_enabled=False,
             description="Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
         ),
         MethodDefinition(
@@ -35251,7 +35287,8 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ordinary_turn_trusted_argument_bindings={
                 "profile": "gmail_profile",
             },
-            timeout_sec=15.0,
+            advisory_timeout_sec=15.0,
+            hard_timeout_enabled=False,
             description="List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
         ),
         MethodDefinition(
@@ -35979,6 +36016,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             ),
             output_schema=None,
             category="read",
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
             },
@@ -36024,6 +36062,7 @@ def _build_default_catalogue_diagnostics_and_research_definitions() -> (
             ),
             output_schema=None,
             category="read",
+            hard_timeout_enabled=False,
             ordinary_turn_trusted_argument_bindings={
                 "namespace": "turn_namespace",
             },

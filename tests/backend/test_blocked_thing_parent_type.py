@@ -337,7 +337,7 @@ def test_mcp_fetch_concept_adds_vacuous_warning(monkeypatch):
         return concept
 
     monkeypatch.setattr(
-        "src.backend.services.concept_service.get_concept_by_concept_id",
+        "src.backend.services.concept_service.get_concept_by_concept_id_exact",
         _fake_get_concept,
     )
     monkeypatch.setattr(

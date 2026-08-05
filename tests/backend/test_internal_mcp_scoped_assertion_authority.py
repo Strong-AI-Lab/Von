@@ -204,7 +204,7 @@ def _install_route_fakes(monkeypatch: pytest.MonkeyPatch):
         lambda _concept_id: {"exists": True, "accessible": True},
     )
     monkeypatch.setattr(
-        "src.backend.services.concept_service.get_concept_by_concept_id",
+        "src.backend.services.concept_service.get_concept_by_concept_id_exact",
         fake_get_concept,
     )
     monkeypatch.setattr(
