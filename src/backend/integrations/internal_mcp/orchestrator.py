@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import requests
+from contextvars import copy_context
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import (
@@ -15222,8 +15223,9 @@ class InternalMCPChatOrchestrator:
             finally:
                 done.set()
 
+        worker_context = copy_context()
         threading.Thread(
-            target=_worker,
+            target=lambda: worker_context.run(_worker),
             daemon=True,
             name=f"von-llm-{stage_name}",
         ).start()
@@ -15473,8 +15475,10 @@ class InternalMCPChatOrchestrator:
             # JVNAUTOSCI-2373: model-resolution telemetry shared across all
             # attempts. ``model_source`` records why this candidate was tried
             # (active_llm, enabled_settings, policy primary/fallback, ...);
-            # ``requested_model`` and ``effective_model`` distinguish what the
-            # caller asked for from what the fallback chain actually used;
+            # ``requested_model`` and ``selected_model`` distinguish what the
+            # caller asked for from what the fallback chain chose.  An
+            # ``effective_model`` is added only when a provider response
+            # reports one.
             # ``model_switch_reason`` explains divergence (dead-candidate
             # skip, previous-attempt failure class).
             attempt_meta: dict[str, Any] = {
@@ -15482,7 +15486,9 @@ class InternalMCPChatOrchestrator:
                 "fallback_candidate_count": total_candidates,
                 "model_source": candidate.source,
                 "requested_model": default_model,
-                "effective_model": model_name,
+                "selected_model": model_name,
+                "effective_model": None,
+                "model_identity_source": None,
                 # JVNAUTOSCI-2517: carry the stable exchange/attempt identity on
                 # every per-attempt live lifecycle event (sent/received/
                 # completed/cancelled/failed) so the Thinking card groups them.
@@ -15576,6 +15582,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call(
                     call_type="llm.generate",
                     model_name=model_name,
+                    requested_model_name=default_model,
                     duration_ms=duration_ms,
                     usage=None,
                     note="candidate reachability probe failed; trying fallback",
@@ -15741,6 +15748,7 @@ class InternalMCPChatOrchestrator:
                     record_llm_call(
                         call_type="llm.generate",
                         model_name=model_name,
+                        requested_model_name=default_model,
                         duration_ms=duration_ms,
                         usage=None,
                         note="llm.generate response failed validation; trying fallback",
@@ -15835,6 +15843,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call(
                     call_type="llm.generate",
                     model_name=model_name,
+                    requested_model_name=default_model,
                     duration_ms=duration_ms,
                     usage=None,
                     note=("Fallback chain generate()" if errors else "llm.generate"),
@@ -15910,7 +15919,9 @@ class InternalMCPChatOrchestrator:
                         "skipped_candidates": list(skipped_candidates),
                         "skipped_candidate_count": len(skipped_candidates),
                         "requested_model": default_model,
-                        "effective_model": model_name,
+                        "selected_model": model_name,
+                        "effective_model": None,
+                        "model_identity_source": None,
                         "model_source": candidate.source,
                         **_stage_extra,
                         **selection_metadata,
@@ -15945,6 +15956,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call(
                     call_type="llm.generate",
                     model_name=model_name,
+                    requested_model_name=default_model,
                     duration_ms=duration_ms,
                     usage=None,
                     note="llm.generate cancelled",
@@ -16064,6 +16076,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call(
                     call_type="llm.generate",
                     model_name=model_name,
+                    requested_model_name=default_model,
                     duration_ms=duration_ms,
                     usage=None,
                     note="llm.generate failed; trying fallback",
@@ -16772,7 +16785,9 @@ class InternalMCPChatOrchestrator:
                 "fallback_candidate_count": total_candidates,
                 "model_source": candidate.source,
                 "requested_model": default_model,
-                "effective_model": model_name,
+                "selected_model": model_name,
+                "effective_model": None,
+                "model_identity_source": None,
                 # JVNAUTOSCI-2517: carry the stable exchange/attempt identity on
                 # every per-attempt live lifecycle event (sent/received/
                 # completed/cancelled/failed) so the Thinking card groups them.
@@ -17066,6 +17081,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call(
                     call_type="llm.generate_with_tools",
                     model_name=model_name,
+                    requested_model_name=default_model,
                     duration_ms=duration_ms,
                     usage=None,
                     note="candidate reachability probe failed; trying fallback",
@@ -17141,6 +17157,15 @@ class InternalMCPChatOrchestrator:
                     timeout_override_sec=timeout_override_sec,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                provider_response_model = (
+                    llm_response.model.strip()
+                    if isinstance(getattr(llm_response, "model", None), str)
+                    and llm_response.model.strip()
+                    else None
+                )
+                if provider_response_model:
+                    attempt_meta["effective_model"] = provider_response_model
+                    attempt_meta["model_identity_source"] = "provider_response"
                 response_transport = getattr(
                     llm_response,
                     "transport_metadata",
@@ -17245,14 +17270,14 @@ class InternalMCPChatOrchestrator:
                         failure_kind=validation_failure_kind,
                     )
                     failure_extra["validation"] = dict(response_validation_failure)
-                    resolved_model_name = (
-                        llm_response.model
-                        if isinstance(getattr(llm_response, "model", None), str)
-                        else model_name
-                    )
                     record_llm_call(
                         call_type="llm.generate_with_tools",
-                        model_name=resolved_model_name,
+                        model_name=model_name,
+                        requested_model_name=default_model,
+                        effective_model_name=provider_response_model,
+                        model_identity_source=(
+                            "provider_response" if provider_response_model else None
+                        ),
                         duration_ms=duration_ms,
                         usage=(
                             llm_response.usage
@@ -17279,7 +17304,7 @@ class InternalMCPChatOrchestrator:
                             prompt=prompt,
                             context=context,
                             response=response_text,
-                            model_name=resolved_model_name,
+                            model_name=provider_response_model or model_name,
                             provider=provider,
                             prepared_at_utc=request_prepared_at_utc,
                             sent_at_utc=request_sent_at_utc,
@@ -17368,10 +17393,11 @@ class InternalMCPChatOrchestrator:
                     )
                 record_llm_call(
                     call_type="llm.generate_with_tools",
-                    model_name=(
-                        llm_response.model
-                        if isinstance(getattr(llm_response, "model", None), str)
-                        else model_name
+                    model_name=model_name,
+                    requested_model_name=default_model,
+                    effective_model_name=provider_response_model,
+                    model_identity_source=(
+                        "provider_response" if provider_response_model else None
                     ),
                     duration_ms=duration_ms,
                     usage=(
@@ -17480,7 +17506,11 @@ class InternalMCPChatOrchestrator:
                         "skipped_candidates": list(skipped_candidates),
                         "skipped_candidate_count": len(skipped_candidates),
                         "requested_model": default_model,
-                        "effective_model": model_name,
+                        "selected_model": model_name,
+                        "effective_model": provider_response_model,
+                        "model_identity_source": (
+                            "provider_response" if provider_response_model else None
+                        ),
                         "model_source": candidate.source,
                         **_stage_extra,
                         **selection_metadata,
@@ -17535,6 +17565,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call(
                     call_type="llm.generate_with_tools",
                     model_name=model_name,
+                    requested_model_name=default_model,
                     duration_ms=duration_ms,
                     usage=None,
                     note="structured tool transport failed; compatible fallback candidates only",
@@ -17654,6 +17685,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call(
                     call_type="llm.generate_with_tools",
                     model_name=model_name,
+                    requested_model_name=default_model,
                     duration_ms=duration_ms,
                     usage=None,
                     note="llm.generate_with_tools failed; trying fallback",

@@ -48,6 +48,8 @@ describe('settingsPage OpenAI model change handling', () => {
                 <select id="openaiReasoningEffortSelect"></select>
             </div>
             <button id="testOpenAiModelButton" type="button">Test this model</button>
+            <div id="openaiModelEligibilityStatus"></div>
+            <div id="openaiModelCostSummary"></div>
             <div id="openaiModelStatusMessage"></div>
             <div id="browserChatModelSummary"></div>
             <div id="scopedPrimaryModelSummary"></div>
@@ -219,8 +221,10 @@ describe('settingsPage OpenAI model change handling', () => {
         expect(document.getElementById('browserChatModelSummary').textContent).toContain('gemma4:latest');
         expect(document.getElementById('workflowModelPoolList').textContent).toContain('low effort');
         expect(document.getElementById('addOpenAiToWorkflowPoolButton').textContent).toBe(
-            'Update workflow pool entry'
+            'Update allowed model entry'
         );
+        expect(document.getElementById('openaiModelEligibilityStatus').textContent).toContain('Allowed:');
+        expect(document.getElementById('testOpenAiModelButton').disabled).toBe(false);
         expect(testPayloads).toEqual([]);
         expect(savePayloads).toEqual([]);
 

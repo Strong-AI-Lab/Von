@@ -28,6 +28,7 @@ PRED_HAS_MODEL_API_PROFILE = "#V#has_model_api_profile"
 PRED_HAS_MODEL_PARAMETER_CONSTRAINT = "#V#has_model_parameter_constraint"
 PRED_CONSTRAINS_MODEL_PARAMETER = "#V#constrains_model_parameter"
 PRED_HAS_MODEL_ID = "#V#has_model_id"
+PRED_HAS_MODEL_PRICING_JSON = "#V#has_model_pricing_json"
 PRED_HAS_API_SURFACE = "#V#has_api_surface"
 PRED_HAS_STRUCTURED_TOOL_CALLING = "#V#has_structured_tool_calling_support"
 PRED_HAS_TOOL_CONTINUATION_MODE = "#V#has_tool_continuation_mode"
@@ -790,7 +791,14 @@ def _resolve_model_entry_from_graph(
             }
         )
 
-    return {
+    pricing = _parse_registry_json(
+        _get_first_text(
+            registry_entry_id,
+            predicate=PRED_HAS_MODEL_PRICING_JSON,
+        )
+        or ""
+    )
+    entry = {
         "model_id": model_id,
         "model_aliases": model_aliases,
         "provider": provider,
@@ -799,6 +807,9 @@ def _resolve_model_entry_from_graph(
         "registry_entry_id": registry_entry_id,
         "api_profiles": api_profiles,
     }
+    if pricing is not None:
+        entry["pricing"] = dict(pricing)
+    return entry
 
 
 def _load_registry_from_vontology_graph(

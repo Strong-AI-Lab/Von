@@ -5,6 +5,7 @@ import time
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Callable, Mapping, Sequence, cast
 
+from src.backend.languagemodels.llm_interface import ModelExecutionEligibilityError
 from src.backend.services.debug_payload_store import (
     compact_debug_payload_for_storage,
     default_tool_message_threshold_bytes,
@@ -233,11 +234,33 @@ def _invoke_presenter_screen_backfill_prompt(
     emit_stage_progress(
         {"status": "llm_call_start", "stage": "screen_backfill", "model": model_name}
     )
-    synthesis_response = llm_client.generate(
-        prompt=represented_screen_prompt,
-        context=screen_context_messages,
-        model=model_name,
-    )
+    try:
+        synthesis_response = llm_client.generate(
+            prompt=represented_screen_prompt,
+            context=screen_context_messages,
+            model=model_name,
+        )
+    except Exception as exc:
+        screen_duration_ms = (time.perf_counter() - llm_start) * 1000.0
+        eligibility_denied = isinstance(exc, ModelExecutionEligibilityError)
+        record_stage_llm_call(
+            call_type="llm.generate",
+            model_name=model_name,
+            duration_ms=screen_duration_ms,
+            usage=None,
+            note="Screen backfill represented prompt invocation.",
+            stage="screen_backfill",
+            workflow_stage_id=SCREEN_BACKFILL_STAGE_CONCEPT_ID,
+            provider=(
+                exc.provider if eligibility_denied else infer_provider(model_name)
+            ),
+            status="failed",
+            success=False,
+            error_class=type(exc).__name__,
+            failure_kind=(exc.failure_kind if eligibility_denied else None),
+            provider_request_sent=False if eligibility_denied else None,
+        )
+        raise
     screen_duration_ms = (time.perf_counter() - llm_start) * 1000.0
     emit_stage_progress(
         {
@@ -246,16 +269,6 @@ def _invoke_presenter_screen_backfill_prompt(
             "model": model_name,
             "chunks": 1,
             "duration_ms": int(screen_duration_ms),
-        }
-    )
-    emit_stage_progress(
-        {
-            "status": "llm_call_end",
-            "stage": "screen_backfill",
-            "model": model_name,
-            "duration_ms": int(screen_duration_ms),
-            "success": True,
-            "error": None,
         }
     )
     prompt_ids = _normalise_prompt_concept_ids(
@@ -283,6 +296,9 @@ def _invoke_presenter_screen_backfill_prompt(
             "char_count": len(str(synthesis_response)),
             "is_truncated": False,
         },
+        status="completed",
+        success=True,
+        provider_request_sent=True,
     )
     return synthesis_response, model_name
 
@@ -496,6 +512,7 @@ def _build_generate_error_debug_info(
     error_workflow_discovery: Mapping[str, Any] | None,
     error_workflow_routing: Mapping[str, Any] | None,
     auxiliary_llm_calls: Sequence[Mapping[str, Any]] | None,
+    llm_interaction: Mapping[str, Any] | None,
     error_elapsed_ms: float | None,
     session_id: str | None,
     namespace: str | None,
@@ -545,6 +562,9 @@ def _build_generate_error_debug_info(
         if auxiliary_llm_calls is not None
         else None
     )
+    normalised_llm_interaction = (
+        dict(llm_interaction) if isinstance(llm_interaction, Mapping) else None
+    )
 
     error_debug_info = {
         "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -561,6 +581,7 @@ def _build_generate_error_debug_info(
         "user_prompt": user_prompt_debug,
         "tool_invocations": [],
         "response_transformations": normalised_response_transformations,
+        "llm_interaction": normalised_llm_interaction,
         "turn_execution_diagnostics": build_turn_execution_diagnostics_fn(
             request_id=request_id,
             prompt_text=prompt_text,

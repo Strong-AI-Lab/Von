@@ -990,6 +990,32 @@ def _resolve_active_provider_and_model(
     return provider, model
 
 
+def _external_image_model_execution_denial(
+    *,
+    provider: str,
+    model: str,
+) -> dict[str, Any] | None:
+    """Return the image-service error shape when scoped eligibility is absent."""
+
+    from ..languagemodels.llm_interface import (
+        ModelExecutionEligibilityError,
+        assert_model_execution_allowed,
+    )
+
+    try:
+        assert_model_execution_allowed(provider=provider, model=model)
+    except ModelExecutionEligibilityError as exc:
+        return {
+            "description": None,
+            "method": f"{provider}_vision_not_enabled",
+            "error": str(exc),
+            "failure_kind": exc.failure_kind,
+            "provider": provider,
+            "model": exc.model or model,
+        }
+    return None
+
+
 def _describe_image_with_openai(
     *,
     data_bytes: bytes,
@@ -1030,6 +1056,12 @@ def _describe_image_with_openai(
         }
 
     target_model = model or DEFAULT_OPENAI_MODEL
+    eligibility_denial = _external_image_model_execution_denial(
+        provider="openai",
+        model=target_model,
+    )
+    if eligibility_denial is not None:
+        return eligibility_denial
     mime = _normalise_optional_text(content_type) or "image/png"
     image_b64 = base64.b64encode(bytes(data_bytes)).decode("ascii")
     data_url = f"data:{mime};base64,{image_b64}"
@@ -1109,6 +1141,12 @@ def _describe_image_with_gemini(
         }
 
     target_model = model or "gemini-2.0-flash"
+    eligibility_denial = _external_image_model_execution_denial(
+        provider="gemini",
+        model=target_model,
+    )
+    if eligibility_denial is not None:
+        return eligibility_denial
     mime = _normalise_optional_text(content_type) or "image/png"
     try:
         genai.configure(api_key=api_key)  # type: ignore[attr-defined]

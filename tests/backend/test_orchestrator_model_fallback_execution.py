@@ -486,10 +486,17 @@ def test_run_llm_with_fallbacks_passes_candidate_model_parameters(
     end_event = next(
         event for event in progress_events if event.get("status") == "llm_call_end"
     )
+    assert end_event["requested_model"] == "gpt-5.5"
+    assert end_event["selected_model"] == "gpt-5.5"
+    assert end_event["effective_model"] is None
+    assert end_event["model_identity_source"] is None
     assert end_event["effective_model_parameters"] == {"reasoning_effort": "low"}
     stage_summary = next(
         entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
     )
+    assert stage_summary["selected_model"] == "gpt-5.5"
+    assert stage_summary["effective_model"] is None
+    assert stage_summary["model_identity_source"] is None
     assert stage_summary["effective_model_parameters"] == {"reasoning_effort": "low"}
 
 
@@ -508,6 +515,7 @@ def test_run_llm_with_tools_fallbacks_passes_default_model_parameters(
     client = _StructuredToolClient(
         LLMResponse(
             text_response="",
+            model="gpt-5.6-luna-provider-response",
             tool_calls=[
                 ToolCall(
                     tool_name="fetch_concept",
@@ -597,10 +605,17 @@ def test_run_llm_with_tools_fallbacks_passes_default_model_parameters(
     end_event = next(
         event for event in progress_events if event.get("status") == "llm_call_end"
     )
+    assert end_event["requested_model"] == "gpt-5.6-luna"
+    assert end_event["selected_model"] == "gpt-5.6-luna"
+    assert end_event["effective_model"] == "gpt-5.6-luna-provider-response"
+    assert end_event["model_identity_source"] == "provider_response"
     assert end_event["effective_model_parameters"] == requested_parameters
     stage_summary = next(
         entry for entry in aux_log if entry.get("type") == "workflow_model_policy_stage"
     )
+    assert stage_summary["selected_model"] == "gpt-5.6-luna"
+    assert stage_summary["effective_model"] == "gpt-5.6-luna-provider-response"
+    assert stage_summary["model_identity_source"] == "provider_response"
     assert stage_summary["requested_model_parameters"] == requested_parameters
     assert stage_summary["effective_model_parameters"] == requested_parameters
 
@@ -2426,6 +2441,28 @@ def test_invoke_with_llm_heartbeat_uses_backfill_timeout_for_summariser(
     assert progress_events[-1]["status"] == "heartbeat"
     assert progress_events[-1]["stage"] == "summariser"
     assert progress_events[-1]["liveness_reason"] == "llm_call_pending"
+
+
+def test_invoke_with_llm_heartbeat_preserves_actor_context() -> None:
+    from src.backend.security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+        override_current_actor,
+    )
+
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    with override_current_actor("#V#current_user", "#V#current_org"):
+        result = orchestrator._invoke_with_llm_heartbeat(
+            call=lambda: (
+                get_effective_user_concept_id(),
+                get_effective_organisation_concept_id(),
+            ),
+            stage_name="plain_response",
+            model_name="gpt-test",
+            emit_progress=lambda _payload: None,
+        )
+
+    assert result == ("#V#current_user", "#V#current_org")
 
 
 def test_invoke_with_llm_heartbeat_prefers_explicit_timeout_override(

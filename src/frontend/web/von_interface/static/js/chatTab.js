@@ -4193,6 +4193,10 @@ function buildRetainedThinkingCardRequestFromDebugData(turnId, debugData) {
         latestProgress: null,
         turnExecutionDiagnostics: diagnostics,
         turn_execution_diagnostics: diagnostics,
+        llmUsageCostSummary: (
+            debugData.llm_usage_cost_summary
+            && typeof debugData.llm_usage_cost_summary === 'object'
+        ) ? { ...debugData.llm_usage_cost_summary } : null,
         criticOutput: criticOutput ? cloneThinkingCriticObject(criticOutput) : null,
         thinkingCriticPanelOpen: false,
         thinkingCardMode: loadStoredThinkingCardMode(),
@@ -11699,21 +11703,22 @@ function renderThinkingCardBodyHTML(request, options = {}) {
     const mode = getThinkingCardMode(request, options);
     const progressViewModel = buildThinkingCardProgressViewModel(request);
     const synopsisHtml = renderThinkingCardProgressSynopsisHTML(progressViewModel, mode, request);
+    const llmUsageCostHtml = renderThinkingLlmUsageCostSummaryHTML(request);
     const criticHtml = renderThinkingCriticPanelHTML(request);
     const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request, mode);
     const llmCallLogHtml = renderThinkingLlmCallLogSectionHTML(request, mode);
     const timingHtml = renderThinkingTimingBreakdownHTML(request, mode);
     if (mode === THINKING_CARD_MODE_DEFAULT && synopsisHtml) {
-        return synopsisHtml + criticHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
+        return synopsisHtml + llmUsageCostHtml + criticHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
     }
 
     if (workflowStageHtml) {
-        return synopsisHtml + criticHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
+        return synopsisHtml + llmUsageCostHtml + criticHtml + workflowStageHtml + timingHtml + renderToolHistoryHTML(request, mode) + llmCallLogHtml;
     }
 
     const activityHistoryHtml = renderThinkingActivityHistoryHTML(request, mode);
     if (activityHistoryHtml) {
-        return synopsisHtml + criticHtml + activityHistoryHtml + timingHtml + llmCallLogHtml;
+        return synopsisHtml + llmUsageCostHtml + criticHtml + activityHistoryHtml + timingHtml + llmCallLogHtml;
     }
 
     const toolHistoryHtml = renderToolHistoryHTML(request, mode);
@@ -11722,7 +11727,129 @@ function renderThinkingCardBodyHTML(request, options = {}) {
         : '';
     const fallbackProgressHtml = renderThinkingLatestProgressSummaryHTML(request);
 
-    return synopsisHtml + criticHtml + timingHtml + toolHistoryHtml + workflowHtml + fallbackProgressHtml + llmCallLogHtml;
+    return synopsisHtml + llmUsageCostHtml + criticHtml + timingHtml + toolHistoryHtml + workflowHtml + fallbackProgressHtml + llmCallLogHtml;
+}
+
+function resolveThinkingLlmUsageCostSummary(request) {
+    const candidates = [
+        request?.llmUsageCostSummary,
+        request?.latestProgress?.llm_usage_cost_summary
+    ];
+    return candidates.find((candidate) => candidate && typeof candidate === 'object') || null;
+}
+
+function thinkingUsageNumber(value) {
+    return Number.isFinite(value) && Number(value) >= 0 ? Number(value) : null;
+}
+
+function formatThinkingTokenCount(value, label) {
+    const count = thinkingUsageNumber(value);
+    return count === null ? '' : `${count.toLocaleString('en-NZ')} ${label}`;
+}
+
+function formatThinkingEstimatedCost(cost) {
+    if (!cost || typeof cost !== 'object') {
+        return 'cost estimate unavailable';
+    }
+    const status = normaliseThinkingActivityString(cost.status).toLowerCase();
+    const currency = normaliseThinkingActivityString(cost.currency).toUpperCase();
+    const amount = status === 'estimated'
+        ? thinkingUsageNumber(cost.amount)
+        : thinkingUsageNumber(cost.known_amount);
+    if (amount !== null && currency) {
+        let renderedAmount = `${currency} ${amount.toFixed(6)}`;
+        if (amount > 0 && amount < 0.0001) {
+            renderedAmount = `${currency === 'USD' ? 'US$' : `${currency} `}${amount.toPrecision(3)}`;
+        } else {
+            try {
+                renderedAmount = new Intl.NumberFormat('en-NZ', {
+                    style: 'currency',
+                    currency,
+                    minimumFractionDigits: amount > 0 && amount < 0.01 ? 4 : 2,
+                    maximumFractionDigits: 6
+                }).format(amount);
+            } catch (_) {
+                // Keep the explicit currency fallback for an unrecognised code.
+            }
+        }
+        return status === 'partial'
+            ? `known cost subtotal ${renderedAmount} (partial)`
+            : `estimated ${renderedAmount}`;
+    }
+    if (status === 'not_applicable') {
+        return 'no billable model request';
+    }
+    return status === 'partial'
+        ? 'cost estimate partial; no priced subtotal available'
+        : 'cost estimate unavailable';
+}
+
+function effectiveThinkingModelIdentity(call) {
+    if (!call || typeof call !== 'object') {
+        return '';
+    }
+    const model = normaliseThinkingActivityString(
+        call.effective_model || call.model || call.selected_model || call.requested_model
+    );
+    const provider = normaliseThinkingActivityString(call.provider);
+    return model ? (provider ? `${provider}/${model}` : model) : '';
+}
+
+function providerObservedThinkingModelIdentity(call) {
+    if (normaliseThinkingActivityString(call?.model_identity_source) !== 'provider_response') {
+        return '';
+    }
+    const model = normaliseThinkingActivityString(call?.effective_model);
+    const provider = normaliseThinkingActivityString(call?.provider);
+    return model ? (provider ? `${provider}/${model}` : model) : '';
+}
+
+function renderThinkingLlmUsageCostSummaryHTML(request) {
+    const summary = resolveThinkingLlmUsageCostSummary(request);
+    if (!summary) {
+        const liveEntries = collectThinkingLiveLlmCallLogEntries(request);
+        const liveModels = Array.from(new Set(
+            liveEntries.map((entry) => effectiveThinkingModelIdentity(entry)).filter(Boolean)
+        ));
+        if (liveModels.length === 0) {
+            return '';
+        }
+        return `<section class="thinking-card-diagnostic-section thinking-card-llm-usage-cost">
+            <div class="thinking-card-diagnostic-section-title">Model usage</div>
+            <div class="thinking-card-diagnostic-text">${escapeHtml(liveModels.join(', '))} · in progress · token usage pending</div>
+        </section>`;
+    }
+
+    const identitiesSource = Array.isArray(summary.model_identities)
+        ? summary.model_identities
+        : [];
+    const calls = identitiesSource.filter(
+        (call) => call && typeof call === 'object'
+    );
+    const identities = Array.from(new Set(
+        calls.map((call) => providerObservedThinkingModelIdentity(call)).filter(Boolean)
+    ));
+    const usage = summary.usage && typeof summary.usage === 'object' ? summary.usage : {};
+    const inputTokens = thinkingUsageNumber(usage.input_tokens) ?? thinkingUsageNumber(usage.known_input_tokens);
+    const outputTokens = thinkingUsageNumber(usage.output_tokens) ?? thinkingUsageNumber(usage.known_output_tokens);
+    const totalTokens = thinkingUsageNumber(usage.total_tokens) ?? thinkingUsageNumber(usage.known_total_tokens);
+    const usageStatus = normaliseThinkingActivityString(usage.status).toLowerCase();
+    const callCount = thinkingUsageNumber(summary.unique_call_count) ?? thinkingUsageNumber(summary.call_count);
+    const bits = [
+        identities.length > 0 ? identities.join(', ') : 'effective model identity unavailable',
+        formatThinkingTokenCount(inputTokens, 'input'),
+        formatThinkingTokenCount(outputTokens, 'output'),
+        (inputTokens === null && outputTokens === null) ? formatThinkingTokenCount(totalTokens, 'tokens') : '',
+        formatThinkingEstimatedCost(summary.estimated_cost),
+        callCount !== null ? `${callCount.toLocaleString('en-NZ')} model call${callCount === 1 ? '' : 's'}` : '',
+        usageStatus === 'partial' ? 'token coverage partial' : '',
+        usageStatus === 'unavailable' ? 'token usage unavailable' : ''
+    ].filter(Boolean);
+
+    return `<section class="thinking-card-diagnostic-section thinking-card-llm-usage-cost">
+        <div class="thinking-card-diagnostic-section-title">Model usage</div>
+        <div class="thinking-card-diagnostic-text">${escapeHtml(bits.join(' · '))}</div>
+    </section>`;
 }
 
 function resolveThinkingRequestIdForLlmCallLog(request) {
@@ -11944,6 +12071,13 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
     const sequenceNo = Number.isFinite(entry?.sequence_no)
         ? Number(entry.sequence_no)
         : (Number.isFinite(existing?.sequence_no) ? Number(existing.sequence_no) : index + 1);
+    const incomingIdentitySource = normaliseThinkingActivityString(entry?.model_identity_source);
+    const existingIdentitySource = normaliseThinkingActivityString(existing?.model_identity_source);
+    const effectiveModel = incomingIdentitySource === 'provider_response'
+        ? normaliseThinkingActivityString(entry?.effective_model)
+        : (existingIdentitySource === 'provider_response'
+            ? normaliseThinkingActivityString(existing?.effective_model)
+            : '');
 
     return {
         call_id: explicitCallId || existing?.call_id || '',
@@ -11959,6 +12093,14 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
             || normaliseThinkingActivityString(entry?.selected_model)
             || existing?.model
             || 'unknown model',
+        requested_model: normaliseThinkingActivityString(entry?.requested_model)
+            || existing?.requested_model
+            || '',
+        selected_model: normaliseThinkingActivityString(entry?.selected_model)
+            || existing?.selected_model
+            || '',
+        effective_model: effectiveModel,
+        model_identity_source: incomingIdentitySource || existingIdentitySource || '',
         provider: normaliseThinkingActivityString(entry?.provider)
             || normaliseThinkingActivityString(entry?.selected_provider)
             || existing?.provider
@@ -11986,6 +12128,9 @@ function mergeThinkingLiveLlmCallEvent(existing, entry, index) {
                 is_truncated: responseCapture?.preview_truncated === true
             }
             : (existing?.response || null),
+        usage: entry?.usage && typeof entry.usage === 'object'
+            ? { ...entry.usage }
+            : (existing?.usage || null),
         unavailable_reason: responseText
             ? ''
             : (state.toLowerCase() === 'sent'
@@ -12028,7 +12173,8 @@ function cloneThinkingLlmCallLogEntry(entry) {
     return {
         ...entry,
         prompt: entry.prompt && typeof entry.prompt === 'object' ? { ...entry.prompt } : entry.prompt,
-        response: entry.response && typeof entry.response === 'object' ? { ...entry.response } : entry.response
+        response: entry.response && typeof entry.response === 'object' ? { ...entry.response } : entry.response,
+        usage: entry.usage && typeof entry.usage === 'object' ? { ...entry.usage } : entry.usage
     };
 }
 
@@ -12166,6 +12312,34 @@ function classifyThinkingLlmCallLogEntry(entry) {
     return '';
 }
 
+function thinkingLlmCallUsageCostBits(entry) {
+    const usage = entry?.usage && typeof entry.usage === 'object' ? entry.usage : {};
+    const inputTokens = thinkingUsageNumber(usage.input_tokens) ?? thinkingUsageNumber(usage.known_input_tokens);
+    const outputTokens = thinkingUsageNumber(usage.output_tokens) ?? thinkingUsageNumber(usage.known_output_tokens);
+    const totalTokens = thinkingUsageNumber(usage.total_tokens) ?? thinkingUsageNumber(usage.known_total_tokens);
+    return [
+        formatThinkingTokenCount(inputTokens, 'input'),
+        formatThinkingTokenCount(outputTokens, 'output'),
+        (inputTokens === null && outputTokens === null) ? formatThinkingTokenCount(totalTokens, 'tokens') : ''
+    ].filter(Boolean);
+}
+
+function renderThinkingLlmModelLineageHTML(entry) {
+    const requested = normaliseThinkingActivityString(entry?.requested_model);
+    const selected = normaliseThinkingActivityString(entry?.selected_model);
+    const effective = normaliseThinkingActivityString(entry?.model_identity_source) === 'provider_response'
+        ? normaliseThinkingActivityString(entry?.effective_model)
+        : '';
+    const lineageBits = [
+        requested ? `requested ${requested}` : '',
+        selected && selected !== requested ? `selected ${selected}` : '',
+        effective && effective !== selected && effective !== requested ? `effective ${effective}` : ''
+    ].filter(Boolean);
+    return lineageBits.length > 1
+        ? `<div class="thinking-card-diagnostic-text">Model lineage: ${escapeHtml(lineageBits.join(' · '))}</div>`
+        : '';
+}
+
 function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
     if (!Array.isArray(entries) || entries.length === 0) {
         return '<div class="thinking-card-diagnostic-text">No LLM exchanges were recorded for this turn.</div>';
@@ -12198,6 +12372,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
             || normaliseThinkingActivityString(entry?.completed_at_utc)
             || normaliseThinkingActivityString(entry?.started_at_utc);
         const timestampLabel = formatThinkingLlmCallTimestamp(atUtc);
+        const usageCostBits = thinkingLlmCallUsageCostBits(entry);
 
         const headerBits = [
             seq !== null ? `#${seq}` : '',
@@ -12207,6 +12382,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
             formatThinkingActivityFallbackLabel(callType),
             liveState,
             provider ? `${model} (${provider})` : model,
+            ...usageCostBits,
             promptSizeCue,
             durationMs !== null ? `${durationMs}ms` : ''
         ].filter(Boolean);
@@ -12238,6 +12414,7 @@ function renderThinkingLlmCallLogEntriesHTML(entries, options = {}) {
         return `<details class="thinking-card-diagnostic" data-thinking-diagnostic-key="${escapeHtml(diagnosticKey)}" data-thinking-llm-call-log-key="${escapeHtml(diagnosticKey)}" data-thinking-llm-call-at-utc="${escapeHtml(atUtc || '')}" data-thinking-llm-call-model="${escapeHtml(model)}">
             <summary>${escapeHtml(headerBits.join(' · '))}</summary>
             <div class="thinking-card-diagnostic-content">
+                ${renderThinkingLlmModelLineageHTML(entry)}
                 ${promptBlock}
                 ${responseBlock}
                 ${availability}
@@ -32501,6 +32678,10 @@ async function handleSendPrompt(options = {}) {
                 displayElements
             });
             enriched.foreground_delivery_source = source;
+            request.llmUsageCostSummary = (
+                enriched.llm_usage_cost_summary
+                && typeof enriched.llm_usage_cost_summary === 'object'
+            ) ? { ...enriched.llm_usage_cost_summary } : null;
             syncThinkingCriticOutputFromSource(request, enriched);
             setLlmDebugDataEntry(assistantTurnId, enriched, request.executionContextBinding);
             if (isRequestVisible()) {
@@ -32570,6 +32751,10 @@ async function handleSendPrompt(options = {}) {
         // Store LLM debug data if available even on error
         const errorTurnId = `e-${Date.now()}`;
         if (data?.llm_debug) {
+            request.llmUsageCostSummary = (
+                data.llm_debug.llm_usage_cost_summary
+                && typeof data.llm_debug.llm_usage_cost_summary === 'object'
+            ) ? { ...data.llm_debug.llm_usage_cost_summary } : null;
             syncThinkingCriticOutputFromSource(request, data.llm_debug);
             setLlmDebugDataEntry(errorTurnId, data.llm_debug, request.executionContextBinding);
             if (isRequestVisible()) {

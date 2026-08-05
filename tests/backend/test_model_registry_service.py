@@ -49,6 +49,17 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
         ],
         ("#V#openai_gpt5_mini_registry_entry", mod.PRED_HAS_MODEL_ID): ["gpt-5-mini"],
         (
+            "#V#openai_gpt5_mini_registry_entry",
+            mod.PRED_HAS_MODEL_PRICING_JSON,
+        ): [
+            '{"schema_version":"llm_model_pricing.v1",'
+            '"version":"test-v1","source":"test",'
+            '"effective_at_utc":"2026-08-05T00:00:00Z",'
+            '"model_id":"gpt-5-mini","currency":"USD",'
+            '"unit_tokens":1000000,"rates":{'
+            '"input_tokens":1.0,"output_tokens":4.0}}'
+        ],
+        (
             "#V#openai_gpt5_mini_chat_completions_profile",
             mod.PRED_HAS_API_SURFACE,
         ): ["chat_completions"],
@@ -102,6 +113,8 @@ def test_get_model_registry_snapshot_prefers_graph_and_exposes_constraints(
     assert model_entry["concept_id"] == "#V#openai_gpt_5_mini"
     assert model_entry["registry_entry_id"] == "#V#openai_gpt5_mini_registry_entry"
     assert "gpt-5-mini" in model_entry["model_aliases"]
+    assert model_entry["pricing"]["schema_version"] == "llm_model_pricing.v1"
+    assert model_entry["pricing"]["rates"]["output_tokens"] == 4.0
 
     profile = model_entry["api_profiles"][0]
     assert profile["api_surface"] == "chat_completions"

@@ -30,6 +30,7 @@ from src.backend.integrations.internal_mcp.schemas import (
 from src.backend.integrations.internal_mcp.tool_argument_resolution import (
     is_unresolved_tool_argument_placeholder,
 )
+from src.backend.languagemodels.llm_interface import ModelExecutionEligibilityError
 from src.backend.languagemodels.structured_tool_calling.types import (
     LLMContinuation,
     LLMResponse,
@@ -41,6 +42,9 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     ToolResult,
 )
 from src.backend.security.access_control import override_current_actor
+from src.backend.services.llm_usage_cost_service import (
+    build_llm_usage_cost_summary,
+)
 from src.backend.services.thinking_semantic_projection_service import (
     build_semantic_operation_projection,
 )
@@ -3145,6 +3149,7 @@ def execute_adaptive_turn(
     conversation_situation: str | None = None,
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
     conversation_observation_state: Mapping[str, Any] | None = None,
+    model_registry_snapshot: Any = None,
     turn_budget_seconds: float | None = None,
     final_synthesis_reserve_seconds: float | None = None,
     final_answer_reserve_seconds: float | None = None,
@@ -3267,6 +3272,53 @@ def execute_adaptive_turn(
         }
     ]
     usage_totals: dict[str, float] = {}
+    model_call_sequence = 0
+    client_config = getattr(llm_client, "config", None)
+    configured_provider = str(getattr(client_config, "provider", "") or "").strip()
+    if not configured_provider:
+        client_name = type(llm_client).__name__.lower()
+        configured_provider = next(
+            (
+                provider_name
+                for provider_name in ("openai", "gemini", "ollama")
+                if provider_name in client_name
+            ),
+            "",
+        )
+
+    def current_llm_usage_cost_summary() -> dict[str, Any]:
+        return build_llm_usage_cost_summary(
+            llm_calls,
+            model_registry=model_registry_snapshot,
+        )
+
+    def emit_model_call_end(call: Mapping[str, Any]) -> None:
+        _emit(
+            progress_tracker,
+            {
+                "status": "llm_call_end",
+                "event_kind": "llm_call_end",
+                "stage": call.get("stage") or "adaptive_research",
+                "phase": call.get("stage") or "adaptive_research",
+                "call_id": call.get("call_id"),
+                "model": call.get("selected_model") or call.get("model"),
+                "provider": call.get("provider"),
+                "requested_model": call.get("requested_model"),
+                "selected_model": call.get("selected_model"),
+                "effective_model": call.get("effective_model"),
+                "model_identity_source": call.get("model_identity_source"),
+                "provider_request_sent": call.get("provider_request_sent"),
+                "usage": call.get("usage"),
+                "success": call.get("success"),
+                "duration_ms": call.get("duration_ms"),
+                "llm_usage_cost_summary": current_llm_usage_cost_summary(),
+                "result_summary": (
+                    "The model call completed; usage and cost evidence were updated."
+                    if call.get("success") is True
+                    else "The model call ended without a successful response."
+                ),
+            },
+        )
     seen_request_digests: set[str] = set()
     model_liveness_recovery_used = False
     last_partial_text = ""
@@ -4032,6 +4084,8 @@ def execute_adaptive_turn(
         )
 
     while True:
+        model_call_sequence += 1
+        model_call_id = f"{turn_id or 'adaptive-turn'}:llm:{model_call_sequence}"
         _check_cancellation(progress_tracker)
         now = clock()
         note_crossed_elapsed_time_advisories(now)
@@ -4045,10 +4099,18 @@ def execute_adaptive_turn(
         _emit(
             progress_tracker,
             {
-                "status": "thinking",
+                "status": "llm_call_start",
+                "event_kind": "llm_call_start",
                 "stage": stage,
                 "phase": stage,
                 "mode": mode,
+                "call_id": model_call_id,
+                "model": model,
+                "provider": configured_provider or None,
+                "requested_model": model,
+                "selected_model": model,
+                "effective_model": None,
+                "model_identity_source": None,
                 "phase_label": (
                     "Generating response" if final_synthesis else "Researching"
                 ),
@@ -4191,12 +4253,22 @@ def execute_adaptive_turn(
         # classes. Keep those failures inside the honest turn result.
         except Exception as exc:  # noqa: BLE001
             call_failed_at = clock()
+            provider_request_sent = (
+                False if isinstance(exc, ModelExecutionEligibilityError) else None
+            )
             llm_calls.append(
                 {
+                    "call_id": model_call_id,
                     "type": "adaptive_turn_model_call",
                     "stage": stage,
                     "mode": mode,
                     "model": model,
+                    "provider": configured_provider or None,
+                    "requested_model": model,
+                    "selected_model": model,
+                    "effective_model": None,
+                    "model_identity_source": None,
+                    "provider_request_sent": provider_request_sent,
                     "request_timeout_seconds": effective_params[
                         "request_timeout_seconds"
                     ],
@@ -4210,6 +4282,10 @@ def execute_adaptive_turn(
                     "error_class": type(exc).__name__,
                 }
             )
+            emit_model_call_end(llm_calls[-1])
+            if isinstance(exc, ModelExecutionEligibilityError):
+                terminal_status = exc.failure_kind
+                return finish(str(exc), status=terminal_status)
             if final_synthesis and not answer_only:
                 enter_answer_only("evidence_call_failed")
                 continue
@@ -4293,12 +4369,26 @@ def execute_adaptive_turn(
             (response_received_at - request_started) * 1000.0,
         )
         _usage_add(usage_totals, response.usage)
+        provider_response_model = (
+            response.model.strip()
+            if isinstance(response.model, str) and response.model.strip()
+            else None
+        )
         llm_calls.append(
             {
+                "call_id": model_call_id,
                 "type": "adaptive_turn_model_call",
                 "stage": stage,
                 "mode": mode,
-                "model": response.model or model,
+                "model": provider_response_model or model,
+                "provider": configured_provider or None,
+                "requested_model": model,
+                "selected_model": model,
+                "effective_model": provider_response_model,
+                "model_identity_source": (
+                    "provider_response" if provider_response_model else None
+                ),
+                "provider_request_sent": True,
                 "request_timeout_seconds": effective_params["request_timeout_seconds"],
                 "duration_ms": call_duration_ms,
                 "usage": dict(response.usage) if response.usage else None,
@@ -4309,6 +4399,7 @@ def execute_adaptive_turn(
                 "tool_call_count": len(response.tool_calls),
             }
         )
+        emit_model_call_end(llm_calls[-1])
         if response.text_response.strip():
             last_partial_text = response.text_response.strip()
             last_partial_effect_generation = request_effect_generation

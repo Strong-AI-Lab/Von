@@ -11,6 +11,31 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
         "get_runtime_code_version_info",
         lambda: {"version": "test-version"},
     )
+    monkeypatch.setattr(
+        von_routes,
+        "get_model_registry_snapshot",
+        lambda: {
+            "models": [
+                {
+                    "provider": "openai",
+                    "model_id": "gpt-test",
+                    "pricing": {
+                        "schema_version": "llm_model_pricing.v1",
+                        "version": "test-v1",
+                        "source": "test",
+                        "effective_at_utc": "2026-08-05T00:00:00Z",
+                        "model_id": "gpt-test",
+                        "currency": "USD",
+                        "unit_tokens": 1_000,
+                        "rates": {
+                            "input_tokens": 1.0,
+                            "output_tokens": 2.0,
+                        },
+                    },
+                }
+            ]
+        },
+    )
     evidence = {
         "evidence_id": "evidence_opaque",
         "tool_name": "general_read",
@@ -29,8 +54,18 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
                 "ordinary_turn_terminal_status": "completed",
                 "calls": [
                     {
+                        "call_id": "req-adaptive-observation:llm:1",
                         "type": "adaptive_turn_model_call",
                         "status": "completed",
+                        "provider": "openai",
+                        "requested_model": "gpt-test",
+                            "selected_model": "gpt-test",
+                            "effective_model": "gpt-test",
+                            "model_identity_source": "provider_response",
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 20,
+                        },
                     }
                 ],
             },
@@ -81,9 +116,160 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
     assert record["terminal_status"] == "completed"
     assert record["response"]["present"] is True
     assert record["evidence_index"] == [evidence]
+    summary = result["llm_usage_cost_summary"]
+    assert summary["usage"]["total_tokens"] == 120
+    assert summary["estimated_cost"]["status"] == "estimated"
+    assert summary["estimated_cost"]["amount"] == 0.14
+    assert record["llm_usage_cost_summary"] == summary
     assert "completion_gate" not in record
     assert "required_effects" not in record
     assert "required_tool_obligation_ledger" not in record
+
+
+def test_generate_error_debug_preserves_paid_calls_before_route_failure(
+    monkeypatch,
+) -> None:
+    from src.backend.server.routes import von_routes
+    from src.backend.server.routes.generate_route_support import (
+        _build_generate_error_debug_info,
+    )
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_runtime_code_version_info",
+        lambda: {"version": "test-version"},
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_model_registry_snapshot",
+        lambda: {
+            "models": [
+                {
+                    "provider": "openai",
+                    "model_id": "gpt-test",
+                    "pricing": {
+                        "schema_version": "llm_model_pricing.v1",
+                        "version": "test-v1",
+                        "source": "test",
+                        "effective_at_utc": "2026-08-05T00:00:00Z",
+                        "model_id": "gpt-test",
+                        "currency": "USD",
+                        "unit_tokens": 1_000,
+                        "rates": {
+                            "input_tokens": 1.0,
+                            "output_tokens": 2.0,
+                        },
+                    },
+                }
+            ]
+        },
+    )
+
+    result = _build_generate_error_debug_info(
+        interaction_timestamp_utc="2026-08-05T10:00:00Z",
+        request_id="request-paid-then-failed",
+        model_name="gpt-test",
+        prompt_text="Do useful work.",
+        error_text="route finalisation failed",
+        enhanced_context=[],
+        user_prompt_debug=None,
+        response_transformations=None,
+        error_tool_progress_snapshot=None,
+        error_workflow_discovery=None,
+        error_workflow_routing=None,
+        auxiliary_llm_calls=[],
+        llm_interaction={
+            "ordinary_turn_terminal_status": "model_error",
+            "calls": [
+                {
+                    "call_id": "request-paid-then-failed:llm:1",
+                        "provider": "openai",
+                        "effective_model": "gpt-test",
+                        "model_identity_source": "provider_response",
+                        "provider_request_sent": True,
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+                }
+            ],
+        },
+        error_elapsed_ms=100.0,
+        session_id="session-test",
+        namespace="#V#person@org",
+        history_user_id="#V#person",
+        org_concept_id="#V#org",
+        calculate_context_stats_fn=lambda _context: {},
+        build_response_transformation_telemetry_payload_fn=lambda **_kwargs: {},
+        build_turn_execution_diagnostics_fn=lambda **_kwargs: {},
+        finalise_llm_debug_info_fn=von_routes._finalise_llm_debug_info,
+    )
+
+    assert result["llm_usage_cost_summary"]["usage"]["total_tokens"] == 120
+    assert result["llm_usage_cost_summary"]["estimated_cost"]["amount"] == 0.14
+    assert (
+        result["turn_execution_record"]["llm_usage_cost_summary"]
+        == result["llm_usage_cost_summary"]
+    )
+
+
+def test_finalise_reuses_turn_pricing_snapshot_summary(monkeypatch) -> None:
+    from src.backend.server.routes import von_routes
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_runtime_code_version_info",
+        lambda: {"version": "test-version"},
+    )
+
+    def fail_if_registry_is_read_again():
+        raise AssertionError("turn finalisation must reuse the supplied summary")
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_model_registry_snapshot",
+        fail_if_registry_is_read_again,
+    )
+    supplied_summary = {
+        "schema_version": "llm_usage_cost_summary.v1",
+        "call_count": 1,
+        "unique_call_count": 1,
+        "duplicate_call_count": 0,
+        "billable_call_count": 1,
+        "usage": {"status": "reported", "total_tokens": 120},
+        "estimated_cost": {
+            "status": "estimated",
+            "amount": 0.14,
+            "known_amount": 0.14,
+            "currency": "USD",
+        },
+        "model_identities": [],
+        "model_identity_omitted_count": 0,
+    }
+
+    result = von_routes._finalise_llm_debug_info(
+        llm_debug_info={
+            "request_id": "reuse-summary",
+            "interaction_timestamp_utc": "2026-08-05T10:00:00Z",
+            "response": "Done.",
+            "llm_interaction": {
+                "ordinary_turn_terminal_status": "completed",
+                "calls": [],
+            },
+            "llm_usage_cost_summary": supplied_summary,
+            "tool_invocations": [],
+            "turn_execution_record_tool_invocations": [],
+            "search_evidence": [],
+            "turn_execution_diagnostics": {},
+            "aux_llm_calls": [],
+        },
+        prompt_text="Do the task.",
+        response_text="Done.",
+        session_id="session-reuse-summary",
+        namespace="#V#person@org",
+        user_id="#V#person",
+        org_id="#V#org",
+    )
+
+    assert result["llm_usage_cost_summary"] == supplied_summary
+    assert result["turn_execution_record"]["llm_usage_cost_summary"] == supplied_summary
 
 
 def test_finalise_llm_debug_info_preserves_bounded_evidence_envelope(

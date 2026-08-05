@@ -1358,6 +1358,9 @@ class OpenAIClient(LLMClient):
                         }
                     )
         transport_metadata = decision.to_telemetry()
+        service_tier = _value(response, "service_tier")
+        if isinstance(service_tier, str) and service_tier.strip():
+            transport_metadata["effective_service_tier"] = service_tier.strip().lower()
         accepted_tool_call_ids = [call.call_id for call in tool_calls]
         provider_tool_call_ids = [
             str(item.get("id"))
@@ -1504,6 +1507,9 @@ class OpenAIClient(LLMClient):
         raw_response_id = _value(response, "id")
         accepted_tool_call_ids = [call.call_id for call in tool_calls]
         transport_metadata = decision.to_telemetry()
+        service_tier = _value(response, "service_tier")
+        if isinstance(service_tier, str) and service_tier.strip():
+            transport_metadata["effective_service_tier"] = service_tier.strip().lower()
         transport_metadata["response_id"] = sanitise_transport_telemetry_value(
             raw_response_id,
             key="provider_response_id",
@@ -1729,14 +1735,23 @@ class OpenAIClient(LLMClient):
         if responses:
             prompt = _value(usage, "input_tokens")
             completion = _value(usage, "output_tokens")
+            input_details = _value(usage, "input_tokens_details")
         else:
             prompt = _value(usage, "prompt_tokens")
             completion = _value(usage, "completion_tokens")
-        return {
+            input_details = _value(usage, "prompt_tokens_details")
+        usage_payload = {
             "prompt_tokens": prompt,
             "completion_tokens": completion,
             "total_tokens": _value(usage, "total_tokens"),
         }
+        cached_input_tokens = _value(input_details, "cached_tokens")
+        if cached_input_tokens is not None:
+            usage_payload["cached_input_tokens"] = cached_input_tokens
+        cache_write_input_tokens = _value(input_details, "cache_write_tokens")
+        if cache_write_input_tokens is not None:
+            usage_payload["cache_write_input_tokens"] = cache_write_input_tokens
+        return usage_payload
 
     @staticmethod
     def _attach_parameter_telemetry(

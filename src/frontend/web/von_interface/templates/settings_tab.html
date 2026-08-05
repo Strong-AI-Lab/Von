@@ -244,8 +244,8 @@
                 <h2 id="modelScopeOverviewHeading">Model Selection Scopes</h2>
                 <p class="settings-note">
                     Chat selection, workflow routing, and shared server services are separate scopes. Von's
-                    represented model-selection workflow may choose any model in the enabled pool; Settings
-                    controls eligibility, not routing policy.
+                    represented model-selection workflow may choose only from the scoped allowed models;
+                    Settings controls eligibility, not routing policy.
                 </p>
                 <dl class="settings-model-scope-summary">
                     <div>
@@ -266,7 +266,7 @@
                     </div>
                 </dl>
                 <div class="settings-model-pool-panel">
-                    <h3>Workflow-enabled model pool</h3>
+                    <h3>Scoped allowed models</h3>
                     <div class="inline-form inline-form-tight mb-1">
                         <label for="modelPoolTargetScopeSelect">Save target</label>
                         <select id="modelPoolTargetScopeSelect" disabled>
@@ -286,17 +286,17 @@
                         </button>
                     </div>
                     <p class="settings-note">
-                        Pool-only edits retain the selected target primary. Replacing it with this browser's chat
+                        Allowed-model edits retain the selected target primary. Replacing it with this browser's chat
                         model requires the explicit action above.
                     </p>
                     <p class="settings-note">
-                        The scoped primary is always enabled. Add or remove alternatives explicitly; configuring
-                        or testing a model does not add it to this pool.
+                        The scoped primary is always allowed. Add or remove alternatives explicitly; configuring
+                        or testing a model does not allow it.
                     </p>
                     <div id="workflowModelPoolList" class="settings-model-pool-list"></div>
                     <div class="inline-form inline-form-tight mt-2">
                         <button id="saveModelPoolButton" class="btn-azure" type="button" disabled>
-                            Save scoped primary &amp; workflow pool
+                            Save scoped primary &amp; allowed models
                         </button>
                     </div>
                     <div id="modelPoolStatusMessage" class="status-message" role="status"></div>
@@ -310,11 +310,11 @@
             <div class="inline-form inline-form-tight mt-2">
                 <input type="checkbox" id="enableOpenAiPremiumToggle" />
                 <label for="enableOpenAiPremiumToggle"
-                    title="When enabled, this browser requests the selected OpenAI model for chat. When disabled, it requests the selected Ollama model.">Use
-                    selected OpenAI model for chat in this browser</label>
+                    title="When enabled, this browser requests the selected OpenAI model for chat, provided the exact model is allowed for the selected scope. When disabled, it requests the selected Ollama model.">Use
+                    selected allowed OpenAI model for chat in this browser</label>
             </div>
-            <small class="settings-note">Turn this off to use the selected Ollama model for browser chat. Editing or
-                testing a model does not add it to workflow routing.</small>
+            <small class="settings-note">First allow the exact OpenAI model for this scope and save. Turn this off
+                to use the selected Ollama model for browser chat. Editing or testing a model does not allow it.</small>
             <div id="openaiModelsContainer" class="hidden">
                 <label for="openaiModelSelect">Select OpenAI Model:</label>
                 <select id="openaiModelSelect" name="openai_model">
@@ -325,11 +325,19 @@
                     <select id="openaiReasoningEffortSelect" name="openai_reasoning_effort"></select>
                 </div>
                 <div class="inline-form inline-form-tight mt-2">
-                    <button id="testOpenAiModelButton" class="btn-secondary" type="button">Test this model</button>
-                    <button id="addOpenAiToWorkflowPoolButton" class="btn-secondary" type="button">Add to workflow pool</button>
+                    <button id="testOpenAiModelButton" class="btn-secondary" type="button" disabled>Test this model</button>
+                    <button id="addOpenAiToWorkflowPoolButton" class="btn-secondary" type="button">Allow for this scope</button>
                 </div>
-                <small class="settings-note">A test is a live probe only; it does not change the browser chat
-                    choice, scoped primary, or workflow pool.</small>
+                <small class="settings-note">A test is a live paid-provider probe and is available only after the
+                    exact model is allowed and saved. It does not change the browser choice or scoped primary.</small>
+                <div id="openaiModelEligibilityStatus" class="status-message" role="status">
+                    Select an OpenAI model to check whether it is allowed for this scope.
+                </div>
+                <div id="openaiModelCostSummary"
+                    class="settings-note"
+                    role="status">
+                    Historical cost estimate unavailable until persisted usage and pricing evidence is provided.
+                </div>
                 <div id="openaiModelStatusMessage" class="status-message" role="alert">
                     <!-- Status messages for the selected premium model will appear here -->
                 </div>
@@ -412,10 +420,10 @@
             </div>
             <div class="inline-form inline-form-tight mt-2">
                 <button id="testOllamaModelButton" class="btn-secondary" type="button">Test this model</button>
-                <button id="addOllamaToWorkflowPoolButton" class="btn-secondary" type="button">Add to workflow pool</button>
+                <button id="addOllamaToWorkflowPoolButton" class="btn-secondary" type="button">Allow for this scope</button>
             </div>
             <small class="settings-note">A test is a live probe only; it does not change the browser chat choice,
-                scoped primary, or workflow pool.</small>
+                scoped primary, or scoped allowed models.</small>
             <div id="ollamaModelStatusMessage" class="status-message" role="alert">
                 <!-- Status messages for the selected Ollama model will appear here -->
             </div>

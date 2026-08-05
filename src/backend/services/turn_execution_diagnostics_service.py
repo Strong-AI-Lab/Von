@@ -1954,10 +1954,14 @@ def _normalise_llm_exchange_entry(
     )
     stage = _safe_str(entry.get("stage")) or _safe_str(entry.get("phase"))
     workflow_stage_id = _safe_str(entry.get("workflow_stage_id"))
+    requested_model = _safe_str(entry.get("requested_model"))
+    selected_model = _safe_str(entry.get("selected_model"))
+    effective_model = _safe_str(entry.get("effective_model"))
     model = (
-        _safe_str(entry.get("model"))
+        effective_model
+        or _safe_str(entry.get("model"))
         or _safe_str(entry.get("model_name"))
-        or _safe_str(entry.get("selected_model"))
+        or selected_model
     )
     provider = _safe_str(entry.get("provider")) or _safe_str(
         entry.get("selected_provider")
@@ -1969,6 +1973,7 @@ def _normalise_llm_exchange_entry(
     error = _safe_str(entry.get("error"))
     error_class = _safe_str(entry.get("error_class"))
     failure_kind = _safe_str(entry.get("failure_kind"))
+    usage = _safe_mapping(entry.get("usage"))
 
     exchange_blob_ref = entry.get("exchange_blob_ref")
     exchange_blob_ref_payload = (
@@ -2003,11 +2008,23 @@ def _normalise_llm_exchange_entry(
         "schema_version": "turn_llm_exchange_entry.v1",
         "source": source,
         "source_index": source_index,
+        "call_id": _safe_str(entry.get("call_id")),
+        "llm_exchange_id": _safe_str(entry.get("llm_exchange_id")),
         "call_type": call_type,
         "stage": stage,
         "workflow_stage_id": workflow_stage_id,
         "model": model,
         "provider": provider,
+        "requested_model": requested_model,
+        "selected_model": selected_model,
+        "effective_model": effective_model,
+        "model_identity_source": _safe_str(entry.get("model_identity_source")),
+        "provider_request_sent": (
+            entry.get("provider_request_sent")
+            if isinstance(entry.get("provider_request_sent"), bool)
+            else None
+        ),
+        "usage": usage,
         "duration_ms": duration_ms,
         "status": status,
         "success": success,
@@ -2331,22 +2348,43 @@ def _collect_llm_exchange_entries(
         )
 
     deduped: list[dict[str, Any]] = []
-    seen_keys: set[tuple[Any, ...]] = set()
+    seen_keys: dict[tuple[Any, ...], int] = {}
     for row in rows:
         prompt = row.get("prompt")
         response = row.get("response")
+        call_id = _safe_str(row.get("call_id"))
         key = (
-            row.get("call_type"),
-            row.get("stage"),
-            row.get("workflow_stage_id"),
-            row.get("model"),
-            row.get("at_utc"),
-            (prompt.get("text") if isinstance(prompt, Mapping) else None),
-            (response.get("text") if isinstance(response, Mapping) else None),
+            ("call_id", call_id)
+            if call_id
+            else (
+                "legacy",
+                row.get("call_type"),
+                row.get("stage"),
+                row.get("workflow_stage_id"),
+                row.get("model"),
+                row.get("at_utc"),
+                (prompt.get("text") if isinstance(prompt, Mapping) else None),
+                (response.get("text") if isinstance(response, Mapping) else None),
+            )
         )
-        if key in seen_keys:
+        existing_index = seen_keys.get(key)
+        if existing_index is not None:
+            if call_id:
+                existing = deduped[existing_index]
+                for field in (
+                    "llm_exchange_id",
+                    "requested_model",
+                    "selected_model",
+                    "effective_model",
+                    "model_identity_source",
+                    "provider_request_sent",
+                    "usage",
+                ):
+                    value = row.get(field)
+                    if value is not None:
+                        existing[field] = value
             continue
-        seen_keys.add(key)
+        seen_keys[key] = len(deduped)
         deduped.append(row)
 
     def _sort_key(row: Mapping[str, Any]) -> tuple[int, str, int]:
