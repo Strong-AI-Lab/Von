@@ -25274,10 +25274,26 @@ def _normalise_gmail_message_detail_payload(
     return payload
 
 
+def _gmail_authorised_email(profile_id: str) -> str | None:
+    """Return the trusted token-store mailbox identity without exposing tokens."""
+
+    try:
+        from ...services.agent_gmail_token_store import get_agent_gmail_token_status
+
+        status = get_agent_gmail_token_status(profile_id)
+        authorised_email = getattr(status, "authorised_email", None)
+    except Exception:  # noqa: BLE001 - identity enrichment is best effort
+        return None
+    if not isinstance(authorised_email, str) or not authorised_email.strip():
+        return None
+    return authorised_email.strip()
+
+
 def _annotate_gmail_list_messages_payload(
     result: Mapping[str, Any],
     *,
     profile: str,
+    authorised_email: str | None = None,
     effective_query: Mapping[str, Any] | None = None,
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -25322,6 +25338,8 @@ def _annotate_gmail_list_messages_payload(
         ],
     }
     payload.setdefault("profile", profile)
+    if authorised_email:
+        payload.setdefault("authorised_email", authorised_email)
     return payload
 
 
@@ -25333,6 +25351,7 @@ def _gmail_list_messages_output_schema() -> Schema:
             "nextPageToken": str,
             "resultSizeEstimate": int,
             "profile": str,
+            "authorised_email": str,
             "_tool_follow_up": dict,
             "effective_query": dict,
             "notes": list,
@@ -25340,7 +25359,8 @@ def _gmail_list_messages_output_schema() -> Schema:
         allow_unknown=True,
         description=(
             "gmail_list_messages output: messages contain Gmail id/threadId and "
-            "a message_id alias. The 'effective_query' field reports whether a "
+            "a message_id alias; profile and authorised_email identify the trusted "
+            "mailbox binding when available. The 'effective_query' field reports whether a "
             "profile-level query_prefix or label_filter was applied and the "
             "composed query string actually sent to Gmail; 'notes' surfaces "
             "warnings such as silent profile-level filtering. Use the "
@@ -25367,12 +25387,15 @@ def _gmail_get_message_output_schema() -> Schema:
             "date": str,
             "body": str,
             "body_truncated": bool,
+            "profile": str,
+            "authorised_email": str,
         },
         allow_unknown=True,
         description=(
             "gmail_get_message output: full Gmail message payload plus normalised "
-            "message_id, sender/from, subject, date, and snippet fields when "
-            "available. Body text is returned only when include_body=true."
+            "message_id, sender/from, subject, date, snippet, profile, and trusted "
+            "authorised_email fields when available. Body text is returned only "
+            "when include_body=true."
         ),
     )
 
@@ -25597,6 +25620,7 @@ def _gmail_list_messages(**kwargs):
         return _annotate_gmail_list_messages_payload(
             result,
             profile=str(profile),
+            authorised_email=_gmail_authorised_email(str(profile)),
             effective_query=effective_query,
             notes=notes or None,
         )
@@ -25641,6 +25665,10 @@ def _gmail_get_message(**kwargs):
             },
         )
         normalised = _normalise_gmail_message_detail_payload(result)
+        normalised.setdefault("profile", str(profile))
+        authorised_email = _gmail_authorised_email(str(profile))
+        if authorised_email:
+            normalised.setdefault("authorised_email", authorised_email)
         if include_body:
             body, body_truncated = extract_gmail_message_body(result)
             if body is not None:

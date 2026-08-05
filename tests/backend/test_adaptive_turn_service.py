@@ -5373,6 +5373,10 @@ def test_relation_progress_emits_one_human_start_and_terminal_summary(
         "tool_call_start",
         "tool_call_end",
     ]
+    assert [event["subtask"] for event in relation_events] == [
+        "Add Relationship",
+        "Add Relationship",
+    ]
     assert relation_events[0]["result_summary"] == (
         "Add Relationship: Subject: Nathan Young Doctoral Candidature Situation; "
         "Relation: Has Doctoral Supervisor; Object: Robert Amor (in progress)."
@@ -5472,6 +5476,10 @@ def test_concept_search_progress_emits_query_and_bounded_results() -> None:
     assert [event["event_kind"] for event in search_events] == [
         "tool_call_start",
         "tool_call_end",
+    ]
+    assert [event["subtask"] for event in search_events] == [
+        "Search Concepts",
+        "Search Concepts",
     ]
     assert search_events[0]["result_summary"] == (
         "Search Concepts: Query: “University of Auckland” (in progress)."

@@ -381,6 +381,146 @@ def test_predicate_incidence_projects_anchor_and_predicate_results() -> None:
     )
 
 
+def test_live_predicate_identifiers_are_not_replaced_by_the_anchor_concept() -> None:
+    projection = build_semantic_operation_projection(
+        operation_id="call-live-incidence",
+        capability_name="get_predicate_incidence",
+        execution_method="get_predicate_incidence",
+        capability_kind="registered_tool",
+        arguments={"concept_id": "#V#university_of_auckland_strong_ai_lab"},
+        lifecycle_status="succeeded",
+        success=True,
+        result={
+            "concept_id": "#V#university_of_auckland_strong_ai_lab",
+            "total_predicates": 5,
+            "counts_are_lower_bounds": True,
+            "coverage_complete": False,
+            "predicates": [
+                {"predicate_concept_id": "hasName", "relation_hit_count": 5},
+                {
+                    "predicate_concept_id": "is_an_instance_of",
+                    "relation_hit_count": 5,
+                },
+                {"predicate_concept_id": "has_instance", "relation_hit_count": 2},
+                {"predicate_concept_id": "hasDescription", "relation_hit_count": 1},
+                {"predicate_concept_id": "hasNote", "relation_hit_count": 1},
+            ],
+        },
+    )
+
+    assert projection["observation"]["items"] == [
+        {"name": "Has Name", "identifier": "hasName", "identifier_kind": "predicate"},
+        {
+            "name": "Is An Instance Of",
+            "identifier": "is_an_instance_of",
+            "identifier_kind": "predicate",
+        },
+        {
+            "name": "Has Instance",
+            "identifier": "has_instance",
+            "identifier_kind": "predicate",
+        },
+        {
+            "name": "Has Description",
+            "identifier": "hasDescription",
+            "identifier_kind": "predicate",
+        },
+        {"name": "Has Note", "identifier": "hasNote", "identifier_kind": "predicate"},
+    ]
+    assert "University Of Auckland Strong Ai Lab" not in ", ".join(
+        item["name"] for item in projection["observation"]["items"]
+    )
+    assert projection["summary"] == (
+        "Get Predicate Incidence returned at least 5 predicates: Has Name, "
+        "Is An Instance Of, Has Instance, Has Description and Has Note for "
+        "Concept: University Of Auckland Strong Ai Lab."
+    )
+    assert normalise_semantic_operation_projection(projection) == projection
+
+
+def test_gmail_reads_project_mailbox_and_bounded_message_metadata_without_body() -> (
+    None
+):
+    auth = build_semantic_operation_projection(
+        operation_id="call-gmail-auth",
+        capability_name="gmail_get_auth_config",
+        execution_method="gmail_get_auth_config",
+        capability_kind="registered_tool",
+        arguments={"profile_id": "vonwitbrock-gmail"},
+        lifecycle_status="succeeded",
+        success=True,
+        result={
+            "success": True,
+            "profile_id": "vonwitbrock-gmail",
+            "authorised_email": "zhanvonwitbrock@gmail.com",
+            "token_status": "authorised",
+        },
+    )
+    listed = build_semantic_operation_projection(
+        operation_id="call-gmail-list",
+        capability_name="gmail_list_messages",
+        execution_method="gmail_list_messages",
+        capability_kind="registered_tool",
+        arguments={"profile": "vonwitbrock-gmail", "query": "in:inbox"},
+        lifecycle_status="succeeded",
+        success=True,
+        result={
+            "profile": "vonwitbrock-gmail",
+            "authorised_email": "zhanvonwitbrock@gmail.com",
+            "messages": [{"id": "19c123", "message_id": "19c123"}],
+        },
+    )
+    fetched = build_semantic_operation_projection(
+        operation_id="call-gmail-get",
+        capability_name="gmail_get_message",
+        execution_method="gmail_get_message",
+        capability_kind="registered_tool",
+        arguments={"profile": "vonwitbrock-gmail", "message_id": "19c123"},
+        lifecycle_status="succeeded",
+        success=True,
+        result={
+            "profile": "vonwitbrock-gmail",
+            "authorised_email": "zhanvonwitbrock@gmail.com",
+            "message_id": "19c123",
+            "subject": "Thesis Submission and Examiner Nomination",
+            "sender": "Xianda Zheng <xzhe162@aucklanduni.ac.nz>",
+            "date": "Wed, 5 Aug 2026 19:48:06 +0800",
+            "body": "Private message body that must not enter Thinking.",
+        },
+    )
+
+    assert auth["summary"] == (
+        "Gmail Get Auth Config returned zhanvonwitbrock@gmail.com for Mailbox "
+        "profile: Vonwitbrock Gmail (Authorisation: authorised)."
+    )
+    assert listed["summary"] == (
+        "Gmail List Messages returned 1 message for Query: “in:inbox” "
+        "(Mailbox: zhanvonwitbrock@gmail.com)."
+    )
+    assert fetched["summary"] == (
+        "Gmail Get Message returned Thesis Submission and Examiner Nomination for "
+        "Mailbox profile: Vonwitbrock Gmail (Mailbox: zhanvonwitbrock@gmail.com; "
+        "Sender: Xianda Zheng <xzhe162@aucklanduni.ac.nz>; Date: Wed, 5 Aug 2026 "
+        "19:48:06 +0800)."
+    )
+    assert [item["role"] for item in fetched["arguments"]] == [
+        "mailbox",
+        "message",
+    ]
+    assert fetched["observation"]["items"] == [
+        {
+            "name": "Thesis Submission and Examiner Nomination",
+            "identifier": "19c123",
+            "identifier_kind": "message",
+        }
+    ]
+    assert "body" not in fetched["observation"]
+    assert "Private message body" not in fetched["summary"]
+    assert normalise_semantic_operation_projection(auth) == auth
+    assert normalise_semantic_operation_projection(listed) == listed
+    assert normalise_semantic_operation_projection(fetched) == fetched
+
+
 def test_fetch_concept_projects_requested_and_returned_concept() -> None:
     projection = build_semantic_operation_projection(
         operation_id="call-fetch",

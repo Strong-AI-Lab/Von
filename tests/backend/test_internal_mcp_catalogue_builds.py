@@ -580,6 +580,14 @@ def test_internal_mcp_gmail_list_profiles_registered_and_handler_returns_summari
 def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module
 
+    monkeypatch.setattr(
+        catalogue_module,
+        "_gmail_authorised_email",
+        lambda profile_id: (
+            "zhanvonwitbrock@gmail.com" if profile_id == "zhan-gmail" else None
+        ),
+    )
+
     def fake_list_messages(**kwargs):
         assert kwargs["profile_id"] == "zhan-gmail"
         return {
@@ -621,6 +629,7 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
     )
 
     assert list_payload["messages"][0]["message_id"] == "msg-1"
+    assert list_payload["authorised_email"] == "zhanvonwitbrock@gmail.com"
     follow_up = list_payload["_tool_follow_up"]
     assert follow_up["schema_version"] == "mcp_tool_follow_up.v1"
     assert follow_up["item_array_field"] == "messages"
@@ -642,6 +651,8 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
     )
 
     assert detail_payload["message_id"] == "msg-1"
+    assert detail_payload["profile"] == "zhan-gmail"
+    assert detail_payload["authorised_email"] == "zhanvonwitbrock@gmail.com"
     assert detail_payload["sender"] == "Sender <sender@example.test>"
     assert detail_payload["from"] == "Sender <sender@example.test>"
     assert detail_payload["subject"] == "Subject line"

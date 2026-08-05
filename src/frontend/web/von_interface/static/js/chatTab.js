@@ -1569,6 +1569,7 @@ const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_DERIVED = 'derived_from_live_tele
 const THINKING_SEMANTIC_OPERATION_SCHEMA_VERSION = 'thinking_semantic_operation.v1';
 const THINKING_SEMANTIC_OPERATION_MAX_ARGUMENTS = 8;
 const THINKING_SEMANTIC_OPERATION_MAX_OBSERVATION_ITEMS = 5;
+const THINKING_SEMANTIC_OPERATION_MAX_OBSERVATION_DETAILS = 4;
 const THINKING_SEMANTIC_OPERATION_MAX_TEXT_CHARS = 240;
 const THINKING_SEMANTIC_OPERATION_MAX_SUMMARY_CHARS = 1024;
 const THINKING_SEMANTIC_ARGUMENT_LABELS = new Map([
@@ -1578,7 +1579,9 @@ const THINKING_SEMANTIC_ARGUMENT_LABELS = new Map([
     ['value', 'Value'],
     ['workflow', 'Workflow'],
     ['instance', 'Workflow instance'],
-    ['name', 'Name']
+    ['name', 'Name'],
+    ['mailbox', 'Mailbox'],
+    ['message', 'Message ID']
 ]);
 const THINKING_SEMANTIC_ARGUMENT_VALUE_KINDS = new Set([
     'concept',
@@ -1590,18 +1593,29 @@ const THINKING_SEMANTIC_ARGUMENT_VALUE_KINDS = new Set([
 const THINKING_SEMANTIC_FOCUS_LABELS = new Map([
     ['query', 'Query'],
     ['concept', 'Concept'],
-    ['type', 'Type']
+    ['type', 'Type'],
+    ['mailbox', 'Mailbox profile']
 ]);
 const THINKING_SEMANTIC_FOCUS_SPECS = new Map([
     ['query', { sourceArgument: 'query', valueKind: 'text' }],
     ['concept', { sourceArgument: 'concept_id', valueKind: 'concept' }],
-    ['type', { sourceArgument: 'instance_of', valueKind: 'concept' }]
+    ['type', { sourceArgument: 'instance_of', valueKind: 'concept' }],
+    ['mailbox', { sourceArguments: new Set(['profile', 'profile_id']), valueKind: 'identifier' }]
 ]);
 const THINKING_SEMANTIC_OBSERVATION_COUNT_LABELS = new Map([
     ['total_count', 'concept matches'],
-    ['total_predicates', 'predicates']
+    ['total_predicates', 'predicates'],
+    ['messages', 'messages']
 ]);
-const THINKING_SEMANTIC_OBSERVATION_COLLECTIONS = new Set(['results', 'predicates']);
+const THINKING_SEMANTIC_OBSERVATION_COLLECTIONS = new Set(['results', 'predicates', 'messages']);
+const THINKING_SEMANTIC_OBSERVATION_DETAIL_SPECS = new Map([
+    ['authorised_email', { label: 'Mailbox', valueKind: 'email' }],
+    ['sender', { label: 'Sender', valueKind: 'text' }],
+    ['date', { label: 'Date', valueKind: 'text' }],
+    ['token_status', { label: 'Authorisation', valueKind: 'status' }]
+]);
+const THINKING_SEMANTIC_OBSERVATION_IDENTIFIER_KINDS = new Set(['predicate', 'message']);
+const THINKING_SEMANTIC_BOUNDED_IDENTIFIER_PATTERN = /^[A-Za-z0-9._:@+-]+$/;
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
 const THINKING_LLM_CALL_LOG_DETAILS_SELECTOR = 'details[data-thinking-llm-call-log-key]';
@@ -3294,7 +3308,10 @@ function normaliseThinkingSemanticFocus(rawFocus) {
         rawFocus.value_kind || rawFocus.valueKind,
         40
     ).toLowerCase();
-    if (sourceArgument !== spec.sourceArgument || valueKind !== spec.valueKind) {
+    const sourceMatches = spec.sourceArguments instanceof Set
+        ? spec.sourceArguments.has(sourceArgument)
+        : sourceArgument === spec.sourceArgument;
+    if (!sourceMatches || valueKind !== spec.valueKind) {
         return null;
     }
     const value = normaliseThinkingSemanticScalar(rawFocus.value);
@@ -3341,14 +3358,50 @@ function normaliseThinkingSemanticObservation(rawObservation) {
                     return null;
                 }
                 const identifier = normaliseThinkingSemanticText(rawItem.identifier, 160);
+                const identifierKind = normaliseThinkingSemanticText(
+                    rawItem.identifier_kind || rawItem.identifierKind,
+                    40
+                ).toLowerCase();
+                const identifierAllowed = identifier.startsWith('#V#') || (
+                    THINKING_SEMANTIC_OBSERVATION_IDENTIFIER_KINDS.has(identifierKind)
+                    && THINKING_SEMANTIC_BOUNDED_IDENTIFIER_PATTERN.test(identifier)
+                );
                 return {
                     name,
-                    identifier: identifier.startsWith('#V#') ? identifier : ''
+                    identifier: identifierAllowed ? identifier : '',
+                    identifierKind: identifierAllowed && !identifier.startsWith('#V#')
+                        ? identifierKind
+                        : ''
                 };
             })
             .filter(Boolean)
         : [];
-    if (count === null && items.length === 0) {
+    const details = Array.isArray(rawObservation.details)
+        ? rawObservation.details
+            .slice(0, THINKING_SEMANTIC_OPERATION_MAX_OBSERVATION_DETAILS)
+            .map((rawDetail) => {
+                if (!rawDetail || typeof rawDetail !== 'object') {
+                    return null;
+                }
+                const sourceField = normaliseThinkingSemanticText(
+                    rawDetail.source_field || rawDetail.sourceField,
+                    80
+                );
+                const spec = THINKING_SEMANTIC_OBSERVATION_DETAIL_SPECS.get(sourceField);
+                const value = normaliseThinkingSemanticText(rawDetail.value, 160);
+                if (!spec || !value) {
+                    return null;
+                }
+                return {
+                    label: spec.label,
+                    sourceField,
+                    valueKind: spec.valueKind,
+                    value
+                };
+            })
+            .filter(Boolean)
+        : [];
+    if (count === null && items.length === 0 && details.length === 0) {
         return null;
     }
     return {
@@ -3360,7 +3413,8 @@ function normaliseThinkingSemanticObservation(rawObservation) {
         collectionSource: THINKING_SEMANTIC_OBSERVATION_COLLECTIONS.has(collectionSource)
             ? collectionSource
             : '',
-        items
+        items,
+        details
     };
 }
 
@@ -10586,6 +10640,13 @@ function buildToolHistoryDiagnosticsHTML(entry, mode = THINKING_CARD_MODE_EXPERT
                 .filter(Boolean);
             if (returnedIds.length > 0) {
                 facts.push({ label: 'Returned IDs', value: returnedIds.join(', ') });
+            }
+            for (const detail of semanticOperation.observation.details || []) {
+                const label = normaliseThinkingActivityString(detail.label);
+                const value = normaliseThinkingActivityString(detail.value);
+                if (label && value) {
+                    facts.push({ label, value });
+                }
             }
         }
         if (semanticOperation.observation) {
