@@ -12,6 +12,7 @@ import {
     __testOnly_applySettingsActorRole,
     __testOnly_invalidateActorScopedCapabilityStatus,
     __testOnly_queueActorContextTransition,
+    __testOnly_refreshSelectedOpenAiCostSummary,
     __testOnly_reloadScopedModelSettings,
     __testOnly_renderModelScopeOverview,
     __testOnly_restoreScopedPrimary,
@@ -61,7 +62,11 @@ describe('settings model scope and workflow pool controls', () => {
             <button id="restoreScopedPrimaryButton"></button>
             <select id="openaiModelSelect"><option value="gpt-5.6-luna" selected>gpt-5.6-luna</option></select>
             <select id="openaiReasoningEffortSelect"><option value="low" selected>low</option></select>
+            <input id="enableOpenAiPremiumToggle" type="checkbox" />
+            <button id="testOpenAiModelButton"></button>
             <button id="addOpenAiToWorkflowPoolButton"></button>
+            <div id="openaiModelEligibilityStatus"></div>
+            <div id="openaiModelCostSummary"></div>
             <select id="globalModelSelect">
                 <option value="http://127.0.0.1:11434:gemma4:latest"
                     data-host-url="http://127.0.0.1:11434"
@@ -98,12 +103,161 @@ describe('settings model scope and workflow pool controls', () => {
 
         const rows = Array.from(document.querySelectorAll('.settings-model-pool-entry'));
         expect(rows).toHaveLength(3);
-        expect(rows[0].textContent).toContain('Primary · always enabled');
+        expect(rows[0].textContent).toContain('Primary · always allowed');
         expect(rows[0].querySelector('button')).toBeNull();
         expect(rows[1].textContent).toContain('gpt-5.6-luna');
         expect(rows[2].textContent).toContain('gemini-2.5-pro');
         expect(document.getElementById('browserChatModelSummary').textContent).toContain('gemma4:latest');
         expect(document.getElementById('sharedServerDefaultModelSummary').textContent).toContain('qwen3:8b');
+    });
+
+    test('uses the persisted effective allow list, not staged edits', () => {
+        const eligibility = document.getElementById('openaiModelEligibilityStatus');
+        const testButton = document.getElementById('testOpenAiModelButton');
+        __testOnly_setModelScopeState({
+            targetScope: 'user',
+            resolvedLlm: null,
+            enabledLlms: [],
+            effectiveLlm: {
+                provider: 'ollama',
+                model: 'organisation-primary',
+                scope: 'organisation',
+            },
+            effectiveEnabledLlms: [
+                { provider: 'ollama', model: 'organisation-primary' },
+                { provider: 'openai', model: 'gpt-5.6-luna' },
+            ],
+        });
+        __testOnly_renderModelScopeOverview();
+        expect(testButton.disabled).toBe(false);
+        expect(document.getElementById('enableOpenAiPremiumToggle').disabled).toBe(false);
+
+        __testOnly_setModelScopeState({
+            resolvedLlm: { provider: 'ollama', model: 'gemma4:latest', scope: 'user' },
+            enabledLlms: [
+                { provider: 'ollama', model: 'gemma4:latest' },
+                { provider: 'openai', model: 'gpt-5.6-terra' },
+            ],
+        });
+        __testOnly_renderModelScopeOverview();
+        expect(testButton.disabled).toBe(true);
+        expect(__testOnly_addOrUpdateWorkflowPoolEntry({
+            provider: 'openai', model: 'gpt-5.6-luna',
+            model_parameters: { reasoning_effort: 'low' },
+        })).toBe(true);
+        expect(document.getElementById('addOpenAiToWorkflowPoolButton').textContent)
+            .toBe('Pending allowed-model save');
+    });
+
+    test('fetches and renders bounded actor-scoped cost evidence without inventing zero', async () => {
+        __testOnly_setModelScopeState({
+            targetScope: 'user',
+            resolvedLlm: { provider: 'ollama', model: 'gemma4:latest', scope: 'user' },
+            enabledLlms: [{ provider: 'ollama', model: 'gemma4:latest' }],
+        });
+        const projection = (status, amount = null) => ({
+            schema_version: 'llm_model_turn_cost_summary.v1',
+            status,
+            model_identity: { provider: 'openai', model: 'gpt-5.6-luna' },
+            average_attributed_cost_per_turn: { amount, currency: 'USD' },
+            sample_window: {
+                attributed_turn_count: 5,
+                started_at_utc: '2026-08-01T00:00:00Z',
+                ended_at_utc: '2026-08-05T00:00:00Z',
+                limit: 100,
+            },
+            coverage: { priced_turn_count: 5, attributed_turn_count: 5 },
+            pricing: {
+                source: 'provider', version: '2026-08', effective_at_utc: '2026-08-01T00:00:00Z',
+            },
+        });
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => projection('available', 0.05),
+        });
+
+        await __testOnly_refreshSelectedOpenAiCostSummary();
+
+        const [url, options] = global.fetch.mock.calls[0];
+        const parsed = new URL(url, 'http://von.test');
+        expect(parsed.pathname).toBe('/api/settings/llm/cost_summary');
+        expect(Object.fromEntries(parsed.searchParams.entries())).toEqual({
+            provider: 'openai',
+            model: 'gpt-5.6-luna',
+        });
+        expect(options.cache).toBe('no-store');
+        expect(options.headers['X-Von-Window-Session']).toBeTruthy();
+        const cost = document.getElementById('openaiModelCostSummary');
+        expect(cost.textContent).toContain('US$0.05 per turn');
+        expect(cost.textContent).toContain('5/5 priced · 2026-08-01–2026-08-05');
+        expect(cost.textContent).toContain('pricing provider 2026-08 effective 2026-08-01');
+        expect(cost.textContent).toContain('not provider billing');
+
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => projection('available', 0.000012),
+        });
+        await __testOnly_refreshSelectedOpenAiCostSummary();
+        expect(cost.textContent).toContain('US$0.0000120 per turn');
+        expect(cost.textContent).not.toContain('US$0.0000 per turn');
+
+        for (const [status, expected] of [
+            ['partial', 'coverage is partial'],
+            ['unavailable', 'estimate unavailable'],
+            ['insufficient_coverage', 'Insufficient historical coverage'],
+            ['available', 'estimate unavailable'],
+        ]) {
+            global.fetch.mockResolvedValueOnce({
+                ok: true,
+                json: async () => projection(status),
+            });
+            await __testOnly_refreshSelectedOpenAiCostSummary();
+            expect(cost.textContent).toContain(expected);
+            expect(cost.textContent).not.toContain('US$0.00');
+        }
+
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ ...projection('available', 0.05), pricing: null }),
+        });
+        await __testOnly_refreshSelectedOpenAiCostSummary();
+        expect(cost.textContent).toContain('estimate unavailable');
+    });
+
+    test('does not let an older model response replace the latest selection', async () => {
+        __testOnly_setModelScopeState({
+            resolvedLlm: { provider: 'ollama', model: 'gemma4:latest', scope: 'user' },
+            enabledLlms: [{ provider: 'ollama', model: 'gemma4:latest' }],
+        });
+        let resolveOlder;
+        global.fetch.mockImplementationOnce(() => new Promise((resolve) => { resolveOlder = resolve; }));
+        const older = __testOnly_refreshSelectedOpenAiCostSummary();
+
+        document.getElementById('openaiModelSelect').innerHTML = '<option value="gpt-5.6-terra" selected>gpt-5.6-terra</option>';
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                schema_version: 'llm_model_turn_cost_summary.v1',
+                status: 'partial',
+                model_identity: { provider: 'openai', model: 'gpt-5.6-terra' },
+            }),
+        });
+        await __testOnly_refreshSelectedOpenAiCostSummary();
+        resolveOlder({
+            ok: true,
+            json: async () => ({
+                schema_version: 'llm_model_turn_cost_summary.v1',
+                status: 'available',
+                model_identity: { provider: 'openai', model: 'gpt-5.6-luna' },
+                average_attributed_cost_per_turn: { amount: 99, currency: 'USD' },
+                sample_window: { attributed_turn_count: 100 },
+            }),
+        });
+        await older;
+
+        const cost = document.getElementById('openaiModelCostSummary');
+        expect(cost.textContent).toContain('coverage is partial');
+        expect(cost.textContent).not.toContain('US$99.00');
     });
 
     test('adds, updates, and removes alternatives only through explicit pool actions', () => {
@@ -241,7 +395,7 @@ describe('settings model scope and workflow pool controls', () => {
         expect(document.getElementById('scopedPrimaryModelSummary').textContent)
             .toContain('inherited; saving creates a user override');
         expect(document.getElementById('modelPoolTargetScopeNote').textContent)
-            .toContain('organisation pool is not copied');
+            .toContain('organisation allowed models are not copied');
         expect(document.getElementById('workflowModelPoolList').textContent)
             .not.toContain('organisation-alternative');
         expect(__testOnly_buildPersistedLlmSelections()).toEqual([
@@ -619,7 +773,8 @@ describe('settings model scope and workflow pool controls', () => {
         expect(settingsTemplate.match(/Inherit server default/g)).toHaveLength(2);
         expect(settingsTemplate).not.toContain('Inherit chat default');
         expect(settingsTemplate).toContain('Effective shared RAG LLM: —');
-        expect(settingsTemplate).toContain('Save scoped primary &amp; workflow pool');
+        expect(settingsTemplate).toContain('Save scoped primary &amp; allowed models');
+        expect(settingsTemplate).toContain('Scoped allowed models');
         expect(settingsTemplate).toContain('Blank fields retain the saved');
         expect(settingsTemplate).not.toContain('uses the current browser chat selection as the server default');
         expect(settingsPageSource).toContain("'Effective shared RAG LLM'");

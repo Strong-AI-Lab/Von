@@ -38,6 +38,7 @@ from ...workflows.durable.turn_execution_runtime_support import (
     coerce_user_visible_response_text,
 )
 from ...languagemodels.llm_interface import (
+    ModelExecutionEligibilityError,
     _extract_ollama_model_id,
     _extract_openai_model_id,
     _looks_like_browser_object_model_reference,
@@ -80,6 +81,11 @@ from ...services.model_parameter_service import (
     MODEL_PARAMETERS_KEY,
     normalise_model_parameters_for_storage,
 )
+from ...services.llm_usage_cost_service import (
+    LLM_USAGE_COST_SUMMARY_SCHEMA_VERSION,
+    build_llm_usage_cost_summary,
+)
+from ...services.model_registry_service import get_model_registry_snapshot
 from ...services.feature_flags import (
     get_display_elements_screen_fence_compat_enabled,
 )
@@ -7384,6 +7390,23 @@ def _finalise_llm_debug_info(
             else []
         )
     )
+    supplied_llm_usage_cost_summary = llm_debug_info.get("llm_usage_cost_summary")
+    if (
+        isinstance(supplied_llm_usage_cost_summary, Mapping)
+        and supplied_llm_usage_cost_summary.get("schema_version")
+        == LLM_USAGE_COST_SUMMARY_SCHEMA_VERSION
+    ):
+        llm_usage_cost_summary = dict(supplied_llm_usage_cost_summary)
+    else:
+        try:
+            model_registry = get_model_registry_snapshot()
+        except Exception:
+            model_registry = None
+        llm_usage_cost_summary = build_llm_usage_cost_summary(
+            llm_calls_payload,
+            model_registry=model_registry,
+        )
+    llm_debug_info["llm_usage_cost_summary"] = llm_usage_cost_summary
     evidence_index: list[dict[str, Any]] = []
     for entry in reversed(aux_llm_calls_payload):
         if not isinstance(entry, Mapping):
@@ -7430,6 +7453,7 @@ def _finalise_llm_debug_info(
             ),
         },
         "llm_calls": [dict(item) for item in llm_calls_payload if isinstance(item, Mapping)],
+        "llm_usage_cost_summary": llm_usage_cost_summary,
         "tool_invocations": [
             dict(item)
             for item in turn_record_tool_invocations_payload
@@ -11220,6 +11244,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
 
         # ---------------------------------------------------------
+        try:
+            turn_model_registry_snapshot = get_model_registry_snapshot()
+        except Exception:
+            turn_model_registry_snapshot = None
+
         llm_interaction: dict = {
             "requested_model": model_name,
             "requested_model_parameters": requested_model_parameters or None,
@@ -11229,6 +11258,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "usage": None,
             "calls": [],
         }
+        stage_llm_call_sequence = 0
         render_plan_debug: dict[str, Any] | None = None
 
         def _infer_provider(model_id: str | None) -> str | None:
@@ -11270,14 +11300,50 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             error: str | None = None,
             error_class: str | None = None,
             failure_kind: str | None = None,
+            provider_request_sent: bool | None = None,
+            requested_model_name: str | None = None,
+            effective_model_name: str | None = None,
+            model_identity_source: str | None = None,
         ) -> None:
+            nonlocal stage_llm_call_sequence
+            stage_llm_call_sequence += 1
+            call_id = f"{request_id}:support-llm:{stage_llm_call_sequence}"
+            resolved_provider = provider or _infer_provider(model_name)
+            call_succeeded = (
+                success
+                if isinstance(success, bool)
+                else not any(
+                    isinstance(value, str) and value.strip()
+                    for value in (error, error_class, failure_kind)
+                )
+            )
+            resolved_status = (
+                status.strip()
+                if isinstance(status, str) and status.strip()
+                else ("completed" if call_succeeded else "failed")
+            )
+            resolved_request_sent = (
+                provider_request_sent
+                if isinstance(provider_request_sent, bool)
+                else (True if call_succeeded else None)
+            )
             payload = {
+                "call_id": call_id,
                 "type": call_type,
                 "model": model_name,
-                "provider": provider or _infer_provider(model_name),
+                "provider": resolved_provider,
+                "requested_model": requested_model_name or model_name,
+                "selected_model": model_name,
+                "effective_model": effective_model_name,
+                "model_identity_source": (
+                    model_identity_source if effective_model_name else None
+                ),
+                "provider_request_sent": resolved_request_sent,
                 "duration_ms": duration_ms,
                 "usage": usage,
                 "workflow": "von_generate",
+                "status": resolved_status,
+                "success": call_succeeded,
             }
             if stage:
                 payload["stage"] = stage
@@ -11293,10 +11359,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["prompt"] = prompt
             if response is not None:
                 payload["response"] = response
-            if isinstance(status, str) and status.strip():
-                payload["status"] = status.strip()
-            if isinstance(success, bool):
-                payload["success"] = success
             if isinstance(error, str) and error.strip():
                 payload["error"] = error.strip()
             if isinstance(error_class, str) and error_class.strip():
@@ -11305,6 +11367,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["failure_kind"] = failure_kind.strip()
             _stamp_llm_call_timestamps(payload, duration_ms=duration_ms)
             llm_interaction["calls"].append(payload)
+            llm_usage_cost_summary = build_llm_usage_cost_summary(
+                llm_interaction["calls"],
+                model_registry=turn_model_registry_snapshot,
+            )
+            _emit_stage_progress(
+                {
+                    "status": "llm_call_end",
+                    "event_kind": "llm_call_end",
+                    "stage": stage or "support",
+                    "call_id": call_id,
+                    "model": model_name,
+                    "provider": resolved_provider,
+                    "success": call_succeeded,
+                    "duration_ms": duration_ms,
+                    "llm_usage_cost_summary": llm_usage_cost_summary,
+                }
+            )
 
         def _emit_stage_progress(info: Mapping[str, Any] | None) -> None:
             if not show_tool_use_progress:
@@ -11360,6 +11439,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             conversation_situation=conversation_situation_text,
             conversation_observations=conversation_observations,
             conversation_observation_state=conversation_observation_state,
+            model_registry_snapshot=turn_model_registry_snapshot,
         )
         llm_interaction["duration_ms"] = (
             time.perf_counter() - adaptive_turn_started
@@ -12026,6 +12106,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         spoken_backfill_model_id = None
         spoken_backfill_error_class = None
         spoken_backfill_applied = False
+        narration_llm_started: float | None = None
 
         # If presenter mode was requested but the model didn't produce a usable
         # <spoken> channel, generate it in a second pass for reliability.
@@ -12150,6 +12231,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     f"{screen_text}\n"
                 )
 
+                narration_llm_started = time.perf_counter()
                 narration_response = _llm_generate_spoken_backfill(
                     llm_client,
                     narration_system,
@@ -12157,6 +12239,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     model_name,
                     requested_model_parameters or None,
                 )
+                _record_stage_llm_call(
+                    call_type="llm.generate",
+                    model_name=model_name,
+                    duration_ms=(
+                        time.perf_counter() - narration_llm_started
+                    )
+                    * 1000.0,
+                    usage=None,
+                    note="Presenter narration synthesis.",
+                    stage="narration",
+                    status="completed",
+                    success=True,
+                    provider_request_sent=True,
+                )
+                narration_llm_started = None
                 spoken_backfill_source = "llm_synthesis"
                 spoken_backfill_model_id = model_name
 
@@ -12210,6 +12307,31 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             except Exception as exc:
                 # Defensive: never fail the request just because narration generation failed.
                 spoken_backfill_error_class = type(exc).__name__
+                if narration_llm_started is not None:
+                    eligibility_denied = isinstance(
+                        exc, ModelExecutionEligibilityError
+                    )
+                    _record_stage_llm_call(
+                        call_type="llm.generate",
+                        model_name=model_name,
+                        duration_ms=(
+                            time.perf_counter() - narration_llm_started
+                        )
+                        * 1000.0,
+                        usage=None,
+                        note="Presenter narration synthesis.",
+                        stage="narration",
+                        provider=(exc.provider if eligibility_denied else None),
+                        status="failed",
+                        success=False,
+                        error_class=spoken_backfill_error_class,
+                        failure_kind=(
+                            exc.failure_kind if eligibility_denied else None
+                        ),
+                        provider_request_sent=(
+                            False if eligibility_denied else None
+                        ),
+                    )
                 presenter_channels = presenter_channels
 
         spoken_backfill_latency_ms = (
@@ -12525,6 +12647,32 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         )
                     except Exception as exc:
                         buttonify_error_class = type(exc).__name__
+                        eligibility_denied = isinstance(
+                            exc, ModelExecutionEligibilityError
+                        )
+                        _record_stage_llm_call(
+                            call_type="llm.generate",
+                            model_name=buttonify_model_used,
+                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                            usage=None,
+                            note=(
+                                "Buttonify quick-reply extraction "
+                                "(workflow unavailable)."
+                            ),
+                            stage="buttonify",
+                            provider=(
+                                exc.provider if eligibility_denied else None
+                            ),
+                            status="failed",
+                            success=False,
+                            error_class=buttonify_error_class,
+                            failure_kind=(
+                                exc.failure_kind if eligibility_denied else None
+                            ),
+                            provider_request_sent=(
+                                False if eligibility_denied else None
+                            ),
+                        )
                         if _contains_openai_quota_error(exc):
                             buttonify_suppression_reason = "quota_exhausted"
                         buttonify_response = None
@@ -12765,6 +12913,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             _serialise_tool_invocations_for_turn_execution_record(tool_invocations)
         )
         search_evidence = build_search_tool_evidence(tool_invocations)
+        turn_llm_usage_cost_summary = build_llm_usage_cost_summary(
+            llm_interaction["calls"],
+            model_registry=turn_model_registry_snapshot,
+        )
 
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -12821,6 +12973,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "response_transformations": response_transformations,
             "display_elements": display_elements_contract,
             "turn_execution_diagnostics": turn_execution_diagnostics,
+            "llm_usage_cost_summary": turn_llm_usage_cost_summary,
         }
         llm_debug_info["turn_output_health"] = build_turn_output_health(llm_debug_info)
         if isinstance(render_plan_debug, dict):
@@ -13103,6 +13256,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 auxiliary_llm_calls
                 if "auxiliary_llm_calls" in locals()
                 and isinstance(auxiliary_llm_calls, list)
+                else None
+            ),
+            llm_interaction=(
+                llm_interaction
+                if "llm_interaction" in locals()
+                and isinstance(llm_interaction, Mapping)
                 else None
             ),
             error_elapsed_ms=error_elapsed_ms,

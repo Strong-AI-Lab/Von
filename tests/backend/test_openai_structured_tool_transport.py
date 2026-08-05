@@ -188,6 +188,45 @@ def _install_fake_openai(
     return captured
 
 
+def test_openai_response_preserves_usage_breakdown_and_effective_service_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "usage-breakdown-model"
+    response = _text_response(model=model)
+    response["service_tier"] = "default"
+    response["usage"]["input_tokens_details"] = {
+        "cached_tokens": 2,
+        "cache_write_tokens": 1,
+    }
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    _install_fake_openai(monkeypatch, responses=[response])
+    client = OpenAIClient(
+        LLMClientConfig(
+            model=model,
+            provider="openai",
+            api_key="test-key",
+            temperature=None,
+        )
+    )
+
+    result = asyncio.run(
+        client.generate_with_tools(prompt="Test", available_tools=[_tool()])
+    )
+
+    assert result.usage == {
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "total_tokens": 6,
+        "cached_input_tokens": 2,
+        "cache_write_input_tokens": 1,
+    }
+    assert result.transport_metadata["effective_service_tier"] == "default"
+    assert (
+        result.transport_metadata["effective_connection_id"]
+        == "#V#openai_provider"
+    )
+
+
 def test_sync_calls_close_each_async_client_before_its_loop_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

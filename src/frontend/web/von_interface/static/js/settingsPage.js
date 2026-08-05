@@ -112,6 +112,8 @@ const INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX = 500;
 const INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT = 10;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MIN = 1;
 const INTERNAL_MCP_TOOL_BATCH_CAP_MAX = 20;
+const OPENAI_MODEL_COST_SUMMARY_SCHEMA_VERSION = 'llm_model_turn_cost_summary.v1';
+const OPENAI_MODEL_COST_SUMMARY_ENDPOINT = '/api/settings/llm/cost_summary';
 
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
@@ -126,6 +128,7 @@ let currentEffectiveLlm = null;
 let currentEffectiveEnabledLlms = [];
 let latestOpenAiModelProbe = null;
 let latestOpenAiModelParameterCapability = null;
+let openAiModelCostSummaryGeneration = 0;
 let latestOllamaModelProbe = null;
 let latestSettingsAuthStatus = null;
 let latestCapabilityIndexStatus = null;
@@ -1128,6 +1131,7 @@ function updateOpenAiModelStatusMessage() {
   const selectEl = document.getElementById('openaiModelSelect');
   if (!statusEl) return;
 
+  const allowed = updateSelectedOpenAiEligibilityControls();
   const premiumEnabled = !!toggleEl?.checked;
   const selectedModel = String(selectEl?.value || getStoredOpenAiSelectedModel() || '').trim();
   const selectedModelParameters = readOpenAiModelParametersFromUi()
@@ -1141,6 +1145,15 @@ function updateOpenAiModelStatusMessage() {
         ? 'Select a premium model, then test it before relying on it.'
         : 'Premium use is disabled on this machine. Ollama remains the active provider here.',
       null,
+    );
+    return;
+  }
+
+  if (!allowed) {
+    setInlineStatusMessage(
+      statusEl,
+      `Testing and browser use remain unavailable until ${selectedModel} is allowed for this scope and saved.`,
+      'error',
     );
     return;
   }
@@ -1253,6 +1266,17 @@ async function testSelectedOpenAiModel() {
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
     return { usable: false, model: null, reason: 'No premium model selected.' };
+  }
+
+  if (!isPersistedEffectiveModelAllowed(selectedOpenAiPoolEntry())) {
+    latestOpenAiModelProbe = null;
+    updateOpenAiModelStatusMessage();
+    return {
+      usable: false,
+      model: selectedModel,
+      reason: 'The exact premium model is not allowed for the selected scope.',
+      failure_kind: 'premium_model_not_allowed',
+    };
   }
 
   setStoredOpenAiSelectedModel(selectedModel);
@@ -1549,6 +1573,7 @@ function invalidateScopedModelState(message = 'Loading model settings for the cu
   scopedModelStateReady = false;
   currentResolvedLlm = null;
   stagedScopedPrimaryLlm = null;
+  invalidateSelectedOpenAiCostSummary();
   currentEnabledLlmAlternatives = [];
   explicitlyRemovedWorkflowPoolKeys = new Set();
   updateScopedModelSaveAvailability();
@@ -1647,6 +1672,7 @@ async function reloadScopedModelSettings({
       'Model settings loaded for the current user and organisation.',
       null,
     );
+    void refreshSelectedOpenAiCostSummary();
     return { applied: true, stale: false, generation: loadGeneration, settings };
   } catch (error) {
     if (
@@ -1676,6 +1702,152 @@ function selectedOpenAiPoolEntry() {
     model,
     ...(modelParameters ? { model_parameters: modelParameters } : {}),
   });
+}
+
+function isPersistedEffectiveModelAllowed(entry) {
+  const canonical = buildCanonicalLlmEntry(entry);
+  return Boolean(
+    scopedModelStateReady
+    && canonical
+    && currentEffectiveEnabledLlms.some((candidate) => sameLlmSlot(candidate, canonical)),
+  );
+}
+
+function formatHistoricalCostAmount(amount, currency) {
+  if (amount === null || typeof amount === 'undefined' || typeof amount === 'boolean' || amount === '') return '';
+  const numericAmount = Number(amount);
+  const currencyCode = String(currency || '').trim().toUpperCase();
+  if (!Number.isFinite(numericAmount) || numericAmount < 0 || !currencyCode) return '';
+  const renderedAmount = numericAmount > 0 && numericAmount < 0.0001
+    ? numericAmount.toPrecision(3)
+    : numericAmount.toFixed(numericAmount > 0 && numericAmount < 0.01 ? 4 : 2);
+  return `${currencyCode === 'USD' ? 'US$' : `${currencyCode} `}${renderedAmount}`;
+}
+
+function renderSelectedOpenAiCostSummary(summary = null) {
+  const element = document.getElementById('openaiModelCostSummary');
+  if (!element) return;
+  const selected = selectedOpenAiPoolEntry();
+  const identityMatches = Boolean(
+    selected
+    && String(summary?.schema_version || '') === OPENAI_MODEL_COST_SUMMARY_SCHEMA_VERSION
+    && String(summary?.model_identity?.provider || '').toLowerCase() === 'openai'
+    && String(summary?.model_identity?.model || '') === selected.model
+  );
+  if (!selected) {
+    element.textContent = 'Select an OpenAI model to view historical cost.';
+    return;
+  }
+  if (summary?.status === 'loading') {
+    element.textContent = `Loading historical cost for ${selected.model}...`;
+    return;
+  }
+  const unavailableMessage = {
+    partial: 'Historical cost coverage is partial; average unavailable.',
+    insufficient_coverage: 'Insufficient historical coverage for an average cost.',
+  }[summary?.status];
+  if (identityMatches && unavailableMessage) {
+    element.textContent = unavailableMessage;
+    return;
+  }
+  if (identityMatches && summary.status === 'available') {
+    const average = summary.average_attributed_cost_per_turn;
+    const amount = formatHistoricalCostAmount(average?.amount, average?.currency);
+    const turns = Number(summary.sample_window?.attributed_turn_count);
+    const priced = Number(summary.coverage?.priced_turn_count);
+    const attributed = Number(summary.coverage?.attributed_turn_count);
+    const started = String(summary.sample_window?.started_at_utc || '').slice(0, 10);
+    const ended = String(summary.sample_window?.ended_at_utc || '').slice(0, 10);
+    const pricing = summary.pricing || {};
+    const source = String(pricing.source || '').trim();
+    const version = String(pricing.version || '').trim();
+    const effective = String(pricing.effective_at_utc || '').slice(0, 10);
+    if (
+      amount && Number.isInteger(turns) && turns > 0
+      && priced === turns && attributed === turns
+      && started && ended && source && version && effective
+    ) {
+      element.textContent = `Historical average: ${amount} per turn · ${priced}/${attributed} priced · ${started}–${ended} · pricing ${source} ${version} effective ${effective} · estimate from retained provider-reported usage, not provider billing.`;
+      return;
+    }
+  }
+  element.textContent = 'Historical cost estimate unavailable.';
+}
+
+function invalidateSelectedOpenAiCostSummary() {
+  openAiModelCostSummaryGeneration += 1;
+  renderSelectedOpenAiCostSummary(null);
+}
+
+async function refreshSelectedOpenAiCostSummary() {
+  const selected = selectedOpenAiPoolEntry();
+  if (!scopedModelStateReady || !selected) {
+    invalidateSelectedOpenAiCostSummary();
+    return false;
+  }
+
+  const model = selected.model;
+  const modelScope = selectedModelPoolTargetScope;
+  const generation = ++openAiModelCostSummaryGeneration;
+  renderSelectedOpenAiCostSummary({
+    schema_version: OPENAI_MODEL_COST_SUMMARY_SCHEMA_VERSION,
+    status: 'loading',
+    model_identity: { provider: 'openai', model },
+  });
+
+  const params = new URLSearchParams({
+    provider: 'openai', model,
+  });
+  const url = `${OPENAI_MODEL_COST_SUMMARY_ENDPOINT}?${params.toString()}`;
+
+  let summary = null;
+  try {
+    const response = await fetch(url, {
+      cache: 'no-store',
+      headers: buildSettingsFetchHeaders(),
+    });
+    if (response.ok) summary = await response.json();
+  } catch (_) { /* unavailable */ }
+  if (
+    generation !== openAiModelCostSummaryGeneration
+    || selectedModelPoolTargetScope !== modelScope
+    || selectedOpenAiPoolEntry()?.model !== model
+  ) return false;
+  renderSelectedOpenAiCostSummary(summary);
+  return true;
+}
+
+function updateSelectedOpenAiEligibilityControls() {
+  const statusEl = document.getElementById('openaiModelEligibilityStatus');
+  const toggleEl = document.getElementById('enableOpenAiPremiumToggle');
+  const testButton = document.getElementById('testOpenAiModelButton');
+  const selected = selectedOpenAiPoolEntry();
+  const allowed = isPersistedEffectiveModelAllowed(selected);
+  for (const control of [toggleEl, testButton]) {
+    if (!control) continue;
+    control.disabled = !allowed;
+    control.setAttribute('aria-disabled', String(!allowed));
+  }
+  if (!allowed && toggleEl?.checked) {
+    toggleEl.checked = false;
+    setLocalPremiumModelUseEnabled(false);
+    notifyLocalModelPreferenceChanged();
+  }
+  if (statusEl) {
+    const message = !scopedModelStateReady
+      ? 'Loading persisted allowed models for this scope.'
+      : !selected
+        ? 'Select an OpenAI model to check whether it is allowed for this scope.'
+        : allowed
+          ? `Allowed: ${formatLlmEntry(selected)} is persisted for the current effective actor scope.`
+          : `Not allowed: allow ${formatLlmEntry(selected)} for this scope and save before testing it or using it for browser chat.`;
+    setInlineStatusMessage(
+      statusEl,
+      message,
+      scopedModelStateReady && selected ? (allowed ? 'success' : 'error') : null,
+    );
+  }
+  return allowed;
 }
 
 function selectedOllamaPoolEntry() {
@@ -1784,7 +1956,7 @@ function renderModelPoolTargetScopeNote() {
   }
   if (!currentResolvedLlm && effectiveModelScope() === 'organisation') {
     const inheritedPoolSize = currentEffectiveEnabledLlms.length;
-    note.textContent = `The current user inherits the organisation configuration (${inheritedPoolSize} enabled model${inheritedPoolSize === 1 ? '' : 's'}). Saving creates an explicit user override from the selected primary and explicitly added alternatives; the organisation pool is not copied.`;
+    note.textContent = `The current user inherits the organisation configuration (${inheritedPoolSize} allowed model${inheritedPoolSize === 1 ? '' : 's'}). Saving creates an explicit user override from the selected primary and explicitly added alternatives; the organisation allowed models are not copied.`;
     return;
   }
   note.textContent = 'Saving changes only the current user primary and pool.';
@@ -1814,12 +1986,14 @@ function updatePoolActionButton(buttonId, entry) {
   const existing = currentEnabledLlmAlternatives.find((candidate) => sameLlmSlot(candidate, entry));
   if (existing && sameLlmEntry(existing, entry)) {
     button.disabled = true;
-    button.textContent = 'Already in workflow pool';
+    button.textContent = isPersistedEffectiveModelAllowed(entry)
+      ? 'Already allowed for this scope'
+      : 'Pending allowed-model save';
     return;
   }
 
   button.disabled = false;
-  button.textContent = existing ? 'Update workflow pool entry' : 'Add to workflow pool';
+  button.textContent = existing ? 'Update allowed model entry' : 'Allow for this scope';
 }
 
 function renderWorkflowModelPool() {
@@ -1836,6 +2010,7 @@ function renderWorkflowModelPool() {
       updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
       updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
       updateScopedPrimaryActionButtons();
+      updateSelectedOpenAiEligibilityControls();
       updateScopedModelSaveAvailability();
       return;
     }
@@ -1848,7 +2023,7 @@ function renderWorkflowModelPool() {
       const role = document.createElement('span');
       role.className = 'settings-model-pool-entry-role';
       role.textContent = persistedPrimary && sameLlmEntry(persistedPrimary, displayPrimary)
-        ? 'Primary · always enabled'
+        ? 'Primary · always allowed'
         : 'Pending primary · explicit save required';
       label.appendChild(role);
       primaryRow.appendChild(label);
@@ -1864,13 +2039,13 @@ function renderWorkflowModelPool() {
       label.textContent = formatLlmEntry(entry);
       const role = document.createElement('span');
       role.className = 'settings-model-pool-entry-role';
-      role.textContent = 'Enabled alternative';
+      role.textContent = 'Allowed alternative';
       label.appendChild(role);
       const removeButton = document.createElement('button');
       removeButton.type = 'button';
       removeButton.className = 'btn-secondary';
       removeButton.textContent = 'Remove';
-      removeButton.setAttribute('aria-label', `Remove ${formatLlmEntry(entry)} from workflow pool`);
+      removeButton.setAttribute('aria-label', `Remove ${formatLlmEntry(entry)} from scoped allowed models`);
       const key = modelEntryKey(entry);
       removeButton.addEventListener('click', () => {
         explicitlyRemovedWorkflowPoolKeys.add(key);
@@ -1879,7 +2054,7 @@ function renderWorkflowModelPool() {
         );
         setInlineStatusMessage(
           document.getElementById('modelPoolStatusMessage'),
-          'Workflow pool change pending. Save the scoped primary and workflow pool to apply it.',
+          'Allowed-model change pending. Save the scoped primary and allowed models to apply it.',
           null,
         );
         renderModelScopeOverview();
@@ -1891,7 +2066,7 @@ function renderWorkflowModelPool() {
     if (!displayPrimary && alternatives.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'settings-model-pool-empty';
-      empty.textContent = 'No scoped primary or enabled alternatives are configured.';
+      empty.textContent = 'No scoped primary or allowed alternatives are configured.';
       listEl.appendChild(empty);
     }
   }
@@ -1899,6 +2074,7 @@ function renderWorkflowModelPool() {
   updatePoolActionButton('addOpenAiToWorkflowPoolButton', selectedOpenAiPoolEntry());
   updatePoolActionButton('addOllamaToWorkflowPoolButton', selectedOllamaPoolEntry());
   updateScopedPrimaryActionButtons();
+  updateSelectedOpenAiEligibilityControls();
 }
 
 function renderModelScopeOverview() {
@@ -1939,7 +2115,7 @@ function addOrUpdateWorkflowPoolEntry(entry) {
   ];
   setInlineStatusMessage(
     document.getElementById('modelPoolStatusMessage'),
-    'Workflow pool change pending. Save the scoped primary and workflow pool to apply it.',
+    'Allowed-model change pending. Save the scoped primary and allowed models to apply it.',
     null,
   );
   renderModelScopeOverview();
@@ -2000,7 +2176,7 @@ function restoreScopedPrimary() {
   stagedScopedPrimaryLlm = baselineScopedPrimaryEntry();
   setInlineStatusMessage(
     document.getElementById('modelPoolStatusMessage'),
-    'Pending primary change cleared. Pool edits will retain the selected target primary.',
+    'Pending primary change cleared. Allowed-model edits will retain the selected target primary.',
     null,
   );
   renderModelScopeOverview();
@@ -2022,7 +2198,7 @@ async function persistModelScopeSettings() {
   updateScopedModelSaveAvailability();
   setInlineStatusMessage(
     document.getElementById('modelPoolStatusMessage'),
-    'Saving scoped primary and workflow pool...',
+    'Saving scoped primary and allowed models...',
     null,
   );
   try {
@@ -2030,13 +2206,14 @@ async function persistModelScopeSettings() {
     if (!saved) throw new Error('Model scope save did not complete.');
     setInlineStatusMessage(
       document.getElementById('modelPoolStatusMessage'),
-      'Scoped primary and workflow pool saved for the current scope.',
+      'Scoped primary and allowed models saved for the current scope.',
       'success',
     );
+    void refreshSelectedOpenAiCostSummary();
   } catch (error) {
     setInlineStatusMessage(
       document.getElementById('modelPoolStatusMessage'),
-      error?.message || 'Failed to save scoped primary and workflow pool.',
+      error?.message || 'Failed to save scoped primary and allowed models.',
       'error',
     );
   } finally {
@@ -3717,6 +3894,10 @@ export function __testOnly_getScopedModelState() {
   };
 }
 
+export function __testOnly_refreshSelectedOpenAiCostSummary() {
+  return refreshSelectedOpenAiCostSummary();
+}
+
 export function __testOnly_saveAllSettings(options = {}) {
   return saveAllSettings(options);
 }
@@ -4069,6 +4250,7 @@ function failClosedActorTransition(error, snapshot) {
   actorSessionReady = false;
   scopedModelStateReady = false;
   currentResolvedLlm = null;
+  invalidateSelectedOpenAiCostSummary();
   currentEnabledLlmAlternatives = [];
   explicitlyRemovedWorkflowPoolKeys = new Set();
   syncModelPoolTargetScopeControls();
@@ -4346,12 +4528,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('openaiModelSelect')?.addEventListener('change', async () => {
     const selectedModel = document.getElementById('openaiModelSelect')?.value || '';
     setStoredOpenAiSelectedModel(selectedModel);
+    invalidateSelectedOpenAiCostSummary();
     await refreshOpenAiReasoningEffortControls();
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
     refreshActiveSettingsConcernGuidance();
     notifyLocalModelPreferenceChanged();
     renderModelScopeOverview();
+    void refreshSelectedOpenAiCostSummary();
   });
   document.getElementById('openaiReasoningEffortSelect')?.addEventListener('change', async () => {
     setStoredOpenAiModelParameters(readOpenAiModelParametersFromUi());
@@ -4373,6 +4557,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       setLocalPremiumModelUseEnabled(false);
       updateOpenAiModelStatusMessage();
       updateOllamaModelStatusMessage();
+      refreshActiveSettingsConcernGuidance();
+      notifyLocalModelPreferenceChanged();
+      renderModelScopeOverview();
+      return;
+    }
+
+    if (!isPersistedEffectiveModelAllowed(selectedOpenAiPoolEntry())) {
+      premiumToggle.checked = false;
+      setLocalPremiumModelUseEnabled(false);
+      updateOpenAiModelStatusMessage();
       refreshActiveSettingsConcernGuidance();
       notifyLocalModelPreferenceChanged();
       renderModelScopeOverview();
@@ -5373,8 +5567,15 @@ async function saveAllSettings({ includeChatModels = false, includeRuntimeModels
       currentResolvedLlm = payload.resolved_llm;
       stagedScopedPrimaryLlm = buildCanonicalLlmEntry(payload.resolved_llm);
       if (Array.isArray(payload?.enabled_llms)) {
-        currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(payload.enabled_llms)
+        const persistedTargetEnabledLlms = normaliseEnabledLlmEntries(payload.enabled_llms);
+        currentEnabledLlmAlternatives = [...persistedTargetEnabledLlms]
           .filter((entry) => !currentResolvedLlm || !sameLlmSlot(entry, currentResolvedLlm));
+        if (
+          selectedModelPoolTargetScope === 'user'
+          || effectiveModelScope(currentEffectiveLlm) === 'organisation'
+        ) {
+          currentEffectiveEnabledLlms = [...persistedTargetEnabledLlms];
+        }
       }
       explicitlyRemovedWorkflowPoolKeys = new Set();
       scopedModelStateReady = true;
@@ -5580,6 +5781,7 @@ async function verifyOpenAiApiKey(savedModel = null) {
       await refreshOpenAiReasoningEffortControls();
       latestOpenAiModelProbe = null;
       updateOpenAiModelStatusMessage();
+      void refreshSelectedOpenAiCostSummary();
     } else {
       throw new Error(response.error || 'Failed to verify API key.');
     }
@@ -5596,6 +5798,7 @@ async function verifyOpenAiApiKey(savedModel = null) {
       modelsContainer.classList.remove('hidden');
       latestOpenAiModelProbe = null;
       updateOpenAiModelStatusMessage();
+      void refreshSelectedOpenAiCostSummary();
     } catch (_) {
       setInlineStatusMessage(statusMessage, `Error: ${error.message}`, 'error');
       modelsContainer.style.display = 'none';

@@ -18,6 +18,7 @@ from src.backend.integrations.internal_mcp.transport import (
     InternalMCPTransport,
     internal_mcp_cancellation_requested,
 )
+from src.backend.languagemodels.llm_interface import ModelExecutionEligibilityError
 from src.backend.languagemodels.structured_tool_calling.types import (
     LLMContinuation,
     LLMResponse,
@@ -744,6 +745,40 @@ def test_plain_answer_gets_trusted_scope_and_generic_read_doorway() -> None:
         "offset",
         "limit",
     }
+
+
+def test_model_eligibility_denial_is_returned_in_ordinary_language() -> None:
+    denial = ModelExecutionEligibilityError(
+        "OpenAI model 'gpt-5.6-terra' is not enabled for the current user or "
+        "organisation.",
+        provider="openai",
+        model="gpt-5.6-terra",
+    )
+    client = _SequenceClient(denial)
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Help with this.",
+        context=[],
+        llm_client=client,
+        model="gpt-5.6-terra",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="model-not-enabled",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert result.terminal_status == "model_not_enabled"
+    assert result.response_text == str(denial)
+    assert len(client.calls) == 1
+    assert result.llm_calls[0]["call_id"] == "model-not-enabled:llm:1"
+    assert result.llm_calls[0]["requested_model"] == "gpt-5.6-terra"
+    assert result.llm_calls[0]["selected_model"] == "gpt-5.6-terra"
+    assert result.llm_calls[0]["effective_model"] is None
+    assert result.llm_calls[0]["model_identity_source"] is None
+    assert result.llm_calls[0]["provider_request_sent"] is False
 
 
 def test_terminal_answer_can_update_a_revisable_conversation_situation() -> None:
@@ -7415,3 +7450,103 @@ def test_unchanged_terminally_failed_effect_is_not_dispatched_twice(
     )
     assert result.tool_invocations[1]["effect_status"] == "not_started"
     assert result.tool_invocations[1]["changed"] is False
+
+
+def test_model_call_progress_reports_cumulative_usage_cost_and_exact_identity() -> None:
+    progress_events: list[dict[str, Any]] = []
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_list_evidence",
+                    call_id="list-evidence",
+                    payload={},
+                )
+            ],
+            model="gpt-test-effective",
+            usage={"prompt_tokens": 100, "completion_tokens": 10},
+            transport_metadata={
+                "effective_service_tier": "default",
+                "effective_connection_id": "#V#openai_provider",
+            },
+        ),
+        LLMResponse(
+            text_response="Done.",
+            model="gpt-test-effective",
+            usage={"prompt_tokens": 50, "completion_tokens": 5},
+            transport_metadata={
+                "effective_service_tier": "default",
+                "effective_connection_id": "#V#openai_provider",
+            },
+        ),
+    )
+    client.config = SimpleNamespace(provider="openai")
+    registry = {
+        "models": [
+            {
+                "provider": "openai",
+                "model_id": "gpt-test-effective",
+                "pricing": {
+                    "schema_version": "llm_model_pricing.v1",
+                    "version": "test-v1",
+                    "source": "test",
+                    "effective_at_utc": "2026-08-05T00:00:00Z",
+                    "model_id": "gpt-test-effective",
+                    "currency": "USD",
+                    "unit_tokens": 1_000,
+                    "rates": {
+                        "input_tokens": 1.0,
+                        "output_tokens": 2.0,
+                    },
+                },
+            }
+        ]
+    }
+
+    execute_adaptive_turn(
+        gateway=None,
+        prompt="Use evidence if useful, then answer.",
+        context=[],
+        llm_client=client,
+        model="gpt-test-requested",
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event))
+        ),
+        turn_id="usage-cost-progress",
+        model_registry_snapshot=registry,
+    )
+
+    model_end_events = [
+        event
+        for event in progress_events
+        if event.get("event_kind") == "llm_call_end"
+        and str(event.get("call_id") or "").startswith("usage-cost-progress:llm:")
+    ]
+    assert [event["call_id"] for event in model_end_events] == [
+        "usage-cost-progress:llm:1",
+        "usage-cost-progress:llm:2",
+    ]
+    assert model_end_events[0]["requested_model"] == "gpt-test-requested"
+    assert model_end_events[0]["selected_model"] == "gpt-test-requested"
+    assert model_end_events[0]["effective_model"] == "gpt-test-effective"
+    assert model_end_events[0]["model_identity_source"] == "provider_response"
+    first_summary = model_end_events[0]["llm_usage_cost_summary"]
+    second_summary = model_end_events[1]["llm_usage_cost_summary"]
+    assert first_summary["usage"]["total_tokens"] == 110
+    assert first_summary["estimated_cost"]["amount"] == 0.12
+    assert second_summary["usage"]["total_tokens"] == 165
+    assert second_summary["estimated_cost"]["amount"] == 0.18
+    assert second_summary["model_identities"] == [
+        {
+            "provider": "openai",
+            "requested_model": "gpt-test-requested",
+            "selected_model": "gpt-test-requested",
+            "effective_model": "gpt-test-effective",
+            "model_identity_source": "provider_response",
+            "provider_request_sent": True,
+            "effective_service_tier": "default",
+            "connection_id": "#V#openai_provider",
+            "call_count": 2,
+        }
+    ]

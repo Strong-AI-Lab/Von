@@ -2794,11 +2794,22 @@ def _normalise_llm_call_entry(value: Any) -> dict[str, Any] | None:
     exchange_blob_ref = value.get("exchange_blob_ref")
     candidate = value.get("candidate")
     payload: dict[str, Any] = {
+        "call_id": _safe_str(value.get("call_id")),
+        "llm_exchange_id": _safe_str(value.get("llm_exchange_id")),
         "call_type": _safe_str(value.get("type")) or _safe_str(value.get("call_type")),
         "stage": _safe_str(value.get("stage")),
         "workflow_stage_id": _safe_str(value.get("workflow_stage_id")),
         "model": _safe_str(value.get("model")) or _safe_str(value.get("model_name")),
         "provider": _safe_str(value.get("provider")),
+        "requested_model": _safe_str(value.get("requested_model")),
+        "selected_model": _safe_str(value.get("selected_model")),
+        "effective_model": _safe_str(value.get("effective_model")),
+        "model_identity_source": _safe_str(value.get("model_identity_source")),
+        "provider_request_sent": (
+            value.get("provider_request_sent")
+            if isinstance(value.get("provider_request_sent"), bool)
+            else None
+        ),
         "duration_ms": _safe_non_negative_int(value.get("duration_ms")),
         "note": _safe_str(value.get("note")),
         "exchange_blob_ref": (
@@ -11125,6 +11136,26 @@ def persist_failed_turn_execution_record(
         value = debug.get(key)
         return list(value) if isinstance(value, list) else None
 
+    def _debug_llm_calls() -> list[Any] | None:
+        direct = _debug_list("llm_calls")
+        if direct is not None:
+            return direct
+        llm_interaction = _debug_mapping("llm_interaction")
+        interaction_calls = (
+            llm_interaction.get("calls")
+            if isinstance(llm_interaction, Mapping)
+            else None
+        )
+        if isinstance(interaction_calls, list):
+            return list(interaction_calls)
+        embedded_record = _debug_mapping("turn_execution_record")
+        embedded_calls = (
+            embedded_record.get("llm_calls")
+            if isinstance(embedded_record, Mapping)
+            else None
+        )
+        return list(embedded_calls) if isinstance(embedded_calls, list) else None
+
     critic_verdict = _debug_mapping("critic_verdict")
     receipt_authority: dict[str, Any] | None = None
     if not isinstance(critic_verdict, Mapping):
@@ -11163,7 +11194,7 @@ def persist_failed_turn_execution_record(
             ),
             turn_execution_diagnostics=_debug_mapping("turn_execution_diagnostics"),
             aux_llm_calls=_debug_list("aux_llm_calls"),
-            llm_calls=_debug_list("llm_calls"),
+            llm_calls=_debug_llm_calls(),
             selected_workflow_trace=_debug_mapping("selected_workflow_trace"),
             turn_expected_outcome_contract=_debug_mapping(
                 "turn_expected_outcome_contract"
@@ -11189,6 +11220,19 @@ def persist_failed_turn_execution_record(
             "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
             "request_id": clean_request_id,
         }
+
+    llm_usage_cost_summary = _debug_mapping("llm_usage_cost_summary")
+    if llm_usage_cost_summary is None:
+        embedded_record = _debug_mapping("turn_execution_record")
+        embedded_summary = (
+            embedded_record.get("llm_usage_cost_summary")
+            if isinstance(embedded_record, Mapping)
+            else None
+        )
+        if isinstance(embedded_summary, Mapping):
+            llm_usage_cost_summary = embedded_summary
+    if isinstance(llm_usage_cost_summary, Mapping):
+        record["llm_usage_cost_summary"] = dict(llm_usage_cost_summary)
 
     record["execution_terminal_status"] = clean_terminal_status
     if isinstance(receipt_authority, Mapping):

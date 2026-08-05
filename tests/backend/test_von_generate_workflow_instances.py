@@ -93,6 +93,11 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Flask:
     monkeypatch.setattr(von_routes, "get_llm_client", lambda **_kwargs: object())
     monkeypatch.setattr(
         von_routes,
+        "get_model_registry_snapshot",
+        lambda: {"source": "test", "models": []},
+    )
+    monkeypatch.setattr(
+        von_routes,
         "_resolve_generate_requested_model",
         lambda *_args, **_kwargs: ("test-model", None, {}),
     )
@@ -185,6 +190,10 @@ def test_ordinary_generate_uses_adaptive_turn_without_master_workflow_or_gate(
     adaptive_calls = app.config["_ADAPTIVE_TURN_CALLS"]
     assert len(adaptive_calls) == 1
     assert adaptive_calls[0]["prompt"] == "Answer this ordinary scientific question."
+    assert adaptive_calls[0]["model_registry_snapshot"] == {
+        "source": "test",
+        "models": [],
+    }
 
     llm_debug = payload["llm_debug"]
     assert llm_debug["llm_interaction"]["ordinary_turn_engine"] == (
@@ -519,6 +528,63 @@ def test_presenter_mode_generates_spoken_backfill_for_screen_only_answer(
     assert payload["llm_debug"]["spoken_backfill_second_pass_reason"] == (
         "missing_spoken"
     )
+    narration_call = next(
+        call
+        for call in payload["llm_debug"]["llm_interaction"]["calls"]
+        if call.get("stage") == "narration"
+    )
+    assert narration_call["call_id"].endswith(":support-llm:1")
+    assert narration_call["selected_model"] == "test-model"
+    assert narration_call["effective_model"] is None
+    assert narration_call["model_identity_source"] is None
+    assert narration_call["provider_request_sent"] is True
+    assert narration_call["status"] == "completed"
+    assert payload["llm_debug"]["llm_usage_cost_summary"]["call_count"] == 2
+
+
+def test_narration_eligibility_denial_is_recorded_without_failing_turn(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.languagemodels.llm_interface import (
+        ModelExecutionEligibilityError,
+    )
+    from src.backend.server.routes import von_routes
+
+    app.config["_ADAPTIVE_TURN_STATE"]["response_text"] = (
+        "<screen>A grounded visual summary.</screen>"
+    )
+
+    def _denied_spoken_backfill(*_args: Any, **_kwargs: Any) -> str:
+        raise ModelExecutionEligibilityError(
+            "This model is not enabled for the active scope.",
+            provider="openai",
+            model="test-model",
+        )
+
+    monkeypatch.setattr(
+        von_routes,
+        "_llm_generate_spoken_backfill",
+        _denied_spoken_backfill,
+    )
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Present the result.", "presenter_mode": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    narration_call = next(
+        call
+        for call in payload["llm_debug"]["llm_interaction"]["calls"]
+        if call.get("stage") == "narration"
+    )
+    assert narration_call["provider"] == "openai"
+    assert narration_call["provider_request_sent"] is False
+    assert narration_call["status"] == "failed"
+    assert narration_call["failure_kind"] == "model_not_enabled"
+    assert narration_call["error_class"] == "ModelExecutionEligibilityError"
 
 
 def test_presenter_mode_uses_represented_prompt_to_backfill_missing_screen(

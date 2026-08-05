@@ -149,6 +149,30 @@ def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
             prompt_text="Show me the last 5 email messages",
             llm_debug_info={
                 "aux_llm_calls": [{"type": "workflow_continuation_decision"}],
+                "llm_interaction": {
+                    "calls": [
+                        {
+                            "call_id": "req-2502-test:llm:1",
+                            "type": "adaptive_turn_model_call",
+                            "provider": "openai",
+                            "effective_model": "gpt-test",
+                            "provider_request_sent": True,
+                            "usage": {
+                                "prompt_tokens": 100,
+                                "completion_tokens": 20,
+                            },
+                        }
+                    ]
+                },
+                "llm_usage_cost_summary": {
+                    "schema_version": "llm_usage_cost_summary.v1",
+                    "call_count": 1,
+                    "unique_call_count": 1,
+                    "estimated_cost": {
+                        "status": "unavailable",
+                        "amount": None,
+                    },
+                },
                 "tool_invocations": [
                     {
                         "tool": "represented_workflow_test",
@@ -196,6 +220,14 @@ def test_persist_failed_turn_execution_record_stamps_terminal_envelope():
     assert record["workflow_selection"]["selected_workflow_id"] == (
         "#V#paper_workflow"
     )
+    assert record["execution"]["llm_calls"][0]["call_id"] == (
+        "req-2502-test:llm:1"
+    )
+    assert record["execution"]["llm_calls"][0]["usage"] == {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+    }
+    assert record["llm_usage_cost_summary"]["call_count"] == 1
 
 
 def test_persist_failed_turn_execution_record_requires_request_id():

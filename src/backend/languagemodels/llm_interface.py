@@ -25,7 +25,11 @@ import openai
 import requests
 
 from ..services.llm_api_key_resolution import get_gemini_api_key
-from ..services.settings_service import get_openai_env_var, resolve_llm_setting
+from ..services.settings_service import (
+    get_openai_env_var,
+    resolve_enabled_llm_settings,
+    resolve_llm_setting,
+)
 from ..services.model_parameter_service import (
     openai_responses_kwargs_from_model_parameters,
 )
@@ -712,6 +716,124 @@ def _resolve_effective_llm_actor_scope(
     return resolved_user, resolved_org
 
 
+class ModelExecutionEligibilityError(PermissionError):
+    """Raised before an external model call that lacks scoped eligibility."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        model: str,
+        failure_kind: str = "model_not_enabled",
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.failure_kind = failure_kind
+
+
+def _normalise_model_execution_key(
+    provider: Any,
+    model: Any,
+) -> tuple[str, str]:
+    provider_key = str(provider or "").strip().lower()
+    model_key = str(model or "").strip()
+    provider_prefix = f"{provider_key}:"
+    if provider_key and model_key.lower().startswith(provider_prefix):
+        model_key = model_key.split(":", 1)[1].strip()
+    if provider_key == "openai":
+        model_key = resolve_openai_model_name(model_key) or model_key
+    return provider_key, model_key
+
+
+def assert_model_execution_allowed(
+    *,
+    provider: Any,
+    model: Any,
+    user_concept_id: Optional[str] = None,
+    org_concept_id: Optional[str] = None,
+) -> Mapping[str, Any]:
+    """Require an exact scoped allow-list match for external model execution.
+
+    The existing actor-scoped ``enabled_llms`` setting is the sole authority.
+    Local Ollama calls do not consume this external-model authority. Every
+    other provider must be selected explicitly, including providers added in
+    future, so extending the client factory cannot silently bypass the gate.
+    """
+
+    provider_key, model_key = _normalise_model_execution_key(provider, model)
+    if provider_key == "ollama":
+        return {
+            "allowed": True,
+            "provider": provider_key,
+            "model": model_key,
+            "scope": "local_provider",
+        }
+
+    provider_label = {
+        "openai": "OpenAI",
+        "gemini": "Gemini",
+    }.get(provider_key, provider_key or "External")
+    if not model_key:
+        raise ModelExecutionEligibilityError(
+            f"No concrete {provider_label} model was selected, so the external "
+            "model request was not sent.",
+            provider=provider_key,
+            model=model_key,
+        )
+
+    resolved_user, resolved_org = _resolve_effective_llm_actor_scope(
+        user_concept_id,
+        org_concept_id,
+    )
+    if not resolved_user and not resolved_org:
+        raise ModelExecutionEligibilityError(
+            f"{provider_label} model '{model_key}' cannot be used because no "
+            "authenticated user or organisation model scope is active.",
+            provider=provider_key,
+            model=model_key,
+            failure_kind="model_scope_required",
+        )
+
+    try:
+        enabled_entries = resolve_enabled_llm_settings(
+            user_concept_id=resolved_user,
+            org_concept_id=resolved_org,
+        )
+    except Exception as exc:
+        raise ModelExecutionEligibilityError(
+            f"{provider_label} model '{model_key}' cannot be used because its "
+            "scoped model eligibility could not be verified.",
+            provider=provider_key,
+            model=model_key,
+            failure_kind="model_eligibility_unavailable",
+        ) from exc
+
+    for entry in enabled_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_provider, entry_model = _normalise_model_execution_key(
+            entry.get("provider"),
+            entry.get("model"),
+        )
+        if entry_provider == provider_key and entry_model == model_key:
+            return {
+                "allowed": True,
+                "provider": provider_key,
+                "model": model_key,
+                "scope": entry.get("scope"),
+            }
+
+    raise ModelExecutionEligibilityError(
+        f"{provider_label} model '{model_key}' is not enabled for the current "
+        "user or organisation. Add that exact provider and model to the scoped "
+        "model pool in Settings before using it.",
+        provider=provider_key,
+        model=model_key,
+    )
+
+
 def initialize_clients(force: bool = False):
     """
     Initialize LLM clients based on settings.
@@ -857,6 +979,10 @@ class LLMInterface(ABC):
 
         # Default implementation delegates to structured_tool_calling module
         config = self._get_structured_client_config(model)
+        assert_model_execution_allowed(
+            provider=config.provider,
+            model=config.model,
+        )
         client = get_structured_client(config)
         structured_options = dict(provider_options)
         if llm_params:
@@ -1870,6 +1996,10 @@ class OpenAIClient(LLMInterface):
         target_model = (
             resolve_openai_model_name(model or self.DEFAULT_MODEL) or self.DEFAULT_MODEL
         )
+        assert_model_execution_allowed(
+            provider="openai",
+            model=target_model,
+        )
 
         logger.info(f"Generating response using OpenAI model: {target_model}")
         if _should_log_llm_io():
@@ -2182,6 +2312,10 @@ class GeminiClient(LLMInterface):
         """Generate a response using the Gemini API. Raises RuntimeError on failure."""
         assert genai is not None
         target_model_name = model or self.default_model
+        assert_model_execution_allowed(
+            provider="gemini",
+            model=target_model_name,
+        )
         logger.info(f"Generating response using Gemini model: {target_model_name}")
         if _should_log_llm_io():
             logger.debug(

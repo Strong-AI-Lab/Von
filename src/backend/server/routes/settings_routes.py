@@ -89,12 +89,18 @@ from ...services.model_parameter_service import (
     normalise_model_parameters_for_storage,
     openai_responses_kwargs_from_model_parameters,
 )
+from ...services.llm_model_cost_history_service import (
+    get_actor_historical_model_cost_summary,
+)
+from ...services.model_registry_service import get_model_registry_snapshot
 from ...services.rag_service import peek_rag_service
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...services.concept_service import ConceptNotFoundError
 from ...languagemodels.llm_interface import (
+    ModelExecutionEligibilityError,
     OpenAIClient,
+    assert_model_execution_allowed,
     get_ollama_auto_pull_state_snapshot,
     resolve_openai_responses_max_output_tokens,
 )
@@ -856,6 +862,57 @@ def get_llm_info():
     except Exception as e:
         current_app.logger.error(f"Error retrieving LLM info: {e}", exc_info=True)
         return jsonify({"error": "Failed to retrieve LLM info."}), 500
+
+
+@settings_bp.route("/llm/cost_summary", methods=["GET"])
+def get_llm_cost_summary():
+    """Return a bounded persisted cost summary for the current actor/model."""
+
+    user_id = get_effective_user_concept_id()
+    effective = get_effective_context(
+        request.headers.get("X-Von-Window-Session"),
+        dict(session),
+        user_id,
+    )
+    namespace = str(effective.get("namespace") or "").strip()
+    provider = str(request.args.get("provider") or "").strip().lower()
+    model = str(request.args.get("model") or "").strip()
+    if not user_id or not namespace:
+        return _jsonify_no_store(
+            {"error": "An authenticated actor and namespace are required."}, 401
+        )
+    if not provider or not model:
+        return _jsonify_no_store(
+            {"error": "provider and model are required."}, 400
+        )
+    try:
+        limit = int(request.args.get("limit") or 200)
+        window_days = int(request.args.get("window_days") or 30)
+    except (TypeError, ValueError):
+        return _jsonify_no_store(
+            {"error": "limit and window_days must be integers."}, 400
+        )
+    try:
+        model_registry = get_model_registry_snapshot()
+    except Exception:
+        model_registry = None
+    try:
+        payload = get_actor_historical_model_cost_summary(
+            user_id=user_id,
+            namespace=namespace,
+            provider=provider,
+            model=model,
+            model_registry=model_registry,
+            limit=limit,
+            window_days=window_days,
+        )
+    except Exception:
+        current_app.logger.exception("Could not read persisted LLM cost history")
+        return _jsonify_no_store(
+            {"error": "Persisted LLM cost history is currently unavailable."},
+            503,
+        )
+    return _jsonify_no_store(payload, 200)
 
 
 def _get_entity_with_fallback(
@@ -3428,6 +3485,22 @@ def test_openai_model():
         from ...languagemodels.llm_interface import resolve_openai_model_name
 
         resolved_model = resolve_openai_model_name(requested_model) or requested_model
+        try:
+            assert_model_execution_allowed(
+                provider="openai",
+                model=resolved_model,
+            )
+        except ModelExecutionEligibilityError as exc:
+            return _jsonify_no_store(
+                {
+                    "success": False,
+                    "usable": False,
+                    "model": exc.model or resolved_model,
+                    "failure_kind": exc.failure_kind,
+                    "reason": str(exc),
+                },
+                403,
+            )
         model_parameters = normalise_model_parameters_for_storage(
             payload.get(MODEL_PARAMETERS_KEY) or payload.get("modelParameters"),
             provider="openai",

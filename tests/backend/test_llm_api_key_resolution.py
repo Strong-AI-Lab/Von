@@ -40,6 +40,7 @@ def test_gemini_client_accepts_legacy_google_api_key(monkeypatch):
 
 
 def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
+    from src.backend.languagemodels import llm_interface
     from src.backend.services import file_copy_interpretation_service as service
 
     google_mod = types.ModuleType("google")
@@ -68,6 +69,11 @@ def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
     )
 
     monkeypatch.setitem(sys.modules, "google", google_mod)
+    monkeypatch.setattr(
+        llm_interface,
+        "assert_model_execution_allowed",
+        lambda **_kwargs: {"allowed": True},
+    )
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "legacy-key")
 
@@ -85,6 +91,7 @@ def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
 
 
 def test_describe_image_with_openai_uses_central_default_model(monkeypatch):
+    from src.backend.languagemodels import llm_interface
     from src.backend.services import file_copy_interpretation_service as service
 
     openai_mod = types.ModuleType("openai")
@@ -112,6 +119,11 @@ def test_describe_image_with_openai_uses_central_default_model(monkeypatch):
     setattr(openai_mod, "OpenAI", _Client)
 
     monkeypatch.setitem(sys.modules, "openai", openai_mod)
+    monkeypatch.setattr(
+        llm_interface,
+        "assert_model_execution_allowed",
+        lambda **_kwargs: {"allowed": True},
+    )
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
     result = service._describe_image_with_openai(
@@ -125,3 +137,41 @@ def test_describe_image_with_openai_uses_central_default_model(monkeypatch):
     assert captured["model"] == "gpt-5.5"
     assert result["method"] == "openai_vision"
     assert result["model"] == "gpt-5.5"
+
+
+def test_describe_image_with_openai_denies_actorless_execution_before_provider(
+    monkeypatch,
+):
+    from src.backend.languagemodels import llm_interface
+    from src.backend.services import file_copy_interpretation_service as service
+
+    openai_mod = types.ModuleType("openai")
+    constructed = False
+
+    class _Client:
+        def __init__(self, *, api_key):
+            del api_key
+            nonlocal constructed
+            constructed = True
+
+    setattr(openai_mod, "OpenAI", _Client)
+    monkeypatch.setitem(sys.modules, "openai", openai_mod)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(
+        llm_interface,
+        "_resolve_effective_llm_actor_scope",
+        lambda *_args, **_kwargs: (None, None),
+    )
+
+    result = service._describe_image_with_openai(
+        data_bytes=b"png-data",
+        content_type="image/png",
+        model="gpt-5.6-terra",
+        prompt="Describe the image.",
+    )
+
+    assert result["description"] is None
+    assert result["method"] == "openai_vision_not_enabled"
+    assert result["failure_kind"] == "model_scope_required"
+    assert "no authenticated user or organisation model scope" in result["error"]
+    assert constructed is False

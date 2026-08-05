@@ -9,6 +9,21 @@ import pytest
 import src.backend.services  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def _allow_external_model_for_parameter_transport_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """These tests isolate OpenAI parameter transport, not eligibility policy."""
+
+    from src.backend.languagemodels import llm_interface
+
+    monkeypatch.setattr(
+        llm_interface,
+        "assert_model_execution_allowed",
+        lambda **_kwargs: {"allowed": True},
+    )
+
+
 def _install_openai_temperature_registry(monkeypatch) -> None:
     import src.backend.services.model_registry_service as registry_module
 

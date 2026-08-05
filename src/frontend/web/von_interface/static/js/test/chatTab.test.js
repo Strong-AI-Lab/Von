@@ -4023,6 +4023,90 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('data-thinking-action="llm-call-log-toggle"');
     });
 
+    test('shows cumulative model tokens and estimated cost in the default Thinking view', () => {
+        const request = {
+            clientRequestId: 'req-llm-usage-cost',
+            thinkingCardMode: 'default',
+            latestProgress: {
+                request_id: 'req-llm-usage-cost',
+                status: 'completed',
+                stage: 'completed'
+            },
+            llmUsageCostSummary: {
+                schema_version: 'llm_usage_cost_summary.v1',
+                call_count: 1,
+                unique_call_count: 1,
+                usage: {
+                    status: 'reported',
+                    input_tokens: 12340,
+                    output_tokens: 820,
+                    total_tokens: 13160
+                },
+                estimated_cost: {
+                    status: 'estimated',
+                    amount: 0.123456,
+                    known_amount: 0.123456,
+                    currency: 'USD'
+                },
+                model_identities: [
+                    {
+                        provider: 'openai',
+                        requested_model: 'gpt-requested',
+                        selected_model: 'gpt-selected',
+                        effective_model: 'gpt-effective',
+                        model_identity_source: 'provider_response',
+                        call_count: 1
+                    }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Model usage');
+        expect(html).toContain('openai/gpt-effective');
+        expect(html).toContain('12,340 input');
+        expect(html).toContain('820 output');
+        expect(html).toMatch(/estimated .*0\.123456/);
+        expect(html).toContain('1 model call');
+    });
+
+    test('reports missing pricing and token coverage as unavailable rather than zero', () => {
+        const request = {
+            clientRequestId: 'req-llm-usage-unavailable',
+            thinkingCardMode: 'default',
+            latestProgress: {
+                request_id: 'req-llm-usage-unavailable',
+                status: 'completed',
+                stage: 'completed'
+            },
+            llmUsageCostSummary: {
+                schema_version: 'llm_usage_cost_summary.v1',
+                call_count: 1,
+                unique_call_count: 1,
+                usage: { status: 'unavailable' },
+                estimated_cost: {
+                    status: 'unavailable',
+                    amount: null,
+                    known_amount: null,
+                    currency: null
+                },
+                model_identities: [
+                    {
+                        provider: 'openai',
+                        effective_model: 'gpt-unpriced',
+                        model_identity_source: 'provider_response',
+                        call_count: 1
+                    }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('cost estimate unavailable');
+        expect(html).toContain('token usage unavailable');
+        expect(html).not.toContain('$0');
+    });
+
     test('completed turns clarify that archived LLM exchange details are not loaded yet', () => {
         const request = {
             clientRequestId: 'req-llm-log-completed-not-loaded',
@@ -4065,6 +4149,9 @@ describe('thinking activity history normalisation', () => {
                         status: 'llm_call_start',
                         stage: 'workflow_dispatch',
                         model: 'gpt-5.4-mini',
+                        requested_model: 'gpt-requested',
+                        selected_model: 'gpt-5.4-mini',
+                        effective_model: 'gpt-5.4-mini',
                         provider: 'openai',
                         fallback_attempt_no: 1,
                         llm_request_state: 'sent',
@@ -4088,6 +4175,8 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('LIVE-PROMPT-SENT-IMMEDIATELY');
         expect(html).toContain('Sent');
         expect(html).toContain('response pending');
+        expect(html).toContain('Model lineage: requested gpt-requested · selected gpt-5.4-mini');
+        expect(html).not.toContain('effective gpt-5.4-mini');
         expect(html).not.toContain('Full LLM call log not loaded yet.');
     });
 
@@ -4269,6 +4358,54 @@ describe('thinking activity history normalisation', () => {
         expect(entriesHtml).toContain('data-thinking-llm-call-model="gpt-5.4-mini"');
         // Timestamp is rendered in the summary header (seconds precision present).
         expect(entriesHtml).toMatch(/\d{2}:\d{2}:\d{2}\.\d{3}/);
+    });
+
+    test('renders archived per-call usage and requested-to-effective lineage', () => {
+        const entriesHtml = __testOnly_renderThinkingLlmCallLogEntriesHTML([
+            {
+                call_id: 'call-with-cost-1',
+                sequence_no: 1,
+                stage: 'plain_response',
+                call_type: 'adaptive_turn_model_call',
+                provider: 'openai',
+                model: 'gpt-effective',
+                requested_model: 'gpt-requested',
+                selected_model: 'gpt-selected',
+                effective_model: 'gpt-effective',
+                model_identity_source: 'provider_response',
+                usage: {
+                    status: 'reported',
+                    input_tokens: 1000,
+                    output_tokens: 250,
+                    total_tokens: 1250
+                },
+                prompt: { text: 'Prompt', is_truncated: false },
+                response: { text: 'Response', is_truncated: false }
+            }
+        ]);
+
+        expect(entriesHtml).toContain('1,000 input');
+        expect(entriesHtml).toContain('250 output');
+        expect(entriesHtml).toContain('Model lineage: requested gpt-requested · selected gpt-selected · effective gpt-effective');
+    });
+
+    test('does not present a selected model as provider-effective without provider evidence', () => {
+        const entriesHtml = __testOnly_renderThinkingLlmCallLogEntriesHTML([
+            {
+                stage: 'workflow_dispatch',
+                call_type: 'live_llm_call',
+                model: 'gpt-selected',
+                requested_model: 'gpt-requested',
+                selected_model: 'gpt-selected',
+                effective_model: 'gpt-selected',
+                model_identity_source: '',
+                prompt: { text: 'Prompt', is_truncated: false },
+                response: { text: 'Response', is_truncated: false }
+            }
+        ]);
+
+        expect(entriesHtml).toContain('Model lineage: requested gpt-requested · selected gpt-selected');
+        expect(entriesHtml).not.toContain('effective gpt-selected');
     });
 
     test('marks a truncated LLM exchange so the exact-text expectation is visible (JVNAUTOSCI-2385)', () => {

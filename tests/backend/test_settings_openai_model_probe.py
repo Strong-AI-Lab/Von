@@ -2,9 +2,25 @@ from __future__ import annotations
 
 import types
 
+import pytest
 from flask import Flask
 
 from src.backend.server.routes.settings_routes import settings_bp
+
+
+@pytest.fixture(autouse=True)
+def _allow_external_model_for_probe_transport_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """These tests isolate probe transport; policy denial has its own case."""
+
+    import src.backend.server.routes.settings_routes as settings_routes
+
+    monkeypatch.setattr(
+        settings_routes,
+        "assert_model_execution_allowed",
+        lambda **_kwargs: {"allowed": True},
+    )
 
 
 def _make_app() -> Flask:
@@ -116,6 +132,46 @@ def test_openai_model_probe_passes_reasoning_effort_to_responses(
     assert payload["fallback_used"] is False
     assert captured_responses_kwargs["reasoning"] == {"effort": "low"}
     assert captured_responses_kwargs["max_output_tokens"] == 4096
+
+
+def test_openai_model_probe_rejects_non_enabled_model_before_client_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.server.routes.settings_routes as settings_routes
+
+    constructed = False
+
+    class _UnexpectedOpenAIClient:
+        def __init__(self, **_kwargs):
+            nonlocal constructed
+            constructed = True
+
+    def _deny(**_kwargs):
+        raise settings_routes.ModelExecutionEligibilityError(
+            "OpenAI model 'gpt-5.6-terra' is not enabled for the current user "
+            "or organisation.",
+            provider="openai",
+            model="gpt-5.6-terra",
+        )
+
+    monkeypatch.setattr(settings_routes, "OpenAIClient", _UnexpectedOpenAIClient)
+    monkeypatch.setattr(settings_routes, "assert_model_execution_allowed", _deny)
+    monkeypatch.setattr(settings_routes, "get_openai_env_var", lambda: "OPENAI_API_KEY")
+
+    response = _make_app().test_client().post(
+        "/api/settings/openai/test_model",
+        json={
+            "api_key_env_var": "OPENAI_API_KEY",
+            "model": "gpt-5.6-terra",
+        },
+    )
+
+    assert response.status_code == 403
+    payload = response.get_json()
+    assert payload["usable"] is False
+    assert payload["failure_kind"] == "model_not_enabled"
+    assert "not enabled" in payload["reason"]
+    assert constructed is False
 
 
 def test_ollama_model_probe_uses_selected_host_and_model(monkeypatch) -> None:

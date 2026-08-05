@@ -171,6 +171,40 @@ def test_normalise_llm_exchange_entry_accepts_preview_and_selected_model_aliases
     assert payload["at_utc"] == "2026-06-02T16:45:54.356959Z"
 
 
+def test_normalise_llm_exchange_entry_preserves_usage_and_model_lineage():
+    from src.backend.services.turn_execution_diagnostics_service import (
+        _normalise_llm_exchange_entry,
+    )
+
+    payload = _normalise_llm_exchange_entry(
+        {
+            "call_id": "call-2624",
+            "type": "adaptive_turn_model_call",
+            "provider": "openai",
+            "requested_model": "requested-model",
+            "selected_model": "selected-model",
+            "effective_model": "effective-model",
+            "model_identity_source": "provider_response",
+            "provider_request_sent": True,
+            "usage": {
+                "status": "reported",
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+        },
+        source="unit",
+        source_index=0,
+    )
+
+    assert payload["call_id"] == "call-2624"
+    assert payload["model"] == "effective-model"
+    assert payload["requested_model"] == "requested-model"
+    assert payload["selected_model"] == "selected-model"
+    assert payload["effective_model"] == "effective-model"
+    assert payload["usage"]["total_tokens"] == 120
+
+
 def test_collect_llm_exchange_entries_salvages_embedded_stage_summaries():
     from src.backend.services.turn_execution_diagnostics_service import (
         _collect_llm_exchange_entries,
@@ -264,27 +298,18 @@ def test_collect_llm_exchange_entries_filters_skipped_pseudo_calls():
     assert entries[0]["prompt"]["text"] == "PROMPT"
 
 
-def test_finalise_llm_debug_info_passes_primary_llm_calls_to_record_builder(monkeypatch):
+def test_finalise_llm_debug_info_persists_primary_calls_and_cost_summary(monkeypatch):
     from src.backend.server.routes import von_routes
 
-    captured: dict = {}
-
-    def fake_build_turn_execution_record(**kwargs):
-        captured.update(kwargs)
-        return {
-            "request_id": kwargs.get("request_id"),
-            "workflow_routing_diagnostics": {},
-        }
-
-    monkeypatch.setattr(
-        von_routes,
-        "build_turn_execution_record",
-        fake_build_turn_execution_record,
-    )
+    monkeypatch.setattr(von_routes, "get_model_registry_snapshot", lambda: {})
 
     llm_call = {
+        "call_id": "req-2385:llm:1",
         "type": "llm.generate",
         "stage": "screen_backfill",
+        "provider": "openai",
+        "effective_model": "gpt-test",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
         "prompt": {"text": "PROMPT"},
         "response": {"text": "RESPONSE"},
     }
@@ -305,7 +330,10 @@ def test_finalise_llm_debug_info_passes_primary_llm_calls_to_record_builder(monk
     )
 
     assert result["turn_execution_record"]["request_id"] == "req-2385"
-    assert captured["llm_calls"] == [llm_call]
+    assert result["turn_execution_record"]["llm_calls"] == [llm_call]
+    summary = result["turn_execution_record"]["llm_usage_cost_summary"]
+    assert summary["usage"]["total_tokens"] == 15
+    assert summary["estimated_cost"]["status"] == "unavailable"
 
 
 def test_build_turn_execution_record_persists_primary_and_aux_llm_logs():
