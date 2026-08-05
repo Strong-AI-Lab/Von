@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -153,6 +154,43 @@ def test_list_and_get_message(mock_get_profile, mock_get_service):
     assert message_result == {"id": "123"}
     assert attachment_result == {"data": "abc"}
     assert labels_result == {"labels": []}
+
+
+def test_decode_attachment_bytes_accepts_gmail_base64url_without_padding():
+    source = b"%PDF-1.7\nresearch description"
+    encoded = base64.urlsafe_b64encode(source).decode("ascii").rstrip("=")
+
+    assert gs.decode_attachment_bytes({"data": encoded}) == source
+
+
+def test_find_attachment_part_metadata_traverses_nested_mime_parts():
+    message = {
+        "payload": {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        {
+                            "filename": "research-summary.pdf",
+                            "mimeType": "application/PDF",
+                            "body": {"attachmentId": "attachment-1", "size": 321},
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    assert gs.find_attachment_part_metadata(
+        message,
+        attachment_id="attachment-1",
+    ) == {
+        "attachment_id": "attachment-1",
+        "filename": "research-summary.pdf",
+        "content_type": "application/pdf",
+        "reported_size_bytes": 321,
+    }
 
 
 def test_modify_labels_guard(monkeypatch):

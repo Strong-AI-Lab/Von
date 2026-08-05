@@ -545,6 +545,65 @@ def get_attachment(
     return request.execute() or {}
 
 
+def decode_attachment_bytes(attachment: Mapping[str, Any]) -> bytes:
+    """Decode Gmail's base64url attachment payload into source bytes."""
+
+    raw_data = attachment.get("data")
+    if not isinstance(raw_data, str) or not raw_data.strip():
+        raise ValueError("Gmail attachment response did not contain data")
+    compact = "".join(raw_data.split())
+    padding = "=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(
+            (compact + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise ValueError(
+            "Gmail attachment response contained invalid base64url data"
+        ) from exc
+
+
+def find_attachment_part_metadata(
+    message: Mapping[str, Any],
+    *,
+    attachment_id: str,
+) -> Dict[str, Any]:
+    """Return trusted MIME metadata for one attachment in a full Gmail message."""
+
+    payload = message.get("payload")
+    if not isinstance(payload, Mapping):
+        return {}
+
+    pending: list[Mapping[str, Any]] = [payload]
+    while pending:
+        part = pending.pop()
+        children = part.get("parts")
+        if isinstance(children, list):
+            pending.extend(
+                child for child in reversed(children) if isinstance(child, Mapping)
+            )
+
+        body = part.get("body")
+        if not isinstance(body, Mapping) or body.get("attachmentId") != attachment_id:
+            continue
+
+        metadata: Dict[str, Any] = {"attachment_id": attachment_id}
+        filename = part.get("filename")
+        if isinstance(filename, str) and filename.strip():
+            metadata["filename"] = filename.strip()
+        mime_type = part.get("mimeType")
+        if isinstance(mime_type, str) and mime_type.strip():
+            metadata["content_type"] = mime_type.strip().lower()
+        size = body.get("size")
+        if isinstance(size, int) and size >= 0:
+            metadata["reported_size_bytes"] = size
+        return metadata
+
+    return {}
+
+
 def list_labels(
     profile_id: str,
     profiles: Optional[Dict[str, GmailProfile]] = None,

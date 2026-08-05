@@ -373,6 +373,12 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     }
     assert gmail_reads.isdisjoint(actor_reads)
     assert gmail_reads <= actor_mail_reads
+    assert catalogue.get(
+        "gmail_get_attachment"
+    ).ordinary_turn_trusted_argument_bindings == {
+        "profile": "gmail_profile",
+        "namespace": "turn_namespace",
+    }
 
     # These are mechanism-level exclusions: they expose ambient deployment
     # accounts, host-local data, raw cross-namespace data, or operator state.
