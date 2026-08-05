@@ -17,6 +17,8 @@ SEMANTIC_OPERATION_SCHEMA_VERSION = "thinking_semantic_operation.v1"
 _MAX_TEXT_CHARS = 240
 _MAX_SUMMARY_CHARS = 1_024
 _MAX_ARGUMENTS = 8
+_MAX_OBSERVATION_ITEMS = 5
+_MAX_OBSERVATION_DETAILS = 4
 
 _ARGUMENT_LABELS = {
     "subject": "Subject",
@@ -26,6 +28,8 @@ _ARGUMENT_LABELS = {
     "workflow": "Workflow",
     "instance": "Workflow instance",
     "name": "Name",
+    "mailbox": "Mailbox",
+    "message": "Message ID",
 }
 _ARGUMENT_SPECS = (
     ("subject_concept_id", "subject", "Subject", "concept"),
@@ -42,6 +46,9 @@ _ARGUMENT_SPECS = (
     ("workflow_id", "workflow", "Workflow", "workflow"),
     ("instance_id", "instance", "Workflow instance", "identifier"),
     ("name", "name", "Name", "text"),
+    ("profile", "mailbox", "Mailbox", "identifier"),
+    ("profile_id", "mailbox", "Mailbox", "identifier"),
+    ("message_id", "message", "Message ID", "identifier"),
 )
 _ARGUMENT_KIND_BY_ROLE = {
     role: value_kind for _key, role, _label, value_kind in _ARGUMENT_SPECS
@@ -54,6 +61,44 @@ _ARGUMENT_SOURCE_KEYS_BY_ROLE = {
     )
     for _key, role, _label, _value_kind in _ARGUMENT_SPECS
 }
+_FOCUS_SPECS = (
+    ("query", "query", "Query", "text"),
+    ("instance_of", "type", "Type", "concept"),
+    ("concept_id", "concept", "Concept", "concept"),
+    ("profile", "mailbox", "Mailbox profile", "identifier"),
+    ("profile_id", "mailbox", "Mailbox profile", "identifier"),
+)
+_FOCUS_SPEC_BY_ROLE = {
+    role: (
+        frozenset(
+            source_argument
+            for source_argument, source_role, _label, _value_kind in _FOCUS_SPECS
+            if source_role == role
+        ),
+        label,
+        value_kind,
+    )
+    for _source_argument, role, label, value_kind in _FOCUS_SPECS
+}
+_OBSERVATION_COUNT_LABELS = {
+    "total_count": "concept matches",
+    "total_predicates": "predicates",
+    "messages": "messages",
+}
+_OBSERVATION_COUNT_SINGULAR_LABELS = {
+    "concept matches": "concept match",
+    "predicates": "predicate",
+    "messages": "message",
+}
+_OBSERVATION_COLLECTIONS = ("results", "predicates", "messages")
+_OBSERVATION_DETAIL_SPECS = {
+    "authorised_email": ("Mailbox", "email"),
+    "sender": ("Sender", "text"),
+    "date": ("Date", "text"),
+    "token_status": ("Authorisation", "status"),
+}
+_OBSERVATION_IDENTIFIER_KINDS = frozenset({"predicate", "message"})
+_BOUNDED_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9._:@+-]+")
 
 
 def _clean_text(value: Any, *, limit: int = _MAX_TEXT_CHARS) -> str | None:
@@ -69,6 +114,7 @@ def _clean_text(value: Any, *, limit: int = _MAX_TEXT_CHARS) -> str | None:
 
 def _display_label(value: str) -> str:
     cleaned = value.removeprefix("#V#")
+    cleaned = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", cleaned)
     cleaned = re.sub(r"[_\-]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned.title() if cleaned else value
@@ -106,7 +152,9 @@ def _argument_projection(arguments: Mapping[str, Any]) -> list[dict[str, Any]]:
         display = (
             value
             if isinstance(value, str) and value_kind == "text"
-            else _display_label(value) if isinstance(value, str) else str(value)
+            else _display_label(value)
+            if isinstance(value, str)
+            else str(value)
         )
         item: dict[str, Any] = {
             "role": role,
@@ -146,6 +194,203 @@ def _relation_projection(
         "predicate": dict(predicate),
         "object": dict(target),
     }
+
+
+def _focus_projection(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project the primary object or query of a non-relation operation."""
+
+    for source_argument, role, label, value_kind in _FOCUS_SPECS:
+        value = _argument_value(arguments.get(source_argument))
+        if value is None:
+            continue
+        display = (
+            value
+            if isinstance(value, str) and value_kind == "text"
+            else _display_label(value)
+            if isinstance(value, str)
+            else str(value)
+        )
+        focus: dict[str, Any] = {
+            "role": role,
+            "label": label,
+            "source_argument": source_argument,
+            "value_kind": value_kind,
+            "value": value,
+            "display": display,
+        }
+        if isinstance(value, str) and value.startswith("#V#"):
+            focus["concept_id"] = value
+        return focus
+    return None
+
+
+def _observation_item(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    containers = [value]
+    for preview_key in ("concept_preview", "predicate_preview"):
+        preview = value.get(preview_key)
+        if isinstance(preview, Mapping):
+            containers.append(preview)
+
+    name = next(
+        (
+            item
+            for item in (
+                _clean_text(container.get(key), limit=120)
+                for container in containers
+                for key in (
+                    "name",
+                    "label",
+                    "title",
+                    "display_name",
+                    "subject",
+                    "authorised_email",
+                )
+            )
+            if item
+        ),
+        None,
+    )
+    identifier = None
+    identifier_kind = None
+    for container in containers:
+        for key, kind in (
+            ("concept_id", "concept"),
+            ("predicate_concept_id", "predicate"),
+            ("message_id", "message"),
+        ):
+            candidate = _clean_text(container.get(key), limit=160)
+            if not candidate:
+                continue
+            if kind == "concept" and not candidate.startswith("#V#"):
+                continue
+            if (
+                kind != "concept"
+                and not candidate.startswith("#V#")
+                and not _BOUNDED_IDENTIFIER_RE.fullmatch(candidate)
+            ):
+                continue
+            identifier = candidate
+            identifier_kind = kind
+            break
+        if identifier is not None:
+            break
+    if name is None and identifier is not None and identifier_kind != "message":
+        name = _display_label(identifier)
+    if name is None:
+        return None
+
+    item = {"name": name}
+    if identifier is not None:
+        item["identifier"] = identifier
+        if (
+            identifier_kind in _OBSERVATION_IDENTIFIER_KINDS
+            and not identifier.startswith("#V#")
+        ):
+            item["identifier_kind"] = identifier_kind
+    return item
+
+
+def _observation_details(result: Mapping[str, Any]) -> list[dict[str, str]]:
+    details: list[dict[str, str]] = []
+    for source_field, (label, value_kind) in _OBSERVATION_DETAIL_SPECS.items():
+        value = _clean_text(result.get(source_field), limit=160)
+        if not value:
+            continue
+        details.append(
+            {
+                "label": label,
+                "source_field": source_field,
+                "value_kind": value_kind,
+                "value": value,
+            }
+        )
+        if len(details) >= _MAX_OBSERVATION_DETAILS:
+            break
+    return details
+
+
+def _observation_projection(
+    result: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Project a bounded result from common read-tool response shapes."""
+
+    if not isinstance(result, Mapping):
+        return None
+
+    count_source = next(
+        (
+            key
+            for key in _OBSERVATION_COUNT_LABELS
+            if isinstance(result.get(key), (int, float))
+            and not isinstance(result.get(key), bool)
+        ),
+        None,
+    )
+    count = max(0, int(result[count_source])) if count_source is not None else None
+
+    collection_source = next(
+        (key for key in _OBSERVATION_COLLECTIONS if isinstance(result.get(key), list)),
+        None,
+    )
+    raw_items = result.get(collection_source) if collection_source else None
+    if (
+        count is None
+        and collection_source == "messages"
+        and isinstance(raw_items, list)
+    ):
+        count_source = "messages"
+        count = len(raw_items)
+    items = [
+        item
+        for item in (
+            _observation_item(value)
+            for value in (
+                raw_items[:_MAX_OBSERVATION_ITEMS]
+                if isinstance(raw_items, list)
+                else []
+            )
+        )
+        if item is not None
+    ]
+
+    if (
+        not items
+        and collection_source is None
+        and result.get("success") is not False
+        and not _clean_text(result.get("error_code"), limit=80)
+    ):
+        root_item = _observation_item(result)
+        if root_item is not None:
+            items.append(root_item)
+
+    details = _observation_details(result)
+    if count is None and not items and not details:
+        return None
+
+    observation: dict[str, Any] = {
+        "items": items,
+        "count_is_lower_bound": bool(
+            result.get("counts_are_lower_bounds") is True
+            or result.get("total_count_is_lower_bound") is True
+            or result.get("coverage_complete") is False
+        ),
+    }
+    if count is not None and count_source is not None:
+        observation.update(
+            {
+                "count": count,
+                "count_label": _OBSERVATION_COUNT_LABELS[count_source],
+                "count_source": count_source,
+            }
+        )
+    if collection_source is not None:
+        observation["collection_source"] = collection_source
+    if details:
+        observation["details"] = details
+    return observation
 
 
 def _outcome_projection(
@@ -337,10 +582,117 @@ def _verification_projection(
     }
 
 
+def _focus_statement(focus: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(focus, Mapping):
+        return None
+    label = _clean_text(focus.get("label"), limit=40) or "Target"
+    display = _clean_text(focus.get("display"))
+    if not display:
+        return None
+    if focus.get("value_kind") == "text":
+        display = f"“{display}”"
+    return f"{label}: {display}"
+
+
+def _join_observation_names(names: list[str], omitted_count: int) -> str:
+    parts = list(names)
+    if omitted_count > 0:
+        parts.append(f"{omitted_count} other{'s' if omitted_count != 1 else ''}")
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def _observation_statement(observation: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(observation, Mapping):
+        return None
+    count_value = observation.get("count")
+    count = (
+        max(0, int(count_value))
+        if isinstance(count_value, (int, float)) and not isinstance(count_value, bool)
+        else None
+    )
+    count_label = _clean_text(observation.get("count_label"), limit=80)
+    raw_items = observation.get("items")
+    names = [
+        name
+        for name in (
+            _clean_text(item.get("name"), limit=120)
+            for item in (
+                raw_items[:_MAX_OBSERVATION_ITEMS]
+                if isinstance(raw_items, list)
+                else []
+            )
+            if isinstance(item, Mapping)
+        )
+        if name
+    ]
+    if count is not None and count_label:
+        rendered_count_label = (
+            _OBSERVATION_COUNT_SINGULAR_LABELS.get(count_label, count_label)
+            if count == 1
+            else count_label
+        )
+        if count == 0:
+            if observation.get("count_is_lower_bound") is True:
+                return f"0 {count_label} (coverage incomplete)"
+            return f"no {count_label}"
+        qualifier = (
+            "at least " if observation.get("count_is_lower_bound") is True else ""
+        )
+        statement = f"{qualifier}{count} {rendered_count_label}"
+        if names:
+            omitted_count = max(0, count - len(names))
+            statement += f": {_join_observation_names(names, omitted_count)}"
+        return statement
+    if names:
+        return _join_observation_names(names, 0)
+    return None
+
+
+def _observation_details_statement(
+    observation: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(observation, Mapping):
+        return None
+    raw_details = observation.get("details")
+    if not isinstance(raw_details, list):
+        return None
+    item_names = {
+        name.casefold()
+        for name in (
+            _clean_text(item.get("name"), limit=120)
+            for item in observation.get("items", [])
+            if isinstance(item, Mapping)
+        )
+        if name
+    }
+    parts: list[str] = []
+    for detail in raw_details[:_MAX_OBSERVATION_DETAILS]:
+        if not isinstance(detail, Mapping):
+            continue
+        label = _clean_text(detail.get("label"), limit=60)
+        value = _clean_text(detail.get("value"), limit=160)
+        if not label or not value or value.casefold() in item_names:
+            continue
+        parts.append(f"{label}: {value}")
+    return "; ".join(parts) if parts else None
+
+
+def _append_observation_details(statement: str, details: str | None) -> str:
+    if not details:
+        return statement
+    return f"{statement.rstrip('.')} ({details})."
+
+
 def _summary(
     *,
     capability_label: str,
     relation: Mapping[str, Any] | None,
+    focus: Mapping[str, Any] | None,
+    observation: Mapping[str, Any] | None,
     lifecycle_status: str,
     success: bool | None,
     result: Mapping[str, Any] | None,
@@ -355,8 +707,7 @@ def _summary(
             target = f"“{target}”"
         target_role_label = "Value" if target_is_text else "Object"
         statement = (
-            f"Subject: {subject}; Relation: {predicate}; "
-            f"{target_role_label}: {target}"
+            f"Subject: {subject}; Relation: {predicate}; {target_role_label}: {target}"
         )
         if lifecycle_status == "running":
             return f"{capability_label}: {statement} (in progress)."
@@ -379,8 +730,7 @@ def _summary(
             if changed is True:
                 if read_back_verified:
                     return (
-                        f"{capability_label} verified the reported change: "
-                        f"{statement}."
+                        f"{capability_label} verified the reported change: {statement}."
                     )
                 return f"{capability_label} reported a change: {statement}."
             return f"{capability_label} finished: {statement}."
@@ -394,12 +744,43 @@ def _summary(
                 )
             return f"{capability_label} did not succeed: {statement}."
         return f"{capability_label}: {statement}."
+
+    focus_text = _focus_statement(focus)
+    observation_text = _observation_statement(observation)
+    observation_details = _observation_details_statement(observation)
     if lifecycle_status == "running":
+        if focus_text:
+            return f"{capability_label}: {focus_text} (in progress)."
         return f"Using {capability_label}."
     if success is True:
+        if observation_text and focus_text:
+            return _append_observation_details(
+                f"{capability_label} returned {observation_text} for {focus_text}.",
+                observation_details,
+            )
+        if observation_text:
+            return _append_observation_details(
+                f"{capability_label} returned {observation_text}.",
+                observation_details,
+            )
+        if observation_details and focus_text:
+            return (
+                f"{capability_label} finished for {focus_text} ({observation_details})."
+            )
+        if observation_details:
+            return f"{capability_label} finished ({observation_details})."
+        if focus_text:
+            return (
+                f"{capability_label} finished for {focus_text}; "
+                "no bounded result summary was available."
+            )
         return f"Finished {capability_label}."
     if success is False:
+        if focus_text:
+            return f"{capability_label} did not succeed for {focus_text}."
         return f"{capability_label} did not succeed."
+    if focus_text:
+        return f"{capability_label}: {focus_text}."
     return f"Observed {capability_label}."
 
 
@@ -450,6 +831,126 @@ def _normalise_projected_arguments(value: Any) -> list[dict[str, Any]]:
         projected.append(item)
         seen_roles.add(role)
     return projected
+
+
+def _normalise_projected_focus(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    role = _clean_text(value.get("role"), limit=40)
+    if role not in _FOCUS_SPEC_BY_ROLE:
+        return None
+    expected_sources, label, expected_kind = _FOCUS_SPEC_BY_ROLE[role]
+    source_argument = _clean_text(value.get("source_argument"), limit=80)
+    value_kind = _clean_text(value.get("value_kind"), limit=40)
+    if source_argument not in expected_sources or value_kind != expected_kind:
+        return None
+    focus_value = _argument_value(value.get("value"))
+    if focus_value is None:
+        return None
+    display = (
+        focus_value
+        if isinstance(focus_value, str) and value_kind == "text"
+        else (
+            _display_label(focus_value)
+            if isinstance(focus_value, str)
+            else str(focus_value)
+        )
+    )
+    focus: dict[str, Any] = {
+        "role": role,
+        "label": label,
+        "source_argument": source_argument,
+        "value_kind": value_kind,
+        "value": focus_value,
+        "display": display,
+    }
+    if isinstance(focus_value, str) and focus_value.startswith("#V#"):
+        focus["concept_id"] = focus_value
+    return focus
+
+
+def _normalise_projected_observation(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    count_source = _clean_text(value.get("count_source"), limit=80)
+    count_value = value.get("count")
+    count = (
+        max(0, int(count_value))
+        if count_source in _OBSERVATION_COUNT_LABELS
+        and isinstance(count_value, (int, float))
+        and not isinstance(count_value, bool)
+        else None
+    )
+    collection_source = _clean_text(value.get("collection_source"), limit=80)
+    if collection_source not in _OBSERVATION_COLLECTIONS:
+        collection_source = None
+
+    raw_items = value.get("items")
+    items: list[dict[str, str]] = []
+    if isinstance(raw_items, list):
+        for raw_item in raw_items[:_MAX_OBSERVATION_ITEMS]:
+            if not isinstance(raw_item, Mapping):
+                continue
+            name = _clean_text(raw_item.get("name"), limit=120)
+            if not name:
+                continue
+            item = {"name": name}
+            identifier = _clean_text(raw_item.get("identifier"), limit=160)
+            identifier_kind = _clean_text(raw_item.get("identifier_kind"), limit=40)
+            if identifier and identifier.startswith("#V#"):
+                item["identifier"] = identifier
+            elif (
+                identifier
+                and identifier_kind in _OBSERVATION_IDENTIFIER_KINDS
+                and _BOUNDED_IDENTIFIER_RE.fullmatch(identifier)
+            ):
+                item["identifier"] = identifier
+                item["identifier_kind"] = identifier_kind
+            items.append(item)
+
+    details: list[dict[str, str]] = []
+    raw_details = value.get("details")
+    if isinstance(raw_details, list):
+        for raw_detail in raw_details[:_MAX_OBSERVATION_DETAILS]:
+            if not isinstance(raw_detail, Mapping):
+                continue
+            source_field = _clean_text(raw_detail.get("source_field"), limit=80)
+            spec = _OBSERVATION_DETAIL_SPECS.get(source_field or "")
+            if spec is None:
+                continue
+            label, value_kind = spec
+            detail_value = _clean_text(raw_detail.get("value"), limit=160)
+            if not detail_value:
+                continue
+            details.append(
+                {
+                    "label": label,
+                    "source_field": source_field,
+                    "value_kind": value_kind,
+                    "value": detail_value,
+                }
+            )
+
+    if count is None and not items and not details:
+        return None
+    observation: dict[str, Any] = {
+        "items": items,
+        "count_is_lower_bound": value.get("count_is_lower_bound") is True,
+    }
+    if count is not None and count_source is not None:
+        observation.update(
+            {
+                "count": count,
+                "count_label": _OBSERVATION_COUNT_LABELS[count_source],
+                "count_source": count_source,
+            }
+        )
+    if collection_source is not None:
+        observation["collection_source"] = collection_source
+    if details:
+        observation["details"] = details
+    return observation
 
 
 def _normalise_projected_outcome(value: Any) -> dict[str, Any] | None:
@@ -575,6 +1076,12 @@ def normalise_semantic_operation_projection(value: Any) -> dict[str, Any] | None
     )
     arguments = _normalise_projected_arguments(value.get("arguments"))
     relation = _relation_projection(arguments)
+    focus = _normalise_projected_focus(value.get("focus")) if relation is None else None
+    observation = (
+        _normalise_projected_observation(value.get("observation"))
+        if relation is None
+        else None
+    )
     outcome = _normalise_projected_outcome(value.get("outcome"))
     verification = _normalise_projected_verification(
         value.get("verification"),
@@ -597,6 +1104,8 @@ def normalise_semantic_operation_projection(value: Any) -> dict[str, Any] | None
             _summary(
                 capability_label=_display_label(capability_id),
                 relation=relation,
+                focus=focus,
+                observation=observation,
                 lifecycle_status=lifecycle_status,
                 success=success if isinstance(success, bool) else None,
                 result=outcome,
@@ -610,6 +1119,10 @@ def normalise_semantic_operation_projection(value: Any) -> dict[str, Any] | None
     }
     if relation is not None:
         projection["relation"] = relation
+    if focus is not None:
+        projection["focus"] = focus
+    if observation is not None:
+        projection["observation"] = observation
     if outcome is not None:
         projection["outcome"] = outcome
     return projection
@@ -636,6 +1149,8 @@ def build_semantic_operation_projection(
     capability_label = _display_label(capability_id)
     projected_arguments = _argument_projection(arguments)
     relation = _relation_projection(projected_arguments)
+    focus = _focus_projection(arguments) if relation is None else None
+    observation = _observation_projection(result) if relation is None else None
     verification = _verification_projection(
         result,
         lifecycle_status=status,
@@ -644,6 +1159,8 @@ def build_semantic_operation_projection(
     summary = _summary(
         capability_label=capability_label,
         relation=relation,
+        focus=focus,
+        observation=observation,
         lifecycle_status=status,
         success=success,
         result=result,
@@ -667,6 +1184,10 @@ def build_semantic_operation_projection(
     }
     if relation is not None:
         projection["relation"] = relation
+    if focus is not None:
+        projection["focus"] = focus
+    if observation is not None:
+        projection["observation"] = observation
     outcome = _outcome_projection(
         result,
         lifecycle_status=status,

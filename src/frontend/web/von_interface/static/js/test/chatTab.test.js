@@ -3193,6 +3193,262 @@ describe('thinking activity history normalisation', () => {
         expect((html.match(/<div class="thinking-card-tool">/g) || [])).toHaveLength(1);
     });
 
+    test('makes bounded discovery targets and results primary in Default thinking', () => {
+        const searchOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-search-concepts',
+            lifecycle_status: 'succeeded',
+            capability: {
+                id: 'search_concepts',
+                label: 'Search Concepts',
+                kind: 'registered_tool',
+                execution_method: 'search_concepts'
+            },
+            arguments: [],
+            focus: {
+                role: 'query',
+                label: 'Query',
+                source_argument: 'query',
+                value_kind: 'text',
+                value: 'University of Auckland',
+                display: 'University of Auckland'
+            },
+            observation: {
+                count: 4,
+                count_label: 'concept matches',
+                count_source: 'total_count',
+                count_is_lower_bound: false,
+                collection_source: 'results',
+                items: [
+                    {
+                        name: 'University of Auckland',
+                        identifier: '#V#university_of_auckland'
+                    },
+                    { name: 'University', identifier: '#V#university' }
+                ]
+            },
+            outcome: { status: 'succeeded', success: true },
+            summary: 'Search Concepts returned 4 concept matches: University of Auckland, '
+                + 'University and 2 others for Query: “University of Auckland”.',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'receipt_only',
+                canonical_read_back_present: false,
+                source: 'effect_receipt'
+            }
+        };
+        const fetchOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-fetch-concept',
+            lifecycle_status: 'running',
+            capability: {
+                id: 'fetch_concept',
+                label: 'Fetch Concept',
+                kind: 'registered_tool',
+                execution_method: 'fetch_concept'
+            },
+            arguments: [{
+                role: 'subject',
+                label: 'Subject',
+                source_argument: 'concept_id',
+                value_kind: 'concept',
+                value: '#V#school_of_computer_science',
+                display: 'School Of Computer Science',
+                concept_id: '#V#school_of_computer_science'
+            }],
+            focus: {
+                role: 'concept',
+                label: 'Concept',
+                source_argument: 'concept_id',
+                value_kind: 'concept',
+                value: '#V#school_of_computer_science',
+                display: 'School Of Computer Science',
+                concept_id: '#V#school_of_computer_science'
+            },
+            summary: 'Fetch Concept: Concept: School Of Computer Science (in progress).',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'unknown',
+                canonical_read_back_present: false,
+                source: 'none'
+            }
+        };
+        const createRequest = (mode) => ({
+            thinkingCardMode: mode,
+            latestProgress: {
+                status: 'tool_call_start',
+                stage: 'adaptive_research',
+                tool_history: [
+                    {
+                        tool: 'search_concepts',
+                        success: true,
+                        semanticOperation: searchOperation
+                    },
+                    {
+                        tool: 'fetch_concept',
+                        success: null,
+                        semanticOperation: fetchOperation
+                    }
+                ]
+            }
+        });
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('default'));
+        expect(defaultHtml).toContain('Search Concepts returned 4 concept matches');
+        expect(defaultHtml).toContain('University and 2 others');
+        expect(defaultHtml).toContain('School Of Computer Science');
+        expect(defaultHtml).not.toContain('Tool call: search_concepts');
+        expect(defaultHtml).not.toContain('Tool call: fetch_concept');
+        expect(defaultHtml).not.toContain('#V#school_of_computer_science');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('expert'));
+        expect(expertHtml).toContain('Tool call: search_concepts');
+        expect(expertHtml).toContain('Query');
+        expect(expertHtml).toContain('Returned count');
+        expect(expertHtml).toContain('Returned IDs');
+        expect(expertHtml).toContain('Observation source');
+        expect(expertHtml).toContain('Returned capability result');
+        expect(expertHtml).toContain('#V#university_of_auckland');
+        expect(expertHtml).toContain('Concept ID');
+        expect(expertHtml).toContain('#V#school_of_computer_science');
+    });
+
+    test('keeps bounded Gmail metadata and live predicate identifiers semantic across modes', () => {
+        const gmailOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-gmail-get',
+            lifecycle_status: 'succeeded',
+            capability: {
+                id: 'gmail_get_message',
+                label: 'Gmail Get Message',
+                kind: 'registered_tool',
+                execution_method: 'gmail_get_message'
+            },
+            arguments: [
+                {
+                    role: 'mailbox',
+                    label: 'Mailbox',
+                    source_argument: 'profile',
+                    value_kind: 'identifier',
+                    value: 'vonwitbrock-gmail',
+                    display: 'Vonwitbrock Gmail'
+                },
+                {
+                    role: 'message',
+                    label: 'Message ID',
+                    source_argument: 'message_id',
+                    value_kind: 'identifier',
+                    value: '19c123',
+                    display: '19c123'
+                }
+            ],
+            focus: {
+                role: 'mailbox',
+                label: 'Mailbox profile',
+                source_argument: 'profile',
+                value_kind: 'identifier',
+                value: 'vonwitbrock-gmail',
+                display: 'Vonwitbrock Gmail'
+            },
+            observation: {
+                count_is_lower_bound: false,
+                items: [{
+                    name: 'Thesis Submission and Examiner Nomination',
+                    identifier: '19c123',
+                    identifier_kind: 'message'
+                }],
+                details: [
+                    {
+                        label: 'Mailbox',
+                        source_field: 'authorised_email',
+                        value_kind: 'email',
+                        value: 'zhanvonwitbrock@gmail.com'
+                    },
+                    {
+                        label: 'Sender',
+                        source_field: 'sender',
+                        value_kind: 'text',
+                        value: 'Xianda Zheng <xzhe162@aucklanduni.ac.nz>'
+                    },
+                    {
+                        label: 'Date',
+                        source_field: 'date',
+                        value_kind: 'text',
+                        value: 'Wed, 5 Aug 2026 19:48:06 +0800'
+                    }
+                ]
+            },
+            summary: 'Gmail Get Message returned Thesis Submission and Examiner Nomination '
+                + 'for Mailbox profile: Vonwitbrock Gmail '
+                + '(Mailbox: zhanvonwitbrock@gmail.com; '
+                + 'Sender: Xianda Zheng <xzhe162@aucklanduni.ac.nz>; '
+                + 'Date: Wed, 5 Aug 2026 19:48:06 +0800).',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'receipt_only',
+                canonical_read_back_present: false,
+                source: 'effect_receipt'
+            }
+        };
+        const predicateOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-predicate-incidence',
+            lifecycle_status: 'succeeded',
+            capability: {
+                id: 'get_predicate_incidence',
+                label: 'Get Predicate Incidence',
+                kind: 'registered_tool',
+                execution_method: 'get_predicate_incidence'
+            },
+            arguments: [],
+            observation: {
+                count: 1,
+                count_source: 'total_predicates',
+                count_is_lower_bound: false,
+                collection_source: 'predicates',
+                items: [{
+                    name: 'Has Name',
+                    identifier: 'hasName',
+                    identifier_kind: 'predicate'
+                }]
+            },
+            summary: 'Get Predicate Incidence returned 1 predicate: Has Name.',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'receipt_only',
+                canonical_read_back_present: false,
+                source: 'effect_receipt'
+            }
+        };
+        const request = {
+            latestProgress: {
+                status: 'tool_completed',
+                stage: 'adaptive_research',
+                tool_history: [
+                    { tool: 'gmail_get_message', success: true, semanticOperation: gmailOperation },
+                    {
+                        tool: 'get_predicate_incidence',
+                        success: true,
+                        semanticOperation: predicateOperation
+                    }
+                ]
+            }
+        };
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(request, { mode: 'default' });
+        expect(defaultHtml).toContain('zhanvonwitbrock@gmail.com');
+        expect(defaultHtml).toContain('Thesis Submission and Examiner Nomination');
+        expect(defaultHtml).toContain('Has Name');
+        expect(defaultHtml).not.toContain('Tool call: gmail_get_message');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML(request, { mode: 'expert' });
+        expect(expertHtml).toContain('Mailbox profile');
+        expect(expertHtml).toContain('Message ID');
+        expect(expertHtml).toContain('Xianda Zheng');
+        expect(expertHtml).toContain('Returned IDs');
+        expect(expertHtml).toContain('hasName');
+    });
+
     test('adds bounded semantic IDs and verification in Expert, then execution details only in Debug', () => {
         const semanticOperation = {
             schema_version: 'thinking_semantic_operation.v1',

@@ -25274,10 +25274,26 @@ def _normalise_gmail_message_detail_payload(
     return payload
 
 
+def _gmail_authorised_email(profile_id: str) -> str | None:
+    """Return the trusted token-store mailbox identity without exposing tokens."""
+
+    try:
+        from ...services.agent_gmail_token_store import get_agent_gmail_token_status
+
+        status = get_agent_gmail_token_status(profile_id)
+        authorised_email = getattr(status, "authorised_email", None)
+    except Exception:  # noqa: BLE001 - identity enrichment is best effort
+        return None
+    if not isinstance(authorised_email, str) or not authorised_email.strip():
+        return None
+    return authorised_email.strip()
+
+
 def _annotate_gmail_list_messages_payload(
     result: Mapping[str, Any],
     *,
     profile: str,
+    authorised_email: str | None = None,
     effective_query: Mapping[str, Any] | None = None,
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -25322,6 +25338,8 @@ def _annotate_gmail_list_messages_payload(
         ],
     }
     payload.setdefault("profile", profile)
+    if authorised_email:
+        payload.setdefault("authorised_email", authorised_email)
     return payload
 
 
@@ -25333,6 +25351,7 @@ def _gmail_list_messages_output_schema() -> Schema:
             "nextPageToken": str,
             "resultSizeEstimate": int,
             "profile": str,
+            "authorised_email": str,
             "_tool_follow_up": dict,
             "effective_query": dict,
             "notes": list,
@@ -25340,7 +25359,8 @@ def _gmail_list_messages_output_schema() -> Schema:
         allow_unknown=True,
         description=(
             "gmail_list_messages output: messages contain Gmail id/threadId and "
-            "a message_id alias. The 'effective_query' field reports whether a "
+            "a message_id alias; profile and authorised_email identify the trusted "
+            "mailbox binding when available. The 'effective_query' field reports whether a "
             "profile-level query_prefix or label_filter was applied and the "
             "composed query string actually sent to Gmail; 'notes' surfaces "
             "warnings such as silent profile-level filtering. Use the "
@@ -25367,12 +25387,51 @@ def _gmail_get_message_output_schema() -> Schema:
             "date": str,
             "body": str,
             "body_truncated": bool,
+            "profile": str,
+            "authorised_email": str,
         },
         allow_unknown=True,
         description=(
             "gmail_get_message output: full Gmail message payload plus normalised "
-            "message_id, sender/from, subject, date, and snippet fields when "
-            "available. Body text is returned only when include_body=true."
+            "message_id, sender/from, subject, date, snippet, profile, and trusted "
+            "authorised_email fields when available. Body text is returned only "
+            "when include_body=true."
+        ),
+    )
+
+
+def _gmail_get_attachment_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": bool,
+            "profile": str,
+            "authorised_email": str,
+            "message_id": str,
+            "thread_id": str,
+            "sender": str,
+            "subject": str,
+            "date": str,
+            "attachment_id": str,
+            "filename": str,
+            "content_type": str,
+            "size_bytes": int,
+            "computer_file_copy": dict,
+            "read_result": dict,
+            "text": str,
+            "text_length": int,
+            "text_extraction": str,
+            "error": str,
+            "error_code": str,
+            "error_details": dict,
+            "suggestions": list,
+        },
+        allow_unknown=False,
+        description=(
+            "gmail_get_attachment output: actor-scoped computer_file_copy handle, "
+            "trusted Gmail MIME metadata, canonical file-copy read-back, and bounded "
+            "extracted text when available. Raw base64 attachment bytes are never "
+            "returned to the model."
         ),
     )
 
@@ -25597,6 +25656,7 @@ def _gmail_list_messages(**kwargs):
         return _annotate_gmail_list_messages_payload(
             result,
             profile=str(profile),
+            authorised_email=_gmail_authorised_email(str(profile)),
             effective_query=effective_query,
             notes=notes or None,
         )
@@ -25641,6 +25701,10 @@ def _gmail_get_message(**kwargs):
             },
         )
         normalised = _normalise_gmail_message_detail_payload(result)
+        normalised.setdefault("profile", str(profile))
+        authorised_email = _gmail_authorised_email(str(profile))
+        if authorised_email:
+            normalised.setdefault("authorised_email", authorised_email)
         if include_body:
             body, body_truncated = extract_gmail_message_body(result)
             if body is not None:
@@ -25734,6 +25798,12 @@ def _gmail_send_message(**kwargs):
 
 def _gmail_get_attachment(**kwargs):
     from ...integrations.google import gmail_service as gs
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id,
+    )
+    from ...services.computer_file_copy_service import import_bytes_file_copy
+    from ...services.namespace_service import derive_namespace_for_actor
 
     profile = _resolve_gmail_profile_argument(
         kwargs.get("profile") or kwargs.get("profile_id")
@@ -25748,23 +25818,280 @@ def _gmail_get_attachment(**kwargs):
             suggestions=["Provide profile ID, message ID, and attachment ID"],
         )
 
+    user_concept_id = get_effective_user_concept_id()
+    organisation_concept_id = get_effective_organisation_concept_id()
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return make_error_response(
+            "authenticated_actor_context_required",
+            "Gmail attachment inspection requires an authenticated actor so the "
+            "derived file copy can be scoped safely.",
+            suggestions=[
+                "Run the attachment read from an authenticated Von conversation"
+            ],
+        )
+    user_concept_id = user_concept_id.strip()
+    organisation_concept_id = (
+        organisation_concept_id.strip()
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip()
+        else None
+    )
+    namespace = derive_namespace_for_actor(
+        user_concept_id,
+        organisation_concept_id,
+    )
+    if not namespace:
+        return make_error_response(
+            "actor_namespace_required",
+            "Could not derive an actor namespace for Gmail attachment inspection.",
+        )
+
     try:
-        return gs.get_attachment(
+        message = gs.get_message(
+            profile_id=profile,
+            message_id=message_id,
+            format="full",
+            audit_context={
+                "namespace": namespace,
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_get_attachment",
+                "purpose": "attachment_metadata",
+            },
+        )
+        raw_attachment = gs.get_attachment(
             profile_id=profile,
             message_id=message_id,
             attachment_id=attachment_id,
             audit_context={
-                "namespace": kwargs.get("namespace"),
+                "namespace": namespace,
                 "source": "internal_mcp_gateway",
                 "tool": "gmail_get_attachment",
             },
         )
+        attachment_bytes = gs.decode_attachment_bytes(raw_attachment)
+        import hashlib
+
+        attachment_id_sha256 = hashlib.sha256(
+            str(attachment_id).encode("utf-8")
+        ).hexdigest()
+        content_sha256 = hashlib.sha256(attachment_bytes).hexdigest()
+        part_metadata = gs.find_attachment_part_metadata(
+            message,
+            attachment_id=str(attachment_id),
+        )
+
+        content_type = part_metadata.get("content_type")
+        if not isinstance(content_type, str) or not content_type.strip():
+            content_type = (
+                "application/pdf"
+                if attachment_bytes.startswith(b"%PDF-")
+                else "application/octet-stream"
+            )
+        else:
+            content_type = content_type.strip().lower()
+
+        filename = part_metadata.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            message_slug = re.sub(
+                r"[^A-Za-z0-9._-]+", "_", str(message_id)
+            ).strip("._")
+            message_slug = message_slug or "message"
+            suffix = ".pdf" if content_type == "application/pdf" else ".bin"
+            filename = (
+                f"gmail-attachment-{message_slug}-{content_sha256[:12]}{suffix}"
+            )
+        else:
+            filename = filename.strip()
+
+        message_detail = _normalise_gmail_message_detail_payload(message)
+        authorised_email = _gmail_authorised_email(str(profile))
+        # Gmail attachment IDs are opaque tokens which can rotate and can exceed
+        # object-store metadata limits.  Content identity is stable for reuse;
+        # the message remains the canonical envelope from which Gmail can
+        # resolve a current attachment token again.
+        source_identifier = (
+            f"{profile}:{message_id}:content-sha256:{content_sha256}"
+        )
+        source_uri = f"gmail://{profile}/messages/{message_id}"
+
+        def _bounded_ascii_provenance(value: Any) -> str | None:
+            if value is None:
+                return None
+            original = str(value).strip()
+            if not original:
+                return None
+            encoded = original.encode("ascii", "backslashreplace").decode("ascii")
+            if len(encoded) <= 240:
+                return encoded
+            value_sha256 = hashlib.sha256(original.encode("utf-8")).hexdigest()
+            return f"{encoded[:160]}...sha256:{value_sha256}"
+
+        import_result = import_bytes_file_copy(
+            data=attachment_bytes,
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            namespace=namespace,
+            namespace_source="authenticated_gmail_attachment_read",
+            original_filename=filename,
+            content_type=content_type,
+            source_system="gmail_attachment",
+            source_identifier=source_identifier,
+            source_uri=source_uri,
+            metadata={
+                "gmail_profile": _bounded_ascii_provenance(profile),
+                "gmail_authorised_email": _bounded_ascii_provenance(
+                    authorised_email
+                ),
+                "gmail_message_id": _bounded_ascii_provenance(message_id),
+                "gmail_thread_id": _bounded_ascii_provenance(
+                    message_detail.get("threadId")
+                ),
+                "gmail_attachment_id_sha256": attachment_id_sha256,
+                "gmail_sender": _bounded_ascii_provenance(
+                    message_detail.get("sender")
+                ),
+                "gmail_subject": _bounded_ascii_provenance(
+                    message_detail.get("subject")
+                ),
+                "gmail_date": _bounded_ascii_provenance(message_detail.get("date")),
+                "gmail_reported_attachment_size_bytes": part_metadata.get(
+                    "reported_size_bytes"
+                ),
+            },
+        )
+        if (
+            not isinstance(import_result, Mapping)
+            or import_result.get("success") is not True
+        ):
+            return make_error_response(
+                "gmail_attachment_file_copy_import_failed",
+                "The Gmail attachment was fetched but could not be registered as an "
+                "actor-scoped computer file copy.",
+                details={
+                    "profile": str(profile),
+                    "message_id": str(message_id),
+                    "attachment_id": str(attachment_id),
+                    "filename": filename,
+                    "cause": (
+                        import_result.get("error")
+                        if isinstance(import_result, Mapping)
+                        else "invalid_import_result"
+                    ),
+                },
+            )
+
+        file_copy_concept_id = import_result.get("concept_id")
+        if (
+            not isinstance(file_copy_concept_id, str)
+            or not file_copy_concept_id.strip()
+        ):
+            return make_error_response(
+                "gmail_attachment_file_copy_handle_missing",
+                "The Gmail attachment import did not return a computer file copy handle.",
+                details={"filename": filename},
+            )
+        file_copy_concept_id = file_copy_concept_id.strip()
+
+        read_result = _read_file_copy(
+            concept_id=file_copy_concept_id,
+            as_text=True,
+            namespace=namespace,
+        )
+        read_succeeded = (
+            isinstance(read_result, Mapping)
+            and read_result.get("success") is True
+            and read_result.get("concept_id") == file_copy_concept_id
+        )
+
+        storage = import_result.get("storage")
+        file_copy_summary = {
+            "concept_id": file_copy_concept_id,
+            "type_concept_id": import_result.get("type_concept_id"),
+            "reused_existing": bool(import_result.get("reused_existing")),
+            "storage": dict(storage) if isinstance(storage, Mapping) else None,
+            "artifact_record": import_result.get("artifact_record"),
+        }
+        compact_read_result = (
+            {
+                key: read_result.get(key)
+                for key in (
+                    "success",
+                    "error",
+                    "concept_id",
+                    "original_filename",
+                    "content_type",
+                    "size_bytes",
+                    "byte_length",
+                    "sha256",
+                    "encoding",
+                    "text_extraction",
+                    "text_extraction_error",
+                )
+                if read_result.get(key) is not None
+            }
+            if isinstance(read_result, Mapping)
+            else {"success": False, "error": "invalid_read_result"}
+        )
+        extracted_text = (
+            read_result.get("text")
+            if isinstance(read_result, Mapping)
+            and isinstance(read_result.get("text"), str)
+            else None
+        )
+        if not read_succeeded:
+            return {
+                "success": False,
+                "error": "gmail_attachment_readback_failed",
+                "error_code": "gmail_attachment_readback_failed",
+                "profile": str(profile),
+                "message_id": str(message_id),
+                "attachment_id": str(attachment_id),
+                "filename": filename,
+                "content_type": content_type,
+                "size_bytes": len(attachment_bytes),
+                "computer_file_copy": file_copy_summary,
+                "read_result": compact_read_result,
+            }
+
+        payload: dict[str, Any] = {
+            "success": True,
+            "profile": str(profile),
+            "message_id": str(message_id),
+            "attachment_id": str(attachment_id),
+            "filename": filename,
+            "content_type": content_type,
+            "size_bytes": len(attachment_bytes),
+            "computer_file_copy": file_copy_summary,
+            "read_result": compact_read_result,
+            "text_length": len(extracted_text) if extracted_text is not None else 0,
+        }
+        for output_field, source_field in (
+            ("authorised_email", None),
+            ("thread_id", "threadId"),
+            ("sender", "sender"),
+            ("subject", "subject"),
+            ("date", "date"),
+        ):
+            value = (
+                authorised_email
+                if output_field == "authorised_email"
+                else message_detail.get(source_field)
+            )
+            if isinstance(value, str) and value.strip():
+                payload[output_field] = value.strip()
+        if extracted_text is not None:
+            payload["text"] = extracted_text
+        extraction_method = compact_read_result.get("text_extraction")
+        if isinstance(extraction_method, str) and extraction_method.strip():
+            payload["text_extraction"] = extraction_method.strip()
+        return payload
     except Exception as exc:  # noqa: BLE001
         return make_error_response(
             "gmail_api_error",
-            f"Gmail get attachment failed: {exc}",
+            f"Gmail attachment inspection failed: {exc}",
             details={"exception_type": type(exc).__name__},
-            suggestions=["Check Gmail API connectivity and credentials"],
+            suggestions=[
+                "Check Gmail API connectivity, credentials, attachment metadata, and blob storage"
+            ],
         )
 
 
@@ -34689,9 +35016,14 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     )
     gmail_get_attachment_input_schema = Schema(
         required={"profile": str, "message_id": str, "attachment_id": str},
-        optional={},
+        optional={"namespace": (str, type(None))},
         allow_unknown=False,
-        description="Fetch a Gmail attachment for a profile (base64 payload).",
+        description=(
+            "Inspect a Gmail attachment for a profile. The call fetches the source "
+            "bytes, registers or reuses an actor-scoped computer_file_copy, reads "
+            "that file copy back, and returns bounded extracted text when supported. "
+            "The namespace is server-bound and raw base64 is not returned."
+        ),
     )
     gmail_list_labels_input_schema = Schema(
         required={"profile": str},
@@ -35259,19 +35591,21 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             name="gmail_get_attachment",
             handler=_gmail_get_attachment,
             input_schema=gmail_get_attachment_input_schema,
-            output_schema=Schema(
-                required={},
-                optional={},
-                allow_unknown=True,
-                description="Gmail API attachment response",
-            ),
+            output_schema=_gmail_get_attachment_output_schema(),
             category="read",
             ordinary_turn_trusted_argument_bindings={
                 "profile": "gmail_profile",
+                "namespace": "turn_namespace",
             },
             advisory_timeout_sec=20.0,
             hard_timeout_enabled=False,
-            description="Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
+            description=(
+                "Inspect a Gmail attachment after the model decides it is relevant. "
+                "The tool performs bounded derived maintenance by registering or "
+                "reusing an actor-scoped computer_file_copy, then uses canonical "
+                "file-copy read-back to return extracted document text. It never "
+                "returns raw base64 to the model."
+            ),
         ),
         MethodDefinition(
             name="gmail_list_labels",

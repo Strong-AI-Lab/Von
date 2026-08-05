@@ -578,6 +578,12 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "gmail",
         "display_template": "Attachment: {filename}",
+        "planner_hint": (
+            "Call after gmail_get_message when an attachment is relevant to the "
+            "user's request. The call itself registers or reuses an actor-scoped "
+            "computer_file_copy and returns canonical read-back plus extracted text; "
+            "do not expect or attempt to decode raw base64."
+        ),
     },
     "gmail_list_labels": {
         "salience": "medium",
