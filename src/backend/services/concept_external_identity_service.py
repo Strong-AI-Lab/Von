@@ -31,10 +31,7 @@ from ..db.repositories.text_value_repository import (
 )
 from ..security.access_control import filter_accessible_concept_ids
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id
-from .concept_search_service import (
-    CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
-    _consume_search_cursor,
-)
+from .concept_search_service import _consume_search_cursor
 from .text_value_service import get_texts_for_concepts, upsert_text_for_concept
 
 _SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]{0,63}$")
@@ -290,7 +287,6 @@ def _identity_marker_relation_candidates(
             },
             projection={"_id": 1, "text": 1},
             limit=_MAX_EXTERNAL_IDENTITY_TEXT_VALUES + 1,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
     text_query_saturated = (
@@ -327,7 +323,6 @@ def _identity_marker_relation_candidates(
             },
             projection={"subject_concept_id": 1},
             limit=_MAX_EXTERNAL_IDENTITY_TEXT_RELATIONS + 1,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
     relation_query_saturated = (
@@ -381,7 +376,6 @@ def _legacy_text_reference_candidates(
             {"$text": {"$search": identifier.value}},
             projection={"_id": 1, "text": 1},
             limit=_MAX_EXTERNAL_IDENTITY_TEXT_VALUES + 1,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
     text_query_saturated = (
@@ -421,7 +415,6 @@ def _legacy_text_reference_candidates(
             },
             projection={"subject_concept_id": 1},
             limit=_MAX_EXTERNAL_IDENTITY_TEXT_RELATIONS + 1,
-            max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
         )
     )
     relation_query_saturated = (
@@ -505,7 +498,6 @@ def _confirmed_candidate_ids(
         sorted(visible_ids),
         predicates=_IDENTITY_EVIDENCE_PREDICATES,
         limit_per_concept=_MAX_IDENTITY_EVIDENCE_ROWS_PER_CONCEPT,
-        max_time_ms=CONCEPT_SEARCH_QUERY_MAX_TIME_MS,
     )
     confirmed: set[str] = set()
     for concept_id in visible_ids:

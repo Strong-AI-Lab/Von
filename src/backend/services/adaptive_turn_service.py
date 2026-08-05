@@ -2990,8 +2990,8 @@ def _exact_represented_concept_id(value: Any) -> str | None:
 
 def _exact_scoped_relationship_predicate(
     arguments: Mapping[str, Any],
-) -> str | None:
-    """Extract only a concept-valued predicate that needs no semantic resolution."""
+) -> tuple[str, str] | None:
+    """Extract an exact predicate and its canonical represented value kind."""
 
     if arguments.get("predicate_if_missing") is not None:
         return None
@@ -3001,17 +3001,31 @@ def _exact_scoped_relationship_predicate(
     if isinstance(predicate, str) and predicate.strip():
         if predicate_ref is not None:
             return None
-        return _exact_represented_concept_id(predicate)
+        predicate_id = _exact_represented_concept_id(predicate)
+    else:
+        if not isinstance(predicate_ref, Mapping):
+            return None
+        if isinstance(predicate_ref.get("name"), str) and predicate_ref["name"].strip():
+            return None
+        if str(predicate_ref.get("on_missing") or "fail").strip().lower() != "fail":
+            return None
+        predicate_id = _exact_represented_concept_id(
+            predicate_ref.get("concept_id")
+        )
 
-    if not isinstance(predicate_ref, Mapping):
+    if predicate_id is None:
         return None
-    if isinstance(predicate_ref.get("name"), str) and predicate_ref["name"].strip():
+    try:
+        from src.backend.services.relationship_write_service import (
+            resolve_existing_predicate_value_kind,
+        )
+
+        canonical_value_kind = resolve_existing_predicate_value_kind(predicate_id)
+    except Exception:  # noqa: BLE001
         return None
-    if str(predicate_ref.get("on_missing") or "fail").strip().lower() != "fail":
+    if canonical_value_kind not in {"concept", "text"}:
         return None
-    if str(predicate_ref.get("value_kind") or "concept").strip().lower() != "concept":
-        return None
-    return _exact_represented_concept_id(predicate_ref.get("concept_id"))
+    return predicate_id, canonical_value_kind
 
 
 def _effect_subject_authority_denial(
@@ -3044,17 +3058,28 @@ def _effect_subject_authority_denial(
         )
     elif capability_name == "add_relationship":
         source_id = _exact_represented_concept_id(arguments.get("source_id"))
-        target_id = _exact_represented_concept_id(arguments.get("target"))
-        predicate_id = _exact_scoped_relationship_predicate(arguments)
-        if source_id is None or predicate_id is None or target_id is None:
+        raw_target = arguments.get("target")
+        if not isinstance(raw_target, str) or not raw_target.strip():
+            return payload
+        target = raw_target.strip()
+        predicate_resolution = _exact_scoped_relationship_predicate(arguments)
+        if predicate_resolution is None:
+            return payload
+        predicate_id, target_kind = predicate_resolution
+        if target_kind == "concept" and _exact_represented_concept_id(target) is None:
+            return payload
+        if source_id is None or predicate_id is None:
             return payload
         alternative_arguments = {
             "subject_concept_id": source_id,
             "predicate": predicate_id,
-            "target_concept_id": target_id,
         }
+        alternative_arguments[
+            "target_concept_id" if target_kind == "concept" else "target_text"
+        ] = target
         semantic_effect = (
-            "if the subject, predicate, and target are visible, create a "
+            "if the subject and predicate are visible, and any represented "
+            "target is visible, create a "
             "provenance-bearing actor-scoped assertion without publishing "
             "or mutating the canonical relationship"
         )
@@ -3264,6 +3289,8 @@ def execute_adaptive_turn(
     def scoped_assertion_recovery_key(
         capability_name: str,
         arguments: Mapping[str, Any],
+        *,
+        include_language: bool = True,
     ) -> str | None:
         """Identify one exact scoped assertion independently of trusted bindings."""
 
@@ -3296,16 +3323,11 @@ def execute_adaptive_turn(
             "target": (
                 str(target_text).strip() if has_text else target_concept_id
             ),
-            "language": (
-                str(arguments.get("language") or "en-NZ").strip() or "en-NZ"
-                if has_text
-                else None
-            ),
-            "scope_mode": (
-                str(arguments.get("scope_mode") or "user").strip().lower()
-                or "user"
-            ),
         }
+        if has_text and include_language:
+            language = arguments.get("language")
+            if isinstance(language, str) and language.strip():
+                semantic_identity["language"] = language.strip()
         return hashlib.sha256(_json_bytes(semantic_identity)).hexdigest()
 
     def remember_recovery_affordance(
@@ -3348,18 +3370,32 @@ def execute_adaptive_turn(
         nonlocal effect_state_generation
         if effect_status != "succeeded":
             return
-        recovery_key = scoped_assertion_recovery_key(
+        recovery_keys = [
+            scoped_assertion_recovery_key(
+                capability_name,
+                arguments,
+            )
+        ]
+        language_agnostic_key = scoped_assertion_recovery_key(
             capability_name,
             arguments,
+            include_language=False,
         )
-        if recovery_key is None:
+        if language_agnostic_key not in recovery_keys:
+            recovery_keys.append(language_agnostic_key)
+        failed_effect_id = None
+        for recovery_key in recovery_keys:
+            if recovery_key is None:
+                continue
+            pending_effect_ids = recoverable_effect_ids.get(recovery_key)
+            if not pending_effect_ids:
+                continue
+            failed_effect_id = pending_effect_ids.pop(0)
+            if not pending_effect_ids:
+                recoverable_effect_ids.pop(recovery_key, None)
+            break
+        if failed_effect_id is None:
             return
-        pending_effect_ids = recoverable_effect_ids.get(recovery_key)
-        if not pending_effect_ids:
-            return
-        failed_effect_id = pending_effect_ids.pop(0)
-        if not pending_effect_ids:
-            recoverable_effect_ids.pop(recovery_key, None)
         with effect_state_lock:
             failed_state = effect_states.get(failed_effect_id)
             if (

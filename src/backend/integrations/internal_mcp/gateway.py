@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import logging
+import math
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional
+from threading import Lock
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Optional,
+)
 
 from .schemas import (
     Schema,
@@ -24,6 +36,8 @@ from .transport import (
 logger = logging.getLogger(__name__)
 
 _LOG_TAG = "[mcp_gateway]"
+_SUCCESSFUL_DURATION_ADVISORY_MULTIPLIER = 1.25
+_SUCCESSFUL_DURATION_HARD_MULTIPLIER = 2.0
 _ACTOR_CONTEXT_SOURCE: ContextVar[str | None] = ContextVar(
     "internal_mcp_actor_context_source",
     default=None,
@@ -94,6 +108,9 @@ class MethodDefinition:
     # explicitly make elapsed time advisory-only instead of discarding a live
     # handler result at an arbitrary wall-clock boundary.
     hard_timeout_enabled: bool = True
+    # Seed adaptive warning/hard windows with the longest successful duration
+    # already observed before this process. Omit unless that evidence exists.
+    successful_duration_bootstrap_sec: float | None = None
     description: str | None = None
     write_guardrail: Mapping[str, Any] | None = None
     ordinary_turn_public: bool = False
@@ -122,6 +139,9 @@ class MethodDefinition:
     def resolved_timeout(self, transport: InternalMCPTransport) -> float | None:
         if not self.hard_timeout_enabled:
             return None
+        successful_duration = self.resolved_successful_duration_bootstrap()
+        if successful_duration is not None:
+            return successful_duration * _SUCCESSFUL_DURATION_HARD_MULTIPLIER
         if self.timeout_sec is not None:
             return self.timeout_sec
         if self.category == "write":
@@ -134,6 +154,9 @@ class MethodDefinition:
         self,
         transport: InternalMCPTransport,
     ) -> float:
+        successful_duration = self.resolved_successful_duration_bootstrap()
+        if successful_duration is not None:
+            return successful_duration * _SUCCESSFUL_DURATION_ADVISORY_MULTIPLIER
         if self.advisory_timeout_sec is not None:
             value = float(self.advisory_timeout_sec)
             if value <= 0.0:
@@ -149,6 +172,16 @@ class MethodDefinition:
             self.category,
             hard_timeout_sec=float(hard_timeout or fallback_timeout),
         )
+
+    def resolved_successful_duration_bootstrap(self) -> float | None:
+        if self.successful_duration_bootstrap_sec is None:
+            return None
+        value = float(self.successful_duration_bootstrap_sec)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(
+                "successful_duration_bootstrap_sec must be positive and finite"
+            )
+        return value
 
     def resolved_effect_admission_window(
         self,
@@ -183,6 +216,7 @@ class MethodMetrics:
     last_error: str | None = None
     last_outcome: str | None = None
     last_duration_ms: float | None = None
+    successful_max_duration_ms: float | None = None
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -193,6 +227,7 @@ class MethodMetrics:
             "last_error": self.last_error,
             "last_outcome": self.last_outcome,
             "last_duration_ms": self.last_duration_ms,
+            "successful_max_duration_ms": self.successful_max_duration_ms,
         }
 
 
@@ -258,6 +293,9 @@ class MethodCatalogue:
                 "timeout_sec": definition.timeout_sec,
                 "advisory_timeout_sec": definition.advisory_timeout_sec,
                 "hard_timeout_enabled": definition.hard_timeout_enabled,
+                "successful_duration_bootstrap_sec": (
+                    definition.successful_duration_bootstrap_sec
+                ),
                 "has_output_schema": definition.output_schema is not None,
                 "description": definition.description,
                 "write_guardrail": (
@@ -323,6 +361,7 @@ class InternalMCPGateway:
         self._method_metrics: Dict[str, MethodMetrics] = {
             name: MethodMetrics() for name in catalogue.list_methods()
         }
+        self._adaptive_history_lock = Lock()
 
     @property
     def enabled(self) -> bool:
@@ -341,6 +380,77 @@ class InternalMCPGateway:
     def register_metrics_if_missing(self, method_name: str) -> None:
         if method_name not in self._method_metrics:
             self._method_metrics[method_name] = MethodMetrics()
+
+    def _advisory_timeout_values(
+        self,
+        definition: MethodDefinition,
+        *,
+        hard_boundary_sec: float | None = None,
+    ) -> tuple[float, float, float]:
+        """Return bootstrap, adaptive, and hard-boundary-clamped advisories."""
+
+        bootstrap_sec = definition.resolved_advisory_timeout(self._transport)
+        successful_max_duration_ms = self._successful_max_duration_ms(
+            definition.name
+        )
+        successful_duration_basis_sec = (
+            float(successful_max_duration_ms) / 1000.0
+            if successful_max_duration_ms is not None
+            else None
+        )
+        configured_bootstrap_sec = (
+            definition.resolved_successful_duration_bootstrap()
+        )
+        if configured_bootstrap_sec is not None:
+            successful_duration_basis_sec = max(
+                configured_bootstrap_sec,
+                successful_duration_basis_sec or 0.0,
+            )
+        adaptive_sec = (
+            successful_duration_basis_sec
+            * _SUCCESSFUL_DURATION_ADVISORY_MULTIPLIER
+            if successful_duration_basis_sec is not None
+            else bootstrap_sec
+        )
+        effective_sec = (
+            min(adaptive_sec, max(0.0, float(hard_boundary_sec)))
+            if hard_boundary_sec is not None
+            else adaptive_sec
+        )
+        return bootstrap_sec, adaptive_sec, effective_sec
+
+    def _hard_timeout_values(
+        self,
+        definition: MethodDefinition,
+    ) -> tuple[float | None, float | None]:
+        """Return configured bootstrap and next adaptive hard boundaries."""
+
+        bootstrap_sec = definition.resolved_timeout(self._transport)
+        configured_bootstrap_sec = (
+            definition.resolved_successful_duration_bootstrap()
+        )
+        if bootstrap_sec is None or configured_bootstrap_sec is None:
+            return bootstrap_sec, bootstrap_sec
+        successful_max_duration_ms = self._successful_max_duration_ms(
+            definition.name
+        )
+        successful_duration_basis_sec = max(
+            configured_bootstrap_sec,
+            (
+                float(successful_max_duration_ms) / 1000.0
+                if successful_max_duration_ms is not None
+                else 0.0
+            ),
+        )
+        return (
+            bootstrap_sec,
+            successful_duration_basis_sec
+            * _SUCCESSFUL_DURATION_HARD_MULTIPLIER,
+        )
+
+    def _successful_max_duration_ms(self, method_name: str) -> float | None:
+        with self._adaptive_history_lock:
+            return self._method_metrics[method_name].successful_max_duration_ms
 
     @staticmethod
     def _clean_concept_id(value: Any) -> str | None:
@@ -444,15 +554,32 @@ class InternalMCPGateway:
             self._record_failure(method_name, error_message)
             raise SchemaValidationError(error_message, stage="input_schema")
 
-        timeout = definition.resolved_timeout(self._transport)
-        advisory_timeout = definition.resolved_advisory_timeout(self._transport)
+        _, timeout = self._hard_timeout_values(definition)
+        remaining_hard_boundary_sec = timeout
+        if deadline_monotonic is not None:
+            caller_remaining_sec = max(
+                0.0,
+                float(deadline_monotonic) - time.monotonic(),
+            )
+            remaining_hard_boundary_sec = (
+                min(timeout, caller_remaining_sec)
+                if timeout is not None
+                else caller_remaining_sec
+            )
+        _, _, advisory_timeout = self._advisory_timeout_values(
+            definition,
+            hard_boundary_sec=remaining_hard_boundary_sec,
+        )
         minimum_execution_window = (
             definition.resolved_effect_admission_window(self._transport)
             if require_effect_admission_window
             else None
         )
         observed_late_completion = late_completion_observer
-        if late_completion_observer is not None:
+        observe_adaptive_late_completion = (
+            definition.resolved_successful_duration_bootstrap() is not None
+        )
+        if late_completion_observer is not None or observe_adaptive_late_completion:
 
             def _observe_validated_late_completion(
                 observation: Dict[str, Any],
@@ -504,7 +631,27 @@ class InternalMCPGateway:
                         "output_schema_error": validation_error,
                     }
                 )
-                late_completion_observer(enriched)
+                if (
+                    enriched.get("outcome") == "late_success"
+                    and enriched.get("payload_truncated") is not True
+                    and valid is not False
+                    and not (
+                        isinstance(result_payload, Mapping)
+                        and result_payload.get("success") is False
+                    )
+                ):
+                    try:
+                        completed_duration_ms = float(
+                            enriched.get("queue_duration_ms") or 0.0
+                        ) + float(enriched.get("handler_duration_ms"))
+                    except (TypeError, ValueError):
+                        completed_duration_ms = None
+                    self._record_successful_duration(
+                        method_name,
+                        completed_duration_ms,
+                    )
+                if late_completion_observer is not None:
+                    late_completion_observer(enriched)
 
             observed_late_completion = _observe_validated_late_completion
         try:
@@ -632,16 +779,51 @@ class InternalMCPGateway:
                     self._record_failure(method_name, message)
                     raise SchemaValidationError(message, stage="output_schema")
 
-        self._record_success(method_name, transport_result.duration_ms)
+        self._record_success(
+            method_name,
+            transport_result.duration_ms,
+            include_in_adaptive_history=not (
+                isinstance(result_payload, Mapping)
+                and result_payload.get("success") is False
+            ),
+        )
         return transport_result
 
-    def _record_success(self, method_name: str, duration_ms: float | None) -> None:
+    def _record_success(
+        self,
+        method_name: str,
+        duration_ms: float | None,
+        *,
+        include_in_adaptive_history: bool = True,
+    ) -> None:
         self._total_calls += 1
         metrics = self._method_metrics[method_name]
         metrics.calls += 1
         metrics.last_duration_ms = duration_ms
         metrics.last_error = None
         metrics.last_outcome = "completed"
+        if include_in_adaptive_history and duration_ms is not None:
+            self._record_successful_duration(method_name, duration_ms)
+
+    def _record_successful_duration(
+        self,
+        method_name: str,
+        duration_ms: Any,
+    ) -> None:
+        if duration_ms is None or isinstance(duration_ms, bool):
+            return
+        try:
+            completed_duration_ms = float(duration_ms)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(completed_duration_ms) or completed_duration_ms <= 0.0:
+            return
+        with self._adaptive_history_lock:
+            metrics = self._method_metrics[method_name]
+            metrics.successful_max_duration_ms = max(
+                metrics.successful_max_duration_ms or 0.0,
+                completed_duration_ms,
+            )
 
     def _record_failure(
         self,
@@ -665,15 +847,35 @@ class InternalMCPGateway:
             metrics.saturations += 1
 
     def get_diagnostics(self) -> Dict[str, Any]:
+        method_diagnostics: Dict[str, Dict[str, Any]] = {}
+        for name, metrics in self._method_metrics.items():
+            snapshot = metrics.snapshot()
+            definition = self._catalogue.get(name)
+            bootstrap_hard_timeout_sec, hard_timeout_sec = (
+                self._hard_timeout_values(definition)
+            )
+            bootstrap_sec, adaptive_sec, next_sec = (
+                self._advisory_timeout_values(
+                    definition,
+                    hard_boundary_sec=hard_timeout_sec,
+                )
+            )
+            snapshot.update(
+                {
+                    "bootstrap_advisory_timeout_sec": bootstrap_sec,
+                    "adaptive_advisory_timeout_sec": adaptive_sec,
+                    "next_advisory_timeout_sec": next_sec,
+                    "bootstrap_hard_timeout_sec": bootstrap_hard_timeout_sec,
+                    "next_hard_timeout_sec": hard_timeout_sec,
+                }
+            )
+            method_diagnostics[name] = snapshot
         diagnostics = {
             "enabled": self._enabled,
             "registered_methods": self._catalogue.list_methods(),
             "total_calls": self._total_calls,
             "total_failures": self._total_failures,
-            "methods": {
-                name: metrics.snapshot()
-                for name, metrics in self._method_metrics.items()
-            },
+            "methods": method_diagnostics,
         }
         try:
             from .dynamic_tool_loader import get_dynamic_tool_registration_status
@@ -710,11 +912,11 @@ class InternalMCPGateway:
             return None
 
     def get_method_timeout_sec(self, method_name: str) -> float | None:
-        """Return the configured hard window, or ``None`` for advisory-only."""
+        """Return the next hard window, or ``None`` for advisory-only."""
 
         definition = self.get_method_definition(method_name)
         return (
-            definition.resolved_timeout(self._transport)
+            self._hard_timeout_values(definition)[1]
             if definition is not None
             else None
         )

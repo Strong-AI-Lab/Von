@@ -74,6 +74,10 @@ SUGGESTED_SUPERTYPES: List[str] = [
     "#V#information_object",
 ]
 
+CORE_RELATIONSHIP_TEXT_PREDICATES: frozenset[str] = frozenset(
+    {"hasContent", "hasDescription", "hasName"}
+)
+
 
 def _emit_relationship_mutation_event(
     *,
@@ -417,6 +421,50 @@ def validate_predicate_concept(
         )
 
     return True, None, None
+
+
+def resolve_existing_predicate_value_kind(
+    predicate: str,
+    repo: Any = None,
+) -> str | None:
+    """Return the canonical object kind for one existing exact predicate."""
+
+    if repo is None:
+        repo = ConceptsRepository
+    predicate_id = str(predicate or "").strip()
+    if not predicate_id.startswith("#V#"):
+        return None
+    if predicate_id[3:] in CORE_RELATIONSHIP_TEXT_PREDICATES:
+        return "text"
+    if is_structural_predicate(predicate_id):
+        return "concept"
+    with bypass_access_control():
+        predicate_doc = repo.find_one(
+            {"concept_id": predicate_id},
+            {"concept_id": 1, "relationships.is_an_instance_of": 1},
+        )
+    if predicate_doc is None and is_code_concept_id(predicate_id):
+        predicate_doc = build_virtual_concept_doc(predicate_id)
+    if not isinstance(predicate_doc, dict) or not is_predicate(predicate_doc):
+        return None
+    relationships = (
+        predicate_doc.get("relationships")
+        if isinstance(predicate_doc, Mapping)
+        else {}
+    )
+    instance_of = (
+        relationships.get("is_an_instance_of")
+        if isinstance(relationships, Mapping)
+        else None
+    )
+    if isinstance(instance_of, str):
+        instance_of = [instance_of]
+    return (
+        "text"
+        if isinstance(instance_of, list)
+        and "#V#binary_text_predicate" in instance_of
+        else "concept"
+    )
 
 
 def add_structural_relationship(

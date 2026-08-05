@@ -2721,6 +2721,7 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
     predicate_arguments: dict[str, Any],
 ) -> None:
     from src.backend.db import mongo_client
+    from src.backend.services import relationship_write_service
 
     class _Collection:
         def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -2730,6 +2731,11 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
         mongo_client,
         "get_concepts_collection",
         lambda: _Collection(),
+    )
+    monkeypatch.setattr(
+        relationship_write_service,
+        "resolve_existing_predicate_value_kind",
+        lambda _predicate: "concept",
     )
     invoked: list[tuple[str, dict[str, Any]]] = []
 
@@ -2838,17 +2844,244 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
 
 
 @pytest.mark.parametrize(
+    "predicate_arguments",
+    [
+        {"predicate": "#V#has_email"},
+        {
+            "predicate_ref": {
+                "concept_id": "#V#has_email",
+                "value_kind": "text",
+            }
+        },
+    ],
+)
+def test_canonical_literal_relationship_denial_recovers_in_chosen_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    predicate_arguments: dict[str, Any],
+) -> None:
+    from src.backend.db import mongo_client
+    from src.backend.services import relationship_write_service
+
+    class _Collection:
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"relationships": {}}
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    monkeypatch.setattr(
+        relationship_write_service,
+        "resolve_existing_predicate_value_kind",
+        lambda _predicate: "text",
+    )
+    invoked: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append((name, arguments))
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": "ska_literal_relationship_recovered",
+            "canonical_publication": False,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="canonical-literal-relationship-denied",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#globally_visible_subject",
+                            **predicate_arguments,
+                            "target": "Actor-relative observation.",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="scoped-literal-relationship-recovery",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            "subject_concept_id": (
+                                "#V#globally_visible_subject"
+                            ),
+                            "predicate": "#V#has_email",
+                            "target_text": "Actor-relative observation.",
+                            "language": "en-NZ",
+                            "scope_mode": "organisation",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The scoped observation was recorded."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, include_scoped_assertion=True),
+        prompt="Record this observation without changing shared publication.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="canonical-literal-relationship-denied",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert len(invoked) == 1
+    recovered_name, recovered_arguments = invoked[0]
+    assert recovered_name == "upsert_scoped_assertion"
+    assert recovered_arguments["scope_mode"] == "organisation"
+    assert recovered_arguments["target_text"] == "Actor-relative observation."
+    denial, recovery = result.tool_invocations
+    assert denial["effect_status"] == "failed"
+    assert "target_text" in denial["evidence"]["preview"]
+    assert recovery["effect_status"] == "succeeded"
+    assert denial["recovery_status"] == "succeeded"
+    assert denial["recovered_by_effect_id"] == recovery["effect_id"]
+    assert result.terminal_status == "completed"
+    assert result.response_text == "The scoped observation was recorded."
+
+
+@pytest.mark.parametrize(
+    "recovery_arguments",
+    [
+        {
+            "subject_concept_id": "#V#different_subject",
+            "predicate": "#V#has_email",
+            "target_text": "Actor-relative observation.",
+        },
+        {
+            "subject_concept_id": "#V#globally_visible_subject",
+            "predicate": "hasDescription",
+            "target_text": "Actor-relative observation.",
+        },
+        {
+            "subject_concept_id": "#V#globally_visible_subject",
+            "predicate": "#V#has_email",
+            "target_text": "Different observation.",
+        },
+        {
+            "subject_concept_id": "#V#globally_visible_subject",
+            "predicate": "#V#has_email",
+            "target_concept_id": "#V#actor_relative_observation",
+        },
+    ],
+    ids=["subject", "predicate", "value", "target-kind"],
+)
+def test_canonical_literal_relationship_recovery_requires_same_object(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_arguments: dict[str, Any],
+) -> None:
+    from src.backend.db import mongo_client
+    from src.backend.services import relationship_write_service
+
+    class _Collection:
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"relationships": {}}
+
+    monkeypatch.setattr(
+        mongo_client,
+        "get_concepts_collection",
+        lambda: _Collection(),
+    )
+    monkeypatch.setattr(
+        relationship_write_service,
+        "resolve_existing_predicate_value_kind",
+        lambda _predicate: "text",
+    )
+
+    def handler(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "assertion_id": "ska_unrelated_recovery",
+            "canonical_publication": False,
+        }
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="literal-relationship-denied",
+                    payload={
+                        "name": "add_relationship",
+                        "arguments": {
+                            "source_id": "#V#globally_visible_subject",
+                            "predicate": "#V#has_email",
+                            "target": "Actor-relative observation.",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="unrelated-scoped-assertion",
+                    payload={
+                        "name": "upsert_scoped_assertion",
+                        "arguments": {
+                            **recovery_arguments,
+                            "scope_mode": "organisation",
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="The scoped assertion was recorded."),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_effect_gateway(handler, include_scoped_assertion=True),
+        prompt="Record this observation without changing shared publication.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="literal-relationship-denied",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    denial = result.tool_invocations[0]
+    assert denial["effect_status"] == "failed"
+    assert "recovery_status" not in denial
+    assert "recovered_by_effect_id" not in denial
+    assert result.terminal_status == "effect_failed"
+    assert result.response_text != "The scoped assertion was recorded."
+
+
+@pytest.mark.parametrize(
     "arguments",
     [
         {
             "source_id": "#V#subject",
             "predicate": "hasResearchInterest",
             "target": "#V#topic",
-        },
-        {
-            "source_id": "#V#subject",
-            "predicate": "#V#hasResearchInterest",
-            "target": "Natural-language target",
         },
         {
             "source_id": "#V#subject",
@@ -2865,14 +3098,6 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
             "source_id": "#V#subject",
             "predicate_ref": {
                 "concept_id": "#V#hasResearchInterest",
-                "value_kind": "text",
-            },
-            "target": "#V#topic",
-        },
-        {
-            "source_id": "#V#subject",
-            "predicate_ref": {
-                "concept_id": "#V#hasResearchInterest",
                 "on_missing": "create_typed_predicate",
             },
             "target": "#V#topic",
@@ -2883,11 +3108,32 @@ def test_canonical_relationship_denial_recovers_as_scoped_assertion(
             "predicate_if_missing": {"name": "hasResearchInterest"},
             "target": "#V#topic",
         },
+        {
+            "source_id": "#V#subject",
+            "predicate_ref": {
+                "concept_id": "#V#hasResearchInterest",
+                "value_kind": "concept",
+            },
+            "target": "Natural-language target",
+        },
+        {
+            "source_id": "#V#subject",
+            "predicate": "#V#hasResearchInterest",
+            "target": "#V#malformed target",
+        },
     ],
 )
 def test_non_exact_relationship_denial_has_no_scoped_recovery(
     arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from src.backend.services import relationship_write_service
+
+    monkeypatch.setattr(
+        relationship_write_service,
+        "resolve_existing_predicate_value_kind",
+        lambda _predicate: "concept",
+    )
     denial = _effect_subject_authority_denial(
         capability_name="add_relationship",
         arguments=arguments,
@@ -2896,6 +3142,116 @@ def test_non_exact_relationship_denial_has_no_scoped_recovery(
 
     assert denial["error_code"] == "effect_subject_not_authorised"
     assert "recovery_affordances" not in denial
+
+
+@pytest.mark.parametrize(
+    ("arguments", "canonical_kind", "expected_target_field"),
+    [
+        (
+            {
+                "source_id": "#V#subject",
+                "predicate": "#V#is_an_instance_of",
+                "target": "Professor",
+            },
+            "concept",
+            None,
+        ),
+        (
+            {
+                "source_id": "#V#subject",
+                "predicate_ref": {
+                    "concept_id": "#V#has_email",
+                    "value_kind": "concept",
+                },
+                "target": "#V#student@example.invalid",
+            },
+            "text",
+            "target_text",
+        ),
+        (
+            {
+                "source_id": "#V#subject",
+                "predicate": "#V#hasResearchInterest",
+                "target": "#v#topic",
+            },
+            "concept",
+            None,
+        ),
+    ],
+    ids=["concept-literal", "text-represented-looking-literal", "lowercase-id"],
+)
+def test_relationship_recovery_uses_represented_predicate_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, Any],
+    canonical_kind: str,
+    expected_target_field: str | None,
+) -> None:
+    from src.backend.services import relationship_write_service
+
+    monkeypatch.setattr(
+        relationship_write_service,
+        "resolve_existing_predicate_value_kind",
+        lambda _predicate: canonical_kind,
+    )
+
+    denial = _effect_subject_authority_denial(
+        capability_name="add_relationship",
+        arguments=arguments,
+        scoped_assertion_available=True,
+    )
+
+    affordances = denial.get("recovery_affordances") or []
+    if expected_target_field is None:
+        assert affordances == []
+    else:
+        assert len(affordances) == 1
+        recovery_arguments = affordances[0]["arguments"]
+        assert recovery_arguments[expected_target_field] == arguments["target"]
+        assert "target_concept_id" not in recovery_arguments
+
+
+def test_existing_predicate_value_kind_comes_from_canonical_typing() -> None:
+    from src.backend.services.relationship_write_service import (
+        resolve_existing_predicate_value_kind,
+    )
+
+    class _PredicateRepo:
+        @staticmethod
+        def find_one(query: dict[str, Any], *_args: Any) -> dict[str, Any] | None:
+            concept_id = query.get("concept_id")
+            if concept_id == "#V#has_email":
+                return {
+                    "concept_id": concept_id,
+                    "relationships": {
+                        "is_an_instance_of": ["#V#binary_text_predicate"]
+                    },
+                }
+            if concept_id == "#V#hasResearchInterest":
+                return {
+                    "concept_id": concept_id,
+                    "relationships": {"is_an_instance_of": ["#V#predicate"]},
+                }
+            return None
+
+    assert (
+        resolve_existing_predicate_value_kind("#V#has_email", _PredicateRepo)
+        == "text"
+    )
+    assert (
+        resolve_existing_predicate_value_kind(
+            "#V#hasResearchInterest",
+            _PredicateRepo,
+        )
+        == "concept"
+    )
+    assert (
+        resolve_existing_predicate_value_kind("#V#hasDescription", _PredicateRepo)
+        == "text"
+    )
+    assert (
+        resolve_existing_predicate_value_kind("#V#is_an_instance_of", _PredicateRepo)
+        == "concept"
+    )
 
 
 @pytest.mark.parametrize(

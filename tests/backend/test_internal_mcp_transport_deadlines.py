@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import sys
 import time
+from contextlib import contextmanager
 from threading import Event, Thread
 
-from pymongo.errors import ExecutionTimeout
 import pytest
+from pymongo.errors import ExecutionTimeout
 
 from src.backend.integrations.internal_mcp import transport as transport_mod
 from src.backend.integrations.internal_mcp.gateway import (
@@ -17,12 +17,13 @@ from src.backend.integrations.internal_mcp.gateway import (
 )
 from src.backend.integrations.internal_mcp.schemas import Schema
 from src.backend.integrations.internal_mcp.transport import (
-    _BoundedHandlerExecutor,
     InternalMCPTransport,
+    TransportResult,
+    _BoundedHandlerExecutor,
     get_internal_mcp_execution_scope,
     internal_mcp_cancellation_requested,
-    record_internal_mcp_effect_receipt,
     raise_if_internal_mcp_cancelled,
+    record_internal_mcp_effect_receipt,
 )
 
 
@@ -36,6 +37,7 @@ def _gateway_for(
     timeout_sec: float | None = None,
     advisory_timeout_sec: float | None = None,
     hard_timeout_enabled: bool = True,
+    successful_duration_bootstrap_sec: float | None = None,
     effect_admission_window_sec: float | None = None,
 ) -> InternalMCPGateway:
     catalogue = MethodCatalogue()
@@ -49,6 +51,9 @@ def _gateway_for(
             timeout_sec=timeout_sec,
             advisory_timeout_sec=advisory_timeout_sec,
             hard_timeout_enabled=hard_timeout_enabled,
+            successful_duration_bootstrap_sec=(
+                successful_duration_bootstrap_sec
+            ),
             effect_admission_window_sec=effect_admission_window_sec,
         )
     )
@@ -102,6 +107,7 @@ def test_handler_before_hard_deadline_remains_success_after_advisory_budget(
     method_metrics = diagnostics["methods"]["synthetic_fast_read"]
     assert method_metrics["last_outcome"] == "completed"
     assert method_metrics["timeouts"] == 0
+    assert method_metrics["next_hard_timeout_sec"] == pytest.approx(0.25)
 
 
 def test_advisory_only_handler_keeps_usable_completion_after_warning() -> None:
@@ -118,13 +124,351 @@ def test_advisory_only_handler_keeps_usable_completion_after_warning() -> None:
         hard_timeout_enabled=False,
     )
 
-    result = gateway.invoke("synthetic_soft_window_write", {})
+    first_result = gateway.invoke("synthetic_soft_window_write", {})
 
-    assert result.outcome == "completed"
-    assert result.timeout_sec is None
-    assert result.configured_hard_timeout_sec is None
-    assert result.advisory_budget_exceeded is True
-    assert result.payload == {"success": True, "changed": True}
+    assert first_result.outcome == "completed"
+    assert first_result.timeout_sec is None
+    assert first_result.configured_hard_timeout_sec is None
+    assert first_result.advisory_timeout_sec == pytest.approx(0.005)
+    assert first_result.advisory_budget_exceeded is True
+    assert first_result.payload == {"success": True, "changed": True}
+
+    first_metrics = gateway.get_diagnostics()["methods"][
+        "synthetic_soft_window_write"
+    ]
+    expected_next_advisory = first_metrics["next_advisory_timeout_sec"]
+    assert first_metrics["successful_max_duration_ms"] == pytest.approx(
+        first_result.duration_ms
+    )
+    assert expected_next_advisory == pytest.approx(
+        first_result.duration_ms * 1.25 / 1000.0
+    )
+
+    second_result = gateway.invoke("synthetic_soft_window_write", {})
+
+    assert second_result.outcome == "completed"
+    assert second_result.timeout_sec is None
+    assert second_result.configured_hard_timeout_sec is None
+    assert second_result.advisory_timeout_sec == pytest.approx(
+        expected_next_advisory
+    )
+    assert second_result.payload == {"success": True, "changed": True}
+
+
+def test_gateway_advisory_bootstrap_adapts_from_successful_max_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = InternalMCPTransport(
+        read_timeout_sec=2.0,
+        read_advisory_timeout_sec=0.01,
+    )
+    scripted_results = iter(
+        (
+            ({"success": True}, 4.0),
+            ({"success": True}, 80.0),
+            ({"success": True}, 10.0),
+            ({"success": False, "error": "synthetic"}, 500.0),
+        )
+    )
+    observed_advisories: list[float] = []
+
+    def _scripted_execute(**kwargs) -> TransportResult:
+        payload, duration_ms = next(scripted_results)
+        advisory_timeout_sec = float(kwargs["advisory_timeout_sec"])
+        observed_advisories.append(advisory_timeout_sec)
+        return TransportResult(
+            payload=payload,
+            duration_ms=duration_ms,
+            advisory_timeout_sec=advisory_timeout_sec,
+        )
+
+    monkeypatch.setattr(transport, "execute", _scripted_execute)
+    gateway = _gateway_for(
+        method_name="synthetic_adaptive_read",
+        handler=lambda: {"success": True},
+        transport=transport,
+        advisory_timeout_sec=0.01,
+        hard_timeout_enabled=False,
+    )
+
+    initial_metrics = gateway.get_diagnostics()["methods"][
+        "synthetic_adaptive_read"
+    ]
+    assert initial_metrics["bootstrap_advisory_timeout_sec"] == pytest.approx(
+        0.01
+    )
+    assert initial_metrics["adaptive_advisory_timeout_sec"] == pytest.approx(
+        0.01
+    )
+    assert initial_metrics["next_advisory_timeout_sec"] == pytest.approx(0.01)
+    assert initial_metrics["successful_max_duration_ms"] is None
+
+    gateway.invoke("synthetic_adaptive_read", {})
+    learned_metrics = gateway.get_diagnostics()["methods"][
+        "synthetic_adaptive_read"
+    ]
+    assert observed_advisories == pytest.approx([0.01])
+    assert learned_metrics["successful_max_duration_ms"] == pytest.approx(4.0)
+    assert learned_metrics["adaptive_advisory_timeout_sec"] == pytest.approx(
+        0.005
+    )
+    assert learned_metrics["next_advisory_timeout_sec"] == pytest.approx(0.005)
+
+    gateway.invoke("synthetic_adaptive_read", {})
+    assert observed_advisories == pytest.approx([0.01, 0.005])
+
+    gateway.invoke("synthetic_adaptive_read", {})
+    assert observed_advisories == pytest.approx([0.01, 0.005, 0.1])
+
+    gateway.invoke("synthetic_adaptive_read", {})
+    final_metrics = gateway.get_diagnostics()["methods"][
+        "synthetic_adaptive_read"
+    ]
+    assert observed_advisories == pytest.approx([0.01, 0.005, 0.1, 0.1])
+    assert final_metrics["successful_max_duration_ms"] == pytest.approx(80.0)
+
+
+def test_gateway_adaptive_advisory_clamps_to_remaining_hard_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = InternalMCPTransport(
+        read_timeout_sec=2.0,
+        read_advisory_timeout_sec=0.1,
+    )
+    observed_advisories: list[float] = []
+
+    def _scripted_execute(**kwargs) -> TransportResult:
+        advisory_timeout_sec = float(kwargs["advisory_timeout_sec"])
+        observed_advisories.append(advisory_timeout_sec)
+        return TransportResult(
+            payload={"success": True},
+            duration_ms=1_000.0 if len(observed_advisories) == 1 else 1.0,
+            advisory_timeout_sec=advisory_timeout_sec,
+        )
+
+    monkeypatch.setattr(transport, "execute", _scripted_execute)
+    gateway = _gateway_for(
+        method_name="synthetic_caller_bounded_read",
+        handler=lambda: {"success": True},
+        transport=transport,
+        advisory_timeout_sec=0.1,
+        hard_timeout_enabled=False,
+    )
+
+    gateway.invoke("synthetic_caller_bounded_read", {})
+    gateway.invoke(
+        "synthetic_caller_bounded_read",
+        {},
+        deadline_monotonic=time.monotonic() + 0.5,
+    )
+
+    assert observed_advisories[0] == pytest.approx(0.1)
+    assert 0.0 < observed_advisories[1] <= 0.5
+    assert observed_advisories[1] < 1.25
+
+
+def test_opted_in_hard_boundary_adapts_to_twice_successful_max_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = InternalMCPTransport(
+        write_timeout_sec=1.0,
+        write_advisory_timeout_sec=0.6,
+    )
+    scripted_results = iter(
+        (
+            ({"success": True}, 100.0),
+            ({"success": True}, 800.0),
+            ({"success": True}, 100.0),
+            ({"success": False, "error": "synthetic"}, 2_000.0),
+        )
+    )
+    observed_windows: list[tuple[float | None, float]] = []
+
+    def _scripted_execute(**kwargs) -> TransportResult:
+        payload, duration_ms = next(scripted_results)
+        observed_windows.append(
+            (kwargs["timeout_sec"], float(kwargs["advisory_timeout_sec"]))
+        )
+        return TransportResult(
+            payload=payload,
+            duration_ms=duration_ms,
+            advisory_timeout_sec=float(kwargs["advisory_timeout_sec"]),
+        )
+
+    monkeypatch.setattr(transport, "execute", _scripted_execute)
+    gateway = _gateway_for(
+        method_name="synthetic_adaptive_hard_write",
+        handler=lambda: {"success": True},
+        transport=transport,
+        category="write",
+        successful_duration_bootstrap_sec=0.5,
+    )
+
+    initial = gateway.get_diagnostics()["methods"][
+        "synthetic_adaptive_hard_write"
+    ]
+    assert initial["bootstrap_hard_timeout_sec"] == pytest.approx(1.0)
+    assert initial["next_hard_timeout_sec"] == pytest.approx(1.0)
+    assert initial["next_advisory_timeout_sec"] == pytest.approx(0.625)
+
+    gateway.invoke("synthetic_adaptive_hard_write", {})
+    learned = gateway.get_diagnostics()["methods"][
+        "synthetic_adaptive_hard_write"
+    ]
+    assert observed_windows == pytest.approx([(1.0, 0.625)])
+    assert learned["successful_max_duration_ms"] == pytest.approx(100.0)
+    assert learned["next_hard_timeout_sec"] == pytest.approx(1.0)
+    assert learned["next_advisory_timeout_sec"] == pytest.approx(0.625)
+    assert gateway.get_method_timeout_sec(
+        "synthetic_adaptive_hard_write"
+    ) == pytest.approx(1.0)
+
+    gateway.invoke("synthetic_adaptive_hard_write", {})
+    gateway.invoke("synthetic_adaptive_hard_write", {})
+    gateway.invoke("synthetic_adaptive_hard_write", {})
+    final = gateway.get_diagnostics()["methods"][
+        "synthetic_adaptive_hard_write"
+    ]
+    assert observed_windows == pytest.approx(
+        [
+            (1.0, 0.625),
+            (1.0, 0.625),
+            (1.6, 1.0),
+            (1.6, 1.0),
+        ]
+    )
+    assert final["successful_max_duration_ms"] == pytest.approx(800.0)
+    assert final["next_hard_timeout_sec"] == pytest.approx(1.6)
+    assert final["next_advisory_timeout_sec"] == pytest.approx(1.0)
+
+    restarted = _gateway_for(
+        method_name="synthetic_restarted_adaptive_hard_write",
+        handler=lambda: {"success": True},
+        transport=transport,
+        category="write",
+        successful_duration_bootstrap_sec=0.5,
+    )
+    restarted_metrics = restarted.get_diagnostics()["methods"][
+        "synthetic_restarted_adaptive_hard_write"
+    ]
+    assert restarted_metrics["next_hard_timeout_sec"] == pytest.approx(1.0)
+    assert restarted_metrics["next_advisory_timeout_sec"] == pytest.approx(0.625)
+
+
+def test_parallel_successes_preserve_longest_adaptive_duration() -> None:
+    gateway = _gateway_for(
+        method_name="synthetic_parallel_adaptive_write",
+        handler=lambda: {"success": True},
+        transport=InternalMCPTransport(),
+        category="write",
+        successful_duration_bootstrap_sec=0.5,
+    )
+    start = Event()
+    durations = [25.0, 800.0, 40.0, 1_200.0, 300.0, 75.0]
+    threads = [
+        Thread(
+            target=lambda value=value: (
+                start.wait(),
+                gateway._record_successful_duration(
+                    "synthetic_parallel_adaptive_write",
+                    value,
+                ),
+            ),
+            daemon=True,
+        )
+        for value in durations
+    ]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for thread in threads:
+        thread.join(timeout=1.0)
+    for ignored_duration in (None, 0.0, -1.0, float("nan"), float("inf"), "bad"):
+        gateway._record_successful_duration(
+            "synthetic_parallel_adaptive_write",
+            ignored_duration,
+        )
+
+    metrics = gateway.get_diagnostics()["methods"][
+        "synthetic_parallel_adaptive_write"
+    ]
+    assert metrics["successful_max_duration_ms"] == pytest.approx(max(durations))
+    assert metrics["next_hard_timeout_sec"] == pytest.approx(2.4)
+    assert metrics["next_advisory_timeout_sec"] == pytest.approx(1.5)
+
+
+def test_adaptive_history_learns_validated_late_success() -> None:
+    transport = InternalMCPTransport(
+        write_timeout_sec=1.0,
+        write_advisory_timeout_sec=0.01,
+    )
+    gateway = _gateway_for(
+        method_name="synthetic_late_adaptive_write",
+        handler=lambda: (time.sleep(0.03), {"success": True})[1],
+        transport=transport,
+        category="write",
+        successful_duration_bootstrap_sec=0.01,
+    )
+
+    result = gateway.invoke("synthetic_late_adaptive_write", {})
+
+    assert result.outcome == "timed_out"
+    deadline = time.monotonic() + 1.0
+    metrics = gateway.get_diagnostics()["methods"][
+        "synthetic_late_adaptive_write"
+    ]
+    while (
+        metrics["successful_max_duration_ms"] is None
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+        metrics = gateway.get_diagnostics()["methods"][
+            "synthetic_late_adaptive_write"
+        ]
+    assert metrics["successful_max_duration_ms"] is not None
+    assert metrics["successful_max_duration_ms"] >= 25.0
+    assert metrics["next_hard_timeout_sec"] >= 0.05
+
+
+def test_adaptive_late_success_includes_queue_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = InternalMCPTransport()
+
+    def _scripted_execute(**kwargs) -> TransportResult:
+        kwargs["late_completion_observer"](
+            {
+                "outcome": "late_success",
+                "queue_duration_ms": 40.0,
+                "handler_duration_ms": 80.0,
+                "payload": {"success": True},
+                "payload_truncated": False,
+            }
+        )
+        return TransportResult(
+            payload={"success": False, "error_code": "tool_timeout"},
+            duration_ms=100.0,
+            outcome="timed_out",
+        )
+
+    monkeypatch.setattr(transport, "execute", _scripted_execute)
+    gateway = _gateway_for(
+        method_name="synthetic_queued_late_adaptive_write",
+        handler=lambda: {"success": True},
+        transport=transport,
+        category="write",
+        successful_duration_bootstrap_sec=0.05,
+    )
+
+    result = gateway.invoke("synthetic_queued_late_adaptive_write", {})
+    metrics = gateway.get_diagnostics()["methods"][
+        "synthetic_queued_late_adaptive_write"
+    ]
+
+    assert result.outcome == "timed_out"
+    assert metrics["successful_max_duration_ms"] == pytest.approx(120.0)
+    assert metrics["next_hard_timeout_sec"] == pytest.approx(0.24)
+    assert metrics["next_advisory_timeout_sec"] == pytest.approx(0.15)
 
 
 def test_hard_deadline_returns_typed_timeout_and_requests_cooperative_cancel() -> None:

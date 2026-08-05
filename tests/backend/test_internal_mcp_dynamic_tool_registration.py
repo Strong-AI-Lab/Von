@@ -109,6 +109,44 @@ def test_dynamic_loader_supports_fixed_payload_with_gateway_invoke(monkeypatch):
         pass
 
 
+def test_dynamic_proxy_preserves_target_timing_policy(monkeypatch):
+    _set_dynamic_tool_docs(
+        monkeypatch,
+        [
+            {
+                "concept_id": "#V#dynamic_timing_proxy",
+                "attributes": {
+                    "mcp_tool_name": "timing_proxy",
+                    "dynamic_registration_enabled": True,
+                    "dynamic_registration_approved": True,
+                    "dynamic_target_tool_name": "timing_base",
+                },
+            }
+        ],
+    )
+    base_definition = MethodDefinition(
+        name="timing_base",
+        handler=lambda: {"success": True},
+        input_schema=Schema(allow_unknown=False),
+        category="write",
+        successful_duration_bootstrap_sec=12.0,
+    )
+
+    definitions = load_dynamic_method_definitions(
+        base_definitions={"timing_base": base_definition},
+        protected_method_names={"timing_base"},
+    ).definitions
+
+    assert len(definitions) == 1
+    proxy = definitions[0]
+    assert proxy.successful_duration_bootstrap_sec == 12.0
+    assert proxy.hard_timeout_enabled is True
+    assert proxy.resolved_advisory_timeout(
+        InternalMCPTransport()
+    ) == 15.0
+    assert proxy.resolved_timeout(InternalMCPTransport()) == 24.0
+
+
 def test_dynamic_proxy_preserves_unfixed_target_schema_semantics(monkeypatch):
     _set_dynamic_tool_docs(
         monkeypatch,
