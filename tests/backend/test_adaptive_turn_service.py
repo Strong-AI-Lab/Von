@@ -5398,6 +5398,94 @@ def test_relation_progress_emits_one_human_start_and_terminal_summary(
     assert result.tool_invocations[0]["changed"] is False
 
 
+def test_concept_search_progress_emits_query_and_bounded_results() -> None:
+    progress_events: list[dict[str, Any]] = []
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="search_concepts",
+            handler=lambda **_kwargs: {
+                "results": [
+                    {
+                        "concept_id": "#V#university_of_auckland",
+                        "name": "University of Auckland",
+                    },
+                    {"concept_id": "#V#university", "name": "University"},
+                ],
+                "total_count": 4,
+                "match_types_used": ["substring"],
+                "query_info": {"query": "University of Auckland"},
+            },
+            input_schema=Schema(
+                required={"query": str},
+                allow_unknown=False,
+                description="Search represented concepts.",
+            ),
+            category="read",
+            ordinary_turn_public=True,
+            description="Search represented concepts.",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(read_timeout_sec=1.0),
+        enabled=True,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="search-auckland",
+                    payload={
+                        "name": "search_concepts",
+                        "arguments": {"query": "University of Auckland"},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="I found the represented university concepts."),
+    )
+
+    execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Find the represented University of Auckland concept.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id="semantic-search-progress",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event)),
+            check_cancellation=lambda: None,
+        ),
+    )
+
+    search_events = [
+        event for event in progress_events if event.get("call_id") == "search-auckland"
+    ]
+    assert [event["event_kind"] for event in search_events] == [
+        "tool_call_start",
+        "tool_call_end",
+    ]
+    assert search_events[0]["result_summary"] == (
+        "Search Concepts: Query: “University of Auckland” (in progress)."
+    )
+    assert search_events[1]["result_summary"] == (
+        "Search Concepts returned 4 concept matches: University of Auckland, "
+        "University and 2 others for Query: “University of Auckland”."
+    )
+    assert search_events[1]["semantic_operation"]["observation"]["items"][0] == {
+        "name": "University of Auckland",
+        "identifier": "#V#university_of_auckland",
+    }
+
+
 def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout() -> None:
     seen_cases: list[str] = []
     progress_events: list[dict[str, Any]] = []

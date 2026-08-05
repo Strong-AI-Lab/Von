@@ -1568,6 +1568,7 @@ const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_EXPLICIT = 'explicit_turn_state';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_DERIVED = 'derived_from_live_telemetry';
 const THINKING_SEMANTIC_OPERATION_SCHEMA_VERSION = 'thinking_semantic_operation.v1';
 const THINKING_SEMANTIC_OPERATION_MAX_ARGUMENTS = 8;
+const THINKING_SEMANTIC_OPERATION_MAX_OBSERVATION_ITEMS = 5;
 const THINKING_SEMANTIC_OPERATION_MAX_TEXT_CHARS = 240;
 const THINKING_SEMANTIC_OPERATION_MAX_SUMMARY_CHARS = 1024;
 const THINKING_SEMANTIC_ARGUMENT_LABELS = new Map([
@@ -1586,6 +1587,21 @@ const THINKING_SEMANTIC_ARGUMENT_VALUE_KINDS = new Set([
     'workflow',
     'identifier'
 ]);
+const THINKING_SEMANTIC_FOCUS_LABELS = new Map([
+    ['query', 'Query'],
+    ['concept', 'Concept'],
+    ['type', 'Type']
+]);
+const THINKING_SEMANTIC_FOCUS_SPECS = new Map([
+    ['query', { sourceArgument: 'query', valueKind: 'text' }],
+    ['concept', { sourceArgument: 'concept_id', valueKind: 'concept' }],
+    ['type', { sourceArgument: 'instance_of', valueKind: 'concept' }]
+]);
+const THINKING_SEMANTIC_OBSERVATION_COUNT_LABELS = new Map([
+    ['total_count', 'concept matches'],
+    ['total_predicates', 'predicates']
+]);
+const THINKING_SEMANTIC_OBSERVATION_COLLECTIONS = new Set(['results', 'predicates']);
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
 const THINKING_LLM_CALL_LOG_DETAILS_SELECTOR = 'details[data-thinking-llm-call-log-key]';
@@ -3260,6 +3276,94 @@ function normaliseThinkingSemanticArgument(rawArgument) {
     };
 }
 
+function normaliseThinkingSemanticFocus(rawFocus) {
+    if (!rawFocus || typeof rawFocus !== 'object') {
+        return null;
+    }
+    const role = normaliseThinkingSemanticText(rawFocus.role, 40).toLowerCase();
+    const spec = THINKING_SEMANTIC_FOCUS_SPECS.get(role);
+    const label = THINKING_SEMANTIC_FOCUS_LABELS.get(role);
+    if (!spec || !label) {
+        return null;
+    }
+    const sourceArgument = normaliseThinkingSemanticText(
+        rawFocus.source_argument || rawFocus.sourceArgument,
+        80
+    );
+    const valueKind = normaliseThinkingSemanticText(
+        rawFocus.value_kind || rawFocus.valueKind,
+        40
+    ).toLowerCase();
+    if (sourceArgument !== spec.sourceArgument || valueKind !== spec.valueKind) {
+        return null;
+    }
+    const value = normaliseThinkingSemanticScalar(rawFocus.value);
+    if (value === null) {
+        return null;
+    }
+    return {
+        role,
+        label,
+        sourceArgument,
+        valueKind,
+        value,
+        display: normaliseThinkingSemanticText(rawFocus.display) || String(value),
+        conceptId: normaliseThinkingSemanticText(rawFocus.concept_id || rawFocus.conceptId)
+    };
+}
+
+function normaliseThinkingSemanticObservation(rawObservation) {
+    if (!rawObservation || typeof rawObservation !== 'object') {
+        return null;
+    }
+    const countSource = normaliseThinkingSemanticText(
+        rawObservation.count_source || rawObservation.countSource,
+        80
+    );
+    const countLabel = THINKING_SEMANTIC_OBSERVATION_COUNT_LABELS.get(countSource) || '';
+    const rawCount = rawObservation.count;
+    const count = countLabel && Number.isFinite(rawCount)
+        ? Math.max(0, Math.trunc(Number(rawCount)))
+        : null;
+    const collectionSource = normaliseThinkingSemanticText(
+        rawObservation.collection_source || rawObservation.collectionSource,
+        80
+    );
+    const items = Array.isArray(rawObservation.items)
+        ? rawObservation.items
+            .slice(0, THINKING_SEMANTIC_OPERATION_MAX_OBSERVATION_ITEMS)
+            .map((rawItem) => {
+                if (!rawItem || typeof rawItem !== 'object') {
+                    return null;
+                }
+                const name = normaliseThinkingSemanticText(rawItem.name, 120);
+                if (!name) {
+                    return null;
+                }
+                const identifier = normaliseThinkingSemanticText(rawItem.identifier, 160);
+                return {
+                    name,
+                    identifier: identifier.startsWith('#V#') ? identifier : ''
+                };
+            })
+            .filter(Boolean)
+        : [];
+    if (count === null && items.length === 0) {
+        return null;
+    }
+    return {
+        count,
+        countLabel,
+        countSource: count !== null ? countSource : '',
+        countIsLowerBound: rawObservation.count_is_lower_bound === true
+            || rawObservation.countIsLowerBound === true,
+        collectionSource: THINKING_SEMANTIC_OBSERVATION_COLLECTIONS.has(collectionSource)
+            ? collectionSource
+            : '',
+        items
+    };
+}
+
 function normaliseThinkingSemanticOutcome(rawOutcome) {
     if (!rawOutcome || typeof rawOutcome !== 'object') {
         return null;
@@ -3374,6 +3478,8 @@ function normaliseThinkingSemanticOperation(rawOperation) {
         lifecycleStatus,
         capability,
         arguments: argumentsList,
+        focus: normaliseThinkingSemanticFocus(rawOperation.focus),
+        observation: normaliseThinkingSemanticObservation(rawOperation.observation),
         summary: normaliseThinkingSemanticText(rawOperation.summary, THINKING_SEMANTIC_OPERATION_MAX_SUMMARY_CHARS),
         visibility,
         outcome: normaliseThinkingSemanticOutcome(rawOperation.outcome),
@@ -3381,7 +3487,12 @@ function normaliseThinkingSemanticOperation(rawOperation) {
             rawOperation.verification || rawOperation.outcome?.verification
         )
     };
-    if (!operation.summary && argumentsList.length === 0) {
+    if (
+        !operation.summary
+        && argumentsList.length === 0
+        && !operation.focus
+        && !operation.observation
+    ) {
         return null;
     }
     return operation;
@@ -8132,12 +8243,18 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
             statusClass = 'failure';
         }
 
-        const toolLabel = tool
+        const technicalToolLabel = tool
             ? `Tool call: ${tool}`
             : (workflowTask ? `Workflow task: ${workflowTask}` : '');
+        const toolLabel = renderMode === THINKING_CARD_MODE_DEFAULT && semanticSummary
+            ? semanticSummary
+            : technicalToolLabel;
+        const toolDetail = renderMode === THINKING_CARD_MODE_DEFAULT && semanticSummary
+            ? ''
+            : (semanticSummary || resultSummary);
         items.push(renderThinkingDiagnosticRowHTML({
             label: toolLabel,
-            detail: semanticSummary || resultSummary,
+            detail: toolDetail,
             detailHtml: '',
             state: statusClass,
             diagnosticKey: buildThinkingDiagnosticKey('tool', tool || workflowTask, batchSize || ''),
@@ -10405,7 +10522,31 @@ function buildToolHistoryDiagnosticsHTML(entry, mode = THINKING_CARD_MODE_EXPERT
     ];
 
     if (semanticOperation) {
+        const focusSourceArgument = normaliseThinkingActivityString(
+            semanticOperation.focus?.sourceArgument
+        );
+        if (semanticOperation.focus) {
+            const focusDisplay = normaliseThinkingActivityString(semanticOperation.focus.display)
+                || formatThinkingDiagnosticFactValue(semanticOperation.focus.value);
+            facts.push({ label: semanticOperation.focus.label, value: focusDisplay });
+            const focusId = getThinkingSemanticArgumentCanonicalId(semanticOperation.focus);
+            if (focusId) {
+                facts.push({ label: `${semanticOperation.focus.label} ID`, value: focusId });
+            }
+            if (renderMode === THINKING_CARD_MODE_DEBUG && focusSourceArgument) {
+                facts.push({
+                    label: `${semanticOperation.focus.label} source argument`,
+                    value: focusSourceArgument
+                });
+            }
+        }
         for (const argument of semanticOperation.arguments) {
+            if (
+                focusSourceArgument
+                && normaliseThinkingActivityString(argument.sourceArgument) === focusSourceArgument
+            ) {
+                continue;
+            }
             const label = normaliseThinkingActivityString(argument.label);
             const display = normaliseThinkingActivityString(argument.display)
                 || formatThinkingDiagnosticFactValue(argument.value);
@@ -10421,10 +10562,43 @@ function buildToolHistoryDiagnosticsHTML(entry, mode = THINKING_CARD_MODE_EXPERT
                 facts.push({ label: `${label} source argument`, value: argument.sourceArgument });
             }
         }
-        facts.push({
-            label: 'Verification',
-            value: describeThinkingSemanticVerification(semanticOperation)
-        });
+        if (semanticOperation.observation) {
+            if (
+                Number.isFinite(semanticOperation.observation.count)
+                && semanticOperation.observation.countLabel
+            ) {
+                const qualifier = semanticOperation.observation.countIsLowerBound
+                    ? 'At least '
+                    : '';
+                facts.push({
+                    label: 'Returned count',
+                    value: `${qualifier}${semanticOperation.observation.count} ${semanticOperation.observation.countLabel}`
+                });
+            }
+            const returnedNames = semanticOperation.observation.items
+                .map((item) => normaliseThinkingActivityString(item.name))
+                .filter(Boolean);
+            if (returnedNames.length > 0) {
+                facts.push({ label: 'Returned items', value: returnedNames.join(', ') });
+            }
+            const returnedIds = semanticOperation.observation.items
+                .map((item) => normaliseThinkingActivityString(item.identifier))
+                .filter(Boolean);
+            if (returnedIds.length > 0) {
+                facts.push({ label: 'Returned IDs', value: returnedIds.join(', ') });
+            }
+        }
+        if (semanticOperation.observation) {
+            facts.push({
+                label: 'Observation source',
+                value: 'Returned capability result'
+            });
+        } else {
+            facts.push({
+                label: 'Verification',
+                value: describeThinkingSemanticVerification(semanticOperation)
+            });
+        }
         if (semanticOperation.outcome && typeof semanticOperation.outcome.changed === 'boolean') {
             facts.push({
                 label: 'Reported change',
@@ -10445,7 +10619,12 @@ function buildToolHistoryDiagnosticsHTML(entry, mode = THINKING_CARD_MODE_EXPERT
             { label: 'Execution method', value: semanticOperation?.capability?.executionMethod },
             { label: 'Effect status', value: outcome?.effectStatus },
             { label: 'Outcome finality', value: outcome?.outcomeFinality },
-            { label: 'Verification source', value: semanticOperation?.verification?.source },
+            {
+                label: semanticOperation?.observation
+                    ? 'Receipt source'
+                    : 'Verification source',
+                value: semanticOperation?.verification?.source
+            },
             { label: 'Visibility', value: semanticOperation?.visibility }
         );
     }

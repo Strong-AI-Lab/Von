@@ -3193,6 +3193,126 @@ describe('thinking activity history normalisation', () => {
         expect((html.match(/<div class="thinking-card-tool">/g) || [])).toHaveLength(1);
     });
 
+    test('makes bounded discovery targets and results primary in Default thinking', () => {
+        const searchOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-search-concepts',
+            lifecycle_status: 'succeeded',
+            capability: {
+                id: 'search_concepts',
+                label: 'Search Concepts',
+                kind: 'registered_tool',
+                execution_method: 'search_concepts'
+            },
+            arguments: [],
+            focus: {
+                role: 'query',
+                label: 'Query',
+                source_argument: 'query',
+                value_kind: 'text',
+                value: 'University of Auckland',
+                display: 'University of Auckland'
+            },
+            observation: {
+                count: 4,
+                count_label: 'concept matches',
+                count_source: 'total_count',
+                count_is_lower_bound: false,
+                collection_source: 'results',
+                items: [
+                    {
+                        name: 'University of Auckland',
+                        identifier: '#V#university_of_auckland'
+                    },
+                    { name: 'University', identifier: '#V#university' }
+                ]
+            },
+            outcome: { status: 'succeeded', success: true },
+            summary: 'Search Concepts returned 4 concept matches: University of Auckland, '
+                + 'University and 2 others for Query: “University of Auckland”.',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'receipt_only',
+                canonical_read_back_present: false,
+                source: 'effect_receipt'
+            }
+        };
+        const fetchOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-fetch-concept',
+            lifecycle_status: 'running',
+            capability: {
+                id: 'fetch_concept',
+                label: 'Fetch Concept',
+                kind: 'registered_tool',
+                execution_method: 'fetch_concept'
+            },
+            arguments: [{
+                role: 'subject',
+                label: 'Subject',
+                source_argument: 'concept_id',
+                value_kind: 'concept',
+                value: '#V#school_of_computer_science',
+                display: 'School Of Computer Science',
+                concept_id: '#V#school_of_computer_science'
+            }],
+            focus: {
+                role: 'concept',
+                label: 'Concept',
+                source_argument: 'concept_id',
+                value_kind: 'concept',
+                value: '#V#school_of_computer_science',
+                display: 'School Of Computer Science',
+                concept_id: '#V#school_of_computer_science'
+            },
+            summary: 'Fetch Concept: Concept: School Of Computer Science (in progress).',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'unknown',
+                canonical_read_back_present: false,
+                source: 'none'
+            }
+        };
+        const createRequest = (mode) => ({
+            thinkingCardMode: mode,
+            latestProgress: {
+                status: 'tool_call_start',
+                stage: 'adaptive_research',
+                tool_history: [
+                    {
+                        tool: 'search_concepts',
+                        success: true,
+                        semanticOperation: searchOperation
+                    },
+                    {
+                        tool: 'fetch_concept',
+                        success: null,
+                        semanticOperation: fetchOperation
+                    }
+                ]
+            }
+        });
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('default'));
+        expect(defaultHtml).toContain('Search Concepts returned 4 concept matches');
+        expect(defaultHtml).toContain('University and 2 others');
+        expect(defaultHtml).toContain('School Of Computer Science');
+        expect(defaultHtml).not.toContain('Tool call: search_concepts');
+        expect(defaultHtml).not.toContain('Tool call: fetch_concept');
+        expect(defaultHtml).not.toContain('#V#school_of_computer_science');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('expert'));
+        expect(expertHtml).toContain('Tool call: search_concepts');
+        expect(expertHtml).toContain('Query');
+        expect(expertHtml).toContain('Returned count');
+        expect(expertHtml).toContain('Returned IDs');
+        expect(expertHtml).toContain('Observation source');
+        expect(expertHtml).toContain('Returned capability result');
+        expect(expertHtml).toContain('#V#university_of_auckland');
+        expect(expertHtml).toContain('Concept ID');
+        expect(expertHtml).toContain('#V#school_of_computer_science');
+    });
+
     test('adds bounded semantic IDs and verification in Expert, then execution details only in Debug', () => {
         const semanticOperation = {
             schema_version: 'thinking_semantic_operation.v1',
