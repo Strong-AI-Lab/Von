@@ -8346,12 +8346,12 @@ describe('thinking card toggle accessibility', () => {
         const retained = getRetainedThinkingCardElements();
         retained.toggleButton.click();
 
-        expect(retained.detail.style.height).toBe('120px');
-        expect(retained.sizeDecreaseButton.disabled).toBe(true);
+        expect(retained.detail.style.height).toBe('220px');
+        expect(retained.sizeDecreaseButton.disabled).toBe(false);
         expect(retained.sizeIncreaseButton.disabled).toBe(false);
 
         retained.sizeIncreaseButton.click();
-        expect(retained.detail.style.height).toBe('200px');
+        expect(retained.detail.style.height).toBe('300px');
         expect(retained.sizeDecreaseButton.disabled).toBe(false);
 
         retained.sizeIncreaseButton.click();
@@ -8430,6 +8430,22 @@ describe('active thinking card manual resize persistence', () => {
             }]
         };
     }
+
+    test('starts tall enough for the initial thinking-card content', () => {
+        const request = createActiveThinkingRequest();
+        __testOnly_setThinkingCardRequests(request, null);
+
+        const detail = document.getElementById('loadingIndicatorDetail');
+        Object.defineProperty(detail, 'scrollHeight', {
+            configurable: true,
+            value: 360
+        });
+
+        __testOnly_refreshThinkingCardProgressUi(request);
+
+        expect(request.thinkingCardBodyHeightPx).toBe(360);
+        expect(detail.style.height).toBe('360px');
+    });
 
     test('keeps a manually dragged active thinking-card height across live refreshes', () => {
         const request = createActiveThinkingRequest();
