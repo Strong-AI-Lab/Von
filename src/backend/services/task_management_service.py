@@ -1247,19 +1247,12 @@ def create_task(
     # Generate unique concept_id
     task_concept_id = _generate_task_concept_id(title)
 
-    # Best-effort ontology bootstrap so effort-unit predicates/types are available
-    # for downstream lifecycle wiring. Task writes must remain available even if
-    # ontology bootstrap encounters recoverable issues.
-    try:
-        ensure_effort_unit_ontology()
-    except Exception as exc:
-        logger.debug(
-            "Effort-unit ontology bootstrap skipped during task create: %s", exc
-        )
-    try:
-        ensure_task_ontology()
-    except Exception as exc:
-        logger.debug("Task ontology bootstrap skipped during task create: %s", exc)
+    # Task creation is a latency-bounded user effect, not an ontology migration
+    # surface. The canonical relationship IDs below remain valid write inputs
+    # without synchronously re-checking and repairing the complete task and
+    # effort-unit ontologies. Those explicit maintenance operations can take
+    # many remote-database round trips and previously consumed the whole MCP
+    # deadline before the task itself was written.
 
     # Normalise concept IDs
     if assignee_concept_id:

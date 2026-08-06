@@ -119,6 +119,8 @@ class TestCreateTask:
         assert result["task_concept_id"].startswith("#V#task_")
         assert result["task_type_ids"] == [DEFAULT_TASK_TYPE_ID]
         assert result["task_source_id"] == DEFAULT_TASK_SOURCE_ID
+        mock_ensure_effort_unit_ontology.assert_not_called()
+        mock_ensure_task_ontology.assert_not_called()
         mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
