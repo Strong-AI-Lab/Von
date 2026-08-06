@@ -5303,6 +5303,7 @@ def _summarise_tool_invocations(
             "effect_id",
             "effect_status",
             "capability_kind",
+            "capability_display_name",
             "execution_method",
             "represented_workflow_id",
             "workflow_id",

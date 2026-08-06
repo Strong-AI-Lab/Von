@@ -1823,6 +1823,7 @@ def test_turn_execution_get_prefers_identity_bearing_top_level_invocations(
                     "effect_id": "effect-durable-identities",
                     "effect_status": "partial",
                     "error_code": "tool_timeout_after_durable_submission",
+                    "capability_display_name": "Paper Representation Workflow",
                     "workflow_id": "#V#paper_workflow",
                     "evidence": {
                         "instance_id": "instance-durable-identities",
@@ -1866,6 +1867,7 @@ def test_turn_execution_get_prefers_identity_bearing_top_level_invocations(
             "effect_status": "partial",
             "error_code": "tool_timeout_after_durable_submission",
             "capability_kind": "represented_workflow",
+            "capability_display_name": "Paper Representation Workflow",
             "execution_method": "workflow_execute",
             "represented_workflow_id": "#V#paper_workflow",
             "workflow_id": "#V#paper_workflow",
@@ -1906,6 +1908,9 @@ def test_turn_execution_get_diagnostics_hydrates_empty_progress_tool_history(
                                 "effect_status": "partial",
                                 "error_code": (
                                     "tool_timeout_after_durable_submission"
+                                ),
+                                "capability_display_name": (
+                                    "Paper Representation Workflow"
                                 ),
                                 "execution_id": "mcp-workflow",
                                 "workflow_id": "#V#paper_workflow",
@@ -1968,6 +1973,9 @@ def test_turn_execution_get_diagnostics_hydrates_empty_progress_tool_history(
         "tool_timeout_after_durable_submission"
     )
     assert workflow_call["execution_id"] == "mcp-workflow"
+    assert workflow_call["capability_display_name"] == (
+        "Paper Representation Workflow"
+    )
     assert workflow_call["workflow_id"] == "#V#paper_workflow"
     assert workflow_call["instance_id"] == "instance-workflow"
     assert "effective_arguments" not in workflow_call

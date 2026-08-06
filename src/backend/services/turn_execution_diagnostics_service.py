@@ -633,6 +633,7 @@ def _summarise_tool_invocation_history(
             "error_code",
             "execution_id",
             "capability_kind",
+            "capability_display_name",
             "execution_method",
             "represented_workflow_id",
             "workflow_id",

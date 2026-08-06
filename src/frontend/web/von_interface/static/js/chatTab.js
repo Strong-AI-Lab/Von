@@ -3559,6 +3559,80 @@ function getThinkingSemanticOperation(source) {
     return normaliseThinkingSemanticOperation(source.semanticOperation || source.semantic_operation);
 }
 
+function getThinkingCapabilityDescriptor(source) {
+    if (!source || typeof source !== 'object') {
+        return null;
+    }
+    const semanticOperation = getThinkingSemanticOperation(source);
+    const capabilityId = normaliseThinkingActivityString(
+        semanticOperation?.capability?.id || source.tool || source.workflowTask
+    );
+    const workflowArgument = semanticOperation?.arguments?.find(
+        (argument) => argument?.role === 'workflow'
+    );
+    const workflowId = normaliseThinkingActivityString(
+        source.represented_workflow_id
+        || source.representedWorkflowId
+        || source.workflow_id
+        || source.workflowId
+        || semanticOperation?.outcome?.workflowId
+        || workflowArgument?.value
+    );
+    const capabilityKind = normaliseThinkingActivityString(
+        semanticOperation?.capability?.kind || source.capability_kind || source.capabilityKind
+    ) || (workflowId && capabilityId.startsWith('represented_workflow_')
+        ? 'represented_workflow'
+        : '');
+    const suppliedDisplayName = normaliseThinkingActivityString(
+        source.capability_display_name || source.capabilityDisplayName
+    );
+    const projectedLabel = normaliseThinkingActivityString(
+        semanticOperation?.capability?.label
+    );
+    const generatedCapabilityLabel = formatThinkingActivityFallbackLabel(capabilityId);
+    const workflowFallbackLabel = workflowId
+        ? formatWorkflowName(workflowId).replace(/\b\w/g, (character) => (
+            character.toUpperCase()
+        ))
+        : '';
+    const projectedLabelIsOpaque = (
+        capabilityKind === 'represented_workflow'
+        && projectedLabel.toLowerCase() === generatedCapabilityLabel.toLowerCase()
+    );
+    const label = suppliedDisplayName
+        || (projectedLabelIsOpaque ? workflowFallbackLabel : projectedLabel)
+        || workflowFallbackLabel
+        || generatedCapabilityLabel;
+    if (!capabilityId && !label) {
+        return null;
+    }
+    return {
+        capabilityId,
+        capabilityKind,
+        generatedCapabilityLabel,
+        label,
+        opaqueCapabilityLabel: projectedLabelIsOpaque
+            ? projectedLabel
+            : generatedCapabilityLabel,
+        semanticOperation,
+        workflowId
+    };
+}
+
+function replaceOpaqueThinkingCapabilityLabel(summary, descriptor) {
+    const cleanSummary = normaliseThinkingActivityString(summary);
+    if (
+        !cleanSummary
+        || descriptor?.capabilityKind !== 'represented_workflow'
+        || !descriptor.label
+        || !descriptor.opaqueCapabilityLabel
+        || descriptor.label === descriptor.opaqueCapabilityLabel
+    ) {
+        return cleanSummary;
+    }
+    return cleanSummary.split(descriptor.opaqueCapabilityLabel).join(descriptor.label);
+}
+
 function cloneThinkingToolHistoryEntry(entry) {
     const copy = { ...entry };
     const semanticOperation = getThinkingSemanticOperation(entry);
@@ -6384,8 +6458,14 @@ function deriveThinkingExecutionInterpretation(request = null) {
         selected_workflow_name: normaliseThinkingActivityString(latestProgress?.selected_workflow_name)
     }, workflowDiscovery);
     const toolHistory = getCanonicalThinkingToolHistory(request);
+    const representedWorkflowCapability = toolHistory
+        .map((entry) => getThinkingCapabilityDescriptor(entry))
+        .find((descriptor) => descriptor?.capabilityKind === 'represented_workflow') || null;
     const uniqueToolNames = [...new Set(toolHistory
-        .map((entry) => normaliseThinkingActivityString(entry?.tool || entry?.workflowTask))
+        .map((entry) => {
+            const descriptor = getThinkingCapabilityDescriptor(entry);
+            return normaliseThinkingActivityString(descriptor?.label);
+        })
         .filter(Boolean))];
     const stage = normaliseThinkingActivityString(latestProgress?.stage || latestProgress?.phase);
     const stageLabel = normaliseThinkingActivityString(latestProgress?.stage_label || latestProgress?.phase_label)
@@ -6399,6 +6479,10 @@ function deriveThinkingExecutionInterpretation(request = null) {
         executionFamily = 'selected_workflow';
         progressKind = 'workflow_execution';
         identitySummary = `Selected workflow: ${selectedWorkflow.label}`;
+    } else if (representedWorkflowCapability) {
+        executionFamily = 'selected_workflow';
+        progressKind = 'workflow_execution';
+        identitySummary = `Workflow: ${representedWorkflowCapability.label}`;
     } else if (uniqueToolNames.length > 0 || isToolCentricStage) {
         executionFamily = 'tool_orchestration';
         progressKind = 'tool_execution';
@@ -7052,14 +7136,27 @@ function buildDerivedThinkingCardEvidenceSummary({
     }
 
     const toolHistory = getCanonicalThinkingToolHistory(request);
-    const toolNames = [...new Set(toolHistory
-        .map((entry) => normaliseThinkingActivityString(entry.tool || entry.workflowTask))
-        .filter(Boolean))];
+    const observedCapabilities = toolHistory
+        .map((entry) => {
+            const descriptor = getThinkingCapabilityDescriptor(entry);
+            return {
+                label: normaliseThinkingActivityString(descriptor?.label),
+                kind: normaliseThinkingActivityString(descriptor?.capabilityKind)
+            };
+        })
+        .filter((entry) => entry.label);
+    const toolNames = [...new Set(observedCapabilities.map((entry) => entry.label))];
     if (toolNames.length > 0) {
         const preview = toolNames.slice(0, 3).join(', ');
+        const onlyRepresentedWorkflows = observedCapabilities.every(
+            (entry) => entry.kind === 'represented_workflow'
+        );
+        const observationLabel = onlyRepresentedWorkflows
+            ? 'Workflow observed'
+            : 'Tools observed';
         bits.push(toolNames.length > 3
-            ? `Tools observed: ${preview} +${toolNames.length - 3} more`
-            : `Tools observed: ${preview}`);
+            ? `${observationLabel}: ${preview} +${toolNames.length - 3} more`
+            : `${observationLabel}: ${preview}`);
     }
 
     return bits.join(' · ');
@@ -8284,9 +8381,22 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
             continue;
         }
         const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
-        const resultSummary = entry && typeof entry.resultSummary === 'string' ? entry.resultSummary : '';
-        const semanticOperation = getThinkingSemanticOperation(entry);
-        const semanticSummary = normaliseThinkingActivityString(semanticOperation?.summary);
+        const capabilityDescriptor = getThinkingCapabilityDescriptor(entry);
+        const semanticOperation = capabilityDescriptor?.semanticOperation || null;
+        const resultSummary = replaceOpaqueThinkingCapabilityLabel(
+            entry && typeof entry.resultSummary === 'string' ? entry.resultSummary : '',
+            capabilityDescriptor
+        );
+        const semanticSummary = replaceOpaqueThinkingCapabilityLabel(
+            semanticOperation?.summary,
+            capabilityDescriptor
+        );
+        const semanticCapabilityLabel = normaliseThinkingActivityString(
+            capabilityDescriptor?.label
+        );
+        const isRepresentedWorkflow = (
+            capabilityDescriptor?.capabilityKind === 'represented_workflow'
+        );
         const success = entry.success;
 
         // Status icon and class
@@ -8297,9 +8407,15 @@ function renderToolHistoryHTML(request, mode = THINKING_CARD_MODE_DEFAULT) {
             statusClass = 'failure';
         }
 
-        const technicalToolLabel = tool
-            ? `Tool call: ${tool}`
-            : (workflowTask ? `Workflow task: ${workflowTask}` : '');
+        const technicalToolLabel = (
+            renderMode !== THINKING_CARD_MODE_DEBUG
+            && isRepresentedWorkflow
+            && semanticCapabilityLabel
+        )
+            ? `Workflow: ${semanticCapabilityLabel}`
+            : (tool
+                ? `Tool call: ${tool}`
+                : (workflowTask ? `Workflow task: ${workflowTask}` : ''));
         const toolLabel = renderMode === THINKING_CARD_MODE_DEFAULT && semanticSummary
             ? semanticSummary
             : technicalToolLabel;
@@ -10560,13 +10676,33 @@ function buildToolHistoryDiagnosticsHTML(entry, mode = THINKING_CARD_MODE_EXPERT
     const renderMode = normaliseThinkingCardMode(mode);
     const tool = normaliseThinkingActivityString(entry.tool);
     const workflowTask = normaliseThinkingActivityString(entry.workflowTask);
-    const semanticOperation = getThinkingSemanticOperation(entry);
+    const capabilityDescriptor = getThinkingCapabilityDescriptor(entry);
+    const semanticOperation = capabilityDescriptor?.semanticOperation || null;
+    const isRepresentedWorkflow = (
+        capabilityDescriptor?.capabilityKind === 'represented_workflow'
+    );
+    const capabilityLabel = normaliseThinkingActivityString(
+        capabilityDescriptor?.label
+    );
     const facts = [
-        { label: 'Tool', value: tool },
+        {
+            label: isRepresentedWorkflow && renderMode !== THINKING_CARD_MODE_DEBUG
+                ? 'Workflow capability'
+                : 'Tool',
+            value: isRepresentedWorkflow && renderMode !== THINKING_CARD_MODE_DEBUG
+                ? capabilityLabel
+                : tool
+        },
         { label: 'Workflow task', value: workflowTask },
         { label: 'Phase', value: entry.phase ? formatThinkingActivityFallbackLabel(entry.phase) : '' },
         { label: 'Batch size', value: entry.batchSize },
-        { label: 'Result', value: semanticOperation?.summary || entry.resultSummary },
+        {
+            label: 'Result',
+            value: replaceOpaqueThinkingCapabilityLabel(
+                semanticOperation?.summary || entry.resultSummary,
+                capabilityDescriptor
+            )
+        },
         {
             label: 'Outcome',
             value: typeof entry.success === 'boolean'
@@ -10574,6 +10710,17 @@ function buildToolHistoryDiagnosticsHTML(entry, mode = THINKING_CARD_MODE_EXPERT
                 : 'Pending'
         }
     ];
+    const hasWorkflowArgument = semanticOperation?.arguments?.some(
+        (argument) => argument?.role === 'workflow'
+    );
+    if (
+        isRepresentedWorkflow
+        && renderMode !== THINKING_CARD_MODE_DEFAULT
+        && capabilityDescriptor?.workflowId
+        && !hasWorkflowArgument
+    ) {
+        facts.push({ label: 'Workflow ID', value: capabilityDescriptor.workflowId });
+    }
 
     if (semanticOperation) {
         const focusSourceArgument = normaliseThinkingActivityString(

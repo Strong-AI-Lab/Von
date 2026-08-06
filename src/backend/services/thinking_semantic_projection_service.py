@@ -3,8 +3,9 @@
 The projection is deliberately a view model, not a second execution record.
 It retains exact identifiers needed for inspection while giving the ordinary
 Thinking surface labels and role-labelled arguments that a person can read.
-No database lookup is performed here: richer naming remains an optional later
-enrichment rather than another source of latency or failure on the answer path.
+No database lookup is performed here: trusted display labels already resolved
+by capability discovery may be carried in, with canonical identifiers retained
+as the bounded fallback and inspection identity.
 """
 
 from __future__ import annotations
@@ -177,6 +178,39 @@ def _argument_by_role(
     arguments: list[dict[str, Any]], role: str
 ) -> dict[str, Any] | None:
     return next((item for item in arguments if item.get("role") == role), None)
+
+
+def _capability_display_label(
+    *,
+    capability_id: str,
+    capability_kind: str,
+    projected_arguments: list[dict[str, Any]],
+    display_name: Any = None,
+    workflow_identity: Any = None,
+) -> str:
+    """Choose a bounded human label without replacing stable capability identity."""
+
+    candidate = _clean_text(display_name)
+    generated_from_capability_id = _display_label(capability_id)
+    if candidate and not (
+        capability_kind == "represented_workflow"
+        and candidate == generated_from_capability_id
+    ):
+        return _display_label(candidate) if candidate.startswith("#V#") else candidate
+
+    if capability_kind == "represented_workflow":
+        workflow = _argument_by_role(projected_arguments, "workflow")
+        argument_workflow_identity = _clean_text(
+            workflow.get("value") if isinstance(workflow, Mapping) else None
+        )
+        if argument_workflow_identity:
+            return _display_label(argument_workflow_identity)
+
+        outcome_workflow_identity = _clean_text(workflow_identity)
+        if outcome_workflow_identity:
+            return _display_label(outcome_workflow_identity)
+
+    return generated_from_capability_id
 
 
 def _relation_projection(
@@ -1075,6 +1109,14 @@ def normalise_semantic_operation_projection(value: Any) -> dict[str, Any] | None
         _clean_text(raw_capability.get("execution_method")) or capability_id
     )
     arguments = _normalise_projected_arguments(value.get("arguments"))
+    outcome = _normalise_projected_outcome(value.get("outcome"))
+    capability_label = _capability_display_label(
+        capability_id=capability_id,
+        capability_kind=kind,
+        projected_arguments=arguments,
+        display_name=raw_capability.get("label"),
+        workflow_identity=(outcome or {}).get("workflow_id"),
+    )
     relation = _relation_projection(arguments)
     focus = _normalise_projected_focus(value.get("focus")) if relation is None else None
     observation = (
@@ -1082,7 +1124,6 @@ def normalise_semantic_operation_projection(value: Any) -> dict[str, Any] | None
         if relation is None
         else None
     )
-    outcome = _normalise_projected_outcome(value.get("outcome"))
     verification = _normalise_projected_verification(
         value.get("verification"),
         lifecycle_status=lifecycle_status,
@@ -1095,14 +1136,14 @@ def normalise_semantic_operation_projection(value: Any) -> dict[str, Any] | None
         "lifecycle_status": lifecycle_status,
         "capability": {
             "id": capability_id,
-            "label": _display_label(capability_id),
+            "label": capability_label,
             "kind": kind,
             "execution_method": execution_method,
         },
         "arguments": arguments,
         "summary": _clean_text(
             _summary(
-                capability_label=_display_label(capability_id),
+                capability_label=capability_label,
                 relation=relation,
                 focus=focus,
                 observation=observation,
@@ -1113,7 +1154,7 @@ def normalise_semantic_operation_projection(value: Any) -> dict[str, Any] | None
             ),
             limit=_MAX_SUMMARY_CHARS,
         )
-        or f"Observed {_display_label(capability_id)}.",
+        or f"Observed {capability_label}.",
         "visibility": "conversation_scope",
         "verification": verification,
     }
@@ -1136,6 +1177,7 @@ def build_semantic_operation_projection(
     capability_kind: str,
     arguments: Mapping[str, Any],
     lifecycle_status: str,
+    capability_display_name: str | None = None,
     success: bool | None = None,
     result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1146,8 +1188,18 @@ def build_semantic_operation_projection(
     execution_method_id = _clean_text(execution_method) or capability_id
     kind = _clean_text(capability_kind) or "registered_tool"
     status = _clean_text(lifecycle_status, limit=80) or "unknown"
-    capability_label = _display_label(capability_id)
     projected_arguments = _argument_projection(arguments)
+    capability_label = _capability_display_label(
+        capability_id=capability_id,
+        capability_kind=kind,
+        projected_arguments=projected_arguments,
+        display_name=capability_display_name,
+        workflow_identity=(
+            result.get("workflow_id")
+            if isinstance(result, Mapping)
+            else None
+        ),
+    )
     relation = _relation_projection(projected_arguments)
     focus = _focus_projection(arguments) if relation is None else None
     observation = _observation_projection(result) if relation is None else None

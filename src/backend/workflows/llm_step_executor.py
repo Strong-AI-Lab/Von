@@ -2970,6 +2970,9 @@ def _run_gateway_llm_step_no_tools(
         call_type: str,
         model_name: str | None,
         duration_ms: float | None,
+        requested_model_name: str | None = None,
+        effective_model_name: str | None = None,
+        model_identity_source: str | None = None,
         usage: Mapping[str, Any] | None = None,
         note: str | None = None,
         stage: str | None = None,
@@ -2990,6 +2993,14 @@ def _run_gateway_llm_step_no_tools(
             "duration_ms": duration_ms,
             "stage": stage,
         }
+        if isinstance(requested_model_name, str) and requested_model_name.strip():
+            entry["requested_model"] = requested_model_name.strip()
+        if isinstance(model_name, str) and model_name.strip():
+            entry["selected_model"] = model_name.strip()
+        if isinstance(effective_model_name, str) and effective_model_name.strip():
+            entry["effective_model"] = effective_model_name.strip()
+            if isinstance(model_identity_source, str) and model_identity_source.strip():
+                entry["model_identity_source"] = model_identity_source.strip()
         if isinstance(call_id, str) and call_id.strip():
             entry["call_id"] = call_id.strip()
         if usage:
@@ -3451,6 +3462,9 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
         call_type: str,
         model_name: str | None,
         duration_ms: float | None,
+        requested_model_name: str | None = None,
+        effective_model_name: str | None = None,
+        model_identity_source: str | None = None,
         usage: Mapping[str, Any] | None = None,
         note: str | None = None,
         stage: str | None = None,
@@ -3471,6 +3485,14 @@ def _execute_llm_step_inner(request: WorkflowActionRequest) -> WorkflowActionRes
             "duration_ms": duration_ms,
             "stage": stage,
         }
+        if isinstance(requested_model_name, str) and requested_model_name.strip():
+            entry["requested_model"] = requested_model_name.strip()
+        if isinstance(model_name, str) and model_name.strip():
+            entry["selected_model"] = model_name.strip()
+        if isinstance(effective_model_name, str) and effective_model_name.strip():
+            entry["effective_model"] = effective_model_name.strip()
+            if isinstance(model_identity_source, str) and model_identity_source.strip():
+                entry["model_identity_source"] = model_identity_source.strip()
         if isinstance(call_id, str) and call_id.strip():
             entry["call_id"] = call_id.strip()
         if usage:

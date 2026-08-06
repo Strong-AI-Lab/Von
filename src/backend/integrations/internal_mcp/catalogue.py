@@ -12274,6 +12274,7 @@ def _summarise_turn_execution_tool_invocations(
             "mutation_outcome",
             "outcome_finality",
             "capability_kind",
+            "capability_display_name",
             "execution_method",
             "represented_workflow_id",
             "workflow_id",

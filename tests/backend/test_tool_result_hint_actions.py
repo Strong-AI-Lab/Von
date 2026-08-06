@@ -186,6 +186,7 @@ def test_action_uses_workflow_model_policy_fallback_with_gateway(
             kwargs["record_llm_call"](
                 call_type="llm.generate",
                 model_name="gpt-4.1-mini",
+                requested_model_name="gpt-4.1-mini",
                 duration_ms=10,
                 note="llm.generate failed; trying fallback",
                 stage=kwargs["stage"],
@@ -196,6 +197,7 @@ def test_action_uses_workflow_model_policy_fallback_with_gateway(
             kwargs["record_llm_call"](
                 call_type="llm.generate",
                 model_name="granite3.3:2b",
+                requested_model_name="gpt-4.1-mini",
                 duration_ms=5,
                 note="Fallback chain generate()",
                 stage=kwargs["stage"],
@@ -266,6 +268,8 @@ def test_action_uses_workflow_model_policy_fallback_with_gateway(
     assert result.outputs["selected_model"] == "granite3.3:2b"
     assert result.outputs["selected_model_candidate"]["provider"] == "ollama"
     assert result.outputs["llm_calls"][0]["provider"] == "openai"
+    assert result.outputs["llm_calls"][0]["requested_model"] == "gpt-4.1-mini"
+    assert result.outputs["llm_calls"][0]["selected_model"] == "gpt-4.1-mini"
     stage_summary = result.outputs["aux_llm_calls"][0]
     assert stage_summary["fallback_attempt_count"] == 2
     assert stage_summary["fallback_attempts"][0]["failure_kind"] == "quota_exhausted"
