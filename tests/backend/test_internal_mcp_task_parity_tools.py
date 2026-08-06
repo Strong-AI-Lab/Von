@@ -1019,6 +1019,7 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
             "title": "Task with dates",
             "description": "Details",
             "status": "pending",
+            "priority": "medium",
         },
     )
     monkeypatch.setattr(
@@ -1053,6 +1054,15 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
             },
         ).payload
     assert payload.get("success") is True
+    assert payload.get("effect_status") == "succeeded"
+    assert payload.get("changed") is True
+    assert payload["canonical_read_back"] == {
+        "task_concept_id": "#V#task_123",
+        "title": "Task with dates",
+        "description": "Details",
+        "status": "pending",
+        "priority": "medium",
+    }
     assert payload.get("start_date") == "2026-03-01T10:00:00+00:00"
     assert payload.get("due_date") == "2026-03-05T10:00:00+00:00"
     assert payload.get("epic_task_concept_id") == "#V#task_epic_1"
@@ -1061,6 +1071,69 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
     assert payload.get("report_to_concept_id") == "#V#user_manager"
     assert payload.get("reference_code") == "TASK-001"
     _assert_schema_conformance(gateway, "task_create", payload)
+
+
+def test_task_create_gateway_marks_required_persistence_failure_indeterminate(
+    monkeypatch,
+):
+    gateway = _build_gateway()
+    from src.backend.security.access_control import override_current_actor
+
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.create_task",
+        lambda **_kwargs: {
+            "task_concept_id": "#V#task_partial",
+            "title": "Create a task",
+            "description": "Persist the required fields.",
+            "status": "pending",
+            "priority": "medium",
+            "required_text_persistence_failures": [
+                {
+                    "predicate": "#V#hasPriority",
+                    "exception_type": "TimeoutError",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.get_task",
+        lambda task_concept_id: {
+            "task_concept_id": task_concept_id,
+            "title": "Create a task",
+            "description": "Persist the required fields.",
+            "status": "pending",
+            "priority": "medium",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.find_task_by_agent_creation_fingerprint",
+        lambda **_kwargs: None,
+    )
+
+    with override_current_actor("#V#user_alice", "#V#org_test"):
+        payload = gateway.invoke(
+            "task_create",
+            {
+                "title": "Create a task",
+                "description": "Persist the required fields.",
+                "priority": "medium",
+                "assignee_id": "#V#user_alice",
+                "created_by_concept_id": "#V#user_alice",
+                "acting_user_concept_id": "#V#user_alice",
+                "organisation_concept_id": "#V#org_test",
+                "request_id": "turn-required-read-back",
+                "namespace": "#V#user_alice@org_test",
+            },
+        ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "task_canonical_read_back_incomplete"
+    assert payload["effect_status"] == "indeterminate"
+    assert payload["task_concept_id"] == "#V#task_partial"
+    assert payload["required_field_mismatches"] == {}
+    assert payload["required_text_persistence_failures"] == [
+        {"predicate": "#V#hasPriority", "exception_type": "TimeoutError"}
+    ]
 
 
 def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):

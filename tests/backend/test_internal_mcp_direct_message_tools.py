@@ -268,6 +268,7 @@ def _owned_task(*, status: str = "pending") -> dict[str, Any]:
         "title": "Agent task",
         "description": "Test",
         "status": status,
+        "priority": "medium",
         "assignee_concept_id": "#V#user_alice",
         "created_by_concept_id": "#V#user_alice",
         "organisation_concept_id": "#V#org_test",

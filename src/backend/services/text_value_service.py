@@ -276,7 +276,17 @@ def create_text_value(
         "created_at": _now(),
         "updated_at": _now(),
     }
-    res = TextValuesRepository.insert_one(doc)
+    try:
+        res = TextValuesRepository.insert_one(doc)
+    except DuplicateKeyError:
+        # A concurrent creator can win after the lookup above.  The unique
+        # fingerprint/lang index remains authoritative, so reconcile to that
+        # exact canonical row rather than failing an otherwise idempotent
+        # upsert.
+        existing = TextValuesRepository.find_one({"fingerprint": fp, "lang": tv.lang})
+        if existing and existing.get("_id"):
+            return str(existing["_id"])
+        raise
     return str(res.inserted_id)
 
 

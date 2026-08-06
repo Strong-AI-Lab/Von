@@ -91,6 +91,91 @@ class TestTaskConstants:
 class TestCreateTask:
     """Tests for create_task function."""
 
+    def test_required_task_text_workers_preserve_enforced_actor_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The task access decision is cached before scoped worker writes."""
+        import src.backend.security.access_control as access_control
+        from src.backend.security.access_control import (
+            can_access_concept,
+            get_effective_organisation_concept_id,
+            get_effective_user_concept_id,
+            override_current_actor,
+            should_enforce_access_control,
+        )
+        from src.backend.services import task_management_service as service
+
+        observed: list[tuple[str | None, str | None, bool]] = []
+        access_checks: list[str] = []
+
+        class Concepts:
+            def find_one(self, query: dict[str, str], _projection: Any = None):
+                access_checks.append(query["concept_id"])
+                return {"concept_id": query["concept_id"], "relationships": {}}
+
+        def persist_text(**_kwargs: Any) -> dict[str, str]:
+            observed.append(
+                (
+                    get_effective_user_concept_id(),
+                    get_effective_organisation_concept_id(),
+                    should_enforce_access_control(),
+                )
+            )
+            assert can_access_concept("#V#task_scoped") is True
+            return {"relation_id": "#V#relation"}
+
+        monkeypatch.setattr(
+            access_control, "get_concepts_collection", lambda: Concepts()
+        )
+        monkeypatch.setattr(service, "upsert_text_for_concept", persist_text)
+
+        with override_current_actor("#V#user", "#V#organisation"):
+            failures = service._persist_required_task_texts(
+                task_concept_id="#V#task_scoped",
+                title="Scoped task",
+                description="Keep the actor scope in each worker.",
+                priority="medium",
+            )
+
+        assert failures == []
+        assert access_checks == ["#V#task_scoped"]
+        assert (
+            observed
+            == [
+                ("#V#user", "#V#organisation", True),
+            ]
+            * 4
+        )
+
+    def test_required_task_text_access_failure_is_receipt_evidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-insert access lookup failure cannot become replay success."""
+        from src.backend.services import task_management_service as service
+
+        monkeypatch.setattr(
+            service,
+            "can_access_concept",
+            lambda _task_id: (_ for _ in ()).throw(TimeoutError("access timeout")),
+        )
+        persist_text = MagicMock()
+        monkeypatch.setattr(service, "upsert_text_for_concept", persist_text)
+
+        failures = service._persist_required_task_texts(
+            task_concept_id="#V#task_partial",
+            title="Partial task",
+            description="Access failed after the concept insert.",
+            priority="medium",
+        )
+
+        assert failures == [
+            {
+                "predicate": "required_task_texts",
+                "exception_type": "TimeoutError",
+            }
+        ]
+        persist_text.assert_not_called()
+
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
     @patch("src.backend.services.task_management_service.ensure_task_ontology")
@@ -609,6 +694,112 @@ class TestGetTasksForUser:
             ["#V#task_1", "#V#task_2"]
         )
         mock_get_texts_for_concept.assert_not_called()
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
+    def test_get_tasks_for_user_applies_limit_before_hydration(
+        self,
+        mock_get_texts_for_concepts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        """A requested task page hydrates only its actor-visible concept rows."""
+        now = datetime.now(timezone.utc)
+        mock_repo.count_documents.return_value = 3
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_1",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    "#V#hasAssignee": ["#V#user_alice"],
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_2",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    "#V#hasAssignee": ["#V#user_alice"],
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+        mock_get_texts_for_concepts.return_value = {
+            "#V#task_1": [{"predicate": "#V#hasName", "text": "First task"}],
+            "#V#task_2": [{"predicate": "#V#hasName", "text": "Second task"}],
+        }
+
+        result = get_tasks_for_user(
+            "#V#user_alice",
+            include_created=True,
+            limit=2,
+            return_metadata=True,
+        )
+
+        assert result["count"] == 2
+        assert result["total"] == 3
+        assert result["total_is_exhaustive"] is True
+        assert result["has_more"] is True
+        assert mock_repo.find.call_args.kwargs["limit"] == 2
+        assert mock_repo.find.call_args.kwargs["sort"] == [
+            ("updated_at", -1),
+            ("created_at", -1),
+            ("concept_id", 1),
+        ]
+        mock_get_texts_for_concepts.assert_called_once_with(["#V#task_1", "#V#task_2"])
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
+    def test_get_tasks_for_user_does_not_fabricate_status_total_for_partial_page(
+        self,
+        mock_get_texts_for_concepts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        """Text-backed filters report an unknown total until their source page is complete."""
+        now = datetime.now(timezone.utc)
+        mock_repo.count_documents.return_value = 3
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_pending",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    "#V#hasAssignee": ["#V#user_alice"],
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_completed",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    "#V#hasAssignee": ["#V#user_alice"],
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+        mock_get_texts_for_concepts.return_value = {
+            "#V#task_pending": [
+                {"predicate": "#V#hasName", "text": "Pending task"},
+                {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            ],
+            "#V#task_completed": [
+                {"predicate": "#V#hasTaskStatus", "text": "completed"}
+            ],
+        }
+
+        result = get_tasks_for_user(
+            "#V#user_alice",
+            status_filter="pending",
+            limit=2,
+            return_metadata=True,
+        )
+
+        assert result["count"] == 1
+        assert result["total"] is None
+        assert result["total_is_exhaustive"] is False
+        assert result["has_more"] is None
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")

@@ -1,13 +1,17 @@
 import pytest
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
 )
 from src.backend.security.access_control import bypass_access_control
-from src.backend.services.text_value_service import upsert_text_for_concept
+from src.backend.services.text_value_service import (
+    create_text_value,
+    upsert_text_for_concept,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -71,3 +75,29 @@ def test_upsert_does_not_dedup_away_newlines():
     tv = TextValuesRepository.find_one({"_id": ObjectId(second["text_value_id"])})
     assert tv is not None
     assert tv.get("text") == "Hello\nworld"
+
+
+def test_create_text_value_reconciles_duplicate_key_race(monkeypatch):
+    """A concurrent insert winner is returned by its canonical fingerprint row."""
+
+    existing_id = ObjectId()
+    lookups: list[dict[str, str]] = []
+
+    def find_one(query):
+        lookups.append(query)
+        if len(lookups) == 1:
+            return None
+        return {"_id": existing_id}
+
+    monkeypatch.setattr(TextValuesRepository, "find_one", find_one)
+    monkeypatch.setattr(
+        TextValuesRepository,
+        "insert_one",
+        lambda _doc: (_ for _ in ()).throw(DuplicateKeyError("duplicate")),
+    )
+
+    text_value_id = create_text_value("Same title", lang="en-NZ")
+
+    expected = {"fingerprint": "same title||en-nz", "lang": "en-NZ"}
+    assert text_value_id == str(existing_id)
+    assert lookups == [expected, expected]

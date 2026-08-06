@@ -30611,6 +30611,50 @@ def _task_create(**kwargs):
         ).encode("utf-8")
     ).hexdigest()
 
+    required_read_back_fields = {
+        "title": title.strip(),
+        "description": description.strip(),
+        "status": "pending",
+        "priority": priority,
+    }
+
+    def _canonical_read_back_mismatches(task: dict[str, Any]) -> dict[str, Any]:
+        return {
+            field_name: {
+                "expected": expected_value,
+                "actual": task.get(field_name),
+            }
+            for field_name, expected_value in required_read_back_fields.items()
+            if task.get(field_name) != expected_value
+        }
+
+    def _incomplete_canonical_read_back_response(
+        *,
+        task_concept_id: str,
+        task: dict[str, Any],
+        required_text_persistence_failures: Any = None,
+    ) -> dict[str, Any]:
+        response: dict[str, Any] = {
+            "success": False,
+            "error": "task_canonical_read_back_incomplete",
+            "error_code": "task_canonical_read_back_incomplete",
+            "message": (
+                "The task concept exists, but canonical read-back did not confirm "
+                "all required task fields."
+            ),
+            "effect_status": "indeterminate",
+            "mutation_outcome": "unknown",
+            "changed": True,
+            "task_concept_id": task_concept_id,
+            "canonical_read_back": task,
+            "required_field_mismatches": _canonical_read_back_mismatches(task),
+        }
+        if required_text_persistence_failures:
+            response["required_text_persistence_failures"] = (
+                required_text_persistence_failures
+            )
+        return response
+
     def _idempotent_replay_response(task: dict[str, Any]) -> dict[str, Any]:
         return {
             **task,
@@ -30701,6 +30745,18 @@ def _task_create(**kwargs):
                 "task_concept_id": task_concept_id,
                 "read_back_error": type(exc).__name__,
             }
+        required_text_persistence_failures = result.get(
+            "required_text_persistence_failures"
+        )
+        if (
+            required_text_persistence_failures
+            or _canonical_read_back_mismatches(canonical_read_back)
+        ):
+            return _incomplete_canonical_read_back_response(
+                task_concept_id=task_concept_id,
+                task=canonical_read_back,
+                required_text_persistence_failures=required_text_persistence_failures,
+            )
         result.update(
             {
                 "success": True,
@@ -30764,12 +30820,16 @@ def _task_list(**kwargs):
 
     try:
         if user_id and isinstance(user_id, str) and user_id.strip():
-            # Get tasks for a specific user
-            tasks = get_tasks_for_user(
+            # Limit the actor-visible concept query before task text and
+            # conversation projections are hydrated.
+            page = get_tasks_for_user(
                 user_id.strip(),
                 status_filter=status if isinstance(status, str) else None,
                 include_created=bool(kwargs.get("include_created", True)),
+                limit=limit,
+                return_metadata=True,
             )
+            return {"success": True, **page}
         else:
             # List tasks with filters
             tasks = list_tasks(

@@ -8,6 +8,8 @@ All tasks are stored as first-class Vontology concepts (type: #V#task_specificat
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import contextvars
 import hashlib
 import logging
 import time
@@ -30,6 +32,7 @@ from ..security.visibility_predicates import (
     set_specific_to_org_values,
     set_specific_to_user_values,
 )
+from ..security.access_control import can_access_concept
 from .effort_unit_ontology_service import (
     ensure_effort_unit_ontology,
     extract_effort_unit_type_ids,
@@ -73,6 +76,7 @@ logger = logging.getLogger(__name__)
 
 TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION = "task_list_load_telemetry.v1"
 TASK_SEARCH_ACCESSIBLE_CANDIDATE_LIMIT = 400
+TASK_LIST_MAX_PAGE_SIZE = 200
 
 
 def _round_duration_ms(duration_seconds: float) -> float:
@@ -445,6 +449,93 @@ def _upsert_optional_task_text(
         text=value,
         lang=lang,
     )
+
+
+def _persist_required_task_texts(
+    *,
+    task_concept_id: str,
+    title: str,
+    description: str,
+    priority: str,
+) -> list[dict[str, str]]:
+    """Persist mandatory task text fields concurrently and report failures.
+
+    These independent relations formerly ran serially after the concept insert.
+    On a remote Mongo deployment that can consume the ordinary-turn effect
+    budget before a caller can perform its canonical read-back. Their writes
+    are independent and idempotent, so concurrent persistence preserves their
+    semantics while bounding their wall-clock contribution.
+    """
+
+    required_texts = (
+        (PREDICATE_HAS_NAME, title, "en-NZ"),
+        (PREDICATE_HAS_DESCRIPTION, description, "en-NZ"),
+        (PREDICATE_HAS_TASK_STATUS, TASK_STATUS_PENDING, "en"),
+        (PREDICATE_HAS_PRIORITY, priority, "en"),
+    )
+    failures: list[dict[str, str]] = []
+
+    def persist(predicate: str, text: str, lang: str) -> None:
+        upsert_text_for_concept(
+            subject_concept_id=task_concept_id,
+            predicate=predicate,
+            text=text,
+            lang=lang,
+        )
+
+    # The copied worker contexts share the request AccessEvaluator. Resolve
+    # this one task decision before submitting so every worker only reads its
+    # cached decision instead of mutating that shared evaluator concurrently.
+    # This happens after the concept insert, so a failure must be returned as
+    # receipt evidence rather than escape into fingerprint reconciliation.
+    try:
+        can_access_concept(task_concept_id)
+    except Exception as exc:
+        logger.warning("Failed to verify required task text access: %s", exc)
+        return [
+            {
+                "predicate": "required_task_texts",
+                "exception_type": type(exc).__name__,
+            }
+        ]
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(required_texts)) as executor:
+            pending = {
+                executor.submit(
+                    contextvars.copy_context().run,
+                    persist,
+                    predicate,
+                    text,
+                    lang,
+                ): predicate
+                for predicate, text, lang in required_texts
+            }
+            for future in as_completed(pending):
+                predicate = pending[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to store required task text field %s: %s",
+                        predicate,
+                        exc,
+                    )
+                    failures.append(
+                        {
+                            "predicate": predicate,
+                            "exception_type": type(exc).__name__,
+                        }
+                    )
+    except Exception as exc:
+        logger.warning("Failed to run required task text workers: %s", exc)
+        failures.append(
+            {
+                "predicate": "required_task_texts",
+                "exception_type": type(exc).__name__,
+            }
+        )
+    return failures
 
 
 def _replace_single_relationship_target(
@@ -1381,49 +1472,12 @@ def create_task(
         logger.error(f"Failed to create task concept: {e}")
         raise TaskManagementError(f"Failed to create task: {e}") from e
 
-    # Store title as hasName text relation
-    try:
-        upsert_text_for_concept(
-            subject_concept_id=task_concept_id,
-            predicate=PREDICATE_HAS_NAME,
-            text=title,
-            lang="en-NZ",
-        )
-    except Exception as e:
-        logger.warning(f"Failed to store task title: {e}")
-
-    # Store description as hasDescription text relation
-    try:
-        upsert_text_for_concept(
-            subject_concept_id=task_concept_id,
-            predicate=PREDICATE_HAS_DESCRIPTION,
-            text=description,
-            lang="en-NZ",
-        )
-    except Exception as e:
-        logger.warning(f"Failed to store task description: {e}")
-
-    # Store status as text relation
-    try:
-        upsert_text_for_concept(
-            subject_concept_id=task_concept_id,
-            predicate=PREDICATE_HAS_TASK_STATUS,
-            text=TASK_STATUS_PENDING,
-            lang="en",
-        )
-    except Exception as e:
-        logger.warning(f"Failed to store task status: {e}")
-
-    # Store priority as text relation
-    try:
-        upsert_text_for_concept(
-            subject_concept_id=task_concept_id,
-            predicate=PREDICATE_HAS_PRIORITY,
-            text=priority,
-            lang="en",
-        )
-    except Exception as e:
-        logger.warning(f"Failed to store task priority: {e}")
+    required_text_persistence_failures = _persist_required_task_texts(
+        task_concept_id=task_concept_id,
+        title=title,
+        description=description,
+        priority=priority,
+    )
 
     # Store start date if provided
     if parsed_start_date:
@@ -1525,6 +1579,7 @@ def create_task(
         "notes": notes,
         "reference_code": reference_code,
         "created_at": now.isoformat(),
+        "required_text_persistence_failures": required_text_persistence_failures,
     }
 
     try:
@@ -2259,19 +2314,33 @@ def get_tasks_for_user(
     *,
     status_filter: Optional[str] = None,
     include_created: bool = False,
-) -> List[Dict[str, Any]]:
+    limit: int | None = None,
+    return_metadata: bool = False,
+) -> List[Dict[str, Any]] | Dict[str, Any]:
     """Get all tasks assigned to a user.
 
     Args:
         user_concept_id: The user's concept_id
         status_filter: Optional status to filter by
         include_created: If True, also include tasks created by the user
+        limit: Optional maximum number of accessible task concepts to hydrate
+        return_metadata: Return page metadata in addition to the task rows
 
     Returns:
-        List of task dicts
+        Task dicts, or a bounded page with count and total metadata when
+        ``return_metadata`` is requested.
     """
     normalised_id = ensure_v_concept_prefix(user_concept_id)
     if not normalised_id:
+        if return_metadata:
+            return {
+                "tasks": [],
+                "count": 0,
+                "total": 0,
+                "total_is_exhaustive": True,
+                "has_more": False,
+                "limit": limit,
+            }
         return []
     user_concept_id = normalised_id
 
@@ -2291,12 +2360,60 @@ def get_tasks_for_user(
             ],
         }
 
-    cursor = ConceptsRepository.find(query)
+    page_limit: int | None = None
+    if limit is not None:
+        try:
+            page_limit = max(1, min(int(limit), TASK_LIST_MAX_PAGE_SIZE))
+        except (TypeError, ValueError):
+            page_limit = 50
+
+    total: int | None = None
+    if return_metadata:
+        try:
+            # ConceptsRepository applies the trusted actor visibility filter
+            # before counting, so inaccessible tasks neither leak nor consume
+            # this page's cap.
+            total = int(ConceptsRepository.count_documents(query))
+        except Exception:
+            # A failed count must not turn a bounded page into a fabricated
+            # total. The readable task rows still provide a useful response.
+            total = None
+
+    cursor = ConceptsRepository.find(
+        query,
+        sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
+        limit=page_limit or 0,
+    )
     tasks = _build_task_responses(cursor)
 
     # Apply status filter if provided
     if status_filter:
         tasks = [t for t in tasks if t.get("status") == status_filter]
+
+    if return_metadata:
+        total_is_exhaustive = total is not None and not (
+            status_filter and page_limit is not None and total > page_limit
+        )
+        reported_total = len(tasks) if total_is_exhaustive and status_filter else total
+        has_more: bool | None
+        if total is None:
+            has_more = None
+        elif status_filter and not total_is_exhaustive:
+            # The bounded source page has more actor-visible candidates, but
+            # their text-backed statuses are unknown until hydrated.
+            has_more = None
+        elif status_filter and total_is_exhaustive:
+            has_more = False
+        else:
+            has_more = total > (page_limit if page_limit is not None else len(tasks))
+        return {
+            "tasks": tasks,
+            "count": len(tasks),
+            "total": reported_total if total_is_exhaustive else None,
+            "total_is_exhaustive": total_is_exhaustive,
+            "has_more": has_more,
+            "limit": page_limit,
+        }
 
     return tasks
 
