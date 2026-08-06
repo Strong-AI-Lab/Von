@@ -6647,6 +6647,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     )
 
     seen_arguments: dict[str, Any] = {}
+    progress_events: list[dict[str, Any]] = []
     workflow_capability = WorkflowTurnCapability(
         name="represented_workflow_turn_test",
         workflow_id="#V#represented_test_workflow",
@@ -6754,6 +6755,10 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         turn_id="turn-represented-workflow",
         turn_budget_seconds=20,
         final_synthesis_reserve_seconds=2,
+        progress_tracker=SimpleNamespace(
+            emit=lambda event: progress_events.append(dict(event)),
+            check_cancellation=lambda: None,
+        ),
     )
 
     catalogue_result = client.calls[1]["tool_results"][0].output
@@ -6789,6 +6794,7 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert invocation["tool"] == workflow_capability.name
     assert invocation["execution_method"] == "workflow_execute"
     assert invocation["capability_kind"] == "represented_workflow"
+    assert invocation["capability_display_name"] == "Represented test workflow"
     assert invocation["represented_workflow_id"] == (
         "#V#represented_test_workflow"
     )
@@ -6805,6 +6811,34 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert selection_trace["capability_name"] == workflow_capability.name
     assert selection_trace["selection_policy"]["representedness_priority"] is False
     assert selection_trace["plan_profile"]["shape"] == ("represented_workflow")
+    workflow_events = [
+        event
+        for event in progress_events
+        if event.get("call_id") == "invoke-workflow"
+    ]
+    assert [event["event_kind"] for event in workflow_events] == [
+        "tool_call_start",
+        "tool_call_end",
+    ]
+    assert [event["subtask"] for event in workflow_events] == [
+        "Represented test workflow",
+        "Represented test workflow",
+    ]
+    assert workflow_events[0]["result_summary"] == (
+        "Using Represented test workflow."
+    )
+    assert workflow_events[1]["result_summary"] == (
+        "Finished Represented test workflow."
+    )
+    for event in workflow_events:
+        semantic_operation = event["semantic_operation"]
+        assert semantic_operation["capability"]["id"] == workflow_capability.name
+        assert semantic_operation["capability"]["label"] == (
+            "Represented test workflow"
+        )
+        assert semantic_operation["arguments"][0]["value"] == (
+            "#V#represented_test_workflow"
+        )
     assert result.response_text == "The represented work product was completed."
 
 

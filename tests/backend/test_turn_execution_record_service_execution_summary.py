@@ -288,6 +288,7 @@ def test_partial_represented_workflow_preserves_durable_identity_in_projection()
                 "tool": "represented_workflow_turn_test",
                 "status": "error",
                 "capability_kind": "represented_workflow",
+                "capability_display_name": "Represented Test Workflow",
                 "execution_method": "workflow_execute",
                 "represented_workflow_id": "#V#represented_test_workflow",
                 "workflow_id": "#V#represented_test_workflow",
@@ -306,6 +307,7 @@ def test_partial_represented_workflow_preserves_durable_identity_in_projection()
     serialised = record["execution"]["tool_invocations"][0]
     assert serialised["status"] == "partial"
     assert serialised["capability_kind"] == "represented_workflow"
+    assert serialised["capability_display_name"] == "Represented Test Workflow"
     assert serialised["execution_method"] == "workflow_execute"
     assert serialised["represented_workflow_id"] == (
         "#V#represented_test_workflow"

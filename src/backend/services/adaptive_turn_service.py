@@ -129,6 +129,7 @@ class _PreparedCapabilityCall:
     minimum_effect_window_seconds: float
     capability_kind: str = "registered_tool"
     represented_workflow_id: str | None = None
+    capability_display_name: str | None = None
     binding_diagnostics: Mapping[str, Any] | None = None
 
 
@@ -145,6 +146,7 @@ class _ContainedCapabilityResult:
     execution_method_name: str
     capability_kind: str = "registered_tool"
     represented_workflow_id: str | None = None
+    capability_display_name: str | None = None
     binding_diagnostics: Mapping[str, Any] | None = None
 
 
@@ -4715,6 +4717,11 @@ def execute_adaptive_turn(
                 if is_workflow_capability
                 else bool(is_effect)
             )
+            capability_display_name = (
+                str(workflow_capability.display_name)
+                if is_workflow_capability
+                else None
+            )
             if not isinstance(arguments, Mapping):
                 raw_capability_results[index] = _ContainedCapabilityResult(
                     raw_payload=_error_payload(
@@ -4737,6 +4744,7 @@ def execute_adaptive_turn(
                         if is_workflow_capability
                         else None
                     ),
+                    capability_display_name=capability_display_name,
                 )
                 continue
             binding_diagnostics: Mapping[str, Any] | None = None
@@ -4759,6 +4767,7 @@ def execute_adaptive_turn(
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
                         represented_workflow_id=str(workflow_capability.workflow_id),
+                        capability_display_name=capability_display_name,
                     )
                     continue
                 if not scope.user_concept_id or not scope.namespace:
@@ -4778,6 +4787,7 @@ def execute_adaptive_turn(
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
                         represented_workflow_id=str(workflow_capability.workflow_id),
+                        capability_display_name=capability_display_name,
                     )
                     continue
                 from src.backend.services.workflow_turn_capability_service import (
@@ -4828,6 +4838,7 @@ def execute_adaptive_turn(
                         execution_method_name=execution_method_name,
                         capability_kind="represented_workflow",
                         represented_workflow_id=str(workflow_capability.workflow_id),
+                        capability_display_name=capability_display_name,
                     )
                     continue
                 if turn_id:
@@ -4907,6 +4918,7 @@ def execute_adaptive_turn(
                         if is_workflow_capability
                         else None
                     ),
+                    capability_display_name=capability_display_name,
                     binding_diagnostics=binding_diagnostics,
                 )
             )
@@ -4939,6 +4951,7 @@ def execute_adaptive_turn(
                     execution_method_name=execution_method_name,
                     capability_kind=item.capability_kind,
                     represented_workflow_id=item.represented_workflow_id,
+                    capability_display_name=item.capability_display_name,
                     binding_diagnostics=item.binding_diagnostics,
                 )
 
@@ -5097,6 +5110,7 @@ def execute_adaptive_turn(
                     capability_kind=item.capability_kind,
                     arguments=arguments,
                     lifecycle_status="running",
+                    capability_display_name=item.capability_display_name,
                 )
                 _emit(
                     progress_tracker,
@@ -5568,6 +5582,10 @@ def execute_adaptive_turn(
                     invocation["represented_workflow_id"] = (
                         contained_result.represented_workflow_id
                     )
+                if contained_result.capability_display_name:
+                    invocation["capability_display_name"] = (
+                        contained_result.capability_display_name
+                    )
                 if contained_result.binding_diagnostics:
                     invocation["binding_diagnostics"] = dict(
                         contained_result.binding_diagnostics
@@ -5685,6 +5703,9 @@ def execute_adaptive_turn(
                     arguments=arguments,
                     lifecycle_status=(
                         effect_status or ("succeeded" if status == "ok" else "failed")
+                    ),
+                    capability_display_name=(
+                        contained_result.capability_display_name
                     ),
                     success=status == "ok",
                     result=semantic_result,

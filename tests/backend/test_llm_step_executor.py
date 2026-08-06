@@ -1396,20 +1396,23 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
     assert captured["check_cancellation"] is None
 
 
-def test_execute_llm_step_preserves_gateway_llm_call_id(monkeypatch) -> None:
+def test_execute_llm_step_preserves_gateway_llm_call_metadata(monkeypatch) -> None:
     class _StubOrchestrator:
         def _run_llm_with_fallbacks(self, **kwargs):
             record_llm_call = kwargs.get("record_llm_call")
             assert callable(record_llm_call)
             record_llm_call(
                 call_type="llm_call",
-                model_name="test-model",
+                model_name="selected-model",
+                requested_model_name="requested-model",
+                effective_model_name="provider-model",
+                model_identity_source="provider_response",
                 duration_ms=12.0,
                 stage="selector",
                 provider="openai",
                 call_id="llm-test:attempt:1",
             )
-            return ('{"ok": true}', "test-model", None)
+            return ('{"ok": true}', "selected-model", None)
 
     monkeypatch.setattr(
         "src.backend.workflows.llm_step_executor._build_gateway_runtime",
@@ -1422,7 +1425,7 @@ def test_execute_llm_step_preserves_gateway_llm_call_id(monkeypatch) -> None:
         environment=WorkflowEnvironment(
             llm_client=MagicMock(),
             gateway=object(),
-            model="test-model",
+            model="requested-model",
         ),
         data={},
         prompt_contract={"prompt_text": "Return JSON only."},
@@ -1433,10 +1436,18 @@ def test_execute_llm_step_preserves_gateway_llm_call_id(monkeypatch) -> None:
     result = execute_llm_step(request)
 
     assert result.status == "success"
-    assert result.outputs["llm_calls"][0]["call_id"] == "llm-test:attempt:1"
+    llm_call = result.outputs["llm_calls"][0]
+    assert llm_call["call_id"] == "llm-test:attempt:1"
+    assert llm_call["requested_model"] == "requested-model"
+    assert llm_call["selected_model"] == "selected-model"
+    assert llm_call["effective_model"] == "provider-model"
+    assert llm_call["model_identity_source"] == "provider_response"
     assert (
         result.outputs["llm_step_envelope"]["llm_calls"][0]["call_id"]
         == "llm-test:attempt:1"
+    )
+    assert (
+        result.outputs["llm_step_envelope"]["llm_calls"] == result.outputs["llm_calls"]
     )
 
 
@@ -1737,7 +1748,7 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
 
         def _select_model_for_stage(self, **kwargs):
             captured["prefer_default_model"] = kwargs.get("prefer_default_model")
-            return kwargs.get("default_model")
+            return "selected-model"
 
         def _action_tool_calling_plan(self, request):
             captured["shared_prefer_default_model"] = request.data.get(
@@ -1745,6 +1756,15 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
             )
             captured["workflow_step_output_contract"] = request.data.get(
                 "workflow_step_output_contract"
+            )
+            request.data["record_llm_call"](
+                call_type="llm.generate_with_tools",
+                model_name="selected-model",
+                requested_model_name="requested-model",
+                effective_model_name="provider-model",
+                model_identity_source="provider_response",
+                duration_ms=12.0,
+                stage="tool_call",
             )
             request.data["model_for_stage"]("tool_call")
             return type(
@@ -1774,10 +1794,10 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
         environment=WorkflowEnvironment(
             llm_client=MagicMock(),
             gateway=_StubGateway(),
-            model="gemma4:26b",
+            model="requested-model",
         ),
         data={
-            "requested_model": "gemma4:26b",
+            "requested_model": "requested-model",
             "requested_client_type": "ollama",
         },
         prompt_contract={"prompt_text": "Return JSON only."},
@@ -1790,6 +1810,14 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
     assert result.status == "success"
     assert captured["shared_prefer_default_model"] is True
     assert captured["prefer_default_model"] is True
+    llm_call = result.outputs["llm_calls"][0]
+    assert llm_call["requested_model"] == "requested-model"
+    assert llm_call["selected_model"] == "selected-model"
+    assert llm_call["effective_model"] == "provider-model"
+    assert llm_call["model_identity_source"] == "provider_response"
+    assert (
+        result.outputs["llm_step_envelope"]["llm_calls"] == result.outputs["llm_calls"]
+    )
     assert captured["workflow_step_output_contract"] == {
         "schema_version": "workflow_step_output_contract.v1",
         "output_format": "json_value",

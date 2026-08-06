@@ -3449,6 +3449,127 @@ describe('thinking activity history normalisation', () => {
         expect(expertHtml).toContain('hasName');
     });
 
+    test('shows represented workflow names by default and keeps both machine identities inspectable', () => {
+        const semanticOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-arxiv-workflow',
+            lifecycle_status: 'succeeded',
+            capability: {
+                id: 'represented_workflow_0348c4f884fc88757dcf',
+                label: 'Arxiv Paper Representation Workflow',
+                kind: 'represented_workflow',
+                execution_method: 'workflow_execute'
+            },
+            arguments: [{
+                role: 'workflow',
+                label: 'Workflow',
+                source_argument: 'workflow_id',
+                value_kind: 'workflow',
+                value: '#V#arxiv_paper_representation_workflow',
+                display: 'Arxiv Paper Representation Workflow',
+                concept_id: '#V#arxiv_paper_representation_workflow'
+            }],
+            summary: 'Finished Arxiv Paper Representation Workflow.',
+            visibility: 'conversation_scope',
+            verification: {
+                status: 'receipt_only',
+                canonical_read_back_present: false,
+                source: 'effect_receipt'
+            },
+            outcome: { status: 'succeeded', success: true }
+        };
+        const createRequest = (mode) => ({
+            thinkingCardMode: mode,
+            latestProgress: {
+                status: 'completed',
+                stage: 'adaptive_research',
+                tool_history: [{
+                    tool: semanticOperation.capability.id,
+                    callId: 'call-arxiv-workflow',
+                    success: true,
+                    resultSummary: semanticOperation.summary,
+                    semanticOperation
+                }]
+            }
+        });
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('default'));
+        expect(defaultHtml).toContain('Finished Arxiv Paper Representation Workflow');
+        expect(defaultHtml).not.toContain('represented_workflow_0348c4f884fc88757dcf');
+        expect(defaultHtml).not.toContain('#V#arxiv_paper_representation_workflow');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('expert'));
+        expect(expertHtml).toContain('Arxiv Paper Representation Workflow');
+        expect(expertHtml).toContain('Workflow: Arxiv Paper Representation Workflow');
+        expect(expertHtml).toContain('Workflow ID');
+        expect(expertHtml).toContain('#V#arxiv_paper_representation_workflow');
+        expect(expertHtml).not.toContain('Tool call: represented_workflow_0348c4f884fc88757dcf');
+
+        const debugHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('debug'));
+        expect(debugHtml).toContain('Tool call: represented_workflow_0348c4f884fc88757dcf');
+        expect(debugHtml).toContain('Capability ID');
+        expect(debugHtml).toContain('represented_workflow_0348c4f884fc88757dcf');
+        expect(debugHtml).toContain('workflow_execute');
+    });
+
+    test('recovers a represented workflow name from legacy completed history', () => {
+        const capabilityId = 'represented_workflow_0348c4f884ec88757dcf';
+        const opaqueLabel = 'Represented Workflow 0348C4F884Ec88757Dcf';
+        const semanticOperation = {
+            schema_version: 'thinking_semantic_operation.v1',
+            operation_id: 'operation-legacy-arxiv-workflow',
+            lifecycle_status: 'failed',
+            capability: {
+                id: capabilityId,
+                label: opaqueLabel,
+                kind: 'represented_workflow',
+                execution_method: 'workflow_execute'
+            },
+            arguments: [],
+            summary: `${opaqueLabel} did not succeed.`,
+            visibility: 'conversation_scope',
+            outcome: {
+                status: 'failed',
+                success: false,
+                workflow_id: '#V#arxiv_paper_representation_workflow'
+            },
+            verification: {
+                status: 'receipt_only',
+                canonical_read_back_present: false,
+                source: 'effect_receipt'
+            }
+        };
+        const createRequest = (mode) => ({
+            thinkingCardMode: mode,
+            latestProgress: {
+                status: 'completed',
+                stage: 'adaptive_research',
+                tool_history: [{
+                    tool: capabilityId,
+                    capability_kind: 'represented_workflow',
+                    represented_workflow_id: '#V#arxiv_paper_representation_workflow',
+                    success: false,
+                    resultSummary: semanticOperation.summary,
+                    semanticOperation
+                }]
+            }
+        });
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('default'));
+        expect(defaultHtml).toContain('Arxiv Paper Representation Workflow did not succeed');
+        expect(defaultHtml).not.toContain(opaqueLabel);
+        expect(defaultHtml).not.toContain(capabilityId);
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('expert'));
+        expect(expertHtml).toContain('Workflow: Arxiv Paper Representation Workflow');
+        expect(expertHtml).toContain('#V#arxiv_paper_representation_workflow');
+        expect(expertHtml).not.toContain(`Tool call: ${capabilityId}`);
+
+        const debugHtml = __testOnly_renderThinkingCardBodyHTML(createRequest('debug'));
+        expect(debugHtml).toContain(`Tool call: ${capabilityId}`);
+        expect(debugHtml).toContain('Arxiv Paper Representation Workflow did not succeed');
+    });
+
     test('adds bounded semantic IDs and verification in Expert, then execution details only in Debug', () => {
         const semanticOperation = {
             schema_version: 'thinking_semantic_operation.v1',
@@ -6182,7 +6303,7 @@ describe('thinking activity history normalisation', () => {
         const text = container.textContent || '';
 
         expect(text).toContain('Execution path');
-        expect(text).toContain('General tool use: fetch_concept, task_get');
+        expect(text).toContain('General tool use: Fetch concept, Task get');
         expect(text).toContain('Progress meaning');
         expect(text).toContain('Running tool pipeline for this turn.');
     });

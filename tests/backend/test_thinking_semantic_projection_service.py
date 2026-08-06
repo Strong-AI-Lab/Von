@@ -45,6 +45,65 @@ def test_relation_projection_has_role_labelled_arguments_and_readable_start() ->
     )
 
 
+def test_represented_workflow_uses_human_label_without_losing_identities() -> None:
+    projection = build_semantic_operation_projection(
+        operation_id="call-arxiv-workflow",
+        capability_name="represented_workflow_0348c4f884fc88757dcf",
+        execution_method="workflow_execute",
+        capability_kind="represented_workflow",
+        capability_display_name="Arxiv Paper Representation Workflow",
+        arguments={"workflow_id": "#V#arxiv_paper_representation_workflow"},
+        lifecycle_status="running",
+    )
+
+    assert projection["capability"] == {
+        "id": "represented_workflow_0348c4f884fc88757dcf",
+        "label": "Arxiv Paper Representation Workflow",
+        "kind": "represented_workflow",
+        "execution_method": "workflow_execute",
+    }
+    assert projection["arguments"][0]["value"] == (
+        "#V#arxiv_paper_representation_workflow"
+    )
+    assert projection["summary"] == "Using Arxiv Paper Representation Workflow."
+    assert normalise_semantic_operation_projection(projection) == projection
+
+
+def test_legacy_workflow_projection_falls_back_to_canonical_workflow_id() -> None:
+    projection = build_semantic_operation_projection(
+        operation_id="call-arxiv-workflow",
+        capability_name="represented_workflow_0348c4f884fc88757dcf",
+        execution_method="workflow_execute",
+        capability_kind="represented_workflow",
+        arguments={"workflow_id": "#V#arxiv_paper_representation_workflow"},
+        lifecycle_status="running",
+    )
+    projection["capability"]["label"] = (
+        "Represented Workflow 0348C4F884Fc88757Dcf"
+    )
+    projection["summary"] = "Using Represented Workflow 0348C4F884Fc88757Dcf."
+    projection["arguments"] = []
+    projection["outcome"] = {
+        "status": "failed",
+        "success": False,
+        "workflow_id": "#V#arxiv_paper_representation_workflow",
+    }
+    projection["lifecycle_status"] = "failed"
+
+    normalised = normalise_semantic_operation_projection(projection)
+
+    assert normalised is not None
+    assert normalised["capability"]["id"] == (
+        "represented_workflow_0348c4f884fc88757dcf"
+    )
+    assert normalised["capability"]["label"] == (
+        "Arxiv Paper Representation Workflow"
+    )
+    assert normalised["summary"] == (
+        "Arxiv Paper Representation Workflow did not succeed."
+    )
+
+
 def test_nested_predicate_reference_and_receipt_only_unchanged_are_truthful() -> None:
     projection = _relation_projection(
         arguments={
