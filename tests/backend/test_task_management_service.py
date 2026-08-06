@@ -326,7 +326,11 @@ class TestUpdateTaskStatus:
         """update_task_status() with valid status should update."""
         mock_repo.find_one.return_value = {
             "concept_id": "#V#task_abc",
-            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "relationships": {
+                "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                "#V#hasCreatedBy": ["#V#user_bob"],
+                "#V#hasAssignee": ["#V#user_alice"],
+            },
             "metadata": {},
         }
         mock_get_texts.return_value = [
@@ -338,11 +342,26 @@ class TestUpdateTaskStatus:
             "updated_at": datetime.now(timezone.utc),
         }
 
-        result = update_task_status("#V#task_abc", "in_progress")
+        result = update_task_status(
+            "#V#task_abc",
+            "in_progress",
+            actor_concept_id="#V#user_alice",
+        )
 
         assert result["status"] == "in_progress"
         mock_upsert.assert_called()
         mock_launch_workflow.assert_called_once()
+        assert (
+            mock_launch_workflow.call_args.kwargs["created_by_concept_id"]
+            == "#V#user_alice"
+        )
+        history_events = [
+            call.args[1]["$push"]["metadata.task_history"]
+            for call in mock_repo.update_one.call_args_list
+            if "$push" in call.args[1]
+            and "metadata.task_history" in call.args[1]["$push"]
+        ]
+        assert history_events[-1]["actor_concept_id"] == "#V#user_alice"
 
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")

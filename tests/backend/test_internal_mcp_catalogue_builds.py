@@ -68,6 +68,11 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "testing_prepare_arxiv_paper_ingestion_fixture" in methods
     assert "testing_verify_arxiv_paper_ingestion_result" in methods
     assert "testing_cleanup_arxiv_paper_ingestion_artifacts" in methods
+    assert {
+        "message_send_direct",
+        "message_get_direct",
+        "message_list_direct",
+    } <= methods
 
 
 def test_default_catalogue_exposes_calibrated_effect_admission_windows():
@@ -261,6 +266,7 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
                 "actor_user_concept_id": "#V#ordinary_actor",
                 "actor_organisation_concept_id": "#V#ordinary_org",
                 "turn_id": "turn-1",
+                "conversation_id": "conversation-1",
             },
         )
     )
@@ -297,9 +303,54 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
         "upsert_scoped_assertion",
         "upsert_text_relation",
         "add_relationship",
+        "message_send_direct",
+        "task_create",
+        "task_update_status",
+        "task_add_comment",
     }
     assert not {
         name for name in public_reads if catalogue.get(name).category == "write"
+    }
+
+    message_send_definition = catalogue.get("message_send_direct")
+    assert message_send_definition.ordinary_turn_effect is True
+    assert message_send_definition.ordinary_turn_trusted_argument_bindings == {
+        "acting_user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+        "request_id": "turn_id",
+        "namespace": "turn_namespace",
+    }
+    assert catalogue.get("message_get_direct").ordinary_turn_effect is False
+    assert catalogue.get("message_list_direct").ordinary_turn_effect is False
+    task_create_definition = catalogue.get("task_create")
+    assert task_create_definition.ordinary_turn_effect is True
+    assert task_create_definition.ordinary_turn_trusted_argument_bindings == {
+        "assignee_id": "actor_user_concept_id",
+        "assignee_concept_id": "actor_user_concept_id",
+        "created_by_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+        "originating_session_id": "conversation_id",
+        "namespace": "turn_namespace",
+        "acting_user_concept_id": "actor_user_concept_id",
+        "request_id": "turn_id",
+    }
+    task_status_definition = catalogue.get("task_update_status")
+    assert task_status_definition.ordinary_turn_effect is True
+    assert task_status_definition.ordinary_turn_mutation_subject_argument == "task_concept_id"
+    assert task_status_definition.ordinary_turn_trusted_argument_bindings == {
+        "namespace": "turn_namespace",
+        "acting_user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+    }
+    task_comment_definition = catalogue.get("task_add_comment")
+    assert task_comment_definition.ordinary_turn_effect is True
+    assert task_comment_definition.ordinary_turn_mutation_subject_argument == "task_concept_id"
+    assert task_comment_definition.ordinary_turn_trusted_argument_bindings == {
+        "author_concept_id": "actor_user_concept_id",
+        "namespace": "turn_namespace",
+        "acting_user_concept_id": "actor_user_concept_id",
+        "organisation_concept_id": "actor_organisation_concept_id",
+        "request_id": "turn_id",
     }
 
     create_definition = catalogue.get("create_concepts")

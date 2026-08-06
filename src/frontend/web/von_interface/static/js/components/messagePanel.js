@@ -20,6 +20,7 @@ let _messageListEl = null;
 let _threads = [];
 let _currentMessages = [];
 let _currentConversationUserId = null;
+let _currentUserId = null;
 let _isLoading = false;
 let _unreadCount = 0;
 let _replySendFailureState = null;
@@ -436,16 +437,19 @@ async function loadConversation(userId) {
     try {
         const response = await getJson(`/api/messages/conversation/${encodeURIComponent(userId)}?limit=50`);
         _currentMessages = response.messages || [];
+        _currentUserId = response.current_user_id || null;
         await renderMessages();
 
         // Mark messages as read
         const unreadIds = _currentMessages
             .filter(m => {
-                const _readBy = m.concept_data?.read_by || [];
-                // Check if current user hasn't read it yet
-                // We need to get current user ID - for now, check if not sender
-                const senderId = m.relationships?.['#V#has_sender']?.[0];
-                return senderId !== userId; // Simplified: assume we're the other party
+                const readBy = m.concept_data?.read_by || [];
+                const recipientIds = m.relationships?.['#V#has_recipient'] || [];
+                return Boolean(
+                    _currentUserId
+                    && recipientIds.includes(_currentUserId)
+                    && !readBy.includes(_currentUserId)
+                );
             })
             .map(m => m.concept_id);
 
@@ -709,15 +713,19 @@ async function renderMessages() {
     _currentMessages.forEach(msg => {
         const senderId = msg.relationships?.['#V#has_sender']?.[0] || '';
         const content = msg.concept_data?.content_fallback || '';
+        const subject = typeof msg.concept_data?.subject === 'string'
+            ? msg.concept_data.subject.trim()
+            : '';
         const timestamp = msg.created_at ? new Date(msg.created_at) : null;
         const isRecommendationMessage = isPaperRecommendationMessage(msg);
 
-        // Determine if this is a sent or received message
-        // For now, compare with the other user in conversation
-        const isSent = senderId !== _currentConversationUserId;
+        const isSent = _currentUserId
+            ? senderId === _currentUserId
+            : senderId !== _currentConversationUserId;
 
         html += `
             <div class="message-bubble ${isSent ? 'sent' : 'received'}">
+                ${subject ? `<div class="message-subject">${escapeHtml(subject)}</div>` : ''}
                 <div class="message-content">${escapeHtml(content)}</div>
                 ${isRecommendationMessage ? `
                 <div class="message-recommendation-panel" data-message-recommendation-panel="1" data-message-id="${escapeHtml(msg.concept_id || '')}">

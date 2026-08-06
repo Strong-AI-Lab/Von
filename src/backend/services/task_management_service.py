@@ -181,6 +181,8 @@ TASK_METADATA_KEY_WORKLOG = "worklog"
 TASK_METADATA_KEY_HISTORY = "task_history"
 TASK_METADATA_KEY_EXTERNAL_REFERENCES = "external_references"
 TASK_METADATA_KEY_BULK_TASK_COLLECTIONS = "bulk_task_collections"
+TASK_METADATA_KEY_CREATION_FINGERPRINT = "agent_creation_fingerprint"
+TASK_METADATA_KEY_CREATION_REQUEST_ID = "agent_creation_request_id"
 
 # Bulk task collection metadata is an explicit visibility marker. Jira-origin
 # tasks are not hidden merely because they came from Jira.
@@ -1125,6 +1127,8 @@ def create_task(
     evidence: str | None = None,
     notes: str | None = None,
     reference_code: str | None = None,
+    agent_creation_fingerprint: str | None = None,
+    agent_creation_request_id: str | None = None,
 ) -> Dict[str, Any]:
     """Create a new task as a Vontology concept.
 
@@ -1152,6 +1156,8 @@ def create_task(
         evidence: Optional evidence text
         notes: Optional notes text
         reference_code: Optional compact task number / reference code
+        agent_creation_fingerprint: Optional server-issued retry fingerprint
+        agent_creation_request_id: Optional server-issued request identity
 
     Returns:
         Dict with task_concept_id, title, status, and other metadata
@@ -1213,6 +1219,14 @@ def create_task(
     reference_code = _normalise_optional_text(
         reference_code,
         field_name="reference_code",
+    )
+    agent_creation_fingerprint = _normalise_optional_text(
+        agent_creation_fingerprint,
+        field_name="agent_creation_fingerprint",
+    )
+    agent_creation_request_id = _normalise_optional_text(
+        agent_creation_request_id,
+        field_name="agent_creation_request_id",
     )
 
     parsed_start_date = _parse_datetime(start_date)
@@ -1334,6 +1348,8 @@ def create_task(
             TASK_METADATA_KEY_HISTORY: [],
             TASK_METADATA_KEY_EXTERNAL_REFERENCES: {},
             TASK_METADATA_KEY_BULK_TASK_COLLECTIONS: [],
+            TASK_METADATA_KEY_CREATION_FINGERPRINT: agent_creation_fingerprint,
+            TASK_METADATA_KEY_CREATION_REQUEST_ID: agent_creation_request_id,
         },
     }
 
@@ -1563,6 +1579,35 @@ def get_task(task_concept_id: str) -> Dict[str, Any]:
         TaskNotFoundError: If task not found
     """
     task_concept_id, doc = _get_task_doc(task_concept_id)
+    return _build_task_response(doc)
+
+
+def find_task_by_agent_creation_fingerprint(
+    *,
+    created_by_concept_id: str,
+    organisation_concept_id: str,
+    creation_fingerprint: str,
+) -> Dict[str, Any] | None:
+    """Find a prior actor-scoped task create for retry reconciliation."""
+
+    created_by = _normalise_optional_concept_id(created_by_concept_id)
+    organisation = _normalise_optional_concept_id(organisation_concept_id)
+    fingerprint = _normalise_optional_text(
+        creation_fingerprint,
+        field_name="creation_fingerprint",
+    )
+    if not created_by or not organisation or not fingerprint:
+        return None
+    doc = ConceptsRepository.find_one(
+        {
+            "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
+            f"relationships.{PREDICATE_HAS_CREATED_BY}": created_by,
+            f"metadata.{TASK_METADATA_KEY_ORGANISATION}": organisation,
+            f"metadata.{TASK_METADATA_KEY_CREATION_FINGERPRINT}": fingerprint,
+        }
+    )
+    if not isinstance(doc, dict) or not _is_task_doc(doc):
+        return None
     return _build_task_response(doc)
 
 
@@ -1797,12 +1842,18 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
+def update_task_status(
+    task_concept_id: str,
+    status: str,
+    *,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
     """Update a task's status.
 
     Args:
         task_concept_id: The task's concept_id
         status: New status (pending, in_progress, completed, cancelled, blocked)
+        actor_concept_id: Trusted actor performing the transition, when available
 
     Returns:
         Updated task dict
@@ -1820,6 +1871,9 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
     task_concept_id, doc = _get_task_doc(task_concept_id)
 
     existing_task = _build_task_response(doc)
+    transition_actor_id = _normalise_optional_concept_id(
+        actor_concept_id
+    ) or existing_task.get("created_by_concept_id")
     previous_status = existing_task.get("status")
     if isinstance(previous_status, str) and previous_status == status:
         # No state transition occurred, so skip duplicate writes/events.
@@ -1851,7 +1905,7 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
         _append_task_history_event(
             task_concept_id=task_concept_id,
             event_type="task_status_changed",
-            actor_concept_id=existing_task.get("created_by_concept_id"),
+            actor_concept_id=transition_actor_id,
             details={
                 "from_status": previous_status,
                 "to_status": status,
@@ -1886,7 +1940,7 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
                 effort_unit_type_ids=extract_effort_unit_type_ids(refreshed_doc),
                 successor_effort_unit_type_ids=successor_type_ids,
                 completed_at_iso=updated_at_iso,
-                created_by_concept_id=updated_task.get("created_by_concept_id"),
+                created_by_concept_id=transition_actor_id,
                 organisation_concept_id=updated_task.get("organisation_concept_id"),
             )
             updated_task["effort_unit_completion_workflow_event_launch"] = (
@@ -1914,7 +1968,7 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
             ),
             new_status=status,
             updated_at_iso=updated_at_iso,
-            created_by_concept_id=updated_task.get("created_by_concept_id"),
+            created_by_concept_id=transition_actor_id,
             organisation_concept_id=updated_task.get("organisation_concept_id"),
         )
         if isinstance(workflow_event_launch, dict):
@@ -3498,6 +3552,46 @@ def list_task_comments(
         "offset": offset,
         "limit": limit,
     }
+
+
+def get_task_comment(
+    task_concept_id: str,
+    comment_id: str,
+) -> Dict[str, Any] | None:
+    """Read one task comment by its stable ID without a pagination ceiling."""
+
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    cleaned_comment_id = str(comment_id or "").strip()
+    if not cleaned_comment_id:
+        return None
+    return next(
+        (
+            comment
+            for comment in _list_metadata_items(doc, TASK_METADATA_KEY_COMMENTS)
+            if comment.get("comment_id") == cleaned_comment_id
+        ),
+        None,
+    )
+
+
+def find_task_comment_by_effect_fingerprint(
+    task_concept_id: str,
+    effect_fingerprint: str,
+) -> Dict[str, Any] | None:
+    """Find a prior actor-bound comment effect for retry reconciliation."""
+
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    cleaned_fingerprint = str(effect_fingerprint or "").strip()
+    if not cleaned_fingerprint:
+        return None
+    for comment in _list_metadata_items(doc, TASK_METADATA_KEY_COMMENTS):
+        source = comment.get("source")
+        if (
+            isinstance(source, Mapping)
+            and source.get("effect_fingerprint") == cleaned_fingerprint
+        ):
+            return comment
+    return None
 
 
 def add_task_attachment(

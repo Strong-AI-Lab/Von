@@ -26,6 +26,7 @@ function flushUi() {
 describe('message panel single-thread auto-open', () => {
     beforeEach(() => {
         renderFixture();
+        window.scrollTo = jest.fn();
     });
 
     afterEach(() => {
@@ -140,6 +141,69 @@ describe('message panel single-thread auto-open', () => {
 
         expect(document.querySelector('.message-thread-item.selected')).toBeNull();
         expect(document.getElementById('messageViewHeader')?.classList.contains('hidden')).toBe(true);
-        expect(document.getElementById('messageViewContent')?.textContent).toContain('Select a conversation to view messages');
+        expect(document.querySelector('.message-empty-title')?.textContent).toBe('Select a conversation');
+    });
+
+    test('shows a self-addressed subject and marks the message read as the current user', async () => {
+        const { getJson, postJson } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const { initializeMessagePanel, showMessagesTab } = require(modulePath);
+
+        postJson.mockResolvedValue({ success: true, updated_count: 1 });
+        getJson.mockImplementation(async (url) => {
+            if (url === '/api/messages/threads?limit=20') {
+                return {
+                    threads: [{
+                        _id: ['#V#michael_witbrock'],
+                        last_message: {
+                            concept_data: {
+                                subject: 'Messaging test',
+                                content_fallback: 'Please confirm that this arrived.',
+                            },
+                        },
+                        message_count: 1,
+                    }],
+                };
+            }
+            if (url === '/api/messages/unread/count') {
+                return { unread_count: 1 };
+            }
+            if (url === '/api/messages/conversation/%23V%23michael_witbrock?limit=50') {
+                return {
+                    current_user_id: '#V#michael_witbrock',
+                    messages: [{
+                        concept_id: '#V#message_self_1',
+                        relationships: {
+                            '#V#has_sender': ['#V#michael_witbrock'],
+                            '#V#has_recipient': ['#V#michael_witbrock'],
+                        },
+                        concept_data: {
+                            subject: 'Messaging test',
+                            content_fallback: 'Please confirm that this arrived.',
+                            read_by: [],
+                        },
+                        created_at: '2026-08-06T10:00:00Z',
+                    }],
+                };
+            }
+            throw new Error(`Unexpected getJson call: ${url}`);
+        });
+
+        global.fetch = jest.fn(async () => ({
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({}),
+            json: async () => ({}),
+        }));
+
+        initializeMessagePanel();
+        await showMessagesTab();
+        await flushUi();
+
+        expect(document.querySelector('.message-subject')?.textContent).toBe('Messaging test');
+        expect(document.querySelector('.message-content')?.textContent).toContain('Please confirm that this arrived.');
+        expect(document.querySelector('.message-bubble')?.classList.contains('sent')).toBe(true);
+        expect(postJson).toHaveBeenCalledWith('/api/messages/read/bulk', {
+            message_ids: ['#V#message_self_1'],
+        });
     });
 });

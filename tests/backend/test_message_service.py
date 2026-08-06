@@ -17,6 +17,7 @@ from src.backend.services.message_service import (
     PREDICATE_RECIPIENT,
     create_message,
     get_message,
+    get_message_for_user,
     get_messages_for_user,
     get_unread_count,
     mark_message_read,
@@ -119,14 +120,14 @@ class TestCreateMessage:
     @patch("src.backend.services.message_service.ConceptsRepository")
     @patch("src.backend.services.message_service.upsert_text_for_concept")
     @patch("src.backend.services.message_service.maybe_launch_direct_message_workflow")
-    def test_create_message_with_org_scoping(
+    def test_create_message_keeps_org_as_provenance_not_visibility(
         self,
         mock_launch_workflow: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
         mock_get_coll: MagicMock,
     ) -> None:
-        """create_message() with org_id should include org in visibility."""
+        """Organisation context must not reveal a direct message to nonparticipants."""
         mock_get_coll.return_value = MagicMock()
         mock_repo.insert_one.return_value = None
 
@@ -137,9 +138,8 @@ class TestCreateMessage:
             org_id="#V#nao_institute",
         )
 
-        assert result["relationships"][CANONICAL_SPECIFIC_TO_ORG_PREDICATE] == [
-            "#V#nao_institute"
-        ]
+        assert result["concept_data"]["organisation_concept_id"] == "#V#nao_institute"
+        assert CANONICAL_SPECIFIC_TO_ORG_PREDICATE not in result["relationships"]
         mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.message_service.get_concepts_collection")
@@ -276,6 +276,28 @@ class TestGetMessage:
         result = get_message("")
         assert result is None
 
+    @patch("src.backend.services.message_service.get_concepts_collection")
+    @patch("src.backend.services.message_service.apply_concept_query_filter")
+    def test_get_message_for_user_requires_sender_or_recipient(
+        self,
+        mock_filter: MagicMock,
+        mock_get_coll: MagicMock,
+    ) -> None:
+        mock_coll = MagicMock()
+        mock_get_coll.return_value = mock_coll
+        mock_filter.side_effect = lambda query: query
+        mock_coll.find_one.return_value = None
+
+        result = get_message_for_user("#V#message_abc", "#V#user_charlie")
+
+        assert result is None
+        query = mock_coll.find_one.call_args.args[0]
+        assert query["relationships.is_an_instance_of"] == MESSAGE_TYPE_CONCEPT_ID
+        assert query["$or"] == [
+            {f"relationships.{PREDICATE_SENDER}": "#V#user_charlie"},
+            {f"relationships.{PREDICATE_RECIPIENT}": "#V#user_charlie"},
+        ]
+
 
 class TestGetMessagesForUser:
     """Tests for get_messages_for_user function."""
@@ -340,6 +362,8 @@ class TestMarkMessageRead:
         result = mark_message_read("#V#message_abc", "#V#user_bob")
 
         assert result is True
+        base_filter = mock_filter.call_args.args[0]
+        assert base_filter[f"relationships.{PREDICATE_RECIPIENT}"] == "#V#user_bob"
 
     @patch("src.backend.services.message_service.get_concepts_collection")
     @patch("src.backend.services.message_service.apply_concept_query_filter")

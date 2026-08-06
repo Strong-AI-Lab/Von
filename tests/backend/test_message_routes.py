@@ -32,6 +32,31 @@ def test_send_message_requires_authentication(monkeypatch, app_client):
     assert response.get_json()["error"] == "Authentication required"
 
 
+def test_get_single_message_requires_actor_participation(monkeypatch, app_client):
+    _, client = app_client
+    monkeypatch.setattr(
+        message_routes,
+        "_get_current_user_concept_id",
+        lambda: "#V#user_charlie",
+    )
+    seen: list[tuple[str, str]] = []
+
+    def _fake_get_message_for_user(message_id: str, user_id: str):
+        seen.append((message_id, user_id))
+        return None
+
+    monkeypatch.setattr(
+        message_routes,
+        "get_message_for_user",
+        _fake_get_message_for_user,
+    )
+
+    response = client.get("/api/messages/%23V%23message_private")
+
+    assert response.status_code == 404
+    assert seen == [("#V#message_private", "#V#user_charlie")]
+
+
 def test_send_message_rejects_recipient_outside_organisation(monkeypatch, app_client):
     _, client = app_client
     monkeypatch.setattr(
@@ -270,4 +295,3 @@ def test_send_message_success_logs_episode_and_returns_attribution(
     assert episode_calls[0]["actor_user_id"] == "#V#user_alice"
     assert episode_calls[0]["organisation_concept_id"] == "#V#org_test"
     assert episode_calls[0]["payload"]["message_id"] == "#V#message_test_1"
-

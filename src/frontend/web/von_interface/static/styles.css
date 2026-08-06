@@ -4451,6 +4451,14 @@ body[data-active-tab="messagesTab"] .tab-content-area {
     line-height: 1.5;
 }
 
+.messages-content .message-subject {
+    margin-bottom: 5px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
 .message-meta {
     margin-top: 7px;
     font-size: 0.72rem;

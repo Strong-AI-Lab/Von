@@ -22,7 +22,6 @@ from ..security.access_control import (
     apply_concept_query_filter,
 )
 from ..security.visibility_predicates import (
-    set_specific_to_org_values,
     set_specific_to_user_values,
 )
 
@@ -41,6 +40,126 @@ PREDICATE_REPLY_TO = "#V#is_reply_to"  # For reply chains
 MESSAGE_STATUS_SENT = "sent"
 MESSAGE_STATUS_DELIVERED = "delivered"
 MESSAGE_STATUS_READ = "read"
+
+
+def _normalise_concept_id(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned if cleaned.startswith("#V#") else f"#V#{cleaned}"
+
+
+def normalise_message_recipient_ids(value: Any) -> List[str]:
+    """Return stable, de-duplicated recipient concept IDs."""
+
+    if not isinstance(value, list):
+        return []
+    recipients: List[str] = []
+    seen: set[str] = set()
+    for item in value:
+        concept_id = _normalise_concept_id(item)
+        if concept_id is None:
+            continue
+        fingerprint = concept_id.casefold()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        recipients.append(concept_id)
+    return recipients
+
+
+def authorise_direct_message_participants(
+    *,
+    sender_id: str,
+    recipient_ids: List[str],
+    organisation_concept_id: str,
+) -> tuple[bool, List[str]]:
+    """Check that the sender and every recipient belong to the selected org."""
+
+    from .organisation_membership_service import get_organisation_members
+
+    normalised_sender = _normalise_concept_id(sender_id)
+    normalised_org = _normalise_concept_id(organisation_concept_id)
+    normalised_recipients = normalise_message_recipient_ids(recipient_ids)
+    if normalised_sender is None or normalised_org is None:
+        invalid = [
+            value
+            for value in (sender_id, organisation_concept_id)
+            if isinstance(value, str) and value.strip()
+        ]
+        return False, invalid
+
+    members = get_organisation_members(normalised_org)
+    member_ids = {
+        concept_id
+        for concept_id in (
+            _normalise_concept_id(member.get("user_concept_id"))
+            for member in members.get("members", [])
+            if isinstance(member, dict)
+        )
+        if concept_id is not None
+    }
+    invalid_ids: List[str] = []
+    if normalised_sender not in member_ids:
+        invalid_ids.append(normalised_sender)
+    invalid_ids.extend(
+        recipient_id
+        for recipient_id in normalised_recipients
+        if recipient_id not in member_ids
+    )
+    return not invalid_ids, invalid_ids
+
+
+def project_direct_message(message_doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the bounded direct-message fields needed for receipts/read-back."""
+
+    relationships = message_doc.get("relationships")
+    relationships = relationships if isinstance(relationships, dict) else {}
+    concept_data = message_doc.get("concept_data")
+    concept_data = concept_data if isinstance(concept_data, dict) else {}
+
+    def relationship_values(predicate: str) -> List[str]:
+        raw = relationships.get(predicate)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, str) and item.strip()]
+
+    sender_ids = relationship_values(PREDICATE_SENDER)
+    raw_read_by = concept_data.get("read_by")
+    if isinstance(raw_read_by, str):
+        raw_read_by = [raw_read_by]
+    if not isinstance(raw_read_by, list):
+        raw_read_by = []
+    return {
+        "message_id": str(message_doc.get("concept_id") or ""),
+        "sender_id": sender_ids[0] if sender_ids else None,
+        "recipient_ids": relationship_values(PREDICATE_RECIPIENT),
+        "subject": concept_data.get("subject"),
+        "content": concept_data.get("content_fallback"),
+        "sent_at": concept_data.get("sent_at"),
+        "status": concept_data.get("message_status"),
+        "read_by": [
+            item
+            for item in raw_read_by
+            if isinstance(item, str)
+        ],
+        "thread_id": (
+            relationship_values(PREDICATE_THREAD)[0]
+            if relationship_values(PREDICATE_THREAD)
+            else None
+        ),
+        "reply_to_id": (
+            relationship_values(PREDICATE_REPLY_TO)[0]
+            if relationship_values(PREDICATE_REPLY_TO)
+            else None
+        ),
+        "organisation_concept_id": concept_data.get("organisation_concept_id"),
+        "attribution": concept_data.get("attribution"),
+    }
 
 
 def _generate_message_concept_id(sender_id: str, timestamp: datetime) -> str:
@@ -111,10 +230,6 @@ def create_message(
     if reply_to_id:
         relationships[PREDICATE_REPLY_TO] = [reply_to_id.strip()]
 
-    # Organisation scoping if provided
-    if org_id:
-        relationships = set_specific_to_org_values(relationships, [org_id.strip()])
-
     metadata_payload = metadata if isinstance(metadata, dict) else {}
     metadata_payload = {str(k): v for k, v in metadata_payload.items() if isinstance(k, str)}
     attribution = metadata_payload.get("attribution")
@@ -135,6 +250,9 @@ def create_message(
             # Keep a canonical copy for UI/search paths that do not resolve text relations.
             "content_fallback": content,
             "attribution": attribution,
+            # Organisation is provenance and send-authorisation context. Direct
+            # message visibility remains limited to sender and recipients.
+            "organisation_concept_id": org_id.strip() if org_id else None,
         },
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -207,6 +325,53 @@ def get_message(message_id: str) -> Optional[Dict[str, Any]]:
     query = apply_concept_query_filter(base_filter)
 
     return coll.find_one(query)
+
+
+def get_message_for_user(
+    message_id: str,
+    user_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Retrieve one message only when the user is a sender or recipient."""
+
+    if not message_id or not user_id:
+        return None
+    coll = get_concepts_collection()
+    if coll is None:
+        return None
+
+    normalised_user_id = _normalise_concept_id(user_id)
+    if normalised_user_id is None:
+        return None
+    base_filter: Dict[str, Any] = {
+        "concept_id": message_id.strip(),
+        "relationships.is_an_instance_of": MESSAGE_TYPE_CONCEPT_ID,
+        "$or": [
+            {f"relationships.{PREDICATE_SENDER}": normalised_user_id},
+            {f"relationships.{PREDICATE_RECIPIENT}": normalised_user_id},
+        ],
+    }
+    return coll.find_one(apply_concept_query_filter(base_filter))
+
+
+def get_message_for_delivery_fingerprint(
+    *,
+    sender_id: str,
+    delivery_fingerprint: str,
+) -> Optional[Dict[str, Any]]:
+    """Read an actor's prior delivery for bounded retry reconciliation."""
+
+    normalised_sender = _normalise_concept_id(sender_id)
+    if normalised_sender is None or not delivery_fingerprint.strip():
+        return None
+    coll = get_concepts_collection()
+    if coll is None:
+        return None
+    base_filter: Dict[str, Any] = {
+        "relationships.is_an_instance_of": MESSAGE_TYPE_CONCEPT_ID,
+        f"relationships.{PREDICATE_SENDER}": normalised_sender,
+        "concept_data.metadata.delivery_fingerprint": delivery_fingerprint.strip(),
+    }
+    return coll.find_one(apply_concept_query_filter(base_filter))
 
 
 def get_messages_for_user(
@@ -345,8 +510,13 @@ def mark_message_read(message_id: str, reader_id: str) -> bool:
     if coll is None:
         return False
 
-    # Use access control to ensure user can see the message
-    base_filter = {"concept_id": message_id}
+    # A recipient may acknowledge a message; organisation visibility alone is
+    # never sufficient authority to change direct-message state.
+    base_filter = {
+        "concept_id": message_id,
+        "relationships.is_an_instance_of": MESSAGE_TYPE_CONCEPT_ID,
+        f"relationships.{PREDICATE_RECIPIENT}": reader_id,
+    }
     query = apply_concept_query_filter(base_filter)
 
     result = coll.update_one(
@@ -385,7 +555,11 @@ def mark_messages_read_bulk(message_ids: List[str], reader_id: str) -> int:
     if coll is None:
         return 0
 
-    base_filter = {"concept_id": {"$in": message_ids}}
+    base_filter = {
+        "concept_id": {"$in": message_ids},
+        "relationships.is_an_instance_of": MESSAGE_TYPE_CONCEPT_ID,
+        f"relationships.{PREDICATE_RECIPIENT}": reader_id,
+    }
     query = apply_concept_query_filter(base_filter)
 
     result = coll.update_many(

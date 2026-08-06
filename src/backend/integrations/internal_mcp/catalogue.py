@@ -5390,6 +5390,271 @@ def _deliver_paper_recommendation_messages(**kwargs):
     )
 
 
+def _resolve_direct_message_actor_scope(
+    kwargs: Mapping[str, Any],
+    *,
+    surface: str,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    actor_scope, scope_error = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface=surface,
+        require_actor=True,
+    )
+    if scope_error is not None:
+        return None, scope_error
+    if actor_scope is None or not actor_scope.user_concept_id:
+        return None, make_error_response(
+            "authenticated_actor_context_required",
+            "Internal direct-message access requires a trusted authenticated user.",
+        )
+    if not actor_scope.organisation_concept_id:
+        return None, make_error_response(
+            "authenticated_organisation_context_required",
+            "Sending or reading internal direct messages requires a trusted organisation context.",
+        )
+    return actor_scope, None
+
+
+def _message_send_direct(**kwargs):
+    """Send one participant-scoped Von direct message with canonical read-back."""
+
+    import hashlib
+    import json
+
+    from ...services.message_service import (
+        authorise_direct_message_participants,
+        create_message,
+        get_message_for_delivery_fingerprint,
+        get_message_for_user,
+        normalise_message_recipient_ids,
+        project_direct_message,
+    )
+
+    actor_scope, scope_error = _resolve_direct_message_actor_scope(
+        kwargs,
+        surface="message_send_direct",
+    )
+    if scope_error is not None:
+        return scope_error
+    assert actor_scope is not None
+    sender_id = str(actor_scope.user_concept_id)
+    organisation_concept_id = str(actor_scope.organisation_concept_id)
+    recipient_ids = normalise_message_recipient_ids(kwargs.get("recipient_ids"))
+    content = kwargs.get("content")
+    if not recipient_ids:
+        return make_error_response(
+            "missing_recipients",
+            "At least one direct-message recipient is required.",
+        )
+    if not isinstance(content, str) or not content.strip():
+        return make_error_response(
+            "missing_content",
+            "Direct-message content must be a non-empty string.",
+        )
+
+    authorised, invalid_ids = authorise_direct_message_participants(
+        sender_id=sender_id,
+        recipient_ids=recipient_ids,
+        organisation_concept_id=organisation_concept_id,
+    )
+    if not authorised:
+        return make_error_response(
+            "message_participant_outside_organisation",
+            "The sender and every recipient must belong to the authenticated organisation.",
+            details={
+                "invalid_concept_ids": invalid_ids,
+                "organisation_concept_id": organisation_concept_id,
+            },
+        )
+
+    subject = kwargs.get("subject")
+    subject = subject.strip() if isinstance(subject, str) and subject.strip() else None
+    thread_id = kwargs.get("thread_id")
+    reply_to_id = kwargs.get("reply_to_id")
+    request_id = str(kwargs.get("request_id") or "").strip()
+    if not request_id:
+        return make_error_response(
+            "authenticated_request_context_required",
+            "Direct-message delivery requires the trusted conversation-turn request identity.",
+        )
+    fingerprint_payload = {
+        "request_id": request_id,
+        "sender_id": sender_id,
+        "organisation_concept_id": organisation_concept_id,
+        "recipient_ids": sorted(recipient_ids),
+        "content": content.strip(),
+        "subject": subject,
+        "thread_id": thread_id,
+        "reply_to_id": reply_to_id,
+    }
+    delivery_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    prior_message = get_message_for_delivery_fingerprint(
+        sender_id=sender_id,
+        delivery_fingerprint=delivery_fingerprint,
+    )
+    if isinstance(prior_message, dict):
+        projection = project_direct_message(prior_message)
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": False,
+            "idempotent_replay": True,
+            "message_id": projection.get("message_id"),
+            "sent_at": projection.get("sent_at"),
+            "attribution": projection.get("attribution"),
+            "canonical_read_back": projection,
+        }
+
+    attribution = f"Sent by Von on behalf of {sender_id}"
+    metadata = {
+        "delivery_channel": "interuser_message",
+        "intent": "info",
+        "attribution": attribution,
+        "delivery_request_id": request_id or None,
+        "delivery_fingerprint": delivery_fingerprint,
+    }
+    try:
+        message = create_message(
+            sender_id=sender_id,
+            recipient_ids=recipient_ids,
+            content=content.strip(),
+            subject=subject,
+            thread_id=thread_id,
+            reply_to_id=reply_to_id,
+            org_id=organisation_concept_id,
+            metadata=metadata,
+        )
+    except ValueError as exc:
+        return make_error_response("invalid_message", str(exc))
+    except Exception as exc:
+        return make_error_response(
+            "message_send_failed",
+            f"Failed to persist the internal direct message: {exc}",
+        )
+
+    message_id = str(message.get("concept_id") or "")
+    canonical_message = get_message_for_user(message_id, sender_id)
+    if not isinstance(canonical_message, dict):
+        return {
+            "success": False,
+            "error": "message_read_back_failed",
+            "error_code": "message_read_back_failed",
+            "message": (
+                "The message may have been created, but participant-scoped canonical "
+                "read-back did not confirm it."
+            ),
+            "effect_status": "indeterminate",
+            "mutation_outcome": "unknown",
+            "changed": True,
+            "message_id": message_id,
+        }
+
+    episode_id = None
+    episode_warning = None
+    try:
+        from ...services.episode_logging_service import log_episode
+
+        episode_id = log_episode(
+            episode_type="interuser_message_sent",
+            actor_user_id=sender_id,
+            organisation_concept_id=organisation_concept_id,
+            payload={
+                "message_id": message_id,
+                "recipient_ids": recipient_ids,
+                "intent": metadata["intent"],
+                "thread_id": thread_id,
+                "reply_to_id": reply_to_id,
+                "request_id": request_id or None,
+            },
+            status="sent",
+        )
+    except Exception as exc:
+        episode_warning = f"episode_logging_failed:{type(exc).__name__}"
+
+    projection = project_direct_message(canonical_message)
+    return {
+        "success": True,
+        "effect_status": "succeeded",
+        "changed": True,
+        "idempotent_replay": False,
+        "message_id": message_id,
+        "sent_at": projection.get("sent_at"),
+        "attribution": projection.get("attribution"),
+        "canonical_read_back": projection,
+        "episode_id": episode_id,
+        "warning": episode_warning,
+    }
+
+
+def _message_get_direct(**kwargs):
+    from ...services.message_service import get_message_for_user, project_direct_message
+
+    actor_scope, scope_error = _resolve_direct_message_actor_scope(
+        kwargs,
+        surface="message_get_direct",
+    )
+    if scope_error is not None:
+        return scope_error
+    message_id = kwargs.get("message_id")
+    if not isinstance(message_id, str) or not message_id.strip():
+        return make_error_response("missing_message_id", "message_id is required.")
+    assert actor_scope is not None
+    message = get_message_for_user(message_id.strip(), actor_scope.user_concept_id)
+    if not isinstance(message, dict):
+        return make_error_response(
+            "message_not_found",
+            "No participant-visible internal direct message was found for that ID.",
+        )
+    return {"success": True, "message": project_direct_message(message)}
+
+
+def _message_list_direct(**kwargs):
+    from ...services.message_service import (
+        get_messages_for_user,
+        project_direct_message,
+    )
+
+    actor_scope, scope_error = _resolve_direct_message_actor_scope(
+        kwargs,
+        surface="message_list_direct",
+    )
+    if scope_error is not None:
+        return scope_error
+    try:
+        limit = max(1, min(int(kwargs.get("limit", 50)), 100))
+        offset = max(0, int(kwargs.get("offset", 0)))
+    except (TypeError, ValueError):
+        return make_error_response(
+            "invalid_paging",
+            "limit and offset must be integers.",
+        )
+    assert actor_scope is not None
+    messages = get_messages_for_user(
+        user_id=actor_scope.user_concept_id,
+        include_sent=bool(kwargs.get("include_sent", True)),
+        include_received=bool(kwargs.get("include_received", True)),
+        thread_id=kwargs.get("thread_id"),
+        limit=limit,
+        skip=offset,
+    )
+    projected = [project_direct_message(message) for message in messages]
+    return {
+        "success": True,
+        "messages": projected,
+        "count": len(projected),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
 def _normalise_string_list_argument(value: Any) -> list[str]:
     if value is None:
         return []
@@ -10810,6 +11075,114 @@ def _deliver_paper_recommendation_messages_output_schema() -> Schema:
             "deliver_paper_recommendation_messages output: whether direct messages "
             "were created, which subjects and message concepts were affected, and "
             "per-subject delivery diagnostics."
+        ),
+    )
+
+
+def _message_send_direct_input_schema() -> Schema:
+    return Schema(
+        required={
+            "recipient_ids": list,
+            "content": str,
+        },
+        optional={
+            "subject": (str, type(None)),
+            "thread_id": (str, type(None)),
+            "reply_to_id": (str, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "request_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=False,
+        aliases={
+            "recipients": "recipient_ids",
+            "body": "content",
+            "message": "content",
+        },
+        description=(
+            "Send one Von internal direct message. The authenticated sender, "
+            "organisation, request identity, and namespace are supplied by the server."
+        ),
+    )
+
+
+def _message_send_direct_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "effect_status": str,
+            "changed": bool,
+            "idempotent_replay": bool,
+            "message_id": str,
+            "canonical_read_back": dict,
+        },
+        optional={
+            "sent_at": (str, type(None)),
+            "attribution": (str, type(None)),
+            "episode_id": (str, type(None)),
+            "warning": (str, type(None)),
+        },
+        allow_unknown=False,
+        description=(
+            "A direct-message effect receipt with participant-scoped canonical read-back."
+        ),
+    )
+
+
+def _message_get_direct_input_schema() -> Schema:
+    return Schema(
+        required={
+            "message_id": str,
+        },
+        optional={
+            "acting_user_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=False,
+        description=(
+            "Read one internal direct message by ID when the authenticated actor is "
+            "its sender or a recipient."
+        ),
+    )
+
+
+def _message_list_direct_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "include_sent": (bool, type(None)),
+            "include_received": (bool, type(None)),
+            "thread_id": (str, type(None)),
+            "limit": (int, type(None)),
+            "offset": (int, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=False,
+        description=(
+            "List the authenticated actor's sent and received internal direct messages."
+        ),
+    )
+
+
+def _message_read_output_schema(*, list_result: bool) -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "message": (dict, type(None)),
+            "messages": (list, type(None)),
+            "count": (int, type(None)),
+            "offset": (int, type(None)),
+            "limit": (int, type(None)),
+        },
+        allow_unknown=not list_result,
+        description=(
+            "Participant-scoped internal direct-message list."
+            if list_result
+            else "One participant-scoped internal direct message."
         ),
     )
 
@@ -30040,12 +30413,90 @@ def _parse_optional_iso_datetime_param(
     return parsed, None
 
 
+def _resolve_task_actor_scope(
+    kwargs: Mapping[str, Any],
+    *,
+    surface: str,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    actor_scope, scope_error = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface=surface,
+        require_actor=True,
+    )
+    if scope_error is not None:
+        return None, scope_error
+    if actor_scope is None or not actor_scope.user_concept_id:
+        return None, make_error_response(
+            "authenticated_actor_context_required",
+            "Task effects require a trusted authenticated user.",
+        )
+    if not actor_scope.organisation_concept_id:
+        return None, make_error_response(
+            "authenticated_organisation_context_required",
+            "Task effects require a trusted organisation context.",
+        )
+    return actor_scope, None
+
+
+def _authorise_task_actor_mutation(
+    kwargs: Mapping[str, Any],
+    *,
+    surface: str,
+) -> tuple[Any | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """Require a same-organisation task owned by or assigned to the actor."""
+
+    from ...services.task_management_service import TaskNotFoundError, get_task
+
+    actor_scope, scope_error = _resolve_task_actor_scope(kwargs, surface=surface)
+    if scope_error is not None:
+        return None, None, scope_error
+    task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return actor_scope, None, make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide the task's concept_id"],
+        )
+    try:
+        task = get_task(task_id.strip())
+    except TaskNotFoundError as exc:
+        return actor_scope, None, make_error_response("NOT_FOUND", str(exc))
+    except Exception as exc:
+        return actor_scope, None, make_error_response(
+            "UNEXPECTED_ERROR",
+            f"Unable to verify task authority: {exc}",
+        )
+
+    assert actor_scope is not None
+    actor_id = str(actor_scope.user_concept_id)
+    actor_org_id = str(actor_scope.organisation_concept_id)
+    task_org_id = str(task.get("organisation_concept_id") or "").strip()
+    actor_controls_task = actor_id in {
+        str(task.get("assignee_concept_id") or "").strip(),
+        str(task.get("created_by_concept_id") or "").strip(),
+    }
+    if task_org_id != actor_org_id or not actor_controls_task:
+        return actor_scope, None, make_error_response(
+            "task_actor_scope_denied",
+            (
+                "An ordinary-turn agent may change only a task in its authenticated "
+                "organisation that it created or is assigned to."
+            ),
+        )
+    return actor_scope, task, None
+
+
 def _task_create(**kwargs):
     """Create a new task via the task management service."""
+    import hashlib
+    import json
+
     from ...services.task_management_service import (
         InvalidTaskDataError,
         TaskManagementError,
         create_task,
+        find_task_by_agent_creation_fingerprint,
+        get_task,
     )
 
     title = kwargs.get("title")
@@ -30062,6 +30513,14 @@ def _task_create(**kwargs):
             "Missing required parameter: description",
             suggestions=["Provide a non-empty description string for the task"],
         )
+
+    actor_scope, scope_error = _resolve_task_actor_scope(
+        kwargs,
+        surface="task_create",
+    )
+    if scope_error is not None:
+        return scope_error
+    assert actor_scope is not None
 
     assignee_id = kwargs.get("assignee_id") or kwargs.get("assignee_concept_id")
     session_id = kwargs.get("originating_session_id") or kwargs.get("session_id")
@@ -30084,6 +30543,27 @@ def _task_create(**kwargs):
     evidence = kwargs.get("evidence")
     notes = kwargs.get("notes")
     reference_code = kwargs.get("reference_code")
+    request_id = str(kwargs.get("request_id") or "").strip()
+
+    actor_id = str(actor_scope.user_concept_id)
+    actor_org_id = str(actor_scope.organisation_concept_id)
+    if (
+        str(assignee_id or "").strip() != actor_id
+        or str(created_by or "").strip() != actor_id
+        or str(org_id or "").strip() != actor_org_id
+    ):
+        return make_error_response(
+            "task_actor_scope_denied",
+            (
+                "An ordinary-turn task must be assigned to and created by the "
+                "authenticated actor in the authenticated organisation."
+            ),
+        )
+    if not request_id:
+        return make_error_response(
+            "authenticated_request_context_required",
+            "Task creation requires the trusted conversation-turn request identity.",
+        )
 
     start_date, start_error = _parse_optional_iso_datetime_param(
         kwargs.get("start_date"),
@@ -30098,7 +30578,54 @@ def _task_create(**kwargs):
     if due_error:
         return due_error
 
+    creation_fingerprint_payload = {
+        "request_id": request_id,
+        "actor_id": actor_id,
+        "organisation_concept_id": actor_org_id,
+        "title": title.strip(),
+        "description": description.strip(),
+        "originating_session_id": session_id,
+        "priority": priority,
+        "start_date": start_date.isoformat() if start_date else None,
+        "due_date": due_date.isoformat() if due_date else None,
+        "epic_task_concept_id": epic_task_concept_id,
+        "components": components,
+        "fix_versions": fix_versions,
+        "sprint_values": sprint_values,
+        "backlog_rank": backlog_rank,
+        "task_type_ids": task_type_ids,
+        "task_source_id": task_source_id,
+        "task_role": task_role,
+        "next_checkpoint": next_checkpoint,
+        "progress_signal": progress_signal,
+        "evidence": evidence,
+        "notes": notes,
+        "reference_code": reference_code,
+    }
+    creation_fingerprint = hashlib.sha256(
+        json.dumps(
+            creation_fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
     try:
+        prior_task = find_task_by_agent_creation_fingerprint(
+            created_by_concept_id=actor_id,
+            organisation_concept_id=actor_org_id,
+            creation_fingerprint=creation_fingerprint,
+        )
+        if isinstance(prior_task, dict):
+            return {
+                **prior_task,
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": False,
+                "idempotent_replay": True,
+                "canonical_read_back": prior_task,
+            }
         result = create_task(
             title=title.strip(),
             description=description.strip(),
@@ -30123,8 +30650,36 @@ def _task_create(**kwargs):
             evidence=evidence,
             notes=notes,
             reference_code=reference_code,
+            agent_creation_fingerprint=creation_fingerprint,
+            agent_creation_request_id=request_id,
         )
-        result["success"] = True
+        task_concept_id = str(result.get("task_concept_id") or "")
+        try:
+            canonical_read_back = get_task(task_concept_id)
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": "task_read_back_failed",
+                "error_code": "task_read_back_failed",
+                "message": (
+                    "The task may have been created, but canonical read-back did not "
+                    "confirm it."
+                ),
+                "effect_status": "indeterminate",
+                "mutation_outcome": "unknown",
+                "changed": True,
+                "task_concept_id": task_concept_id,
+                "read_back_error": type(exc).__name__,
+            }
+        result.update(
+            {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "idempotent_replay": False,
+                "canonical_read_back": canonical_read_back,
+            }
+        )
         return result
     except InvalidTaskDataError as exc:
         return make_error_response("INVALID_DATA", str(exc))
@@ -30224,9 +30779,42 @@ def _task_update_status(**kwargs):
             suggestions=["Provide status (e.g. 'pending', 'in_progress', 'completed')"],
         )
 
+    actor_scope, current_task, authority_error = _authorise_task_actor_mutation(
+        kwargs,
+        surface="task_update_status",
+    )
+    if authority_error is not None:
+        return authority_error
+    assert actor_scope is not None and current_task is not None
+    requested_status = status.strip().lower()
+    if current_task.get("status") == requested_status:
+        return {
+            **current_task,
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": False,
+            "idempotent_replay": True,
+            "canonical_read_back": current_task,
+            "actor_user_concept_id": actor_scope.user_concept_id,
+        }
+
     try:
-        result = update_task_status(task_id.strip(), status.strip())
-        result["success"] = True
+        result = update_task_status(
+            task_id.strip(),
+            requested_status,
+            actor_concept_id=actor_scope.user_concept_id,
+        )
+        canonical_read_back = dict(result)
+        result.update(
+            {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": True,
+                "idempotent_replay": False,
+                "canonical_read_back": canonical_read_back,
+                "actor_user_concept_id": actor_scope.user_concept_id,
+            }
+        )
         return result
     except TaskNotFoundError as exc:
         return make_error_response("NOT_FOUND", str(exc))
@@ -31574,10 +32162,15 @@ def _task_unlink(**kwargs):
 
 
 def _task_add_comment(**kwargs):
+    import hashlib
+    import json
+
     from ...services.task_management_service import (
         InvalidTaskDataError,
         TaskNotFoundError,
         add_task_comment,
+        find_task_comment_by_effect_fingerprint,
+        get_task_comment,
     )
 
     task_id = _resolve_task_identifier(kwargs)
@@ -31594,14 +32187,85 @@ def _task_add_comment(**kwargs):
             "Missing required parameter: body",
             suggestions=["Provide comment body text (or use 'comment')"],
         )
+
+    actor_scope, _task, authority_error = _authorise_task_actor_mutation(
+        kwargs,
+        surface="task_add_comment",
+    )
+    if authority_error is not None:
+        return authority_error
+    assert actor_scope is not None
+    request_id = str(kwargs.get("request_id") or "").strip()
+    if not request_id:
+        return make_error_response(
+            "authenticated_request_context_required",
+            "Task comments require the trusted conversation-turn request identity.",
+        )
+    effect_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "request_id": request_id,
+                "task_concept_id": task_id,
+                "body": body.strip(),
+                "actor_id": actor_scope.user_concept_id,
+                "organisation_concept_id": actor_scope.organisation_concept_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     try:
+        prior_comment = find_task_comment_by_effect_fingerprint(
+            task_id,
+            effect_fingerprint,
+        )
+        if isinstance(prior_comment, dict):
+            return {
+                "success": True,
+                "effect_status": "succeeded",
+                "changed": False,
+                "idempotent_replay": True,
+                "task_concept_id": task_id,
+                "comment": prior_comment,
+                "canonical_read_back": prior_comment,
+            }
         comment = add_task_comment(
             task_id,
             body=body.strip(),
-            author_concept_id=kwargs.get("author_concept_id")
-            or kwargs.get("namespace"),
+            author_concept_id=actor_scope.user_concept_id,
+            source={
+                "kind": "ordinary_turn_agent_effect",
+                "request_id": request_id,
+                "effect_fingerprint": effect_fingerprint,
+            },
         )
-        return {"success": True, "task_concept_id": task_id, "comment": comment}
+        comment_id = comment.get("comment_id")
+        read_back = get_task_comment(task_id, comment_id)
+        if read_back is None:
+            return {
+                "success": False,
+                "error": "task_comment_read_back_failed",
+                "error_code": "task_comment_read_back_failed",
+                "message": (
+                    "The comment may have been added, but canonical read-back did not "
+                    "confirm it."
+                ),
+                "effect_status": "indeterminate",
+                "mutation_outcome": "unknown",
+                "changed": True,
+                "task_concept_id": task_id,
+                "comment_id": comment_id,
+            }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": True,
+            "idempotent_replay": False,
+            "task_concept_id": task_id,
+            "comment": comment,
+            "canonical_read_back": read_back,
+        }
     except TaskNotFoundError as exc:
         return make_error_response("NOT_FOUND", str(exc))
     except InvalidTaskDataError as exc:
@@ -37770,10 +38434,68 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
     )
     definitions: List[MethodDefinition] = [
         MethodDefinition(
+            name="message_send_direct",
+            handler=_message_send_direct,
+            input_schema=_message_send_direct_input_schema(),
+            output_schema=_message_send_direct_output_schema(),
+            category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "request_id": "turn_id",
+                "namespace": "turn_namespace",
+            },
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=5.0,
+            description=(
+                "Send a Von internal direct message, not email. The server binds the "
+                "authenticated sender and organisation, verifies every recipient is an "
+                "organisation member, prevents an identical retry within the turn from "
+                "duplicating the message, and returns participant-scoped canonical "
+                "read-back. Supports an optional subject and reply/thread identifiers."
+            ),
+        ),
+        MethodDefinition(
+            name="message_get_direct",
+            handler=_message_get_direct,
+            input_schema=_message_get_direct_input_schema(),
+            output_schema=_message_read_output_schema(list_result=False),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+            },
+            description=(
+                "Read one Von internal direct message by message_id. The authenticated "
+                "actor must be its sender or recipient; organisation membership alone "
+                "does not reveal it."
+            ),
+        ),
+        MethodDefinition(
+            name="message_list_direct",
+            handler=_message_list_direct,
+            input_schema=_message_list_direct_input_schema(),
+            output_schema=_message_read_output_schema(list_result=True),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "namespace": "turn_namespace",
+            },
+            description=(
+                "List the authenticated actor's Von internal direct messages, including "
+                "subjects and bodies, with sent/received and paging filters."
+            ),
+        ),
+        MethodDefinition(
             name="task_create",
             handler=_task_create,
             input_schema=Schema(
-                required={"title": str, "description": str},
+                required={
+                    "title": str,
+                    "description": str,
+                },
                 optional={
                     "assignee_id": (str, type(None)),
                     "assignee_concept_id": (str, type(None)),
@@ -37789,7 +38511,6 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "fix_versions": (list, type(None)),
                     "sprint_values": (list, type(None)),
                     "backlog_rank": (str, type(None)),
-                    "organisation_concept_id": (str, type(None)),
                     "task_type_ids": (list, str, type(None)),
                     "task_type_id": (list, str, type(None)),
                     "task_source_id": (str, type(None)),
@@ -37802,6 +38523,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "evidence": (str, type(None)),
                     "notes": (str, type(None)),
                     "reference_code": (str, type(None)),
+                    "acting_user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "request_id": (str, type(None)),
                 },
                 allow_unknown=True,
                 enum_values={
@@ -37811,9 +38535,28 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             ),
             output_schema=task_create_output_schema,
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "assignee_id": "actor_user_concept_id",
+                "assignee_concept_id": "actor_user_concept_id",
+                "created_by_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "originating_session_id": "conversation_id",
+                "namespace": "turn_namespace",
+                "acting_user_concept_id": "actor_user_concept_id",
+                "request_id": "turn_id",
+            },
+            ordinary_turn_fixed_arguments={
+                "session_id": None,
+                "report_to_concept_id": None,
+                "reports_to_concept_id": None,
+            },
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=8.0,
             description=(
-                "Create a Von task (stored as a Vontology concept). Use this to track work items, "
-                "action items, or to-dos. Tasks can be assigned to users and linked to conversations. "
+                "Create a self-assigned Von task (stored as a Vontology concept) for "
+                "the authenticated actor and organisation, linked to the current "
+                "conversation. Identical retries in the same turn reuse the canonical "
+                "task. Use this to track work items, action items, or to-dos. "
                 "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
                 "planning metadata (components, fix versions, sprint values, backlog rank), canonical "
                 "task categories, source semantics, and richer task-detail fields."
@@ -38165,23 +38908,34 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             name="task_update_status",
             handler=_task_update_status,
             input_schema=Schema(
-                required={"status": str},
+                required={
+                    "task_concept_id": str,
+                    "status": str,
+                },
                 optional={
-                    "task_concept_id": (str,),
                     "task_id": (str,),
+                    "acting_user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
-                scalar_source_fields={
-                    "task_concept_id": task_id_scalar_sources,
-                    "task_id": task_id_scalar_sources,
-                },
+                aliases={"task_id": "task_concept_id"},
                 description="Update a task's status.",
             ),
             output_schema=task_update_status_output_schema,
             category="write",
+            ordinary_turn_trusted_argument_bindings={
+                "namespace": "turn_namespace",
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+            },
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=5.0,
+            ordinary_turn_mutation_subject_argument="task_concept_id",
             description=(
-                "Update the status of a Von task. Valid statuses: pending, in_progress, "
-                "completed, cancelled, blocked. Use this to track task progress."
+                "Update the status of a Von task created by or assigned to the "
+                "authenticated actor in the same organisation. Valid statuses: pending, "
+                "in_progress, completed, cancelled, blocked."
             ),
         ),
         MethodDefinition(
@@ -38260,21 +39014,42 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             name="task_add_comment",
             handler=_task_add_comment,
             input_schema=Schema(
-                required={},
+                required={
+                    "task_concept_id": str,
+                    "body": str,
+                },
                 optional={
-                    "task_concept_id": (str,),
                     "task_id": (str,),
-                    "body": (str,),
                     "comment": (str,),
                     "author_concept_id": (str, type(None)),
+                    "acting_user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "request_id": (str, type(None)),
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
-                description="Add a comment to a task.",
+                aliases={
+                    "task_id": "task_concept_id",
+                    "comment": "body",
+                },
+                description="Add an idempotent comment to an actor-owned task.",
             ),
             output_schema=task_add_comment_output_schema,
             category="write",
-            description="Add a task comment (Jira-style comment operation).",
+            ordinary_turn_trusted_argument_bindings={
+                "author_concept_id": "actor_user_concept_id",
+                "namespace": "turn_namespace",
+                "acting_user_concept_id": "actor_user_concept_id",
+                "organisation_concept_id": "actor_organisation_concept_id",
+                "request_id": "turn_id",
+            },
+            ordinary_turn_effect=True,
+            effect_admission_window_sec=5.0,
+            ordinary_turn_mutation_subject_argument="task_concept_id",
+            description=(
+                "Add a retry-safe comment to a Von task created by or assigned to the "
+                "authenticated actor in the same organisation."
+            ),
         ),
         MethodDefinition(
             name="task_list_comments",

@@ -3226,6 +3226,7 @@ def execute_adaptive_turn(
             "actor_user_concept_id": scope.user_concept_id,
             "actor_organisation_concept_id": scope.organisation_concept_id,
             "turn_id": turn_id or "ordinary-turn",
+            "conversation_id": conversation_id,
         }
     )
     delegated_names = ordinary_turn_capability_delegation(

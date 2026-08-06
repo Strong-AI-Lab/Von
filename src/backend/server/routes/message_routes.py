@@ -12,8 +12,9 @@ from flask import Blueprint, jsonify, request, session
 from flask.typing import ResponseReturnValue
 
 from ...services.message_service import (
+    authorise_direct_message_participants,
     create_message,
-    get_message,
+    get_message_for_user,
     get_messages_for_user,
     get_conversation_between_users,
     get_unread_count,
@@ -162,27 +163,11 @@ def _authorise_sender_and_recipients_for_org(
     recipient_ids: list[str],
     organisation_concept_id: str,
 ) -> tuple[bool, list[str]]:
-    from ...services.organisation_membership_service import get_organisation_members
-
-    members = get_organisation_members(organisation_concept_id)
-    org_member_ids = {
-        normalised
-        for normalised in (
-            _normalise_concept_id(member.get("user_concept_id"))
-            for member in members.get("members", [])
-            if isinstance(member, dict)
-        )
-        if isinstance(normalised, str)
-    }
-
-    invalid_ids: list[str] = []
-    if sender_id not in org_member_ids:
-        invalid_ids.append(sender_id)
-    for recipient_id in recipient_ids:
-        if recipient_id not in org_member_ids:
-            invalid_ids.append(recipient_id)
-
-    return (len(invalid_ids) == 0, invalid_ids)
+    return authorise_direct_message_participants(
+        sender_id=sender_id,
+        recipient_ids=recipient_ids,
+        organisation_concept_id=organisation_concept_id,
+    )
 
 
 def _prettify_concept_id(concept_id: str) -> str:
@@ -420,7 +405,7 @@ def get_single_message(message_id: str) -> ResponseReturnValue:
     if not user_id:
         return jsonify({"error": "Authentication required"}), 401
 
-    message = get_message(message_id)
+    message = get_message_for_user(message_id, user_id)
     if not message:
         return jsonify({"error": "Message not found"}), 404
 
@@ -438,7 +423,7 @@ def get_message_paper_recommendation_review(message_id: str) -> ResponseReturnVa
     if not user_id:
         return jsonify({"error": "Authentication required"}), 401
 
-    message = get_message(message_id)
+    message = get_message_for_user(message_id, user_id)
     if not message:
         return jsonify({"error": "Message not found"}), 404
     if not _is_paper_recommendation_message(message):
@@ -480,7 +465,7 @@ def post_message_paper_recommendation_feedback(message_id: str) -> ResponseRetur
     if not user_id:
         return jsonify({"error": "Authentication required"}), 401
 
-    message = get_message(message_id)
+    message = get_message_for_user(message_id, user_id)
     if not message:
         return jsonify({"error": "Message not found"}), 404
     if not _is_paper_recommendation_message(message):
@@ -576,6 +561,7 @@ def list_messages() -> ResponseReturnValue:
             {
                 "messages": messages,
                 "count": len(messages),
+                "current_user_id": user_id,
             }
         ),
         200,
@@ -617,6 +603,7 @@ def get_conversation(other_user_id: str) -> ResponseReturnValue:
             {
                 "messages": messages,
                 "count": len(messages),
+                "current_user_id": user_id,
             }
         ),
         200,

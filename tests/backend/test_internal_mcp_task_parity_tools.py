@@ -824,29 +824,73 @@ def test_task_link_gateway_success_and_error_schema(monkeypatch):
 
 def test_task_comment_gateway_success_and_error_schema(monkeypatch):
     gateway = _build_gateway()
+    from src.backend.security.access_control import override_current_actor
 
-    def _fake_add_task_comment(task_concept_id: str, *, body: str, author_concept_id=None):
+    def _fake_add_task_comment(
+        task_concept_id: str,
+        *,
+        body: str,
+        author_concept_id=None,
+        source=None,
+    ):
         return {
             "comment_id": "comment_abc123",
             "body": body,
             "author_concept_id": author_concept_id,
             "task_concept_id": task_concept_id,
+            "source": source,
         }
 
     monkeypatch.setattr(
         "src.backend.services.task_management_service.add_task_comment",
         _fake_add_task_comment,
     )
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.get_task",
+        lambda task_concept_id: {
+            "task_concept_id": task_concept_id,
+            "assignee_concept_id": "#V#user_alice",
+            "created_by_concept_id": "#V#user_alice",
+            "organisation_concept_id": "#V#org_test",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.find_task_comment_by_effect_fingerprint",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.get_task_comment",
+        lambda _task_concept_id, _comment_id: {
+            "comment_id": "comment_abc123",
+            "body": "Looks good",
+            "author_concept_id": "#V#user_alice",
+        },
+    )
 
-    success_payload = gateway.invoke(
-        "task_add_comment",
-        {"task_concept_id": "#V#task_1", "body": "Looks good"},
-    ).payload
+    actor_payload = {
+        "acting_user_concept_id": "#V#user_alice",
+        "organisation_concept_id": "#V#org_test",
+        "request_id": "turn-1",
+        "namespace": "#V#user_alice@org_test",
+    }
+    with override_current_actor("#V#user_alice", "#V#org_test"):
+        success_payload = gateway.invoke(
+            "task_add_comment",
+            {
+                "task_concept_id": "#V#task_1",
+                "body": "Looks good",
+                **actor_payload,
+            },
+        ).payload
     assert success_payload.get("success") is True
     assert success_payload.get("comment", {}).get("comment_id") == "comment_abc123"
     _assert_schema_conformance(gateway, "task_add_comment", success_payload)
 
-    error_payload = gateway.invoke("task_add_comment", {"task_concept_id": "#V#task_1"}).payload
+    with override_current_actor("#V#user_alice", "#V#org_test"):
+        error_payload = gateway.invoke(
+            "task_add_comment",
+            {"task_concept_id": "#V#task_1", "body": "", **actor_payload},
+        ).payload
     assert error_payload.get("success") is False
     assert error_payload.get("error_code") == "MISSING_PARAM"
     _assert_schema_conformance(gateway, "task_add_comment", error_payload)
@@ -904,6 +948,7 @@ def test_task_attachment_gateway_success_and_error_schema(monkeypatch):
 
 def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
     gateway = _build_gateway()
+    from src.backend.security.access_control import override_current_actor
 
     def _fake_create_task(
         title: str,
@@ -930,6 +975,8 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
         evidence=None,
         notes=None,
         reference_code=None,
+        agent_creation_fingerprint=None,
+        agent_creation_request_id=None,
     ):
         return {
             "task_concept_id": "#V#task_123",
@@ -957,32 +1004,54 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
             "evidence": evidence,
             "notes": notes,
             "reference_code": reference_code,
+            "agent_creation_fingerprint": agent_creation_fingerprint,
+            "agent_creation_request_id": agent_creation_request_id,
         }
 
     monkeypatch.setattr(
         "src.backend.services.task_management_service.create_task",
         _fake_create_task,
     )
-
-    payload = gateway.invoke(
-        "task_create",
-        {
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.get_task",
+        lambda task_concept_id: {
+            "task_concept_id": task_concept_id,
             "title": "Task with dates",
             "description": "Details",
-            "start_date": "2026-03-01T10:00:00Z",
-            "due_date": "2026-03-05T10:00:00Z",
-            "epic_task_concept_id": "#V#task_epic_1",
-            "task_type_ids": ["#V#delegated_task_specification"],
-            "task_source_id": "#V#jira_imported_task_source",
-            "report_to_concept_id": "#V#user_manager",
-            "task_role": "Communicator",
-            "next_checkpoint": "Tomorrow morning",
-            "progress_signal": "Confirmed by chat",
-            "evidence": "Printed document",
-            "notes": "Needs a coloured copy",
-            "reference_code": "TASK-001",
+            "status": "pending",
         },
-    ).payload
+    )
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.find_task_by_agent_creation_fingerprint",
+        lambda **_kwargs: None,
+    )
+
+    with override_current_actor("#V#user_alice", "#V#org_test"):
+        payload = gateway.invoke(
+            "task_create",
+            {
+                "title": "Task with dates",
+                "description": "Details",
+                "start_date": "2026-03-01T10:00:00Z",
+                "due_date": "2026-03-05T10:00:00Z",
+                "epic_task_concept_id": "#V#task_epic_1",
+                "task_type_ids": ["#V#delegated_task_specification"],
+                "task_source_id": "#V#jira_imported_task_source",
+                "report_to_concept_id": "#V#user_manager",
+                "task_role": "Communicator",
+                "next_checkpoint": "Tomorrow morning",
+                "progress_signal": "Confirmed by chat",
+                "evidence": "Printed document",
+                "notes": "Needs a coloured copy",
+                "reference_code": "TASK-001",
+                "assignee_id": "#V#user_alice",
+                "created_by_concept_id": "#V#user_alice",
+                "acting_user_concept_id": "#V#user_alice",
+                "organisation_concept_id": "#V#org_test",
+                "request_id": "turn-1",
+                "namespace": "#V#user_alice@org_test",
+            },
+        ).payload
     assert payload.get("success") is True
     assert payload.get("start_date") == "2026-03-01T10:00:00+00:00"
     assert payload.get("due_date") == "2026-03-05T10:00:00+00:00"
