@@ -30611,6 +30611,35 @@ def _task_create(**kwargs):
         ).encode("utf-8")
     ).hexdigest()
 
+    def _idempotent_replay_response(task: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **task,
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": False,
+            "idempotent_replay": True,
+            "canonical_read_back": task,
+        }
+
+    def _reconcile_after_create_failure() -> dict[str, Any] | None:
+        """Read the deterministic task ID after an in-flight retry collision.
+
+        The initial lookup and insert are necessarily separate operations.  If
+        an earlier timed-out invocation commits between them, a duplicate-key
+        error is evidence to reconcile, not a second task-creation failure.
+        ``find_task_by_agent_creation_fingerprint`` verifies the actor,
+        organisation, type, and stored fingerprint before returning a task.
+        """
+        try:
+            task = find_task_by_agent_creation_fingerprint(
+                created_by_concept_id=actor_id,
+                organisation_concept_id=actor_org_id,
+                creation_fingerprint=creation_fingerprint,
+            )
+        except Exception:
+            return None
+        return _idempotent_replay_response(task) if isinstance(task, dict) else None
+
     try:
         prior_task = find_task_by_agent_creation_fingerprint(
             created_by_concept_id=actor_id,
@@ -30618,41 +30647,42 @@ def _task_create(**kwargs):
             creation_fingerprint=creation_fingerprint,
         )
         if isinstance(prior_task, dict):
-            return {
-                **prior_task,
-                "success": True,
-                "effect_status": "succeeded",
-                "changed": False,
-                "idempotent_replay": True,
-                "canonical_read_back": prior_task,
-            }
-        result = create_task(
-            title=title.strip(),
-            description=description.strip(),
-            assignee_concept_id=assignee_id,
-            originating_session_id=session_id,
-            created_by_concept_id=created_by,
-            start_date=start_date,
-            due_date=due_date,
-            epic_task_concept_id=epic_task_concept_id,
-            components=components,
-            fix_versions=fix_versions,
-            sprint_values=sprint_values,
-            backlog_rank=backlog_rank,
-            priority=priority,
-            organisation_concept_id=org_id,
-            task_type_ids=task_type_ids,
-            task_source_id=task_source_id,
-            report_to_concept_id=report_to_concept_id,
-            task_role=task_role,
-            next_checkpoint=next_checkpoint,
-            progress_signal=progress_signal,
-            evidence=evidence,
-            notes=notes,
-            reference_code=reference_code,
-            agent_creation_fingerprint=creation_fingerprint,
-            agent_creation_request_id=request_id,
-        )
+            return _idempotent_replay_response(prior_task)
+        try:
+            result = create_task(
+                title=title.strip(),
+                description=description.strip(),
+                assignee_concept_id=assignee_id,
+                originating_session_id=session_id,
+                created_by_concept_id=created_by,
+                start_date=start_date,
+                due_date=due_date,
+                epic_task_concept_id=epic_task_concept_id,
+                components=components,
+                fix_versions=fix_versions,
+                sprint_values=sprint_values,
+                backlog_rank=backlog_rank,
+                priority=priority,
+                organisation_concept_id=org_id,
+                task_type_ids=task_type_ids,
+                task_source_id=task_source_id,
+                report_to_concept_id=report_to_concept_id,
+                task_role=task_role,
+                next_checkpoint=next_checkpoint,
+                progress_signal=progress_signal,
+                evidence=evidence,
+                notes=notes,
+                reference_code=reference_code,
+                agent_creation_fingerprint=creation_fingerprint,
+                agent_creation_request_id=request_id,
+            )
+        except InvalidTaskDataError:
+            raise
+        except Exception:
+            reconciled_task = _reconcile_after_create_failure()
+            if reconciled_task is not None:
+                return reconciled_task
+            raise
         task_concept_id = str(result.get("task_concept_id") or "")
         try:
             canonical_read_back = get_task(task_concept_id)

@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..db.repositories.text_value_repository import (
+    TextRelationsRepository,
+    TextValuesRepository,
+)
 from ..services.text_value_service import (
     get_texts_for_concept,
     get_texts_for_concepts,
@@ -53,6 +58,8 @@ from .task_ontology_service import (
     TASK_REFERENCE_CODE_TEXT_PREDICATES,
     TASK_ROLE_TEXT_PREDICATES,
     TASK_SOURCE_RELATIONSHIP_PREDICATES,
+    TASK_SOURCE_DEFINITIONS,
+    TASK_TYPE_DEFINITIONS,
     ensure_task_ontology,
     get_task_source_definition,
     get_task_taxonomy as get_task_taxonomy_definition,
@@ -70,6 +77,9 @@ from .workflow_event_integration_service import (
 logger = logging.getLogger(__name__)
 
 TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION = "task_list_load_telemetry.v1"
+TASK_SEARCH_TEXT_VALUE_CANDIDATE_LIMIT = 200
+TASK_SEARCH_TEXT_RELATION_CANDIDATE_LIMIT = 400
+TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS = 2_000
 
 
 def _round_duration_ms(duration_seconds: float) -> float:
@@ -2783,6 +2793,124 @@ def list_tasks_with_visibility(
     return payload
 
 
+def _task_text_search_predicates() -> tuple[str, ...]:
+    """Return every task text predicate searched by ``search_tasks(query=...)``."""
+    return tuple(
+        dict.fromkeys(
+            (
+                PREDICATE_HAS_NAME,
+                "hasName",
+                PREDICATE_HAS_DESCRIPTION,
+                "hasDescription",
+                *TASK_REFERENCE_CODE_TEXT_PREDICATES,
+                *TASK_ROLE_TEXT_PREDICATES,
+                *NEXT_CHECKPOINT_TEXT_PREDICATES,
+                *PROGRESS_SIGNAL_TEXT_PREDICATES,
+                *EVIDENCE_TEXT_PREDICATES,
+                "#V#hasNote",
+                "hasNote",
+            )
+        )
+    )
+
+
+def _query_matches_task_taxonomy_label_or_slug(query: str) -> bool:
+    query_lower = query.strip().lower()
+    return any(
+        query_lower in str(definition.get(field) or "").lower()
+        for definition in (*TASK_TYPE_DEFINITIONS, *TASK_SOURCE_DEFINITIONS)
+        for field in ("label", "slug")
+    )
+
+
+def _task_text_query_candidates(query: str) -> tuple[list[str], dict[str, Any]]:
+    """Return bounded task candidates from the indexed text-value relation path."""
+    cleaned_query = query.strip()
+    normalised_query = re.sub(r"[\t\f\v ]+", " ", cleaned_query).lower()
+    fingerprint_prefix = f"{normalised_query}||"
+    text_value_limit = TASK_SEARCH_TEXT_VALUE_CANDIDATE_LIMIT
+    relation_limit = TASK_SEARCH_TEXT_RELATION_CANDIDATE_LIMIT
+
+    try:
+        text_values = list(
+            TextValuesRepository.find(
+                {
+                    "fingerprint": {
+                        "$type": "string",
+                        "$regex": f"^{re.escape(fingerprint_prefix)}",
+                    }
+                },
+                projection={"_id": 1},
+                limit=text_value_limit + 1,
+                max_time_ms=TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS,
+            )
+        )
+        if not text_values:
+            text_values = list(
+                TextValuesRepository.find(
+                    {"$text": {"$search": cleaned_query}},
+                    projection={"_id": 1},
+                    limit=text_value_limit + 1,
+                    max_time_ms=TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS,
+                )
+            )
+    except Exception as exc:
+        raise TaskManagementError(
+            "Task text candidate search is temporarily unavailable"
+        ) from exc
+
+    text_value_truncated = len(text_values) > text_value_limit
+    text_value_ids: list[Any] = []
+    for text_value in text_values[:text_value_limit]:
+        raw_id = text_value.get("_id") if isinstance(text_value, Mapping) else None
+        if raw_id is None:
+            continue
+        text_value_ids.extend((raw_id, str(raw_id)))
+
+    if not text_value_ids:
+        return [], {
+            "applied": True,
+            "bounded": True,
+            "truncated": text_value_truncated,
+        }
+
+    try:
+        relations = list(
+            TextRelationsRepository.find(
+                {
+                    "object_text_id": {"$in": text_value_ids},
+                    "predicate": {"$in": _task_text_search_predicates()},
+                },
+                projection={"subject_concept_id": 1},
+                limit=relation_limit + 1,
+                max_time_ms=TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS,
+            )
+        )
+    except Exception as exc:
+        raise TaskManagementError(
+            "Task text relation candidate search is temporarily unavailable"
+        ) from exc
+
+    relation_truncated = len(relations) > relation_limit
+    candidate_ids = list(
+        dict.fromkeys(
+            subject_id.strip()
+            for relation in relations[:relation_limit]
+            for subject_id in [
+                relation.get("subject_concept_id")
+                if isinstance(relation, Mapping)
+                else None
+            ]
+            if isinstance(subject_id, str) and subject_id.strip()
+        )
+    )
+    return candidate_ids, {
+        "applied": True,
+        "bounded": True,
+        "truncated": text_value_truncated or relation_truncated,
+    }
+
+
 def search_tasks(
     *,
     query: str | None = None,
@@ -2872,6 +3000,17 @@ def search_tasks(
             {f"relationships.{predicate}": report_to_id}
             for predicate in report_to_predicates
         ]
+
+    query_candidate_prefilter: dict[str, Any] = {"applied": False}
+    if (
+        isinstance(query, str)
+        and query.strip()
+        and not _query_matches_task_taxonomy_label_or_slug(query)
+    ):
+        candidate_ids, query_candidate_prefilter = _task_text_query_candidates(query)
+        # Do not broaden to the former all-task hydration path when the bounded
+        # relation lookup has no match or reaches its explicit candidate cap.
+        query_filter["concept_id"] = {"$in": candidate_ids}
 
     # Use deterministic storage ordering before in-memory filters so paged reads do
     # not drift or duplicate items across offsets.
@@ -3229,6 +3368,7 @@ def search_tasks(
         "hidden_bulk_task_collections": visibility_payload[
             "hidden_bulk_task_collections"
         ],
+        "query_candidate_prefilter": query_candidate_prefilter,
     }
 
 

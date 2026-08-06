@@ -468,3 +468,45 @@ def test_task_create_retry_reuses_canonical_task(monkeypatch):
     assert second["changed"] is False
     assert second["idempotent_replay"] is True
     assert create_calls["count"] == 1
+
+
+def test_task_create_reconciles_late_first_write_after_create_failure(monkeypatch):
+    """A retry must read back a task committed after its first lookup."""
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import task_management_service
+
+    canonical_task = _owned_task()
+    find_calls = {"count": 0}
+
+    def fake_find(**_kwargs):
+        find_calls["count"] += 1
+        return None if find_calls["count"] == 1 else canonical_task
+
+    def fake_create(**_kwargs):
+        raise task_management_service.TaskManagementError("duplicate concept_id")
+
+    monkeypatch.setattr(
+        task_management_service,
+        "find_task_by_agent_creation_fingerprint",
+        fake_find,
+    )
+    monkeypatch.setattr(task_management_service, "create_task", fake_create)
+    arguments = {
+        "title": "Agent task",
+        "description": "Test",
+        "assignee_id": "#V#user_alice",
+        "created_by_concept_id": "#V#user_alice",
+        "request_id": "turn-1",
+        "originating_session_id": "conversation-1",
+        **_task_actor_arguments(),
+    }
+
+    with override_current_actor("#V#user_alice", "#V#org_test"):
+        result = catalogue_module._task_create(**arguments)
+
+    assert find_calls["count"] == 2
+    assert result["success"] is True
+    assert result["changed"] is False
+    assert result["idempotent_replay"] is True
+    assert result["canonical_read_back"] == canonical_task

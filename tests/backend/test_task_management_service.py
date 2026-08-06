@@ -745,7 +745,7 @@ class TestTaskCollectionHydration:
             },
         ]
 
-        result = search_tasks(query="task")
+        result = search_tasks()
 
         assert [task["conversation_name"] for task in result["tasks"]] == [
             "First conversation",
@@ -759,6 +759,117 @@ class TestTaskCollectionHydration:
             ["#V#conversation_1", "#V#conversation_2"],
         )
         mock_get_texts_for_concept.assert_not_called()
+
+
+class TestTaskSearchTextCandidates:
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.TextRelationsRepository")
+    @patch("src.backend.services.task_management_service.TextValuesRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
+    def test_search_tasks_uses_bounded_exact_title_candidates(
+        self,
+        mock_get_texts_for_concepts: MagicMock,
+        mock_text_values: MagicMock,
+        mock_text_relations: MagicMock,
+        mock_concepts: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_text_values.find.return_value = [{"_id": "exact-title-text"}]
+        mock_text_relations.find.return_value = [
+            {"subject_concept_id": "#V#task_exact_title"}
+        ]
+        mock_concepts.find.return_value = [
+            {
+                "concept_id": "#V#task_exact_title",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+        mock_get_texts_for_concepts.return_value = {
+            "#V#task_exact_title": [
+                {"predicate": "#V#hasName", "text": "Exact task title"}
+            ]
+        }
+
+        result = search_tasks(query="Exact task title")
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["title"] == "Exact task title"
+        assert result["query_candidate_prefilter"] == {
+            "applied": True,
+            "bounded": True,
+            "truncated": False,
+        }
+        text_value_query = mock_text_values.find.call_args.args[0]
+        assert text_value_query["fingerprint"]["$regex"].startswith(
+            "^exact\\ task\\ title\\|\\|"
+        )
+        relation_query = mock_text_relations.find.call_args.args[0]
+        assert "#V#hasName" in relation_query["predicate"]["$in"]
+        assert "#V#hasDescription" in relation_query["predicate"]["$in"]
+        assert mock_concepts.find.call_args.args[0]["concept_id"] == {
+            "$in": ["#V#task_exact_title"]
+        }
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.TextRelationsRepository")
+    @patch("src.backend.services.task_management_service.TextValuesRepository")
+    def test_search_tasks_no_text_match_uses_an_empty_bounded_candidate_set(
+        self,
+        mock_text_values: MagicMock,
+        mock_text_relations: MagicMock,
+        mock_concepts: MagicMock,
+    ) -> None:
+        mock_text_values.find.return_value = []
+        mock_concepts.find.return_value = []
+
+        result = search_tasks(query="no such task title")
+
+        assert result["tasks"] == []
+        assert result["query_candidate_prefilter"] == {
+            "applied": True,
+            "bounded": True,
+            "truncated": False,
+        }
+        assert mock_text_values.find.call_count == 2
+        mock_text_relations.find.assert_not_called()
+        assert mock_concepts.find.call_args.args[0]["concept_id"] == {"$in": []}
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.TextValuesRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
+    def test_search_tasks_preserves_static_task_type_label_queries(
+        self,
+        mock_get_texts_for_concepts: MagicMock,
+        mock_text_values: MagicMock,
+        mock_concepts: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_concepts.find.return_value = [
+            {
+                "concept_id": "#V#task_delegated",
+                "relationships": {
+                    "is_an_instance_of": [
+                        TASK_SPECIFICATION_TYPE_ID,
+                        "#V#delegated_task_specification",
+                    ]
+                },
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+        mock_get_texts_for_concepts.return_value = {
+            "#V#task_delegated": []
+        }
+
+        result = search_tasks(query="delegated")
+
+        assert result["count"] == 1
+        assert result["query_candidate_prefilter"] == {"applied": False}
+        mock_text_values.find.assert_not_called()
 
 
 class TestBulkTaskCollections:
