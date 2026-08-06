@@ -2263,17 +2263,18 @@ function clampThinkingCardBodyHeightPx(value) {
     );
 }
 
+function getThinkingCardInitialBodyHeightPx(detailEl = null) {
+    const contentHeight = (detailEl instanceof HTMLElement && Number.isFinite(detailEl.scrollHeight))
+        ? detailEl.scrollHeight
+        : THINKING_CARD_BODY_DEFAULT_HEIGHT_PX;
+    return clampThinkingCardBodyHeightPx(
+        Math.max(contentHeight, THINKING_CARD_BODY_DEFAULT_HEIGHT_PX)
+    );
+}
+
 function ensureThinkingCardBodyHeightPx(request, detailEl = null) {
     if (!request || typeof request !== 'object') {
-        const contentHeight = (detailEl instanceof HTMLElement && Number.isFinite(detailEl.scrollHeight))
-            ? detailEl.scrollHeight
-            : THINKING_CARD_BODY_DEFAULT_HEIGHT_PX;
-        return clampThinkingCardBodyHeightPx(
-            Math.min(
-                Math.max(contentHeight, THINKING_CARD_BODY_MIN_HEIGHT_PX),
-                THINKING_CARD_BODY_DEFAULT_HEIGHT_PX
-            )
-        );
+        return getThinkingCardInitialBodyHeightPx(detailEl);
     }
 
     const existingHeight = Number(request.thinkingCardBodyHeightPx);
@@ -2282,15 +2283,7 @@ function ensureThinkingCardBodyHeightPx(request, detailEl = null) {
         return request.thinkingCardBodyHeightPx;
     }
 
-    const contentHeight = (detailEl instanceof HTMLElement && Number.isFinite(detailEl.scrollHeight))
-        ? detailEl.scrollHeight
-        : THINKING_CARD_BODY_DEFAULT_HEIGHT_PX;
-    request.thinkingCardBodyHeightPx = clampThinkingCardBodyHeightPx(
-        Math.min(
-            Math.max(contentHeight, THINKING_CARD_BODY_MIN_HEIGHT_PX),
-            THINKING_CARD_BODY_DEFAULT_HEIGHT_PX
-        )
-    );
+    request.thinkingCardBodyHeightPx = getThinkingCardInitialBodyHeightPx(detailEl);
     return request.thinkingCardBodyHeightPx;
 }
 
