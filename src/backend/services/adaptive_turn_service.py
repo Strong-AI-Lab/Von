@@ -48,6 +48,9 @@ from src.backend.services.llm_usage_cost_service import (
 from src.backend.services.thinking_semantic_projection_service import (
     build_semantic_operation_projection,
 )
+from src.backend.services.tool_evidence_projection_service import (
+    project_nested_workflow_progress_evidence,
+)
 from src.backend.services.turn_evidence_store import (
     EVIDENCE_SLICE_SCHEMA_VERSION,
     TrustedTurnScope,
@@ -3111,6 +3114,179 @@ def _emit(progress_tracker: Any, payload: Mapping[str, Any]) -> None:
         emit(dict(payload))
 
 
+def _bounded_workflow_progress_text(
+    value: Any,
+    *,
+    limit: int = 320,
+) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split()).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: max(0, limit - 3)].rstrip()}..."
+
+
+def _humanise_workflow_recovery_action(value: Any) -> str | None:
+    action_type = _bounded_workflow_progress_text(value, limit=120)
+    if not action_type:
+        return None
+    return action_type.replace("_", " ").strip().capitalize() or None
+
+
+def _build_represented_workflow_execution_event(
+    *,
+    payload: Any,
+    workflow_id: str,
+    workflow_name: str | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Project one represented execution into the existing Thinking contract.
+
+    Workflow-authored progress facts remain the semantic authority. This bridge
+    only carries their bounded projection, plus typed execution and recovery
+    state already present in the durable workflow receipt.
+    """
+
+    receipt = dict(payload) if isinstance(payload, Mapping) else {}
+    workflow_execution_raw = receipt.get("workflow_execution")
+    workflow_execution = (
+        dict(workflow_execution_raw)
+        if isinstance(workflow_execution_raw, Mapping)
+        else {}
+    )
+    workflow_instance_raw = receipt.get("workflow_instance")
+    workflow_instance = (
+        dict(workflow_instance_raw)
+        if isinstance(workflow_instance_raw, Mapping)
+        else {}
+    )
+    latest_step_raw = workflow_execution.get("latest_step_result_envelope")
+    latest_step = (
+        dict(latest_step_raw) if isinstance(latest_step_raw, Mapping) else {}
+    )
+    diagnostics_raw = latest_step.get("diagnostics")
+    diagnostics = (
+        dict(diagnostics_raw) if isinstance(diagnostics_raw, Mapping) else {}
+    )
+
+    progress_evidence = project_nested_workflow_progress_evidence(receipt)
+    progress_facts = (
+        list(progress_evidence.get("facts") or [])
+        if isinstance(progress_evidence, Mapping)
+        else []
+    )
+
+    effect_status = _bounded_workflow_progress_text(
+        receipt.get("effect_status"),
+        limit=80,
+    )
+    final_status = (
+        _bounded_workflow_progress_text(receipt.get("final_status"), limit=80)
+        or _bounded_workflow_progress_text(
+            workflow_execution.get("final_status"), limit=80
+        )
+        or _bounded_workflow_progress_text(
+            workflow_execution.get("current_status"), limit=80
+        )
+        or _bounded_workflow_progress_text(
+            workflow_instance.get("status"), limit=80
+        )
+    )
+    effect_status_key = (effect_status or "").lower()
+    final_status_key = (final_status or "").lower()
+    if effect_status_key == "succeeded":
+        event_status = "workflow_execution_complete"
+    elif effect_status_key == "partial":
+        event_status = "workflow_execution_waiting"
+    elif effect_status_key == "indeterminate":
+        event_status = "workflow_execution_indeterminate"
+    elif effect_status_key in {"failed", "not_started"}:
+        event_status = "workflow_execution_failed"
+    elif final_status_key in {"completed", "complete", "succeeded", "success"}:
+        event_status = "workflow_execution_complete"
+    elif final_status_key in {"pending", "queued", "running", "paused"}:
+        event_status = "workflow_execution_waiting"
+    else:
+        event_status = "workflow_execution_failed"
+
+    error = (
+        _bounded_workflow_progress_text(
+            workflow_execution.get("failure_reason"), limit=320
+        )
+        or _bounded_workflow_progress_text(
+            receipt.get("failure_reason"), limit=320
+        )
+        or _bounded_workflow_progress_text(diagnostics.get("error"), limit=320)
+        or _bounded_workflow_progress_text(
+            workflow_execution.get("error"), limit=320
+        )
+        or _bounded_workflow_progress_text(receipt.get("error_code"), limit=160)
+    )
+    recovery_affordances = receipt.get("recovery_affordances")
+    next_action = None
+    if isinstance(recovery_affordances, Sequence) and not isinstance(
+        recovery_affordances,
+        (str, bytes, bytearray),
+    ):
+        for affordance in recovery_affordances:
+            if not isinstance(affordance, Mapping):
+                continue
+            next_action = _humanise_workflow_recovery_action(
+                affordance.get("action_type")
+            )
+            if next_action:
+                break
+
+    event: dict[str, Any] = {
+        "schema_version": "selected_workflow_execution_event.v1",
+        "status": event_status,
+        "event_kind": event_status,
+        "workflow_id": workflow_id,
+        "selected_workflow_id": workflow_id,
+        "selected_execution_mode": "adaptive_turn_capability",
+    }
+    optional_text = {
+        "selected_workflow_name": workflow_name,
+        "state_id": latest_step.get("state_id")
+        or workflow_execution.get("current_state"),
+        "action_id": latest_step.get("action_id"),
+        "action_status": latest_step.get("action_status"),
+        "action_outcome": latest_step.get("action_outcome"),
+        "final_state": workflow_execution.get("current_state")
+        or workflow_instance.get("current_state"),
+        "error": error,
+        "effect_status": effect_status,
+        "mutation_outcome": receipt.get("mutation_outcome"),
+        "outcome_finality": receipt.get("outcome_finality"),
+        "next_action": next_action,
+    }
+    for key, value in optional_text.items():
+        text_value = _bounded_workflow_progress_text(value)
+        if text_value:
+            event[key] = text_value
+    for key in ("changed", "semantic_effect"):
+        if isinstance(receipt.get(key), bool):
+            event[key] = receipt[key]
+    if isinstance(latest_step.get("state_attempt"), (int, float)) and not isinstance(
+        latest_step.get("state_attempt"), bool
+    ):
+        event["state_attempt"] = max(0, int(latest_step["state_attempt"]))
+    if isinstance(diagnostics.get("duration_ms"), (int, float)) and not isinstance(
+        diagnostics.get("duration_ms"), bool
+    ):
+        event["duration_ms"] = max(0, int(diagnostics["duration_ms"]))
+    if progress_facts:
+        event["progress_facts"] = progress_facts
+    progress_payload = (
+        dict(progress_evidence)
+        if isinstance(progress_evidence, Mapping)
+        else None
+    )
+    return event, progress_payload
+
+
 def _check_cancellation(progress_tracker: Any) -> None:
     if progress_tracker is None:
         return
@@ -5113,21 +5289,31 @@ def execute_adaptive_turn(
                     lifecycle_status="running",
                     capability_display_name=item.capability_display_name,
                 )
-                _emit(
-                    progress_tracker,
-                    {
-                        "status": "tool_call_start",
-                        "event_kind": "tool_call_start",
-                        "stage": "adaptive_research",
-                        "phase": "adaptive_research",
-                        "tool": canonical_name,
-                        "subtask": semantic_operation["capability"]["label"],
-                        "execution_method": execution_method_name,
-                        "call_id": call.call_id,
-                        "result_summary": semantic_operation["summary"],
-                        "semantic_operation": semantic_operation,
-                    },
-                )
+                start_progress: dict[str, Any] = {
+                    "status": "tool_call_start",
+                    "event_kind": "tool_call_start",
+                    "stage": "adaptive_research",
+                    "phase": "adaptive_research",
+                    "tool": canonical_name,
+                    "subtask": semantic_operation["capability"]["label"],
+                    "execution_method": execution_method_name,
+                    "call_id": call.call_id,
+                    "result_summary": semantic_operation["summary"],
+                    "semantic_operation": semantic_operation,
+                }
+                if item.capability_kind == "represented_workflow" and (
+                    item.represented_workflow_id
+                ):
+                    start_progress["selected_workflow_execution_event"] = {
+                        "schema_version": "selected_workflow_execution_event.v1",
+                        "status": "workflow_execution_start",
+                        "event_kind": "workflow_execution_start",
+                        "workflow_id": item.represented_workflow_id,
+                        "selected_workflow_id": item.represented_workflow_id,
+                        "selected_workflow_name": item.capability_display_name,
+                        "selected_execution_mode": "adaptive_turn_capability",
+                    }
+                _emit(progress_tracker, start_progress)
                 with override_current_actor(
                     scope.user_concept_id,
                     scope.organisation_concept_id,
@@ -5437,6 +5623,20 @@ def execute_adaptive_turn(
                         else "ok"
                     )
                 )
+                selected_workflow_execution_event: dict[str, Any] | None = None
+                workflow_progress_evidence: dict[str, Any] | None = None
+                if (
+                    contained_result.capability_kind == "represented_workflow"
+                    and contained_result.represented_workflow_id
+                ):
+                    (
+                        selected_workflow_execution_event,
+                        workflow_progress_evidence,
+                    ) = _build_represented_workflow_execution_event(
+                        payload=raw_payload,
+                        workflow_id=contained_result.represented_workflow_id,
+                        workflow_name=contained_result.capability_display_name,
+                    )
                 envelope = evidence_store.record(
                     canonical_name,
                     call.call_id,
@@ -5471,6 +5671,10 @@ def execute_adaptive_turn(
                     status=effect_status or status,
                 )
                 envelope_payload = envelope.to_mapping()
+                if workflow_progress_evidence is not None:
+                    envelope_payload["workflow_progress_evidence"] = dict(
+                        workflow_progress_evidence
+                    )
                 if isinstance(raw_payload, Mapping):
                     try:
                         from src.backend.services.tool_evidence_projection_service import (
@@ -5590,6 +5794,14 @@ def execute_adaptive_turn(
                 if contained_result.binding_diagnostics:
                     invocation["binding_diagnostics"] = dict(
                         contained_result.binding_diagnostics
+                    )
+                if workflow_progress_evidence is not None:
+                    invocation["workflow_progress_evidence"] = dict(
+                        workflow_progress_evidence
+                    )
+                if selected_workflow_execution_event is not None:
+                    invocation["selected_workflow_execution_event"] = dict(
+                        selected_workflow_execution_event
                     )
                 if is_effect:
                     invocation.update(
@@ -5711,22 +5923,29 @@ def execute_adaptive_turn(
                     success=status == "ok",
                     result=semantic_result,
                 )
-                _emit(
-                    progress_tracker,
-                    {
-                        "status": "tool_completed",
-                        "event_kind": "tool_call_end",
-                        "stage": "adaptive_research",
-                        "phase": "adaptive_research",
-                        "tool": canonical_name,
-                        "subtask": semantic_operation["capability"]["label"],
-                        "execution_method": execution_method_name,
-                        "call_id": call.call_id,
-                        "success": status == "ok",
-                        "result_summary": semantic_operation["summary"],
-                        "semantic_operation": semantic_operation,
-                    },
-                )
+                completed_progress: dict[str, Any] = {
+                    "status": "tool_completed",
+                    "event_kind": "tool_call_end",
+                    "stage": "adaptive_research",
+                    "phase": "adaptive_research",
+                    "tool": canonical_name,
+                    "subtask": semantic_operation["capability"]["label"],
+                    "execution_method": execution_method_name,
+                    "call_id": call.call_id,
+                    "success": status == "ok",
+                    "result_summary": semantic_operation["summary"],
+                    "semantic_operation": semantic_operation,
+                }
+                if selected_workflow_execution_event is not None:
+                    completed_progress["selected_workflow_execution_event"] = dict(
+                        selected_workflow_execution_event
+                    )
+                    progress_facts = selected_workflow_execution_event.get(
+                        "progress_facts"
+                    )
+                    if isinstance(progress_facts, list) and progress_facts:
+                        completed_progress["progress_facts"] = list(progress_facts)
+                _emit(progress_tracker, completed_progress)
 
         correlated_results = [
             result for result in batch_results if isinstance(result, ToolResult)

@@ -9941,7 +9941,15 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
                     data.latest_selected_workflow_event,
                     workflowDiscovery
                 )
-            }
+            },
+            { label: 'Latest state id', value: data.latest_selected_workflow_event?.state_id },
+            { label: 'Latest action id', value: data.latest_selected_workflow_event?.action_id },
+            { label: 'Action status', value: data.latest_selected_workflow_event?.action_status },
+            { label: 'Action outcome', value: data.latest_selected_workflow_event?.action_outcome },
+            { label: 'Effect status', value: data.latest_selected_workflow_event?.effect_status },
+            { label: 'Mutation outcome', value: data.latest_selected_workflow_event?.mutation_outcome },
+            { label: 'Outcome finality', value: data.latest_selected_workflow_event?.outcome_finality },
+            { label: 'Next action', value: data.latest_selected_workflow_event?.next_action }
         );
         sections.push(buildThinkingDiagnosticListHTML(
             'Workflow execution events',
@@ -10444,7 +10452,12 @@ function renderThinkingWorkflowStageExpertDataHTML(data, workflowDiscovery = nul
                     data.latest_selected_workflow_event,
                     workflowDiscovery
                 )
-            }
+            },
+            { label: 'Latest state id', value: data.latest_selected_workflow_event?.state_id },
+            { label: 'Latest action id', value: data.latest_selected_workflow_event?.action_id },
+            { label: 'Action outcome', value: data.latest_selected_workflow_event?.action_outcome },
+            { label: 'Effect status', value: data.latest_selected_workflow_event?.effect_status },
+            { label: 'Next action', value: data.latest_selected_workflow_event?.next_action }
         );
         sections.push(buildThinkingDiagnosticListHTML(
             'Workflow execution events',
@@ -10953,34 +10966,28 @@ function normaliseThinkingSelectedWorkflowExecution(rawExecution, workflowDiscov
             final_state: normaliseThinkingActivityString(entry.final_state) || null,
             error: normaliseThinkingActivityString(entry.error) || null,
             execution_mode: normaliseThinkingActivityString(entry.execution_mode) || null,
+            effect_status: normaliseThinkingActivityString(entry.effect_status) || null,
+            mutation_outcome: normaliseThinkingActivityString(entry.mutation_outcome) || null,
+            outcome_finality: normaliseThinkingActivityString(entry.outcome_finality) || null,
+            failure_reason: normaliseThinkingActivityString(entry.failure_reason) || null,
+            next_action: normaliseThinkingActivityString(entry.next_action) || null,
+            changed: typeof entry.changed === 'boolean' ? entry.changed : null,
+            semantic_effect: typeof entry.semantic_effect === 'boolean' ? entry.semantic_effect : null,
             duration_ms: Number.isFinite(entry.duration_ms) ? Number(entry.duration_ms) : null,
             sequence_no: Number.isFinite(entry.sequence_no) ? Number(entry.sequence_no) : null,
             at_utc: normaliseThinkingActivityString(entry.at_utc) || null,
             progress_facts: normaliseThinkingProgressFacts(entry.progress_facts),
         }));
-    let latestEvent = events.length > 0
-        ? events[events.length - 1]
-        : (
-            rawExecution.latest_event && typeof rawExecution.latest_event === 'object'
-                ? normaliseThinkingSelectedWorkflowExecution({ events: [rawExecution.latest_event] }, workflowDiscovery)?.latest_event
-                : null
-        );
-    if (
-        latestEvent
-        && (!Array.isArray(latestEvent.progress_facts) || latestEvent.progress_facts.length === 0)
-        && rawExecution.latest_event
-        && typeof rawExecution.latest_event === 'object'
-    ) {
-        const rawLatestProgressFacts = normaliseThinkingProgressFacts(
-            rawExecution.latest_event.progress_facts
-        );
-        if (rawLatestProgressFacts.length > 0) {
-            latestEvent = {
-                ...latestEvent,
-                progress_facts: rawLatestProgressFacts
-            };
-        }
-    }
+    const normalisedExplicitLatestEvent = (
+        rawExecution.latest_event && typeof rawExecution.latest_event === 'object'
+            ? normaliseThinkingSelectedWorkflowExecution(
+                { events: [rawExecution.latest_event] },
+                workflowDiscovery
+            )?.latest_event
+            : null
+    );
+    const latestEvent = normalisedExplicitLatestEvent
+        || (events.length > 0 ? events[events.length - 1] : null);
     const workflowId = normaliseThinkingActivityString(rawExecution.selected_workflow_id)
         || normaliseThinkingActivityString(rawExecution.workflow_id)
         || normaliseThinkingActivityString(latestEvent?.selected_workflow_id)
@@ -11017,6 +11024,26 @@ function normaliseThinkingSelectedWorkflowExecution(rawExecution, workflowDiscov
     };
 }
 
+function formatThinkingWorkflowStateLabel(stateId, workflowId = null) {
+    const cleanStateId = normaliseThinkingActivityString(stateId);
+    if (!cleanStateId) {
+        return '';
+    }
+
+    const representedStepPrefix = '#V#workflow_step_';
+    if (!cleanStateId.startsWith(representedStepPrefix)) {
+        return formatThinkingActivityFallbackLabel(cleanStateId);
+    }
+
+    let stateSlug = cleanStateId.slice(representedStepPrefix.length);
+    const workflowSlug = normaliseThinkingActivityString(workflowId)
+        .replace(/^#V#/, '');
+    if (workflowSlug && stateSlug.startsWith(`${workflowSlug}_`)) {
+        stateSlug = stateSlug.slice(workflowSlug.length + 1);
+    }
+    return formatThinkingActivityFallbackLabel(stateSlug);
+}
+
 function formatThinkingSelectedWorkflowExecutionEvent(event, workflowDiscovery = null) {
     if (!event || typeof event !== 'object') {
         return '';
@@ -11026,24 +11053,85 @@ function formatThinkingSelectedWorkflowExecutionEvent(event, workflowDiscovery =
         event.selected_workflow_name,
         workflowDiscovery
     );
-    const stateText = event.state_id ? formatThinkingActivityFallbackLabel(event.state_id) : '';
+    const stateText = formatThinkingWorkflowStateLabel(
+        event.state_id,
+        event.selected_workflow_id || event.workflow_id
+    );
     const actionText = event.action_id ? formatThinkingActivityFallbackLabel(event.action_id) : '';
     const outcome = event.action_outcome || event.action_status || event.outcome || '';
     const outcomeText = outcome ? formatThinkingActivityFallbackLabel(outcome) : '';
     const durationText = formatThinkingDiagnosticDuration(event.duration_ms);
+    const effectText = (() => {
+        if (event.semantic_effect === false) {
+            return 'Read-only workflow';
+        }
+        if (event.semantic_effect !== true) {
+            return '';
+        }
+        switch (normaliseThinkingActivityString(event.effect_status).toLowerCase()) {
+        case 'succeeded':
+            return 'Requested effect completed';
+        case 'not_started':
+            return 'Effect not started';
+        case 'failed':
+            return 'Effect failed';
+        case 'partial':
+            return 'Effect still pending';
+        case 'indeterminate':
+            return 'Effect outcome unknown';
+        default:
+            return '';
+        }
+    })();
+    const nextActionText = event.next_action ? `Next: ${event.next_action}` : '';
     switch (event.status) {
     case 'workflow_execution_selected':
         return workflowText ? `Selected ${workflowText}` : 'Selected workflow';
     case 'workflow_execution_start':
         return workflowText ? `Started ${workflowText}` : 'Started selected workflow';
     case 'workflow_execution_complete':
-        return [workflowText ? `Completed ${workflowText}` : 'Completed selected workflow', event.final_state].filter(Boolean).join(' · ');
+        return [
+            workflowText ? `Completed ${workflowText}` : 'Completed selected workflow',
+            stateText
+                ? `Last step: ${stateText}`
+                : (actionText ? `Last step: ${actionText}` : event.final_state),
+            effectText,
+            nextActionText
+        ].filter(Boolean).join(' · ');
     case 'workflow_execution_failed':
-        return [workflowText ? `Failed ${workflowText}` : 'Selected workflow failed', event.final_state || event.error].filter(Boolean).join(' · ');
+        return [
+            workflowText ? `Failed ${workflowText}` : 'Selected workflow failed',
+            stateText || actionText || event.final_state,
+            event.failure_reason || event.error,
+            effectText,
+            nextActionText
+        ].filter(Boolean).join(' · ');
+    case 'workflow_execution_waiting':
+        return [
+            workflowText ? `Waiting for ${workflowText}` : 'Waiting for selected workflow',
+            stateText || actionText,
+            effectText,
+            nextActionText
+        ].filter(Boolean).join(' · ');
+    case 'workflow_execution_indeterminate':
+        return [
+            workflowText ? `Outcome unknown for ${workflowText}` : 'Selected workflow outcome unknown',
+            stateText || actionText,
+            event.failure_reason || event.error,
+            effectText,
+            nextActionText
+        ].filter(Boolean).join(' · ');
     case 'workflow_step_start':
         return [actionText ? `Running ${actionText}` : 'Running workflow step', stateText].filter(Boolean).join(' · ');
     case 'workflow_step_complete':
-        return [actionText ? `Finished ${actionText}` : 'Finished workflow step', stateText, outcomeText, durationText].filter(Boolean).join(' · ');
+        return [
+            actionText ? `Finished ${actionText}` : 'Finished workflow step',
+            stateText,
+            outcomeText,
+            durationText,
+            effectText,
+            nextActionText
+        ].filter(Boolean).join(' · ');
     default:
         return [formatThinkingActivityFallbackLabel(event.status), actionText || stateText || workflowText, outcomeText].filter(Boolean).join(' · ');
     }
@@ -11738,6 +11826,10 @@ function buildSelectedWorkflowExecutionStageRow(summary, workflowDiscovery = nul
             selected_workflow_id: workflowId || null,
             selected_workflow_name: normaliseThinkingActivityString(summary?.selected_workflow_name) || null,
             workflow_instance_id: instanceId || null,
+            selected_workflow_event_count: Number.isFinite(summary?.event_count)
+                ? Number(summary.event_count)
+                : (Array.isArray(summary?.events) ? summary.events.length : 0),
+            latest_selected_workflow_event: summary?.latest_event || null,
             selected_workflow_execution: summary?.events ? { ...summary } : null,
             custom_workflow_execution: { ...summary },
             progress_facts: normaliseThinkingProgressFacts(
