@@ -6192,6 +6192,8 @@ describe('thinking activity history normalisation', () => {
                         selected_workflow_id: '#V#research_triage_workflow',
                         state_id: 'read_message',
                         action_id: 'gmail_read',
+                        effect_status: 'succeeded',
+                        semantic_effect: false,
                         progress_facts: [
                             {
                                 schema_version: 'workflow_progress_projection.v1',
@@ -6253,6 +6255,7 @@ describe('thinking activity history normalisation', () => {
         });
         const defaultText = defaultContainer.textContent || '';
         expect(defaultText).toContain('Email subject: Research digest: arXiv attention paper');
+        expect(defaultText).toContain('Read-only workflow');
         expect(defaultText).not.toContain('Paper concept');
         expect(defaultText).not.toContain('Sender email');
 
@@ -6275,6 +6278,129 @@ describe('thinking activity history normalisation', () => {
         expect(debugText).toContain('source: context.email.subject');
         expect(debugText).toContain('contract: #V#email_subject_progress_fact');
         expect(debugText).toContain('reason: redaction_policy_missing');
+    });
+
+    test('renders a represented workflow failure boundary and typed next action', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'default',
+            latestProgress: {
+                phase: 'adaptive_research',
+                stage: 'adaptive_research',
+                selected_workflow_execution: {
+                    schema_version: 'selected_workflow_execution.v1',
+                    selected_workflow_id: '#V#student_research_description_workflow',
+                    selected_workflow_name: 'Student research description workflow',
+                    event_count: 2,
+                    latest_event: {
+                        status: 'workflow_execution_failed',
+                        event_kind: 'workflow_execution_failed',
+                        workflow_id: '#V#student_research_description_workflow',
+                        selected_workflow_id: '#V#student_research_description_workflow',
+                        selected_workflow_name: 'Student research description workflow',
+                        state_id: '#V#workflow_step_student_research_description_workflow_extract_attachment',
+                        action_id: 'extract_pdf_text',
+                        action_status: 'failed',
+                        action_outcome: 'failure',
+                        error: 'The attached PDF could not be read.',
+                        effect_status: 'failed',
+                        semantic_effect: true,
+                        changed: false,
+                        next_action: 'Inspect workflow instance',
+                        progress_facts: [
+                            {
+                                schema_version: 'workflow_progress_projection.v1',
+                                fact_id: 'attachment_name',
+                                label: 'Attachment',
+                                status: 'available',
+                                present: true,
+                                visibility: 'default',
+                                value: 'research-description.pdf'
+                            }
+                        ]
+                    },
+                    events: []
+                }
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent || '';
+
+        expect(text).toContain('Failed Student research description workflow');
+        expect(text).toContain('Extract attachment');
+        expect(text).toContain('The attached PDF could not be read.');
+        expect(text).toContain('Effect failed');
+        expect(text).toContain('Next: Inspect workflow instance');
+        expect(text).toContain('Attachment: research-description.pdf');
+        expect(text).not.toContain('Requested effect completed');
+    });
+
+    test('renders a represented step concept as its workflow-local human label', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'default',
+            latestProgress: {
+                status: 'completed',
+                selected_workflow_execution: {
+                    schema_version: 'selected_workflow_execution.v1',
+                    selected_workflow_id: '#V#operational_marker_absence_probe_workflow',
+                    selected_workflow_name: 'Operational Marker Absence Probe Workflow',
+                    event_count: 2,
+                    latest_event: {
+                        status: 'workflow_execution_complete',
+                        event_kind: 'workflow_execution_complete',
+                        workflow_id: '#V#operational_marker_absence_probe_workflow',
+                        selected_workflow_id: '#V#operational_marker_absence_probe_workflow',
+                        selected_workflow_name: 'Operational Marker Absence Probe Workflow',
+                        state_id: '#V#workflow_step_operational_marker_absence_probe_workflow_project_probe_result',
+                        action_id: 'workflow_control.context_project',
+                        action_status: 'success',
+                        action_outcome: 'success'
+                    },
+                    events: []
+                }
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent || '';
+
+        expect(text).toContain('Last step: Project probe result');
+        expect(text).not.toContain('Last step: Workflow control.context project');
+        expect(text).not.toContain('#V#workflow step');
+
+        for (const mode of ['expert', 'debug']) {
+            const technicalContainer = document.createElement('div');
+            technicalContainer.innerHTML = __testOnly_renderThinkingCardBodyHTML({
+                thinkingCardMode: mode,
+                latestProgress: {
+                    status: 'completed',
+                    selected_workflow_execution: {
+                        schema_version: 'selected_workflow_execution.v1',
+                        selected_workflow_id: '#V#operational_marker_absence_probe_workflow',
+                        selected_workflow_name: 'Operational Marker Absence Probe Workflow',
+                        event_count: 2,
+                        latest_event: {
+                            status: 'workflow_execution_complete',
+                            event_kind: 'workflow_execution_complete',
+                            workflow_id: '#V#operational_marker_absence_probe_workflow',
+                            selected_workflow_id: '#V#operational_marker_absence_probe_workflow',
+                            state_id: '#V#workflow_step_operational_marker_absence_probe_workflow_project_probe_result',
+                            action_id: 'workflow_control.context_project',
+                            action_status: 'success',
+                            action_outcome: 'success'
+                        },
+                        events: []
+                    }
+                }
+            });
+            const technicalText = technicalContainer.textContent || '';
+            expect(technicalText).toContain('Latest state id');
+            expect(technicalText).toContain('#V#workflow_step_operational_marker_absence_probe_workflow_project_probe_result');
+            expect(technicalText).toContain('Latest action id');
+            expect(technicalText).toContain('workflow_control.context_project');
+        }
     });
 
     test('surfaces interpretable execution path for general tool-use turns', () => {

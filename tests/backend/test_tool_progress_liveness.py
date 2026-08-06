@@ -1125,6 +1125,64 @@ def test_serialisation_exposes_a_bounded_timing_trace(monkeypatch) -> None:
     assert serialised["timing_summary"]["slowest_spans"]
 
 
+def test_completed_turn_diagnostics_preserve_selected_workflow_execution() -> None:
+    selected_workflow_execution = {
+        "schema_version": "selected_workflow_execution.v1",
+        "workflow_id": "#V#operational_marker_absence_probe_workflow",
+        "selected_workflow_id": "#V#operational_marker_absence_probe_workflow",
+        "selected_workflow_name": "Operational Marker Absence Probe Workflow",
+        "event_count": 2,
+        "latest_event": {
+            "schema_version": "selected_workflow_execution_event.v1",
+            "sequence_no": 12,
+            "at_utc": "2026-08-06T15:47:00Z",
+            "status": "workflow_execution_complete",
+            "event_kind": "workflow_execution_complete",
+            "workflow_id": "#V#operational_marker_absence_probe_workflow",
+            "selected_workflow_id": "#V#operational_marker_absence_probe_workflow",
+            "selected_workflow_name": "Operational Marker Absence Probe Workflow",
+            "state_id": "project_probe_result",
+            "action_id": "workflow_control.context_project",
+            "action_status": "succeeded",
+            "semantic_effect": False,
+            "progress_facts": [
+                {
+                    "label": "Marker found",
+                    "value": False,
+                    "visibility": "default",
+                    "redacted": False,
+                }
+            ],
+        },
+        "events": [],
+    }
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-selected-workflow-archive",
+        prompt_text="Check whether the marker exists without changing anything.",
+        tool_progress_state={
+            "request_id": "req-selected-workflow-archive",
+            "status": "completed",
+            "selected_workflow_execution": selected_workflow_execution,
+        },
+    )
+
+    archived_execution = diagnostics["latest_progress"][
+        "selected_workflow_execution"
+    ]
+    assert archived_execution == selected_workflow_execution
+    assert archived_execution["latest_event"]["state_id"] == "project_probe_result"
+    assert archived_execution["latest_event"]["semantic_effect"] is False
+    assert archived_execution["latest_event"]["progress_facts"] == [
+        {
+            "label": "Marker found",
+            "value": False,
+            "visibility": "default",
+            "redacted": False,
+        }
+    ]
+
+
 def test_diagnostics_include_neutral_model_tool_and_support_timing() -> None:
     diagnostics = von_routes._build_turn_execution_diagnostics(
         request_id="req-diagnostics-timing",

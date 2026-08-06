@@ -6654,6 +6654,8 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         display_name="Represented test workflow",
         description="Produce the represented test work product.",
         relevance_score=0.94,
+        semantic_effect=True,
+        semantic_effect_source="represented_workflow_declaration",
         input_schema={
             "type": "object",
             "properties": {
@@ -6685,6 +6687,42 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
             "instance_id": "workflow-instance-1",
             "created_new": True,
             "final_status": "completed",
+            "workflow_execution": {
+                "final_status": "completed",
+                "current_state": "record_description",
+                "latest_step_result_envelope": {
+                    "schema_version": "workflow_step_result_envelope.v1",
+                    "workflow_id": "#V#represented_test_workflow",
+                    "state_id": "record_description",
+                    "action_id": "upsert_research_description",
+                    "action_status": "success",
+                    "action_outcome": "success",
+                    "state_attempt": 1,
+                    "diagnostics": {"duration_ms": 125},
+                    "progress_facts": [
+                        {
+                            "schema_version": "workflow_progress_projection.v1",
+                            "fact_id": "student_name",
+                            "label": "Student",
+                            "status": "available",
+                            "present": True,
+                            "visibility": "default",
+                            "value": "Nathan Doe",
+                            "source_path": "context.student_name",
+                        },
+                        {
+                            "schema_version": "workflow_progress_projection.v1",
+                            "fact_id": "description_date",
+                            "label": "Description date",
+                            "status": "available",
+                            "present": True,
+                            "visibility": "default",
+                            "value": "2026-08-05",
+                            "source_path": "context.description_date",
+                        },
+                    ],
+                },
+            },
         }
 
     gateway = _workflow_gateway(
@@ -6803,6 +6841,38 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     assert invocation["instance_id"] == "workflow-instance-1"
     assert invocation["workflow_id"] == "#V#represented_test_workflow"
     assert invocation["plan_profile"]["shape"] == "represented_workflow"
+    assert invocation["workflow_progress_evidence"]["facts"] == [
+        {
+            "schema_version": "workflow_progress_projection.v1",
+            "fact_id": "student_name",
+            "label": "Student",
+            "status": "available",
+            "present": True,
+            "redacted": False,
+            "truncated": False,
+            "source_path": "context.student_name",
+            "payload_source_path": (
+                "workflow_execution.latest_step_result_envelope.progress_facts"
+            ),
+            "visibility": "default",
+            "value": "Nathan Doe",
+        },
+        {
+            "schema_version": "workflow_progress_projection.v1",
+            "fact_id": "description_date",
+            "label": "Description date",
+            "status": "available",
+            "present": True,
+            "redacted": False,
+            "truncated": False,
+            "source_path": "context.description_date",
+            "payload_source_path": (
+                "workflow_execution.latest_step_result_envelope.progress_facts"
+            ),
+            "visibility": "default",
+            "value": "2026-08-05",
+        },
+    ]
     selection_trace = next(
         item
         for item in result.aux_llm_calls
@@ -6839,7 +6909,96 @@ def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
         assert semantic_operation["arguments"][0]["value"] == (
             "#V#represented_test_workflow"
         )
+    start_execution = workflow_events[0]["selected_workflow_execution_event"]
+    assert start_execution == {
+        "schema_version": "selected_workflow_execution_event.v1",
+        "status": "workflow_execution_start",
+        "event_kind": "workflow_execution_start",
+        "workflow_id": "#V#represented_test_workflow",
+        "selected_workflow_id": "#V#represented_test_workflow",
+        "selected_workflow_name": "Represented test workflow",
+        "selected_execution_mode": "adaptive_turn_capability",
+    }
+    completed_execution = workflow_events[1][
+        "selected_workflow_execution_event"
+    ]
+    assert completed_execution["status"] == "workflow_execution_complete"
+    assert completed_execution["state_id"] == "record_description"
+    assert completed_execution["action_id"] == "upsert_research_description"
+    assert completed_execution["action_outcome"] == "success"
+    assert completed_execution["effect_status"] == "succeeded"
+    assert completed_execution["semantic_effect"] is True
+    assert [fact["label"] for fact in completed_execution["progress_facts"]] == [
+        "Student",
+        "Description date",
+    ]
+    assert workflow_events[1]["progress_facts"] == completed_execution[
+        "progress_facts"
+    ]
     assert result.response_text == "The represented work product was completed."
+
+
+def test_represented_workflow_failure_progress_is_actionable() -> None:
+    from src.backend.services.adaptive_turn_service import (
+        _build_represented_workflow_execution_event,
+    )
+
+    event, progress_evidence = _build_represented_workflow_execution_event(
+        payload={
+            "final_status": "failed",
+            "effect_status": "failed",
+            "semantic_effect": True,
+            "changed": False,
+            "mutation_outcome": "partial",
+            "outcome_finality": "terminal_for_turn",
+            "recovery_affordances": [
+                {"action_type": "inspect_workflow_instance"}
+            ],
+            "workflow_execution": {
+                "current_state": "extract_attachment",
+                "error": "Attachment text extraction failed.",
+                "latest_step_result_envelope": {
+                    "state_id": "extract_attachment",
+                    "action_id": "extract_pdf_text",
+                    "action_status": "failed",
+                    "action_outcome": "failure",
+                    "diagnostics": {
+                        "error": "The attached PDF could not be read.",
+                        "duration_ms": 430,
+                    },
+                    "progress_facts": [
+                        {
+                            "schema_version": "workflow_progress_projection.v1",
+                            "fact_id": "attachment_name",
+                            "label": "Attachment",
+                            "status": "available",
+                            "present": True,
+                            "visibility": "default",
+                            "value": "research-description.pdf",
+                            "source_path": "context.attachment_name",
+                        }
+                    ],
+                },
+            },
+        },
+        workflow_id="#V#student_research_description_workflow",
+        workflow_name="Student research description workflow",
+    )
+
+    assert event["status"] == "workflow_execution_failed"
+    assert event["state_id"] == "extract_attachment"
+    assert event["action_id"] == "extract_pdf_text"
+    assert event["action_outcome"] == "failure"
+    assert event["error"] == "The attached PDF could not be read."
+    assert event["effect_status"] == "failed"
+    assert event["semantic_effect"] is True
+    assert event["changed"] is False
+    assert event["next_action"] == "Inspect workflow instance"
+    assert event["progress_facts"][0]["label"] == "Attachment"
+    assert progress_evidence is not None
+    assert progress_evidence["facts"][0]["value"] == (
+        "research-description.pdf"
+    )
 
 
 def test_represented_workflow_nonfinite_wait_is_typed_not_started_feedback(

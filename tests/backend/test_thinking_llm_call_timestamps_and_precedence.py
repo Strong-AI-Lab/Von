@@ -380,6 +380,42 @@ def test_build_turn_execution_record_persists_primary_and_aux_llm_logs():
 # ---------------------------------------------------------------------------
 
 
+def test_selected_workflow_event_preserves_effect_and_recovery_meaning():
+    from src.backend.server.routes.von_routes import (
+        _normalise_selected_workflow_execution_event,
+    )
+
+    event = _normalise_selected_workflow_execution_event(
+        {
+            "status": "tool_completed",
+            "selected_workflow_execution_event": {
+                "status": "workflow_execution_failed",
+                "event_kind": "workflow_execution_failed",
+                "workflow_id": "#V#student_research_description_workflow",
+                "selected_workflow_name": (
+                    "Student research description workflow"
+                ),
+                "effect_status": "failed",
+                "mutation_outcome": "partial",
+                "outcome_finality": "terminal_for_turn",
+                "semantic_effect": True,
+                "changed": False,
+                "next_action": "Inspect workflow instance",
+            },
+        },
+        sequence_no=7,
+        at_utc="2026-08-06T10:00:00Z",
+    )
+
+    assert event is not None
+    assert event["effect_status"] == "failed"
+    assert event["mutation_outcome"] == "partial"
+    assert event["outcome_finality"] == "terminal_for_turn"
+    assert event["semantic_effect"] is True
+    assert event["changed"] is False
+    assert event["next_action"] == "Inspect workflow instance"
+
+
 def test_selected_workflow_evidence_sources_collects_lineage():
     from src.backend.server.routes.von_routes import _selected_workflow_evidence_sources
 

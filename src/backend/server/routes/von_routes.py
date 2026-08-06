@@ -565,9 +565,18 @@ def _normalise_selected_workflow_execution_event(
         "error",
         "execution_mode",
         "result_summary",
+        "effect_status",
+        "mutation_outcome",
+        "outcome_finality",
+        "failure_reason",
+        "next_action",
     ):
         value = _progress_str(event.get(key)) or _progress_str(update.get(key))
         if value:
+            normalised[key] = value
+    for key in ("changed", "semantic_effect"):
+        value = event.get(key)
+        if isinstance(value, bool):
             normalised[key] = value
     state_attempt = _progress_number(event.get("state_attempt"))
     if state_attempt is not None:
@@ -3839,6 +3848,7 @@ def _build_turn_execution_diagnostics(
         "tool_pending_count",
         "tool_call_start_count",
         "tool_call_end_count",
+        "selected_workflow_execution",
         "timing_spans",
     )
     latest_progress = (
