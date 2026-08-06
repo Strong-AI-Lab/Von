@@ -639,11 +639,20 @@ describe('workflow monitor concept links', () => {
                 is_executable: false,
                 executability_reason: 'workflow_step_partially_vacuous',
                 attempts: 12,
+                completions: 6,
+                failures: 4,
+                in_progress: 2,
+                terminal_success_rate: 0.6,
                 episodes_count: 8
             }
         ]);
 
         expect(document.body.textContent).toContain('Episodes: 8 scoped (12 total)');
+        expect(document.body.textContent).toContain('Uses: 12');
+        expect(document.body.textContent).toContain('Succeeded: 6');
+        expect(document.body.textContent).toContain('Failed: 4');
+        expect(document.body.textContent).toContain('Open: 2');
+        expect(document.body.textContent).toContain('Terminal success: 60%');
     });
 });
 

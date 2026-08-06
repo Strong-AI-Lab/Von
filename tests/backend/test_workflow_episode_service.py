@@ -86,6 +86,8 @@ def test_workflow_episode_idempotent_start_for_stable_key():
     aggregate = get_workflow_usage_aggregates_for_workflows([workflow_id])[workflow_id]
     assert aggregate["attempts"] == 1
     assert aggregate["completions"] == 0
+    assert aggregate["failures"] == 0
+    assert aggregate["in_progress"] == 1
 
 
 def test_workflow_episode_aggregates_sync_to_workflow_concept():
@@ -144,7 +146,10 @@ def test_workflow_episode_aggregates_sync_to_workflow_concept():
     aggregate = get_workflow_usage_aggregates_for_workflows([workflow_id])[workflow_id]
     assert aggregate["attempts"] == 2
     assert aggregate["completions"] == 1
+    assert aggregate["failures"] == 1
+    assert aggregate["in_progress"] == 0
     assert aggregate["completion_rate"] == pytest.approx(0.5)
+    assert aggregate["terminal_success_rate"] == pytest.approx(0.5)
 
     concept_doc = ConceptsRepository.find_one(
         {"concept_id": workflow_id},
@@ -154,6 +159,8 @@ def test_workflow_episode_aggregates_sync_to_workflow_concept():
     usage = (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
     assert usage.get("attempts") == 2
     assert usage.get("completions") == 1
+    assert usage.get("failures") == 1
+    assert usage.get("in_progress") == 0
     assert usage.get("completion_rate") == pytest.approx(0.5)
 
 
@@ -195,7 +202,75 @@ def test_workflow_episode_hot_path_updates_aggregates_without_log_scan(
     aggregate = get_workflow_usage_aggregates_for_workflows([workflow_id])[workflow_id]
     assert aggregate["attempts"] == 1
     assert aggregate["completions"] == 1
+    assert aggregate["failures"] == 0
+    assert aggregate["in_progress"] == 0
     assert aggregate["completion_rate"] == pytest.approx(1.0)
+
+
+def test_workflow_episode_migrates_legacy_aggregate_from_episode_log():
+    workflow_id = "#V#workflow_episode_legacy_aggregate"
+    _ensure_workflow_concept(workflow_id)
+
+    for index, completed in enumerate((True, False)):
+        stable_key = build_workflow_episode_stable_key(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            turn_id=f"turn-legacy-{index}",
+        )
+        start_workflow_use_episode(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            stable_key=stable_key,
+            sync_aggregates=False,
+        )
+        finalise_workflow_use_episode(
+            workflow_id=workflow_id,
+            stable_key=stable_key,
+            completed=completed,
+            terminal_stage="completed" if completed else "failed",
+            sync_aggregates=False,
+        )
+
+    ConceptsRepository.update_one(
+        {"concept_id": workflow_id},
+        {
+            "$set": {
+                "concept_data.workflow_use_aggregates": {
+                    "attempts": 2,
+                    "completions": 1,
+                    "completion_rate": 0.5,
+                }
+            }
+        },
+    )
+
+    open_stable_key = build_workflow_episode_stable_key(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        turn_id="turn-legacy-open",
+    )
+    started = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=open_stable_key,
+    )
+
+    assert started is not None
+    aggregate = started["aggregate"]
+    assert aggregate["schema_version"] == "workflow_use_aggregate.v2"
+    assert aggregate["attempts"] == 3
+    assert aggregate["completions"] == 1
+    assert aggregate["failures"] == 1
+    assert aggregate["in_progress"] == 1
+    assert aggregate["terminal_success_rate"] == pytest.approx(0.5)
+
+    concept_doc = ConceptsRepository.find_one({"concept_id": workflow_id}) or {}
+    persisted = (concept_doc.get("concept_data") or {}).get(
+        "workflow_use_aggregates"
+    ) or {}
+    assert persisted["schema_version"] == "workflow_use_aggregate.v2"
+    assert persisted["failures"] == 1
+    assert persisted["in_progress"] == 1
 
 
 def test_workflow_episode_duplicate_finalise_does_not_double_count_completion():
@@ -235,6 +310,44 @@ def test_workflow_episode_duplicate_finalise_does_not_double_count_completion():
     aggregate = get_workflow_usage_aggregates_for_workflows([workflow_id])[workflow_id]
     assert aggregate["attempts"] == 1
     assert aggregate["completions"] == 1
+    assert aggregate["failures"] == 0
+
+
+def test_workflow_episode_terminal_outcome_can_be_reconciled_idempotently():
+    workflow_id = "#V#workflow_episode_reconciled_terminal"
+    _ensure_workflow_concept(workflow_id)
+    stable_key = build_workflow_episode_stable_key(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        turn_id="turn-reconciled-terminal",
+        session_id="session-reconciled-terminal",
+        stage="tool_calling",
+    )
+
+    start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=stable_key,
+    )
+    finalise_workflow_use_episode(
+        workflow_id=workflow_id,
+        stable_key=stable_key,
+        completed=False,
+        terminal_stage="failed",
+    )
+    finalise_workflow_use_episode(
+        workflow_id=workflow_id,
+        stable_key=stable_key,
+        completed=True,
+        terminal_stage="completed",
+    )
+
+    aggregate = get_workflow_usage_aggregates_for_workflows([workflow_id])[workflow_id]
+    assert aggregate["attempts"] == 1
+    assert aggregate["completions"] == 1
+    assert aggregate["failures"] == 0
+    assert aggregate["in_progress"] == 0
+    assert aggregate["terminal_success_rate"] == 1.0
 
 
 def test_workflow_episode_can_skip_concept_aggregate_sync():
@@ -495,9 +608,13 @@ def test_usage_aggregates_skip_episode_log_fallback_when_concept_aggregates_exis
                 "concept_id": workflow_ids[0],
                 "concept_data": {
                     "workflow_use_aggregates": {
+                        "schema_version": "workflow_use_aggregate.v2",
                         "attempts": 3,
                         "completions": 2,
+                        "failures": 1,
+                        "in_progress": 0,
                         "completion_rate": 2 / 3,
+                        "terminal_success_rate": 2 / 3,
                         "last_episode_at": datetime(
                             2026, 3, 5, 12, 0, tzinfo=timezone.utc
                         ),
@@ -509,9 +626,13 @@ def test_usage_aggregates_skip_episode_log_fallback_when_concept_aggregates_exis
                 "concept_id": workflow_ids[1],
                 "concept_data": {
                     "workflow_use_aggregates": {
+                        "schema_version": "workflow_use_aggregate.v2",
                         "attempts": 1,
                         "completions": 1,
+                        "failures": 0,
+                        "in_progress": 0,
                         "completion_rate": 1.0,
+                        "terminal_success_rate": 1.0,
                     }
                 },
             },
@@ -559,9 +680,13 @@ def test_usage_aggregates_fallback_queries_only_missing_concept_aggregates(
                 "concept_id": populated_id,
                 "concept_data": {
                     "workflow_use_aggregates": {
+                        "schema_version": "workflow_use_aggregate.v2",
                         "attempts": 8,
                         "completions": 8,
+                        "failures": 0,
+                        "in_progress": 0,
                         "completion_rate": 1.0,
+                        "terminal_success_rate": 1.0,
                     }
                 },
             }

@@ -28702,8 +28702,17 @@ function _buildWorkflowDefinitionExportPayload({
             completions: Number.isFinite(Number(definitionSummary?.completions))
                 ? Number(definitionSummary.completions)
                 : 0,
+            failures: Number.isFinite(Number(definitionSummary?.failures))
+                ? Number(definitionSummary.failures)
+                : 0,
+            in_progress: Number.isFinite(Number(definitionSummary?.in_progress))
+                ? Number(definitionSummary.in_progress)
+                : 0,
             completion_rate: Number.isFinite(Number(definitionSummary?.completion_rate))
                 ? Number(definitionSummary.completion_rate)
+                : null,
+            terminal_success_rate: Number.isFinite(Number(definitionSummary?.terminal_success_rate))
+                ? Number(definitionSummary.terminal_success_rate)
                 : null,
             last_episode_at: definitionSummary?.last_episode_at || null,
             episodes_count: Number.isFinite(Number(definitionSummary?.episodes_count))
@@ -29742,9 +29751,11 @@ function renderWorkflowDefinitionsList(items) {
         const executableSummary = formatWorkflowExecutabilitySummary(item);
         const attempts = Number.isFinite(Number(item?.attempts)) ? Number(item.attempts) : 0;
         const completions = Number.isFinite(Number(item?.completions)) ? Number(item.completions) : 0;
-        const completionRateRaw = Number(item?.completion_rate);
-        const completionRate = Number.isFinite(completionRateRaw)
-            ? `${Math.round(Math.max(0, Math.min(1, completionRateRaw)) * 100)}%`
+        const failures = Number.isFinite(Number(item?.failures)) ? Number(item.failures) : 0;
+        const inProgress = Number.isFinite(Number(item?.in_progress)) ? Number(item.in_progress) : 0;
+        const terminalSuccessRateRaw = Number(item?.terminal_success_rate);
+        const terminalSuccessRate = Number.isFinite(terminalSuccessRateRaw)
+            ? `${Math.round(Math.max(0, Math.min(1, terminalSuccessRateRaw)) * 100)}%`
             : '—';
         const episodesCountRaw = Number(item?.episodes_count);
         const episodesCount = Number.isFinite(episodesCountRaw) && episodesCountRaw >= 0
@@ -29758,7 +29769,7 @@ function renderWorkflowDefinitionsList(items) {
                 episodesSummary = `Episodes: ${episodesCount}`;
             }
         }
-        const usageMeta = `Attempts: ${attempts} · Completions: ${completions} · ${episodesSummary} · Completion: ${completionRate}`;
+        const usageMeta = `Uses: ${attempts} · Succeeded: ${completions} · Failed: ${failures} · Open: ${inProgress} · ${episodesSummary} · Terminal success: ${terminalSuccessRate}`;
         const executionMeta = executableSummary
             ? `<div class="workflow-status-definition-meta">Status detail: ${escapeHtml(executableSummary)}</div>`
             : '';

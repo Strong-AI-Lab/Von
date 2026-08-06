@@ -203,6 +203,26 @@ def test_referenced_prompt_seed_files_exist_for_canonical_bundle() -> None:
     )
 
 
+def test_legacy_general_mail_review_is_not_an_ordinary_routing_candidate() -> None:
+    payload = json.loads(CANONICAL_BUNDLE_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        item
+        for item in payload.get("workflows", [])
+        if item.get("workflow_id") == "#V#general_mail_review_workflow"
+    )
+    routing_relation = next(
+        item
+        for item in workflow.get("text_relations", [])
+        if item.get("predicate") == "#V#hasWorkflowRoutingProfileJson"
+    )
+    routing_profile = json.loads(routing_relation["text"])
+
+    assert routing_profile["routing_eligible"] is False
+    assert routing_profile["ordinary_mail_review"] is False
+    assert routing_profile["prefer_existing_capability"] is False
+    assert routing_profile["retained_for_explicit_durable_review_only"] is True
+
+
 def test_explicit_workflow_experience_prelude_callers_keep_their_seed_definition() -> (
     None
 ):
