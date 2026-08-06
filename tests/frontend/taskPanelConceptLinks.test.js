@@ -58,7 +58,7 @@ describe('task panel concept links', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -123,7 +123,7 @@ describe('task panel concept links', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -178,7 +178,7 @@ describe('task panel concept links', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
                 return Promise.resolve({ tasks: [task] });
             }
             if (url === '/api/tasks/%23V%23task_1282') {

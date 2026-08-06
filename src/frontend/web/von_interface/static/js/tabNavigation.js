@@ -35,7 +35,9 @@ export function setupTabNavigation() {
       const tabId = button.dataset.tab;
       console.log(`Tab clicked: ${tabId}`);
       activateTab(tabId);
-      // loadTabData will be called after tab initialization is complete
+      if (tabId === 'globalTasksTab') {
+        await loadTabData(tabId);
+      }
     });
   });
 

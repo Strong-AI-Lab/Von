@@ -24,4 +24,20 @@ describe('tab navigation global tasks loading', () => {
 
         expect(showGlobalTasks).toHaveBeenCalledTimes(1);
     });
+
+    test('clicking All Tasks activates and loads the workspace once', async () => {
+        document.body.innerHTML = `
+            <button class="tab-button" data-tab="globalTasksTab">All Tasks</button>
+            <section id="globalTasksTab" class="tab-content"></section>
+        `;
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        const { setupTabNavigation } = require(tabNavigationModulePath);
+
+        setupTabNavigation();
+        document.querySelector('[data-tab="globalTasksTab"]').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(document.querySelector('#globalTasksTab').classList).toContain('active');
+        expect(showGlobalTasks).toHaveBeenCalledTimes(1);
+    });
 });

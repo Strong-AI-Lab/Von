@@ -63,7 +63,7 @@ describe('task panel ontology-backed groups', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -157,7 +157,7 @@ describe('task panel ontology-backed groups', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -221,7 +221,7 @@ describe('task panel ontology-backed groups', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=50')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -414,6 +414,104 @@ describe('task panel ontology-backed groups', () => {
         expect(progress.textContent).toContain('Route 123.45 ms');
         expect(progress.textContent).toContain('service 98.7 ms');
         expect(progress.textContent).toContain('repository_find_page');
+    });
+
+    test('loads a bounded first page and appends the next page without recounting', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        const taskUrls = [];
+        const buildTask = (index) => ({
+            task_concept_id: `#V#task_${index}`,
+            title: `Task ${index}`,
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
+        });
+
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                taskUrls.push(url);
+                if (url.includes('offset=50')) {
+                    return Promise.resolve({
+                        tasks: [buildTask(51)],
+                        count: 1,
+                        offset: 50,
+                        has_more: false,
+                        bulk_summary_included: false,
+                    });
+                }
+                return Promise.resolve({
+                    tasks: Array.from({ length: 50 }, (_, index) => buildTask(index + 1)),
+                    count: 50,
+                    offset: 0,
+                    has_more: true,
+                    bulk_summary_included: true,
+                    hidden_bulk_task_total: 0,
+                    hidden_bulk_task_collections: [],
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks, getTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+
+        expect(taskUrls[0]).toContain('limit=50');
+        expect(taskUrls[0]).toContain('offset=0');
+        expect(taskUrls[0]).toContain('include_total=false');
+        expect(taskUrls[0]).toContain('include_bulk_summary=true');
+        expect(document.querySelector('[data-task-page-action="more"]')).toBeTruthy();
+
+        document.querySelector('[data-task-page-action="more"]').click();
+        await flushRenderQueue();
+
+        expect(taskUrls[1]).toContain('offset=50');
+        expect(taskUrls[1]).toContain('include_bulk_summary=false');
+        expect(getTasks()).toHaveLength(51);
+        expect(document.querySelector('[data-task-page-action="more"]')).toBeNull();
+    });
+
+    test('allows a failed first-page request to be retried with Refresh', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        let taskRequestCount = 0;
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                taskRequestCount += 1;
+                if (taskRequestCount === 1) {
+                    return Promise.reject(new Error('temporary failure'));
+                }
+                return Promise.resolve({
+                    tasks: [{
+                        task_concept_id: '#V#task_recovered',
+                        title: 'Recovered task',
+                        status: 'pending',
+                        priority: 'medium',
+                    }],
+                    count: 1,
+                    offset: 0,
+                    has_more: false,
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        expect(document.querySelector('#globalTaskLoadProgress').classList).toContain('error');
+
+        document.querySelector('#refreshGlobalTasksBtn').click();
+        await flushRenderQueue();
+
+        expect(taskRequestCount).toBe(2);
+        expect(document.body.textContent).toContain('Recovered task');
+        expect(document.querySelector('#globalTaskLoadProgress').classList).toContain('complete');
     });
 
     test('reloads global task scope filters through the backend query', async () => {

@@ -33,6 +33,10 @@ let _bulkTaskCollectionId = '';
 let _hiddenBulkTaskTotal = 0;
 let _hiddenBulkTaskCollections = [];
 let _lastTaskLoadTelemetry = null;
+let _globalTasksOpenPromise = null;
+let _globalTaskNextOffset = 0;
+let _globalTaskHasMore = false;
+let _globalTaskTotal = null;
 let _taskTaxonomy = {
     task_types: [],
     task_sources: [],
@@ -46,6 +50,7 @@ const _taskGroupNameFetchInFlight = new Set();
 
 const TASK_GROUP_STORAGE_KEY_PREFIX = 'von_task_group_filter_v1';
 const TASK_LIST_LIMIT = '500';
+const GLOBAL_TASK_PAGE_SIZE = 50;
 const TASK_PANEL_LOAD_TELEMETRY_SCHEMA_VERSION = 'task_panel_load_telemetry.v1';
 
 // Constants
@@ -365,9 +370,12 @@ function renderTaskLoadProgress(label, telemetry = _lastTaskLoadTelemetry) {
     `;
 }
 
-function buildGlobalTasksUrl() {
+function buildGlobalTasksUrl({ offset = 0, includeBulkSummary = true } = {}) {
     const params = new URLSearchParams();
-    params.set('limit', TASK_LIST_LIMIT);
+    params.set('limit', String(GLOBAL_TASK_PAGE_SIZE));
+    params.set('offset', String(Math.max(0, Number(offset) || 0)));
+    params.set('include_total', 'false');
+    params.set('include_bulk_summary', includeBulkSummary ? 'true' : 'false');
     params.set('bulk_visibility', _bulkTaskVisibility || 'exclude');
     if (_bulkTaskVisibility === 'only' && _bulkTaskCollectionId) {
         params.set('bulk_collection_id', _bulkTaskCollectionId);
@@ -590,12 +598,15 @@ export function toggleTaskPanel(options = {}) {
  * Show global tasks view in the dedicated tab (all user's tasks, not filtered by conversation).
  * Renders into the globalTasksContainer instead of the overlay panel.
  */
-export async function showGlobalTasks() {
+async function openGlobalTasks() {
     const telemetry = createTaskLoadTelemetry('global_tasks_initial');
     loadTaskGroupSelectionFromStorage();
     markTaskLoadStage(telemetry, 'initialise', 'Preparing All Tasks workspace');
     _currentSessionId = null;  // Clear session filter
     _isGlobalTabMode = true;
+    _globalTaskNextOffset = 0;
+    _globalTaskHasMore = false;
+    _globalTaskTotal = null;
 
     // Initialize the global tasks container if needed
     if (!_globalTasksContainer) {
@@ -617,6 +628,16 @@ export async function showGlobalTasks() {
     markTaskLoadStage(telemetry, 'shell_rendered', 'Task controls ready');
     renderTaskLoadProgress('Task controls ready', telemetry);
     await loadGlobalTasks({ telemetry });
+}
+
+export function showGlobalTasks() {
+    if (_globalTasksOpenPromise) {
+        return _globalTasksOpenPromise;
+    }
+    _globalTasksOpenPromise = openGlobalTasks().finally(() => {
+        _globalTasksOpenPromise = null;
+    });
+    return _globalTasksOpenPromise;
 }
 
 /**
@@ -711,6 +732,7 @@ function renderGlobalTasksTabContent() {
             <div class="global-task-layout">
                 <div class="global-task-main">
                     <div id="globalTaskList" class="task-list"></div>
+                    <div id="globalTaskPagination" class="task-pagination-control" aria-live="polite"></div>
                 </div>
                 <aside id="globalTaskInspector" class="task-inspector" aria-live="polite"></aside>
             </div>
@@ -950,7 +972,11 @@ export async function loadMyTasks(statusFilter = null) {
 async function loadGlobalTasks(options = {}) {
     if (_isLoading) return;
 
-    const telemetry = options?.telemetry || createTaskLoadTelemetry('global_tasks_refresh');
+    const append = options?.append === true;
+    const requestOffset = append ? _globalTaskNextOffset : 0;
+    const telemetry = options?.telemetry || createTaskLoadTelemetry(
+        append ? 'global_tasks_next_page' : 'global_tasks_refresh',
+    );
     if (!Array.isArray(telemetry.stages) || telemetry.stages.length === 0) {
         markTaskLoadStage(telemetry, 'initialise', 'Preparing task request');
     }
@@ -958,13 +984,19 @@ async function loadGlobalTasks(options = {}) {
     markTaskLoadStage(telemetry, 'storage_state_loaded', 'Task display preferences loaded');
     _isLoading = true;
     updateLoadingState(true);
+    renderGlobalTaskPagination();
     renderTaskLoadProgress('Requesting tasks from Von', telemetry);
     const stopProgressTicker = startTaskLoadProgressTicker(telemetry);
 
     try {
-        const url = buildGlobalTasksUrl();
+        const url = buildGlobalTasksUrl({
+            offset: requestOffset,
+            includeBulkSummary: !append,
+        });
         markTaskLoadStage(telemetry, 'request_start', 'Requesting tasks from Von', {
-            limit: Number(TASK_LIST_LIMIT),
+            limit: GLOBAL_TASK_PAGE_SIZE,
+            offset: requestOffset,
+            append,
             bulk_visibility: _bulkTaskVisibility || 'exclude',
             scope: _globalTaskScope,
         });
@@ -977,12 +1009,35 @@ async function loadGlobalTasks(options = {}) {
         });
         renderTaskLoadProgress('Task payload received', telemetry);
 
-        _tasks = response.tasks || [];
+        const pageTasks = Array.isArray(response?.tasks) ? response.tasks : [];
+        if (append) {
+            const tasksById = new Map(_tasks.map((task) => [getTaskId(task), task]));
+            pageTasks.forEach((task) => tasksById.set(getTaskId(task), task));
+            _tasks = [...tasksById.values()];
+        } else {
+            _tasks = pageTasks;
+        }
+        const responseOffset = Number.isFinite(Number(response?.offset))
+            ? Math.max(0, Number(response.offset))
+            : requestOffset;
+        const responseCount = Number.isFinite(Number(response?.count))
+            ? Math.max(0, Number(response.count))
+            : pageTasks.length;
+        _globalTaskNextOffset = responseOffset + responseCount;
+        _globalTaskHasMore = typeof response?.has_more === 'boolean'
+            ? response.has_more
+            : pageTasks.length === GLOBAL_TASK_PAGE_SIZE;
+        _globalTaskTotal = response?.total_is_exhaustive === true && Number.isFinite(Number(response?.total))
+            ? Math.max(0, Number(response.total))
+            : null;
         markTaskLoadStage(telemetry, 'cache_updated', 'Task cache updated', {
             task_count: _tasks.length,
+            has_more: _globalTaskHasMore,
         });
 
-        setBulkTaskVisibilitySummary(response);
+        if (response?.bulk_summary_included !== false) {
+            setBulkTaskVisibilitySummary(response);
+        }
         markTaskLoadStage(telemetry, 'bulk_visibility_summary', 'Bulk visibility summary updated', {
             hidden_bulk_task_total: _hiddenBulkTaskTotal,
             hidden_bulk_collection_count: _hiddenBulkTaskCollections.length,
@@ -1016,6 +1071,7 @@ async function loadGlobalTasks(options = {}) {
         stopProgressTicker();
         _isLoading = false;
         updateLoadingState(false);
+        renderGlobalTaskPagination();
     }
 }
 
@@ -1117,12 +1173,35 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
 
     summaryEl.innerHTML = `
         <span class="task-summary-chip"><strong>${filteredTasks.length}</strong> visible</span>
+        <span class="task-summary-chip"><strong>${_tasks.length}</strong> loaded${_globalTaskTotal !== null ? ` of ${_globalTaskTotal}` : ''}</span>
         <span class="task-summary-chip"><strong>${activeCount}</strong> active</span>
         <span class="task-summary-chip"><strong>${typedCount}</strong> typed</span>
         <span class="task-summary-chip"><strong>${sourcedCount}</strong> sourced</span>
         ${_hiddenBulkTaskTotal > 0 ? `<span class="task-summary-chip task-summary-chip-bulk"><strong>${_hiddenBulkTaskTotal}</strong> bulk hidden</span>` : ''}
         <span class="task-summary-chip task-summary-chip-soft">${escapeHtml(selectedTask?.title || 'No task selected')}</span>
     `;
+}
+
+function renderGlobalTaskPagination() {
+    const paginationEl = _globalTasksContainer?.querySelector('#globalTaskPagination');
+    if (!paginationEl) return;
+
+    if (!_globalTaskHasMore) {
+        paginationEl.innerHTML = _tasks.length > 0
+            ? '<span>No more tasks to load.</span>'
+            : '';
+        return;
+    }
+
+    paginationEl.innerHTML = `
+        <span>${_tasks.length.toLocaleString('en-NZ')} tasks loaded</span>
+        <button type="button" class="task-refresh-btn" data-task-page-action="more" ${_isLoading ? 'disabled' : ''}>
+            ${_isLoading ? 'Loading…' : `Load ${GLOBAL_TASK_PAGE_SIZE} more`}
+        </button>
+    `;
+    paginationEl.querySelector('[data-task-page-action="more"]')?.addEventListener('click', () => {
+        loadGlobalTasks({ append: true });
+    });
 }
 
 function getBulkTaskVisibilityControlElements() {
@@ -1214,6 +1293,7 @@ function renderTaskList() {
     ensureSelectedTaskStillValid(filteredTasks);
     renderGlobalTaskSummary(filteredTasks);
     renderBulkTaskVisibilityControls();
+    renderGlobalTaskPagination();
 
     if (filteredTasks.length === 0) {
         const hasGroupFilter = _selectedTaskGroupIds.size > 0;
@@ -1261,6 +1341,7 @@ function renderTaskList() {
 
     renderGlobalTaskInspector();
     attachTaskEventListeners();
+    renderGlobalTaskPagination();
 }
 
 /**

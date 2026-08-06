@@ -2745,6 +2745,8 @@ def list_tasks_with_visibility(
     bulk_collection_ids: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
+    include_total: bool = True,
+    include_bulk_summary: bool = True,
 ) -> Dict[str, Any]:
     """List tasks with repository-level user-scope and bulk-visibility filters.
 
@@ -2767,12 +2769,16 @@ def list_tasks_with_visibility(
 
     visibility = _normalise_bulk_task_visibility(bulk_visibility)
     collection_ids = _normalise_bulk_task_collection_ids(bulk_collection_ids)
+    include_total = include_total is not False
+    include_bulk_summary = include_bulk_summary is not False
     mark_load(
         "normalise_inputs",
         limit=limit,
         offset=offset,
         bulk_visibility=visibility,
         bulk_collection_count=len(collection_ids),
+        include_total=include_total,
+        include_bulk_summary=include_bulk_summary,
     )
 
     base_query = _build_task_listing_query(
@@ -2795,17 +2801,24 @@ def list_tasks_with_visibility(
         has_created_by_scope=bool(created_by_concept_id),
     )
 
-    visibility_summary = _build_bulk_visibility_summary_for_query(
-        base_query,
-        collection_ids=collection_ids,
-    )
-    mark_load(
-        "bulk_visibility_summary",
-        hidden_bulk_task_total=visibility_summary["hidden_bulk_task_total"],
-        hidden_bulk_collection_count=len(
-            visibility_summary["hidden_bulk_task_collections"]
-        ),
-    )
+    visibility_summary = {
+        "hidden_bulk_task_total": 0,
+        "hidden_bulk_task_collections": [],
+    }
+    if include_bulk_summary:
+        visibility_summary = _build_bulk_visibility_summary_for_query(
+            base_query,
+            collection_ids=collection_ids,
+        )
+        mark_load(
+            "bulk_visibility_summary",
+            hidden_bulk_task_total=visibility_summary["hidden_bulk_task_total"],
+            hidden_bulk_collection_count=len(
+                visibility_summary["hidden_bulk_task_collections"]
+            ),
+        )
+    else:
+        mark_load("bulk_visibility_summary_skipped")
 
     sort_spec = [("updated_at", -1), ("created_at", -1), ("concept_id", 1)]
     requires_post_filter = any(
@@ -2848,31 +2861,45 @@ def list_tasks_with_visibility(
 
         total = len(tasks)
         paged_tasks = tasks[offset : offset + limit]
+        has_more = total > offset + len(paged_tasks)
+        total_is_exhaustive = True
         mark_load("paginate", returned_count=len(paged_tasks), total=total)
     else:
-        try:
-            total = int(ConceptsRepository.count_documents(visibility_query) or 0)
-            count_failed = False
-        except Exception:
-            total = 0
-            count_failed = True
-        mark_load("repository_count", total=total, failed=count_failed)
+        count_failed = False
+        total: int | None = None
+        if include_total:
+            try:
+                total = int(ConceptsRepository.count_documents(visibility_query) or 0)
+            except Exception:
+                count_failed = True
+            mark_load("repository_count", total=total, failed=count_failed)
+        else:
+            mark_load("repository_count_skipped")
 
         docs = list(
             ConceptsRepository.find(
                 visibility_query,
                 sort=sort_spec,
                 skip=offset,
-                limit=limit,
+                limit=limit if include_total else limit + 1,
             )
         )
         mark_load("repository_find_page", raw_count=len(docs))
 
+        if include_total:
+            has_more = total is not None and total > offset + min(len(docs), limit)
+            total_is_exhaustive = total is not None
+        else:
+            has_more = len(docs) > limit
+            total_is_exhaustive = False
+            docs = docs[:limit]
+
         paged_tasks = _build_task_responses(docs)
         mark_load("build_task_responses", response_count=len(paged_tasks))
 
-        if not total:
-            total = len(paged_tasks)
+        if include_total and total == 0 and paged_tasks:
+            total = offset + len(paged_tasks)
+            has_more = False
             mark_load("infer_total_from_page", total=total)
 
     payload = {
@@ -2881,8 +2908,11 @@ def list_tasks_with_visibility(
         "count": len(paged_tasks),
         "offset": offset,
         "limit": limit,
+        "has_more": has_more,
+        "total_is_exhaustive": total_is_exhaustive,
         "bulk_visibility": visibility,
         "bulk_collection_ids": sorted(collection_ids),
+        "bulk_summary_included": include_bulk_summary,
         "hidden_bulk_task_total": visibility_summary["hidden_bulk_task_total"],
         "hidden_bulk_task_collections": visibility_summary[
             "hidden_bulk_task_collections"
@@ -2904,6 +2934,8 @@ def list_tasks_with_visibility(
             "has_task_type_filter": _has_nonempty_filter_values(task_type_ids),
             "has_task_source_filter": _has_nonempty_filter_values(task_source_ids),
             "requires_post_filter": requires_post_filter,
+            "include_total": include_total,
+            "include_bulk_summary": include_bulk_summary,
         },
         returned_count=len(paged_tasks),
         total=total,
@@ -5305,10 +5337,7 @@ def delete_task(task_concept_id: str) -> bool:
 
 
 def get_task_taxonomy() -> Dict[str, Any]:
-    try:
-        ensure_task_ontology()
-    except Exception as exc:
-        logger.debug("Task taxonomy bootstrap skipped during taxonomy read: %s", exc)
+    """Return the static task taxonomy without mutating or repairing storage."""
     return get_task_taxonomy_definition()
 
 

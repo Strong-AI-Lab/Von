@@ -233,6 +233,7 @@ def test_list_tasks_route_forwards_bulk_visibility_and_user_scope(monkeypatch):
 
     response = client.get(
         "/api/tasks/?bulk_visibility=exclude&limit=10&offset=5"
+        "&include_total=false&include_bulk_summary=false"
         "&assignee_concept_id=%23V%23user_alice"
         "&bulk_collection_id=%23V%23jira_task_migration_bulk_collection"
     )
@@ -250,6 +251,8 @@ def test_list_tasks_route_forwards_bulk_visibility_and_user_scope(monkeypatch):
     assert captured["bulk_collection_ids"] == ["#V#jira_task_migration_bulk_collection"]
     assert captured["limit"] == 10
     assert captured["offset"] == 5
+    assert captured["include_total"] is False
+    assert captured["include_bulk_summary"] is False
     telemetry = payload["load_telemetry"]
     assert telemetry["schema_version"] == "task_list_load_telemetry.v1"
     assert telemetry["source"] == "task_routes.list_tasks_route"

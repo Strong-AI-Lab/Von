@@ -373,6 +373,12 @@ def list_tasks_route() -> ResponseReturnValue:
         )
         limit = max(1, _parse_int_param(request.args.get("limit"), 50))
         offset = max(0, _parse_int_param(request.args.get("offset"), 0))
+        include_total = _parse_optional_bool(
+            request.args.get("include_total"), "include_total"
+        )
+        include_bulk_summary = _parse_optional_bool(
+            request.args.get("include_bulk_summary"), "include_bulk_summary"
+        )
         bulk_visibility = request.args.get("bulk_visibility") or request.args.get(
             "bulk_task_visibility"
         )
@@ -387,6 +393,8 @@ def list_tasks_route() -> ResponseReturnValue:
             has_priority_filter=bool(priority_filter),
             has_task_type_filter=bool(task_type_ids),
             has_task_source_filter=bool(task_source_ids),
+            include_total=include_total is not False,
+            include_bulk_summary=include_bulk_summary is not False,
         )
 
         # If filtering by session, use get_tasks_for_conversation
@@ -442,6 +450,8 @@ def list_tasks_route() -> ResponseReturnValue:
                 bulk_collection_ids=bulk_collection_ids,
                 limit=limit,
                 offset=offset,
+                include_total=include_total is not False,
+                include_bulk_summary=include_bulk_summary is not False,
             )
             service_telemetry = payload.get("load_telemetry")
             mark_load(
@@ -468,6 +478,8 @@ def list_tasks_route() -> ResponseReturnValue:
                 "has_priority_filter": bool(priority_filter),
                 "has_task_type_filter": bool(task_type_ids),
                 "has_task_source_filter": bool(task_source_ids),
+                "include_total": include_total is not False,
+                "include_bulk_summary": include_bulk_summary is not False,
             },
             service=service_telemetry,
         )

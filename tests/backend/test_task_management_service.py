@@ -33,6 +33,7 @@ from src.backend.services.task_management_service import (
     create_task,
     find_task_by_agent_creation_fingerprint,
     get_task,
+    get_task_taxonomy,
     find_task_by_external_reference,
     add_task_attachment,
     add_task_comment,
@@ -72,6 +73,16 @@ class TestTaskConstants:
         assert "completed" in VALID_TASK_STATUSES
         assert "cancelled" in VALID_TASK_STATUSES
         assert "blocked" in VALID_TASK_STATUSES
+
+    @patch("src.backend.services.task_management_service.ensure_task_ontology")
+    def test_get_task_taxonomy_is_a_pure_read(
+        self, mock_ensure_task_ontology: MagicMock
+    ) -> None:
+        taxonomy = get_task_taxonomy()
+
+        assert taxonomy["task_types"]
+        assert taxonomy["task_sources"]
+        mock_ensure_task_ontology.assert_not_called()
 
     def test_valid_priorities(self) -> None:
         """VALID_PRIORITIES should contain expected values."""
@@ -1251,6 +1262,51 @@ class TestBulkTaskCollections:
         assert {"relationships.#V#hasAssignee": "#V#user_alice"} in visible_query[
             "$and"
         ]
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
+    def test_list_tasks_with_visibility_uses_sentinel_without_count_or_summary(
+        self,
+        mock_get_texts_for_concepts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        docs = [
+            {
+                "concept_id": f"#V#task_{index}",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+            for index in range(11)
+        ]
+        mock_repo.find.return_value = docs
+        mock_get_texts_for_concepts.return_value = {
+            f"#V#task_{index}": [{"predicate": "#V#hasName", "text": f"Task {index}"}]
+            for index in range(10)
+        }
+
+        result = list_tasks_with_visibility(
+            limit=10,
+            include_total=False,
+            include_bulk_summary=False,
+        )
+
+        assert result["count"] == 10
+        assert result["total"] is None
+        assert result["total_is_exhaustive"] is False
+        assert result["has_more"] is True
+        assert result["bulk_summary_included"] is False
+        assert result["hidden_bulk_task_total"] == 0
+        mock_repo.count_documents.assert_not_called()
+        assert mock_repo.find.call_args.kwargs["limit"] == 11
+        mock_get_texts_for_concepts.assert_called_once_with(
+            [f"#V#task_{index}" for index in range(10)]
+        )
+        stages = [stage["stage"] for stage in result["load_telemetry"]["stages"]]
+        assert "repository_count_skipped" in stages
+        assert "bulk_visibility_summary_skipped" in stages
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     def test_backfill_jira_migration_bulk_task_collections_dry_run_marks_only_labelled_imports(

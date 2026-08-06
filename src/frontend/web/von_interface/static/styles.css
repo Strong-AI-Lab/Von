@@ -2917,9 +2917,11 @@ body {
 
 /* Global Tasks Tab Content */
 .global-tasks-content {
-    padding: 24px;
-    max-width: 1600px;
-    margin: 0 auto;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: clamp(16px, 2vw, 32px);
+    box-sizing: border-box;
 }
 
 .global-tasks-header {
@@ -3108,7 +3110,7 @@ body {
 
 .global-task-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.95fr);
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
     gap: 18px;
     align-items: start;
 }
@@ -3116,6 +3118,21 @@ body {
 .global-task-main {
     min-width: 0;
     overflow-x: auto;
+}
+
+.task-pagination-control {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 18px 0 4px;
+    color: #475569;
+    font-size: 0.86rem;
+}
+
+.task-pagination-control .task-refresh-btn:disabled {
+    cursor: wait;
+    opacity: 0.65;
 }
 
 .task-board-view {
@@ -3404,7 +3421,7 @@ body {
     font-style: italic;
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 1450px) {
     .global-task-layout {
         grid-template-columns: minmax(0, 1fr);
     }
@@ -6497,7 +6514,15 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     padding-right: 0;
 }
 
-#globalTasksTab.tab-content,
+#globalTasksTab.tab-content {
+    max-width: none;
+    margin-left: 0;
+    margin-right: 0;
+    padding-left: 0;
+    padding-right: 0;
+    min-height: 0 !important;
+}
+
 #settingsTab.tab-content {
     min-height: 0 !important;
 }
