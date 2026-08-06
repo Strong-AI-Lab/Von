@@ -8,6 +8,7 @@ All tasks are stored as first-class Vontology concepts (type: #V#task_specificat
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 import uuid
@@ -17,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
     get_texts_for_concept,
+    get_texts_for_concepts,
     upsert_text_for_concept,
 )
 from ..utils.concept_id_utils import (
@@ -322,11 +324,31 @@ class InvalidTaskDataError(TaskManagementError):
     pass
 
 
-def _generate_task_concept_id(title: str) -> str:
+def _task_concept_id_for_agent_creation_fingerprint(
+    creation_fingerprint: str,
+) -> str:
+    """Return the stable concept ID used for an idempotent agent task create."""
+
+    digest = hashlib.sha256(creation_fingerprint.encode("utf-8")).hexdigest()
+    return f"#V#task_agent_{digest[:32]}"
+
+
+def _generate_task_concept_id(
+    title: str,
+    *,
+    agent_creation_fingerprint: str | None = None,
+) -> str:
     """Generate a unique concept_id for a task.
 
-    Uses a slug from the title plus a short UUID suffix for uniqueness.
+    Agent-created tasks use their server-issued request fingerprint so retries
+    can reconcile through the indexed ``concept_id`` path. Other callers retain
+    the human-readable title slug plus a short UUID suffix.
     """
+    if agent_creation_fingerprint:
+        return _task_concept_id_for_agent_creation_fingerprint(
+            agent_creation_fingerprint
+        )
+
     # Create slug from title
     slug = title.lower().strip()
     slug = "".join(c if c.isalnum() or c == " " else "" for c in slug)
@@ -1245,7 +1267,10 @@ def create_task(
         raise InvalidTaskDataError("start_date must be before or equal to due_date")
 
     # Generate unique concept_id
-    task_concept_id = _generate_task_concept_id(title)
+    task_concept_id = _generate_task_concept_id(
+        title,
+        agent_creation_fingerprint=agent_creation_fingerprint,
+    )
 
     # Task creation is a latency-bounded user effect, not an ontology migration
     # surface. The canonical relationship IDs below remain valid write inputs
@@ -1591,30 +1616,179 @@ def find_task_by_agent_creation_fingerprint(
     )
     if not created_by or not organisation or not fingerprint:
         return None
-    doc = ConceptsRepository.find_one(
-        {
-            "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
-            f"relationships.{PREDICATE_HAS_CREATED_BY}": created_by,
-            f"metadata.{TASK_METADATA_KEY_ORGANISATION}": organisation,
-            f"metadata.{TASK_METADATA_KEY_CREATION_FINGERPRINT}": fingerprint,
-        }
-    )
+    task_concept_id = _task_concept_id_for_agent_creation_fingerprint(fingerprint)
+    doc = ConceptsRepository.find_one({"concept_id": task_concept_id})
     if not isinstance(doc, dict) or not _is_task_doc(doc):
+        return None
+    metadata = doc.get("metadata")
+    relationships = doc.get("relationships")
+    if not isinstance(metadata, dict) or not isinstance(relationships, dict):
+        return None
+    if (
+        metadata.get(TASK_METADATA_KEY_ORGANISATION) != organisation
+        or metadata.get(TASK_METADATA_KEY_CREATION_FINGERPRINT) != fingerprint
+        or created_by
+        not in _relationship_id_list(relationships.get(PREDICATE_HAS_CREATED_BY))
+    ):
         return None
     return _build_task_response(doc)
 
 
-def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
+def _build_task_responses(docs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build task responses while resolving their text relations in one read.
+
+    Task listings need the same text-backed fields as an individual task, but
+    resolving each task separately turns a single listing into an Atlas round
+    trip per task.  Keep the individual response builder for point reads and
+    provide its already-resolved rows for collection reads instead.
+    """
+    task_docs = list(docs)
+    if not task_docs:
+        return []
+
+    task_ids = [
+        concept_id
+        for doc in task_docs
+        for concept_id in [doc.get("concept_id")]
+        if isinstance(concept_id, str) and concept_id
+    ]
+    texts_by_task: Dict[str, List[Dict[str, Any]]] = {}
+    if task_ids:
+        try:
+            texts_by_task = get_texts_for_concepts(task_ids) or {}
+        except Exception:
+            # Match the existing best-effort text relation behaviour: a
+            # relation-store failure must not hide otherwise readable tasks.
+            texts_by_task = {}
+
+    conversation_details = _get_task_conversation_details(task_docs)
+
+    return [
+        _build_task_response(
+            doc,
+            texts=texts_by_task.get(str(doc.get("concept_id") or ""), []),
+            conversation_details=conversation_details,
+        )
+        for doc in task_docs
+    ]
+
+
+def _get_task_conversation_details(
+    task_docs: Iterable[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Resolve task conversation projections in bounded collection reads."""
+    conversation_ids = {
+        conversation_id
+        for doc in task_docs
+        for conversation_id in [
+            _first_relationship_value(
+                (doc.get("relationships") or {}).get(
+                    PREDICATE_HAS_ORIGINATING_CONVERSATION
+                )
+            )
+        ]
+        if isinstance(conversation_id, str) and conversation_id
+    }
+    if not conversation_ids:
+        return {}
+
+    try:
+        conversation_docs = list(
+            ConceptsRepository.find(
+                {"concept_id": {"$in": sorted(conversation_ids)}}
+            )
+        )
+    except Exception:
+        return {}
+
+    valid_conversations = [
+        doc
+        for doc in conversation_docs
+        if CONVERSATION_TYPE_ID
+        in _relationship_id_list((doc.get("relationships") or {}).get("is_an_instance_of"))
+    ]
+    if not valid_conversations:
+        return {}
+
+    valid_ids = [
+        concept_id
+        for doc in valid_conversations
+        for concept_id in [doc.get("concept_id")]
+        if isinstance(concept_id, str) and concept_id
+    ]
+    try:
+        texts_by_conversation = get_texts_for_concepts(valid_ids) or {}
+    except Exception:
+        texts_by_conversation = {}
+
+    details: Dict[str, Dict[str, Any]] = {}
+    sessions_missing_names: set[str] = set()
+    for doc in valid_conversations:
+        conversation_id = str(doc.get("concept_id") or "")
+        metadata = doc.get("metadata") or {}
+        session_id = metadata.get("session_id")
+        name = None
+        topic = None
+        for text_item in texts_by_conversation.get(conversation_id, []):
+            predicate = text_item.get("predicate", "")
+            text_value = text_item.get("text", "")
+            if predicate in ("#V#hasSessionId", "hasSessionId"):
+                session_id = text_value
+            elif predicate in (PREDICATE_HAS_NAME, "hasName"):
+                name = text_value
+            elif predicate in ("#V#hasTopic", "hasTopic"):
+                topic = text_value
+        details[conversation_id] = {
+            "session_id": session_id,
+            "name": name,
+            "topic": topic,
+        }
+        if isinstance(session_id, str) and session_id and not (name or topic):
+            sessions_missing_names.add(session_id)
+
+    if sessions_missing_names:
+        try:
+            from .chat_history_service import get_chat_history_collection_service
+
+            chat_history_coll = get_chat_history_collection_service()
+            if chat_history_coll is not None:
+                session_names = {
+                    str(row.get("session_id")): row.get("session_name")
+                    for row in chat_history_coll.find(
+                        {"session_id": {"$in": sorted(sessions_missing_names)}},
+                        {"session_id": 1, "session_name": 1},
+                    )
+                    if isinstance(row, dict)
+                    and isinstance(row.get("session_id"), str)
+                    and isinstance(row.get("session_name"), str)
+                    and row.get("session_name")
+                }
+                for detail in details.values():
+                    session_id = detail.get("session_id")
+                    if not detail.get("name") and session_id in session_names:
+                        detail["name"] = session_names[session_id]
+        except Exception:
+            pass
+
+    return details
+
+
+def _build_task_response(
+    doc: Dict[str, Any],
+    *,
+    texts: List[Dict[str, Any]] | None = None,
+    conversation_details: Mapping[str, Mapping[str, Any]] | None = None,
+) -> Dict[str, Any]:
     """Build a task response dict from a concept document."""
     task_concept_id = doc.get("concept_id", "")
     relationships = doc.get("relationships", {})
 
     # Get text relations for title, description, status, priority, start/due dates
-    texts = []
-    try:
-        texts = get_texts_for_concept(task_concept_id) or []
-    except Exception:
-        pass
+    if texts is None:
+        try:
+            texts = get_texts_for_concept(task_concept_id) or []
+        except Exception:
+            texts = []
 
     title = None
     description = None
@@ -1739,7 +1913,12 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     # Fetch conversation details if available
     conversation_session_id = None
     conversation_name = None
-    if originating_conversation:
+    if originating_conversation and conversation_details is not None:
+        conv_details = conversation_details.get(originating_conversation)
+        if conv_details:
+            conversation_session_id = conv_details.get("session_id")
+            conversation_name = conv_details.get("name") or conv_details.get("topic")
+    elif originating_conversation:
         try:
             from .conversation_concept_service import get_conversation_concept
 
@@ -2102,7 +2281,7 @@ def get_tasks_for_user(
         }
 
     cursor = ConceptsRepository.find(query)
-    tasks = [_build_task_response(doc) for doc in cursor]
+    tasks = _build_task_responses(cursor)
 
     # Apply status filter if provided
     if status_filter:
@@ -2134,7 +2313,7 @@ def get_tasks_for_conversation(session_id: str) -> List[Dict[str, Any]]:
     }
 
     cursor = ConceptsRepository.find(query)
-    return [_build_task_response(doc) for doc in cursor]
+    return _build_task_responses(cursor)
 
 
 def list_tasks(
@@ -2171,7 +2350,7 @@ def list_tasks(
         query,
         sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
     )
-    tasks = [_build_task_response(doc) for doc in cursor]
+    tasks = _build_task_responses(cursor)
 
     # Apply status and priority filters (post-query since they're in text relations)
     if status_filter:
@@ -2527,7 +2706,7 @@ def list_tasks_with_visibility(
         )
         mark_load("repository_find_all", raw_count=len(docs))
 
-        tasks = [_build_task_response(doc) for doc in docs]
+        tasks = _build_task_responses(docs)
         mark_load("build_task_responses", response_count=len(tasks))
 
         tasks = _filter_task_response_list(
@@ -2561,7 +2740,7 @@ def list_tasks_with_visibility(
         )
         mark_load("repository_find_page", raw_count=len(docs))
 
-        paged_tasks = [_build_task_response(doc) for doc in docs]
+        paged_tasks = _build_task_responses(docs)
         mark_load("build_task_responses", response_count=len(paged_tasks))
 
         if not total:
@@ -2663,6 +2842,37 @@ def search_tasks(
             )
         query_filter[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
 
+    assignee_id = None
+    if assignee_concept_id is not None:
+        assignee_id = _normalise_optional_concept_id(assignee_concept_id)
+        if not assignee_id:
+            raise InvalidTaskDataError(
+                f"Invalid assignee_concept_id: {assignee_concept_id}"
+            )
+        query_filter[f"relationships.{PREDICATE_HAS_ASSIGNEE}"] = assignee_id
+
+    creator_id = None
+    if created_by_concept_id is not None:
+        creator_id = _normalise_optional_concept_id(created_by_concept_id)
+        if not creator_id:
+            raise InvalidTaskDataError(
+                f"Invalid created_by_concept_id: {created_by_concept_id}"
+            )
+        query_filter[f"relationships.{PREDICATE_HAS_CREATED_BY}"] = creator_id
+
+    report_to_id = None
+    if report_to_concept_id is not None:
+        report_to_id = _normalise_optional_concept_id(report_to_concept_id)
+        if not report_to_id:
+            raise InvalidTaskDataError(
+                f"Invalid report_to_concept_id: {report_to_concept_id}"
+            )
+        report_to_predicates = _relationship_predicate_aliases(PREDICATE_REPORTS_TO)
+        query_filter["$or"] = [
+            {f"relationships.{predicate}": report_to_id}
+            for predicate in report_to_predicates
+        ]
+
     # Use deterministic storage ordering before in-memory filters so paged reads do
     # not drift or duplicate items across offsets.
     docs = list(
@@ -2671,7 +2881,7 @@ def search_tasks(
             sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
         )
     )
-    tasks = [_build_task_response(doc) for doc in docs]
+    tasks = _build_task_responses(docs)
 
     status_values: set[str] = set()
     if isinstance(status_filter, str) and status_filter.strip():
@@ -2725,32 +2935,17 @@ def search_tasks(
                 task for task in tasks if task.get("task_source_id") in source_filters
             ]
 
-    if assignee_concept_id is not None:
-        assignee_id = _normalise_optional_concept_id(assignee_concept_id)
-        if not assignee_id:
-            raise InvalidTaskDataError(
-                f"Invalid assignee_concept_id: {assignee_concept_id}"
-            )
+    if assignee_id is not None:
         tasks = [
             task for task in tasks if task.get("assignee_concept_id") == assignee_id
         ]
 
-    if created_by_concept_id is not None:
-        creator_id = _normalise_optional_concept_id(created_by_concept_id)
-        if not creator_id:
-            raise InvalidTaskDataError(
-                f"Invalid created_by_concept_id: {created_by_concept_id}"
-            )
+    if creator_id is not None:
         tasks = [
             task for task in tasks if task.get("created_by_concept_id") == creator_id
         ]
 
-    if report_to_concept_id is not None:
-        report_to_id = _normalise_optional_concept_id(report_to_concept_id)
-        if not report_to_id:
-            raise InvalidTaskDataError(
-                f"Invalid report_to_concept_id: {report_to_concept_id}"
-            )
+    if report_to_id is not None:
         tasks = [
             task for task in tasks if task.get("report_to_concept_id") == report_to_id
         ]

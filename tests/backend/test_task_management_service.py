@@ -5,6 +5,7 @@ Unit tests for task creation, retrieval, status updates, and assignment.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
@@ -30,6 +31,7 @@ from src.backend.services.task_management_service import (
     backfill_jira_migration_bulk_task_collections,
     build_jira_migration_bulk_task_collection,
     create_task,
+    find_task_by_agent_creation_fingerprint,
     get_task,
     find_task_by_external_reference,
     add_task_attachment,
@@ -122,6 +124,64 @@ class TestCreateTask:
         mock_ensure_effort_unit_ontology.assert_not_called()
         mock_ensure_task_ontology.assert_not_called()
         mock_launch_workflow.assert_called_once()
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_task_created_workflow"
+    )
+    def test_agent_creation_fingerprint_uses_stable_concept_id(
+        self,
+        mock_launch_workflow: MagicMock,
+        _mock_upsert: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        fingerprint = "trusted-request-fingerprint"
+        result = create_task(
+            title="Agent task",
+            description="Created through the agent task effect.",
+            agent_creation_fingerprint=fingerprint,
+        )
+
+        expected_digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+        assert result["task_concept_id"] == f"#V#task_agent_{expected_digest[:32]}"
+        assert mock_repo.insert_one.call_args.args[0]["concept_id"] == result[
+            "task_concept_id"
+        ]
+        mock_launch_workflow.assert_called_once()
+
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    def test_agent_creation_retry_uses_direct_concept_id_lookup(
+        self,
+        mock_repo: MagicMock,
+        mock_get_texts: MagicMock,
+    ) -> None:
+        fingerprint = "trusted-request-fingerprint"
+        expected_digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+        expected_task_id = f"#V#task_agent_{expected_digest[:32]}"
+        mock_repo.find_one.return_value = {
+            "concept_id": expected_task_id,
+            "relationships": {
+                "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                "#V#hasCreatedBy": ["#V#user_alice"],
+            },
+            "metadata": {
+                "organisation_concept_id": "#V#example_org",
+                "agent_creation_fingerprint": fingerprint,
+            },
+        }
+        mock_get_texts.return_value = []
+
+        result = find_task_by_agent_creation_fingerprint(
+            created_by_concept_id="#V#user_alice",
+            organisation_concept_id="#V#example_org",
+            creation_fingerprint=fingerprint,
+        )
+
+        assert result is not None
+        assert result["task_concept_id"] == expected_task_id
+        mock_repo.find_one.assert_called_once_with({"concept_id": expected_task_id})
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
@@ -504,6 +564,54 @@ class TestGetTasksForUser:
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
+    def test_get_tasks_for_user_batches_task_texts(
+        self,
+        mock_get_texts_for_concepts: MagicMock,
+        mock_get_texts_for_concept: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        """Collection reads hydrate task text in one relation-store query."""
+        now = datetime.now(timezone.utc)
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_1",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    "#V#hasAssignee": ["#V#user_alice"],
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_2",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    "#V#hasAssignee": ["#V#user_alice"],
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+        mock_get_texts_for_concepts.return_value = {
+            "#V#task_1": [{"predicate": "#V#hasName", "text": "First task"}],
+            "#V#task_2": [{"predicate": "#V#hasName", "text": "Second task"}],
+        }
+
+        result = get_tasks_for_user("#V#user_alice")
+
+        assert [task["title"] for task in result] == ["First task", "Second task"]
+        assert mock_repo.find.call_args.args[0] == {
+            "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
+            "relationships.#V#hasAssignee": "#V#user_alice",
+        }
+        mock_get_texts_for_concepts.assert_called_once_with(
+            ["#V#task_1", "#V#task_2"]
+        )
+        mock_get_texts_for_concept.assert_not_called()
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
     def test_get_tasks_for_user_assigned(
         self,
         mock_get_texts: MagicMock,
@@ -577,6 +685,82 @@ class TestListTasks:
         assert len(result) == 2
 
 
+class TestTaskCollectionHydration:
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
+    def test_search_tasks_batches_task_and_conversation_hydration(
+        self,
+        mock_get_texts_for_concepts: MagicMock,
+        mock_get_texts_for_concept: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_repo.find.side_effect = [
+            [
+                {
+                    "concept_id": "#V#task_1",
+                    "relationships": {
+                        "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                        "#V#hasOriginatingConversation": ["#V#conversation_1"],
+                    },
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "concept_id": "#V#task_2",
+                    "relationships": {
+                        "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                        "#V#hasOriginatingConversation": ["#V#conversation_2"],
+                    },
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+            [
+                {
+                    "concept_id": "#V#conversation_1",
+                    "relationships": {"is_an_instance_of": ["#V#conversation"]},
+                    "metadata": {"session_id": "session-1"},
+                },
+                {
+                    "concept_id": "#V#conversation_2",
+                    "relationships": {"is_an_instance_of": ["#V#conversation"]},
+                    "metadata": {"session_id": "session-2"},
+                },
+            ],
+        ]
+        mock_get_texts_for_concepts.side_effect = [
+            {
+                "#V#task_1": [{"predicate": "#V#hasName", "text": "First task"}],
+                "#V#task_2": [{"predicate": "#V#hasName", "text": "Second task"}],
+            },
+            {
+                "#V#conversation_1": [
+                    {"predicate": "#V#hasName", "text": "First conversation"}
+                ],
+                "#V#conversation_2": [
+                    {"predicate": "#V#hasName", "text": "Second conversation"}
+                ],
+            },
+        ]
+
+        result = search_tasks(query="task")
+
+        assert [task["conversation_name"] for task in result["tasks"]] == [
+            "First conversation",
+            "Second conversation",
+        ]
+        assert mock_repo.find.call_count == 2
+        assert mock_get_texts_for_concepts.call_args_list[0].args == (
+            ["#V#task_1", "#V#task_2"],
+        )
+        assert mock_get_texts_for_concepts.call_args_list[1].args == (
+            ["#V#conversation_1", "#V#conversation_2"],
+        )
+        mock_get_texts_for_concept.assert_not_called()
+
+
 class TestBulkTaskCollections:
     """Tests for hidden-by-default bulk task collection support."""
 
@@ -645,10 +829,10 @@ class TestBulkTaskCollections:
         )
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
-    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
     def test_list_tasks_with_visibility_excludes_hidden_bulk_docs_in_query(
         self,
-        mock_get_texts: MagicMock,
+        mock_get_texts_for_concepts: MagicMock,
         mock_repo: MagicMock,
     ) -> None:
         now = datetime.now(timezone.utc)
@@ -681,10 +865,12 @@ class TestBulkTaskCollections:
 
         mock_repo.find.side_effect = _find_side_effect
         mock_repo.count_documents.return_value = 1
-        mock_get_texts.return_value = [
-            {"predicate": "#V#hasName", "text": "Visible task"},
-            {"predicate": "#V#hasTaskStatus", "text": "pending"},
-        ]
+        mock_get_texts_for_concepts.return_value = {
+            "#V#task_visible": [
+                {"predicate": "#V#hasName", "text": "Visible task"},
+                {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            ]
+        }
 
         result = list_tasks_with_visibility(
             assignee_concept_id="#V#user_alice",
@@ -707,7 +893,7 @@ class TestBulkTaskCollections:
             stage["stage"] == "repository_find_page"
             for stage in telemetry["stages"]
         )
-        assert mock_get_texts.call_count == 1
+        mock_get_texts_for_concepts.assert_called_once_with(["#V#task_visible"])
         visible_query = mock_repo.find.call_args_list[1].args[0]
         assert "$nor" in visible_query["$and"][-1]
         assert {"relationships.#V#hasAssignee": "#V#user_alice"} in visible_query[
@@ -1205,10 +1391,10 @@ class TestTaskParityDatesAndEpic:
         assert len(set(page_one_ids + page_two_ids)) == 250
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
-    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.get_texts_for_concepts")
     def test_search_tasks_filters_start_date_and_epic(
         self,
-        mock_get_texts: MagicMock,
+        mock_get_texts_for_concepts: MagicMock,
         mock_repo: MagicMock,
     ) -> None:
         now = datetime.now(timezone.utc)
@@ -1232,25 +1418,24 @@ class TestTaskParityDatesAndEpic:
             },
         ]
 
-        def _fake_get_texts(
-            concept_id: str, *args: Any, **kwargs: Any
-        ) -> list[dict[str, str]]:
-            if concept_id == "#V#task_1":
-                return [
-                    {"predicate": "#V#hasName", "text": "Task 1"},
-                    {
-                        "predicate": "#V#hasStartDate",
-                        "text": "2026-03-02T00:00:00+00:00",
-                    },
-                    {"predicate": "#V#hasTaskStatus", "text": "pending"},
-                ]
-            return [
-                {"predicate": "#V#hasName", "text": "Task 2"},
-                {"predicate": "#V#hasStartDate", "text": "2026-04-10T00:00:00+00:00"},
+        mock_get_texts_for_concepts.return_value = {
+            "#V#task_1": [
+                {"predicate": "#V#hasName", "text": "Task 1"},
+                {
+                    "predicate": "#V#hasStartDate",
+                    "text": "2026-03-02T00:00:00+00:00",
+                },
                 {"predicate": "#V#hasTaskStatus", "text": "pending"},
-            ]
-
-        mock_get_texts.side_effect = _fake_get_texts
+            ],
+            "#V#task_2": [
+                {"predicate": "#V#hasName", "text": "Task 2"},
+                {
+                    "predicate": "#V#hasStartDate",
+                    "text": "2026-04-10T00:00:00+00:00",
+                },
+                {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            ],
+        }
 
         result = search_tasks(
             epic_task_concept_id="#V#task_epic_1",
@@ -1338,7 +1523,7 @@ class TestTaskParityDatesAndEpic:
                     PREDICATE_HAS_TASK_SOURCE: [JIRA_IMPORTED_TASK_SOURCE_ID],
                     PREDICATE_REPORTS_TO: ["#V#user_manager"],
                 },
-                "metadata": {},
+                "metadata": {"organisation_concept_id": "#V#example_org"},
                 "created_at": now,
                 "updated_at": now,
             },
@@ -1374,11 +1559,18 @@ class TestTaskParityDatesAndEpic:
             task_source_id=JIRA_IMPORTED_TASK_SOURCE_ID,
             created_by_concept_id="#V#user_creator",
             report_to_concept_id="#V#user_manager",
+            organisation_concept_id="#V#example_org",
             limit=10,
         )
 
         assert result["count"] == 1
         assert result["tasks"][0]["task_concept_id"] == "#V#task_1"
+        query_filter = mock_repo.find.call_args.args[0]
+        assert query_filter["metadata.organisation_concept_id"] == "#V#example_org"
+        assert query_filter["relationships.#V#hasCreatedBy"] == "#V#user_creator"
+        assert {"relationships.#V#reportsTo": "#V#user_manager"} in query_filter[
+            "$or"
+        ]
 
 
 class TestTaskExternalReferences:
