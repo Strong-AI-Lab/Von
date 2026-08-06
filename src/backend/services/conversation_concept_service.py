@@ -10,6 +10,7 @@ Conversations are created lazily when first referenced (e.g., by a task).
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -33,6 +34,13 @@ PREDICATE_HAS_TOPIC = "#V#hasTopic"
 PREDICATE_HAS_START_TIME = "#V#hasStartTime"
 PREDICATE_HAS_NAME = "#V#hasName"
 
+# A legacy session identifier can be attached to more than one text relation,
+# but this lookup is a compatibility path rather than a discovery API.  Keep
+# every legacy read bounded so task creation cannot spend its whole turn budget
+# scanning unrelated text relations.
+_LEGACY_SESSION_TEXT_VALUE_LIMIT = 4
+_LEGACY_SESSION_RELATION_LIMIT = 8
+
 
 class ConversationConceptError(Exception):
     """Base exception for conversation concept operations."""
@@ -53,6 +61,42 @@ def _generate_conversation_concept_id(session_id: str) -> str:
     return f"#V#conversation_{hash_suffix}"
 
 
+def _session_id_text_fingerprint(session_id: str) -> str:
+    """Return the TextValue fingerprint used for the normal session-id write."""
+
+    normalised = session_id.strip()
+    normalised = normalised.replace("\r\n", "\n").replace("\r", "\n")
+    normalised = re.sub(r"[\t\f\v ]+", " ", normalised)
+    normalised = re.sub(r" *\n *", "\n", normalised)
+    return f"{normalised.lower()}||en"
+
+
+def _is_visible_conversation_document(doc: Any) -> bool:
+    """Return whether an access-filtered concept document is a conversation."""
+
+    if not isinstance(doc, dict):
+        return False
+    concept_id = doc.get("concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return False
+    relationships = doc.get("relationships")
+    if not isinstance(relationships, dict):
+        return False
+    instance_of = relationships.get("is_an_instance_of")
+    if isinstance(instance_of, str):
+        instance_of = [instance_of]
+    return isinstance(instance_of, list) and CONVERSATION_TYPE_ID in instance_of
+
+
+def _visible_conversation_id(doc: Any) -> Optional[str]:
+    """Return the verified conversation ID, preserving repository access scope."""
+
+    if not _is_visible_conversation_document(doc):
+        return None
+    concept_id = doc.get("concept_id")
+    return concept_id.strip() if isinstance(concept_id, str) else None
+
+
 def get_conversation_concept_by_session_id(session_id: str) -> Optional[str]:
     """Find an existing conversation concept by session_id.
 
@@ -68,30 +112,112 @@ def get_conversation_concept_by_session_id(session_id: str) -> Optional[str]:
     # Look up by the deterministic concept_id
     expected_concept_id = _generate_conversation_concept_id(session_id)
     doc = ConceptsRepository.find_one({"concept_id": expected_concept_id})
-    if doc:
-        return expected_concept_id
+    existing_id = _visible_conversation_id(doc)
+    if existing_id:
+        return existing_id
 
-    # Fallback: search by session_id in text relations
-    # This handles cases where the conversation was created before
-    # we had the deterministic ID scheme
+    # Legacy conversations created before the deterministic scheme stored the
+    # session in metadata.  This is an exact, actor-filtered concept lookup.
+    doc = ConceptsRepository.find_one(
+        {
+            "metadata.session_id": session_id,
+            "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+        }
+    )
+    existing_id = _visible_conversation_id(doc)
+    if existing_id:
+        return existing_id
+
+    # Last compatibility path: use an exact TextValue candidate, then one
+    # bounded relation lookup.  Do not scan every hasSessionId relation and
+    # hydrate its text value one-by-one: that turns a normal task create into
+    # an unbounded global/N+1 read.
     from ..db.repositories.text_value_repository import (
         TextRelationsRepository,
         TextValuesRepository,
     )
 
-    # Find text relations with predicate hasSessionId
-    relations = list(
-        TextRelationsRepository.find(
-            {"predicate": {"$in": [PREDICATE_HAS_SESSION_ID, "hasSessionId"]}}
+    # Keep the normal indexed fingerprint lookup separate from the legacy raw
+    # text fallback.  Combining them in one ``$or`` allows the unindexed legacy
+    # branch to determine the whole query plan on a large TextValues collection.
+    text_values = list(
+        TextValuesRepository.find(
+            {
+                "fingerprint": _session_id_text_fingerprint(session_id),
+                "lang": "en",
+            },
+            projection={"_id": 1, "text": 1},
+            limit=_LEGACY_SESSION_TEXT_VALUE_LIMIT,
         )
     )
+    if not any(
+        isinstance(text_value, dict) and text_value.get("text") == session_id
+        for text_value in text_values
+    ):
+        text_values = list(
+            TextValuesRepository.find(
+                {"text": session_id},
+                projection={"_id": 1, "text": 1},
+                limit=_LEGACY_SESSION_TEXT_VALUE_LIMIT,
+            )
+        )
+    text_value_ids: list[Any] = []
+    for text_value in text_values:
+        if not isinstance(text_value, dict) or text_value.get("text") != session_id:
+            continue
+        text_value_id = text_value.get("_id")
+        if text_value_id is None:
+            continue
+        if text_value_id not in text_value_ids:
+            text_value_ids.append(text_value_id)
+        string_id = str(text_value_id)
+        if string_id and string_id not in text_value_ids:
+            text_value_ids.append(string_id)
+    if not text_value_ids:
+        return None
 
+    relations = list(
+        TextRelationsRepository.find(
+            {
+                "predicate": {"$in": [PREDICATE_HAS_SESSION_ID, "hasSessionId"]},
+                "object_text_id": {"$in": text_value_ids},
+            },
+            projection={"subject_concept_id": 1},
+            limit=_LEGACY_SESSION_RELATION_LIMIT,
+        )
+    )
+    subject_ids: list[str] = []
     for rel in relations:
-        text_value_id = rel.get("object_text_id")
-        if text_value_id:
-            text_doc = TextValuesRepository.find_one({"_id": text_value_id})
-            if text_doc and text_doc.get("text") == session_id:
-                return rel.get("subject_concept_id")
+        subject_id = rel.get("subject_concept_id") if isinstance(rel, dict) else None
+        if (
+            isinstance(subject_id, str)
+            and subject_id.strip()
+            and subject_id not in subject_ids
+        ):
+            subject_ids.append(subject_id)
+    if not subject_ids:
+        return None
+
+    # ConceptsRepository applies the current actor's visibility filter.  Batch
+    # candidate validation deliberately avoids a relation-to-concept N+1 path.
+    visible_candidates = ConceptsRepository.find(
+        {
+            "concept_id": {"$in": subject_ids},
+            "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+        },
+        projection={"concept_id": 1, "relationships.is_an_instance_of": 1},
+        limit=_LEGACY_SESSION_RELATION_LIMIT,
+    )
+    visible_ids = {
+        conversation_id
+        for conversation_id in (
+            _visible_conversation_id(candidate) for candidate in visible_candidates
+        )
+        if conversation_id
+    }
+    for subject_id in subject_ids:
+        if subject_id in visible_ids:
+            return subject_id
 
     return None
 

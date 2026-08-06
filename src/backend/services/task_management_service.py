@@ -10,17 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
-from ..db.repositories.text_value_repository import (
-    TextRelationsRepository,
-    TextValuesRepository,
-)
 from ..services.text_value_service import (
     get_texts_for_concept,
     get_texts_for_concepts,
@@ -77,9 +72,7 @@ from .workflow_event_integration_service import (
 logger = logging.getLogger(__name__)
 
 TASK_LIST_LOAD_TELEMETRY_SCHEMA_VERSION = "task_list_load_telemetry.v1"
-TASK_SEARCH_TEXT_VALUE_CANDIDATE_LIMIT = 200
-TASK_SEARCH_TEXT_RELATION_CANDIDATE_LIMIT = 400
-TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS = 2_000
+TASK_SEARCH_ACCESSIBLE_CANDIDATE_LIMIT = 400
 
 
 def _round_duration_ms(duration_seconds: float) -> float:
@@ -1644,7 +1637,11 @@ def find_task_by_agent_creation_fingerprint(
     return _build_task_response(doc)
 
 
-def _build_task_responses(docs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_task_responses(
+    docs: Iterable[Dict[str, Any]],
+    *,
+    texts_by_task: Mapping[str, List[Dict[str, Any]]] | None = None,
+) -> List[Dict[str, Any]]:
     """Build task responses while resolving their text relations in one read.
 
     Task listings need the same text-backed fields as an individual task, but
@@ -1662,8 +1659,12 @@ def _build_task_responses(docs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]
         for concept_id in [doc.get("concept_id")]
         if isinstance(concept_id, str) and concept_id
     ]
-    texts_by_task: Dict[str, List[Dict[str, Any]]] = {}
-    if task_ids:
+    if texts_by_task is None:
+        texts_by_task = {}
+        should_fetch_texts = True
+    else:
+        should_fetch_texts = False
+    if task_ids and should_fetch_texts:
         try:
             texts_by_task = get_texts_for_concepts(task_ids) or {}
         except Exception:
@@ -2814,100 +2815,195 @@ def _task_text_search_predicates() -> tuple[str, ...]:
     )
 
 
-def _query_matches_task_taxonomy_label_or_slug(query: str) -> bool:
-    query_lower = query.strip().lower()
-    return any(
-        query_lower in str(definition.get(field) or "").lower()
-        for definition in (*TASK_TYPE_DEFINITIONS, *TASK_SOURCE_DEFINITIONS)
-        for field in ("label", "slug")
+def _task_response_text_predicates() -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *_task_text_search_predicates(),
+                PREDICATE_HAS_TASK_STATUS,
+                "hasTaskStatus",
+                PREDICATE_HAS_PRIORITY,
+                "hasPriority",
+                PREDICATE_HAS_START_DATE,
+                "hasStartDate",
+                PREDICATE_HAS_DUE_DATE,
+                "hasDueDate",
+            )
+        )
     )
 
 
-def _task_text_query_candidates(query: str) -> tuple[list[str], dict[str, Any]]:
-    """Return bounded task candidates from the indexed text-value relation path."""
-    cleaned_query = query.strip()
-    normalised_query = re.sub(r"[\t\f\v ]+", " ", cleaned_query).lower()
-    fingerprint_prefix = f"{normalised_query}||"
-    text_value_limit = TASK_SEARCH_TEXT_VALUE_CANDIDATE_LIMIT
-    relation_limit = TASK_SEARCH_TEXT_RELATION_CANDIDATE_LIMIT
+def _task_text_rows_match_search_query(
+    texts: Iterable[Mapping[str, Any]],
+    query_lower: str,
+) -> bool:
+    return any(
+        str(text.get("predicate") or "") in _task_text_search_predicates()
+        and query_lower in str(text.get("text") or "").lower()
+        for text in texts
+    )
 
-    try:
-        text_values = list(
-            TextValuesRepository.find(
-                {
-                    "fingerprint": {
-                        "$type": "string",
-                        "$regex": f"^{re.escape(fingerprint_prefix)}",
-                    }
-                },
-                projection={"_id": 1},
-                limit=text_value_limit + 1,
-                max_time_ms=TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS,
-            )
+
+def _query_matching_task_taxonomy_ids(
+    query_lower: str,
+) -> tuple[set[str], set[str]]:
+    matching_types = {
+        definition["concept_id"]
+        for definition in TASK_TYPE_DEFINITIONS
+        if query_lower in definition["label"].lower()
+        or query_lower in definition["slug"].lower()
+    }
+    matching_sources = {
+        definition["concept_id"]
+        for definition in TASK_SOURCE_DEFINITIONS
+        if query_lower in definition["label"].lower()
+        or query_lower in definition["slug"].lower()
+    }
+    return matching_types, matching_sources
+
+
+def _actor_scoped_task_ids(
+    query_filter: Mapping[str, Any],
+    *,
+    extra_filter: Mapping[str, Any] | None = None,
+) -> tuple[list[str], bool]:
+    scoped_filter: Dict[str, Any] = dict(query_filter)
+    if extra_filter:
+        scoped_filter = {"$and": [scoped_filter, dict(extra_filter)]}
+    rows = list(
+        ConceptsRepository.find(
+            scoped_filter,
+            projection={"concept_id": 1},
+            sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
+            limit=TASK_SEARCH_ACCESSIBLE_CANDIDATE_LIMIT + 1,
         )
-        if not text_values:
-            text_values = list(
-                TextValuesRepository.find(
-                    {"$text": {"$search": cleaned_query}},
-                    projection={"_id": 1},
-                    limit=text_value_limit + 1,
-                    max_time_ms=TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS,
-                )
-            )
-    except Exception as exc:
-        raise TaskManagementError(
-            "Task text candidate search is temporarily unavailable"
-        ) from exc
+    )
+    truncated = len(rows) > TASK_SEARCH_ACCESSIBLE_CANDIDATE_LIMIT
+    return (
+        [
+            concept_id
+            for row in rows[:TASK_SEARCH_ACCESSIBLE_CANDIDATE_LIMIT]
+            for concept_id in [row.get("concept_id")]
+            if isinstance(concept_id, str) and concept_id
+        ],
+        truncated,
+    )
 
-    text_value_truncated = len(text_values) > text_value_limit
-    text_value_ids: list[Any] = []
-    for text_value in text_values[:text_value_limit]:
-        raw_id = text_value.get("_id") if isinstance(text_value, Mapping) else None
-        if raw_id is None:
-            continue
-        text_value_ids.extend((raw_id, str(raw_id)))
 
-    if not text_value_ids:
-        return [], {
+def _actor_scoped_task_query_candidates(
+    query_filter: Mapping[str, Any],
+    query: str,
+) -> tuple[list[Dict[str, Any]], Mapping[str, List[Dict[str, Any]]], dict[str, Any]]:
+    """Read a bounded, access-controlled task window before matching task text."""
+    candidate_ids, truncated = _actor_scoped_task_ids(query_filter)
+    if not candidate_ids:
+        return [], {}, {
             "applied": True,
             "bounded": True,
-            "truncated": text_value_truncated,
+            "truncated": truncated,
+            "total_is_exhaustive": not truncated,
         }
 
     try:
-        relations = list(
-            TextRelationsRepository.find(
-                {
-                    "object_text_id": {"$in": text_value_ids},
-                    "predicate": {"$in": _task_text_search_predicates()},
-                },
-                projection={"subject_concept_id": 1},
-                limit=relation_limit + 1,
-                max_time_ms=TASK_SEARCH_TEXT_CANDIDATE_MAX_TIME_MS,
-            )
+        texts_by_task = get_texts_for_concepts(
+            candidate_ids,
+            predicates=_task_response_text_predicates(),
+            limit_per_concept=len(_task_response_text_predicates()),
         )
     except Exception as exc:
         raise TaskManagementError(
-            "Task text relation candidate search is temporarily unavailable"
+            "Accessible task text search is temporarily unavailable"
         ) from exc
 
-    relation_truncated = len(relations) > relation_limit
-    candidate_ids = list(
-        dict.fromkeys(
-            subject_id.strip()
-            for relation in relations[:relation_limit]
-            for subject_id in [
-                relation.get("subject_concept_id")
-                if isinstance(relation, Mapping)
-                else None
-            ]
-            if isinstance(subject_id, str) and subject_id.strip()
+    query_lower = query.strip().lower()
+    matching_ids = {
+        task_id
+        for task_id in candidate_ids
+        if _task_text_rows_match_search_query(
+            texts_by_task.get(task_id, []), query_lower
+        )
+    }
+    matching_types, matching_sources = _query_matching_task_taxonomy_ids(query_lower)
+    if matching_types:
+        type_ids, type_truncated = _actor_scoped_task_ids(
+            query_filter,
+            extra_filter={"relationships.is_an_instance_of": {"$in": sorted(matching_types)}},
+        )
+        matching_ids.update(type_ids)
+        truncated = truncated or type_truncated
+    if matching_sources:
+        source_clauses = [
+            {
+                f"relationships.{predicate}": {"$in": sorted(matching_sources)}
+            }
+            for predicate in TASK_SOURCE_RELATIONSHIP_PREDICATES
+        ]
+        if JIRA_IMPORTED_TASK_SOURCE_ID in matching_sources:
+            source_clauses.append(
+                {"metadata.external_references.jira.external_id": {"$exists": True}}
+            )
+        if DEFAULT_TASK_SOURCE_ID in matching_sources:
+            source_clauses.append(
+                {
+                    "$and": [
+                        {
+                            f"relationships.{predicate}": {"$exists": False}
+                        }
+                        for predicate in TASK_SOURCE_RELATIONSHIP_PREDICATES
+                    ]
+                    + [
+                        {
+                            "metadata.external_references.jira.external_id": {
+                                "$exists": False
+                            }
+                        }
+                    ]
+                }
+            )
+        source_ids, source_truncated = _actor_scoped_task_ids(
+            query_filter,
+            extra_filter={"$or": source_clauses},
+        )
+        matching_ids.update(source_ids)
+        truncated = truncated or source_truncated
+
+    if not matching_ids:
+        return [], {}, {
+            "applied": True,
+            "bounded": True,
+            "truncated": truncated,
+            "total_is_exhaustive": not truncated,
+        }
+
+    full_docs = list(
+        ConceptsRepository.find(
+            {"$and": [dict(query_filter), {"concept_id": {"$in": sorted(matching_ids)}}]},
+            sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
         )
     )
-    return candidate_ids, {
+    missing_text_ids = [
+        str(doc.get("concept_id") or "")
+        for doc in full_docs
+        if str(doc.get("concept_id") or "") not in texts_by_task
+    ]
+    if missing_text_ids:
+        try:
+            texts_by_task.update(
+                get_texts_for_concepts(
+                    missing_text_ids,
+                    predicates=_task_response_text_predicates(),
+                    limit_per_concept=len(_task_response_text_predicates()),
+                )
+            )
+        except Exception as exc:
+            raise TaskManagementError(
+                "Accessible task text search is temporarily unavailable"
+            ) from exc
+    return full_docs, texts_by_task, {
         "applied": True,
         "bounded": True,
-        "truncated": text_value_truncated or relation_truncated,
+        "truncated": truncated,
+        "total_is_exhaustive": not truncated,
     }
 
 
@@ -3001,26 +3097,25 @@ def search_tasks(
             for predicate in report_to_predicates
         ]
 
-    query_candidate_prefilter: dict[str, Any] = {"applied": False}
-    if (
-        isinstance(query, str)
-        and query.strip()
-        and not _query_matches_task_taxonomy_label_or_slug(query)
-    ):
-        candidate_ids, query_candidate_prefilter = _task_text_query_candidates(query)
-        # Do not broaden to the former all-task hydration path when the bounded
-        # relation lookup has no match or reaches its explicit candidate cap.
-        query_filter["concept_id"] = {"$in": candidate_ids}
-
-    # Use deterministic storage ordering before in-memory filters so paged reads do
-    # not drift or duplicate items across offsets.
-    docs = list(
-        ConceptsRepository.find(
-            query_filter,
-            sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
+    query_candidate_prefilter: dict[str, Any] = {
+        "applied": False,
+        "total_is_exhaustive": True,
+    }
+    query_texts_by_task: Mapping[str, List[Dict[str, Any]]] | None = None
+    if isinstance(query, str) and query.strip():
+        docs, query_texts_by_task, query_candidate_prefilter = (
+            _actor_scoped_task_query_candidates(query_filter, query)
         )
-    )
-    tasks = _build_task_responses(docs)
+    else:
+        # Use deterministic storage ordering before in-memory filters so paged reads do
+        # not drift or duplicate items across offsets.
+        docs = list(
+            ConceptsRepository.find(
+                query_filter,
+                sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
+            )
+        )
+    tasks = _build_task_responses(docs, texts_by_task=query_texts_by_task)
 
     status_values: set[str] = set()
     if isinstance(status_filter, str) and status_filter.strip():
@@ -3306,8 +3401,10 @@ def search_tasks(
             or query_lower in str(task.get("evidence") or "").lower()
             or query_lower in str(task.get("notes") or "").lower()
             or query_lower in str(task.get("task_source_label") or "").lower()
+            or query_lower in str(task.get("task_source_slug") or "").lower()
             or any(
                 query_lower in str(item.get("label") or "").lower()
+                or query_lower in str(item.get("slug") or "").lower()
                 for item in (task.get("task_types") or [])
                 if isinstance(item, dict)
             )
@@ -3369,6 +3466,9 @@ def search_tasks(
             "hidden_bulk_task_collections"
         ],
         "query_candidate_prefilter": query_candidate_prefilter,
+        "total_is_exhaustive": bool(
+            query_candidate_prefilter.get("total_is_exhaustive", True)
+        ),
     }
 
 
