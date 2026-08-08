@@ -1,5 +1,6 @@
 import base64
 import json
+import socket
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -7,6 +8,82 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.backend.integrations.google import gmail_service as gs
+
+
+class _FakeSocket:
+    def __init__(self, family, attempts, failures):
+        self.family = family
+        self.attempts = attempts
+        self.failures = failures
+        self.closed = False
+
+    def settimeout(self, _timeout):
+        return None
+
+    def bind(self, _source_address):
+        return None
+
+    def connect(self, sockaddr):
+        self.attempts.append((self.family, sockaddr))
+        failure = self.failures.get(self.family)
+        if failure is not None:
+            raise failure
+
+    def close(self):
+        self.closed = True
+
+
+def test_google_connection_prefers_ipv4_over_ipv6(monkeypatch):
+    attempts = []
+    failures = {}
+    monkeypatch.setattr(
+        gs.socket,
+        "getaddrinfo",
+        lambda *_args: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", 443, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        gs.socket,
+        "socket",
+        lambda family, *_args: _FakeSocket(family, attempts, failures),
+    )
+
+    sock = gs._create_connection_prefer_ipv4(  # noqa: SLF001
+        ("gmail.googleapis.com", 443), 1.0
+    )
+
+    assert sock.family == socket.AF_INET
+    assert attempts == [(socket.AF_INET, ("192.0.2.1", 443))]
+
+
+def test_google_connection_retains_ipv6_fallback(monkeypatch):
+    attempts = []
+    failures = {socket.AF_INET: TimeoutError("IPv4 unavailable")}
+    monkeypatch.setattr(
+        gs.socket,
+        "getaddrinfo",
+        lambda *_args: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", 443, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        gs.socket,
+        "socket",
+        lambda family, *_args: _FakeSocket(family, attempts, failures),
+    )
+
+    sock = gs._create_connection_prefer_ipv4(  # noqa: SLF001
+        ("gmail.googleapis.com", 443), 1.0
+    )
+
+    assert sock.family == socket.AF_INET6
+    assert attempts == [
+        (socket.AF_INET, ("192.0.2.1", 443)),
+        (socket.AF_INET6, ("2001:db8::1", 443, 0, 0)),
+    ]
 
 
 def test_load_profiles_from_env_json_list(monkeypatch):

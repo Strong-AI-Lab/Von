@@ -2,9 +2,10 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "4",
+  "seed_version": "10",
   "source_tag": "JVNAUTOSCI-2335",
   "supported_action_ids": [
+    "arxiv.inspect_existing_state",
     "extract_signals_from_tool_result",
     "resolve_tool_output_followup_hint",
     "workflow_control.context_set",
@@ -31,7 +32,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": true, \"role\": \"execution\", \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": true, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -188,6 +189,17 @@
             "execution_mode": "deterministic",
             "next_state": "decide_messages",
             "on_failure_state": "failed",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 5000,
+              "retry_on_outcomes": [
+                "failure",
+                "unknown"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "list_messages",
             "static_input_bindings": [
               [
@@ -391,16 +403,21 @@
     {
       "workflow_id": "#V#email_arxiv_ingestion_from_message_workflow",
       "display_name": "Email Arxiv Ingestion From Message Workflow",
-      "description": "Processes one Gmail message: check for durable represented source-processing evidence, extract resource links when needed, ingest each arXiv reference through represented subworkflows, then record a Vontology source-processing marker only after successful arXiv ingestion.",
+      "description": "Processes one exact Gmail message selected by the caller: check for durable represented source-processing evidence, extract resource links when needed, ingest each arXiv reference through represented subworkflows, then record and canonically read back a Vontology source-processing marker only after successful arXiv ingestion. Use this after read-only discovery has selected the source message; it does not select mailbox messages or mutate Gmail.",
       "text_relations": [
         {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"examples\": [\"Represent the arXiv paper linked from this exact Gmail message and verify its represented processing marker.\", \"Process this selected Gmail message through the durable arXiv representation path without changing Gmail labels.\"], \"keywords\": [\"exact gmail message arxiv representation\", \"selected email arxiv paper ingestion\", \"represent paper from this message\", \"gmail message processing marker\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\"], \"routing_notes\": [\"Use only after read-only discovery or explicit user context identifies one exact Gmail source message.\", \"Pass include_body explicitly on every gmail_get_message discovery read. When a Gmail search result matched the paper query but its subject or snippet does not expose the arXiv reference, use include_body=true and inspect the bounded message body before rejecting it or moving to an older message.\", \"The caller must supply the exact Gmail profile and current_message object; this workflow does not choose a message or scan a mailbox.\", \"Prefer this durable unit over a paper-only representation workflow when the user outcome also requires source-message processing evidence.\", \"Do not mutate Gmail labels; completion is an idempotent represented marker followed by canonical marker read-back.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "lang": "en-NZ"
+        },
+        {
           "predicate": "#V#hasWorkflowLifecycleJson",
-          "text": "{\"phase\": \"published\", \"postconditions_verified\": false, \"published\": true, \"rollout_state\": \"support_subworkflow\", \"routing_eligible\": false, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
+          "text": "{\"phase\": \"published\", \"postconditions_verified\": true, \"published\": true, \"rollout_state\": \"published\", \"routing_eligible\": true, \"schema_version\": \"workflow_publication_lifecycle.v1\", \"validation_passed\": true}",
           "lang": "en-NZ"
         },
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"authoring_intent_required\": false, \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": false, \"role\": \"execution\", \"routing_eligible\": false, \"schema_version\": \"workflow_routing_profile.v1\"}",
+          "text": "{\"authoring_intent_required\": false, \"execution_mode\": \"tool_pipeline\", \"explicit_workflow_context_required\": false, \"prefer_existing_capability\": true, \"role\": \"execution\", \"routing_eligible\": true, \"schema_version\": \"workflow_routing_profile.v1\"}",
           "lang": "en-NZ"
         }
       ],
@@ -579,6 +596,17 @@
             "invoked_workflow_id": "#V#email_resource_link_extraction",
             "next_state": "decide_arxiv_resources",
             "on_failure_state": "failed",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 5000,
+              "retry_on_outcomes": [
+                "failure",
+                "unknown"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "extract_email_resources",
             "static_input_bindings": [
               [
@@ -752,7 +780,19 @@
               "reason_code": "source_processing_marker_additive_vontology_write",
               "schema_version": "workflow_step_mutation_authority.v1"
             },
-            "next_state": "done",
+            "next_state": "verify_done_marker",
+            "on_failure_state": "failed_unmarked",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 5000,
+              "retry_on_outcomes": [
+                "failure",
+                "unknown"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
             "state_id": "mark_done",
             "static_input_bindings": [
               [
@@ -819,6 +859,82 @@
             ]
           },
           {
+            "action_id": "workflow_mcp.invoke_tool",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "expected": true,
+                  "key": "source_processing_marker_exists",
+                  "kind": "context_flag"
+                },
+                "reason": "source_processing_marker_canonically_verified",
+                "to_state": "done"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "failed_unmarked",
+            "on_failure_state": "failed_unmarked",
+            "state_id": "verify_done_marker",
+            "static_input_bindings": [
+              [
+                "tool_arguments",
+                {
+                  "source_item_id": {
+                    "$context_key": "message_id"
+                  },
+                  "source_profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "source_system": "gmail"
+                }
+              ],
+              [
+                "tool_name",
+                "get_source_processing_marker"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_source_processing_marker_exists_to_source_processing_marker_exists",
+                "context_key": "source_processing_marker_exists",
+                "tool_output_field": "result.source_processing_marker_exists"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_message_processing_marker_to_message_processing_marker",
+                "context_key": "message_processing_marker",
+                "tool_output_field": "result.message_processing_marker"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_processed_message_id_to_processed_message_id",
+                "context_key": "processed_message_id",
+                "tool_output_field": "result.processed_message_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_paper_concept_id_to_paper_concept_id",
+                "context_key": "paper_concept_id",
+                "tool_output_field": "result.paper_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_file_copy_concept_id_to_file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "result.file_copy_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_verify_done_marker_result_arxiv_id_to_arxiv_id",
+                "context_key": "arxiv_id",
+                "tool_output_field": "result.arxiv_id"
+              }
+            ],
+            "writes_context_keys": [
+              "source_processing_marker_exists",
+              "message_processing_marker",
+              "processed_message_id",
+              "paper_concept_id",
+              "file_copy_concept_id",
+              "arxiv_id"
+            ]
+          },
+          {
             "state_id": "done"
           },
           {
@@ -870,6 +986,7 @@
                 "tool_arguments",
                 {
                   "format": "full",
+                  "include_body": true,
                   "message_id": {
                     "$context_key": "message_id"
                   },
@@ -953,7 +1070,7 @@
     {
       "workflow_id": "#V#arxiv_resource_ingestion_from_email_reference_workflow",
       "display_name": "Arxiv Resource Ingestion From Email Reference Workflow",
-      "description": "Ingests one arXiv resource reference discovered from email by delegating paper representation to #V#arxiv_paper_representation_workflow. The email-source convergence path succeeds once the paper representation concept is available; heavier paper reading and claim extraction belong in separate enrichment workflows.",
+      "description": "Converges one arXiv resource reference discovered from email. It first reads the canonical stable arXiv paper identity and reuses an existing represented paper when present; otherwise it delegates to #V#arxiv_paper_representation_workflow. The email-source convergence path succeeds once the paper representation concept is available; heavier paper reading and claim extraction belong in separate enrichment workflows.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowLifecycleJson",
@@ -988,7 +1105,7 @@
           {
             "action_id": "workflow_control.context_set",
             "execution_mode": "deterministic",
-            "next_state": "represent_arxiv_paper",
+            "next_state": "inspect_existing_paper",
             "on_failure_state": "failed",
             "state_id": "normalise_reference",
             "static_input_bindings": [
@@ -1020,6 +1137,70 @@
                   }
                 ]
               ]
+            ]
+          },
+          {
+            "action_id": "arxiv.inspect_existing_state",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
+                      "expected": true,
+                      "key": "paper_concept_id",
+                      "kind": "context_exists"
+                    },
+                    {
+                      "expected": false,
+                      "key": "paper_concept_id",
+                      "kind": "context_is_null"
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "paper_already_represented",
+                "to_state": "done"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "paper_not_yet_represented",
+                "to_state": "represent_arxiv_paper"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_arxiv_resource_ingestion_from_email_reference_workflow_inspect_existing_paper_arxiv_id_to_arxiv_id_parameter",
+                "context_key": "arxiv_id",
+                "required": true,
+                "tool_param": "arxiv_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "on_failure_state": "failed",
+            "state_id": "inspect_existing_paper",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_resource_ingestion_from_email_reference_workflow_inspect_existing_paper_arxiv_id_to_arxiv_id",
+                "context_key": "arxiv_id",
+                "tool_output_field": "arxiv_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_resource_ingestion_from_email_reference_workflow_inspect_existing_paper_paper_concept_id_to_paper_concept_id",
+                "context_key": "paper_concept_id",
+                "tool_output_field": "paper_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_resource_ingestion_from_email_reference_workflow_inspect_existing_paper_file_copy_concept_id_to_file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "file_copy_concept_id"
+              }
+            ],
+            "writes_context_keys": [
+              "arxiv_id",
+              "paper_concept_id",
+              "file_copy_concept_id"
             ]
           },
           {

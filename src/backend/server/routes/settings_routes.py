@@ -701,9 +701,7 @@ def get_db_location_info():
             # Try to discover outward-facing IP (best-effort, short timeout). Avoid blocking failures.
             try:
                 import urllib.request
-                import socket
 
-                socket.setdefaulttimeout(1.5)
                 with urllib.request.urlopen(
                     "https://api.ipify.org?format=text", timeout=1.5
                 ) as resp:

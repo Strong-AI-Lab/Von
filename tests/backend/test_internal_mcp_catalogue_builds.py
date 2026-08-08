@@ -1,6 +1,12 @@
 import pytest
 
 
+class _GmailHttpError(Exception):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.resp = type("Response", (), {"status": status})()
+
+
 def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     from src.backend.integrations.internal_mcp import build_default_catalogue
 
@@ -761,6 +767,73 @@ def test_internal_mcp_gmail_get_message_includes_body_only_when_requested(
     assert "body" not in metadata_payload
     assert body_payload["body"] == "Explicitly requested message body"
     assert body_payload["body_truncated"] is False
+
+
+def test_gmail_list_messages_surfaces_invalid_grant_as_reauthorisation(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    def fake_list_messages(**_kwargs):
+        raise RuntimeError("invalid_grant: Token has been expired or revoked")
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.list_messages",
+        fake_list_messages,
+    )
+
+    payload = catalogue_module._gmail_list_messages(profile="zhan-gmail")
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "invalid_grant"
+    assert payload["error_details"] == {
+        "exception_type": "RuntimeError",
+        "failure_kind": "authorisation",
+        "reauthorisation_required": True,
+    }
+
+
+def test_gmail_get_message_keeps_transport_timeout_distinct_from_auth(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    def fake_get_message(**_kwargs):
+        raise TimeoutError("connection attempt timed out")
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.get_message",
+        fake_get_message,
+    )
+
+    payload = catalogue_module._gmail_get_message(
+        profile="zhan-gmail",
+        message_id="msg-timeout",
+    )
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "gmail_transport_timeout"
+    assert payload["error_details"]["failure_kind"] == "transport_timeout"
+    assert payload["error_details"]["reauthorisation_required"] is False
+
+
+def test_gmail_get_message_surfaces_insufficient_oauth_scope(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    def fake_get_message(**_kwargs):
+        raise _GmailHttpError("insufficientPermissions", 403)
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.get_message",
+        fake_get_message,
+    )
+
+    payload = catalogue_module._gmail_get_message(
+        profile="zhan-gmail",
+        message_id="msg-scope",
+    )
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "insufficient_scopes"
+    assert payload["error_details"]["http_status"] == 403
+    assert payload["error_details"]["failure_kind"] == "authorisation"
+    assert payload["error_details"]["reauthorisation_required"] is True
 
 
 def test_gmail_list_messages_zero_results_exposes_empty_messages(monkeypatch):
