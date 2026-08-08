@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "47",
+  "seed_version": "48",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#tool_calling_workflow": {
       "42": [
@@ -3186,7 +3186,7 @@
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":false,\"prefer_existing_capability\":true,\"ordinary_mail_review\":true,\"excludes_auth_or_token_refresh\":true,\"excludes_authoring_or_ingestion_without_explicit_intent\":true}",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":false,\"prefer_existing_capability\":false,\"routing_eligible\":false,\"ordinary_mail_review\":false,\"retained_for_explicit_durable_review_only\":true,\"excludes_auth_or_token_refresh\":true,\"excludes_authoring_or_ingestion_without_explicit_intent\":true}",
           "lang": "en-NZ"
         },
         {

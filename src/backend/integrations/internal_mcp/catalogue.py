@@ -25879,6 +25879,108 @@ def _gmail_label_conflict_error(exc: Exception) -> bool:
     )
 
 
+def _gmail_api_error_response(
+    operation: str,
+    exc: Exception,
+    *,
+    suggestions: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Return a typed Gmail failure without conflating OAuth and transport.
+
+    The model needs to know whether retrying the request can help or whether the
+    user must repair the OAuth grant.  Preserve the original exception type and
+    HTTP status for diagnostics while exposing stable recovery-oriented codes.
+    """
+
+    exception_type = type(exc).__name__
+    error_text = str(exc)
+    error_lower = error_text.lower()
+    status_code = _gmail_exception_status_code(exc)
+    details: dict[str, Any] = {
+        "exception_type": exception_type,
+        "failure_kind": "api",
+        "reauthorisation_required": False,
+    }
+    if status_code is not None:
+        details["http_status"] = status_code
+
+    invalid_grant = (
+        "invalid_grant" in error_lower
+        or "expired or revoked" in error_lower
+        or "token has been expired" in error_lower
+    )
+    if invalid_grant:
+        details.update(
+            failure_kind="authorisation",
+            reauthorisation_required=True,
+        )
+        return make_error_response(
+            "invalid_grant",
+            f"Gmail {operation} failed because the OAuth grant is expired or revoked.",
+            details=details,
+            suggestions=[
+                "Re-authorise this Gmail profile, then retry the operation",
+            ],
+        )
+
+    insufficient_scope = any(
+        marker in error_lower
+        for marker in (
+            "insufficient_scope",
+            "insufficient scopes",
+            "insufficientpermissions",
+            "insufficient authentication scopes",
+        )
+    )
+    if insufficient_scope:
+        details.update(
+            failure_kind="authorisation",
+            reauthorisation_required=True,
+        )
+        return make_error_response(
+            "insufficient_scopes",
+            f"Gmail {operation} failed because the OAuth grant lacks a required scope.",
+            details=details,
+            suggestions=[
+                "Inspect the profile with gmail_get_auth_config",
+                "Update the represented scopes and re-authorise the Gmail profile",
+            ],
+        )
+
+    if status_code == 401:
+        details.update(
+            failure_kind="authorisation",
+            reauthorisation_required=True,
+        )
+        return make_error_response(
+            "gmail_authorisation_failed",
+            f"Gmail {operation} was rejected by Google as unauthorised.",
+            details=details,
+            suggestions=[
+                "Inspect the profile with gmail_get_auth_config and re-authorise it if required",
+            ],
+        )
+
+    if isinstance(exc, TimeoutError) or "timeout" in exception_type.lower():
+        details["failure_kind"] = "transport_timeout"
+        return make_error_response(
+            "gmail_transport_timeout",
+            f"Gmail {operation} timed out before Google returned a response.",
+            details=details,
+            suggestions=[
+                "Retry the bounded Gmail operation",
+                "Check network and Gmail API reachability if the timeout recurs",
+            ],
+        )
+
+    return make_error_response(
+        "gmail_api_error",
+        f"Gmail {operation} failed: {error_text}",
+        details=details,
+        suggestions=list(suggestions or ["Check Gmail API connectivity and credentials"]),
+    )
+
+
 def _gmail_list_profiles(**kwargs):  # noqa: ARG001 (namespace ignored)
     from ...integrations.google import gmail_service as gs
 
@@ -26035,11 +26137,9 @@ def _gmail_list_messages(**kwargs):
             notes=notes or None,
         )
     except Exception as exc:  # noqa: BLE001
-        return make_error_response(
-            "gmail_api_error",
-            f"Gmail list failed: {exc}",
-            details={"exception_type": type(exc).__name__},
-            suggestions=["Check Gmail API connectivity and credentials"],
+        return _gmail_api_error_response(
+            "message listing",
+            exc,
         )
 
 
@@ -26086,11 +26186,9 @@ def _gmail_get_message(**kwargs):
                 normalised["body_truncated"] = body_truncated
         return normalised
     except Exception as exc:  # noqa: BLE001
-        return make_error_response(
-            "gmail_api_error",
-            f"Gmail get message failed: {exc}",
-            details={"exception_type": type(exc).__name__},
-            suggestions=["Check Gmail API connectivity and credentials"],
+        return _gmail_api_error_response(
+            "message read",
+            exc,
         )
 
 
@@ -26160,10 +26258,9 @@ def _gmail_send_message(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return make_error_response(
-            "gmail_api_error",
-            f"Gmail send failed: {exc}",
-            details={"exception_type": type(exc).__name__},
+        return _gmail_api_error_response(
+            "message send",
+            exc,
             suggestions=[
                 "Check Gmail API connectivity, credentials, profile ID, and send-capable OAuth scope",
             ],
@@ -26459,10 +26556,9 @@ def _gmail_get_attachment(**kwargs):
             payload["text_extraction"] = extraction_method.strip()
         return payload
     except Exception as exc:  # noqa: BLE001
-        return make_error_response(
-            "gmail_api_error",
-            f"Gmail attachment inspection failed: {exc}",
-            details={"exception_type": type(exc).__name__},
+        return _gmail_api_error_response(
+            "attachment inspection",
+            exc,
             suggestions=[
                 "Check Gmail API connectivity, credentials, attachment metadata, and blob storage"
             ],
@@ -26493,11 +26589,9 @@ def _gmail_list_labels(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return make_error_response(
-            "gmail_api_error",
-            f"Gmail list labels failed: {exc}",
-            details={"exception_type": type(exc).__name__},
-            suggestions=["Check Gmail API connectivity and credentials"],
+        return _gmail_api_error_response(
+            "label listing",
+            exc,
         )
 
 
@@ -26583,10 +26677,9 @@ def _gmail_create_label(**kwargs):
                     "Use gmail_list_labels to fetch the existing label ID before applying it to messages",
                 ],
             )
-        return make_error_response(
-            "gmail_api_error",
-            f"Gmail create label failed: {exc}",
-            details={"exception_type": type(exc).__name__},
+        return _gmail_api_error_response(
+            "label creation",
+            exc,
             suggestions=[
                 "Check Gmail API connectivity, credentials, profile ID, and gmail.modify OAuth scope",
             ],
@@ -26629,11 +26722,9 @@ def _gmail_modify_labels(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return make_error_response(
-            "gmail_api_error",
-            f"Gmail modify labels failed: {exc}",
-            details={"exception_type": type(exc).__name__},
-            suggestions=["Check Gmail API connectivity and credentials"],
+        return _gmail_api_error_response(
+            "label modification",
+            exc,
         )
 
 

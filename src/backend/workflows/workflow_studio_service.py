@@ -399,7 +399,10 @@ def build_workflow_catalogue_payload(
         )
         attempts = usage.get("attempts")
         completions = usage.get("completions")
+        failures = usage.get("failures")
+        in_progress = usage.get("in_progress")
         completion_rate = usage.get("completion_rate")
+        terminal_success_rate = usage.get("terminal_success_rate")
 
         if not bool(listing_entry.get("definition_loaded")):
             is_executable = False
@@ -426,9 +429,18 @@ def build_workflow_catalogue_payload(
             "completions": (
                 int(completions) if isinstance(completions, (int, float)) else 0
             ),
+            "failures": int(failures) if isinstance(failures, (int, float)) else 0,
+            "in_progress": (
+                int(in_progress) if isinstance(in_progress, (int, float)) else 0
+            ),
             "completion_rate": (
                 float(completion_rate)
                 if isinstance(completion_rate, (int, float))
+                else None
+            ),
+            "terminal_success_rate": (
+                float(terminal_success_rate)
+                if isinstance(terminal_success_rate, (int, float))
                 else None
             ),
             "last_episode_at": (
@@ -1622,9 +1634,16 @@ def build_workflow_studio_detail_payload(
             **listing_entry,
             "attempts": int(usage.get("attempts") or 0),
             "completions": int(usage.get("completions") or 0),
+            "failures": int(usage.get("failures") or 0),
+            "in_progress": int(usage.get("in_progress") or 0),
             "completion_rate": (
                 float(completion_rate)
                 if isinstance(completion_rate, (int, float))
+                else None
+            ),
+            "terminal_success_rate": (
+                float(usage.get("terminal_success_rate"))
+                if isinstance(usage.get("terminal_success_rate"), (int, float))
                 else None
             ),
             "last_episode_at": usage.get("last_episode_at"),

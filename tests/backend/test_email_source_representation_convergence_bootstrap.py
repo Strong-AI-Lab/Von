@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
+import pytest
+
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    ActionSpec,
+    WorkflowActionRequest,
+    WorkflowActionResult,
+    WorkflowEnvironment,
+)
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
 from src.backend.workflows.durable.models import WorkflowSchedule
+from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.workflow_launch_input_contracts import (
     resolve_workflow_launch_inputs,
 )
@@ -96,11 +110,152 @@ def test_email_source_seed_keeps_claim_enrichment_out_of_source_completion() -> 
 
     assert state_ids == {
         "normalise_reference",
+        "inspect_existing_paper",
         "represent_arxiv_paper",
         "done",
         "failed",
     }
     assert all("claim" not in json.dumps(step).lower() for step in steps)
+
+
+def _arxiv_resource_definition():
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+    from src.backend.workflows.workflow_concept_authority_service import (
+        build_repo_seed_workflow_definitions,
+    )
+
+    return build_repo_seed_workflow_definitions(
+        bundle_paths=[mod._REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[
+            mod.ARXIV_RESOURCE_INGESTION_FROM_EMAIL_REFERENCE_WORKFLOW_ID
+        ],
+    )[mod.ARXIV_RESOURCE_INGESTION_FROM_EMAIL_REFERENCE_WORKFLOW_ID]
+
+
+def test_arxiv_resource_workflow_reuses_existing_representation() -> None:
+    definition = _arxiv_resource_definition()
+    registry = ActionRegistry()
+    register_control_flow_actions(registry)
+    calls: list[str] = []
+
+    def inspect(request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls.append("inspect")
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "arxiv_id": request.inputs["arxiv_id"],
+                "paper_concept_id": "#V#paper_on_arxiv_2607_10563_existing",
+                "file_copy_concept_id": "#V#arxiv_pdf_existing",
+            },
+        )
+
+    def represent(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        raise AssertionError("existing paper was represented again")
+
+    registry.register(
+        ActionSpec(action_id="arxiv.inspect_existing_state", handler=inspect)
+    )
+    registry.register(
+        ActionSpec(action_id="workflow_invoke_subworkflow", handler=represent)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "current_resource_reference": {
+                "identifier": "2607.10563",
+                "url": "https://arxiv.org/abs/2607.10563",
+            }
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert calls == ["inspect"]
+    assert result.data["paper_concept_id"] == (
+        "#V#paper_on_arxiv_2607_10563_existing"
+    )
+
+
+def test_arxiv_resource_workflow_represents_only_when_not_already_present() -> None:
+    definition = _arxiv_resource_definition()
+    registry = ActionRegistry()
+    register_control_flow_actions(registry)
+    calls: list[str] = []
+
+    def inspect(request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls.append("inspect")
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "arxiv_id": request.inputs["arxiv_id"],
+                "paper_concept_id": None,
+                "file_copy_concept_id": None,
+            },
+        )
+
+    def represent(request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls.append("represent")
+        assert request.inputs["arxiv_id"] == "2607.22925"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "paper_concept_id": "#V#paper_on_arxiv_2607_22925_new",
+                    "file_copy_concept_id": "#V#arxiv_pdf_new",
+                    "article_readback": {
+                        "concept_id": "#V#paper_on_arxiv_2607_22925_new"
+                    },
+                }
+            },
+        )
+
+    registry.register(
+        ActionSpec(action_id="arxiv.inspect_existing_state", handler=inspect)
+    )
+    registry.register(
+        ActionSpec(action_id="workflow_invoke_subworkflow", handler=represent)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "current_resource_reference": {
+                "identifier": "2607.22925",
+                "url": "https://arxiv.org/abs/2607.22925",
+            }
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert calls == ["inspect", "represent"]
+    assert result.data["paper_concept_id"] == "#V#paper_on_arxiv_2607_22925_new"
+
+
+def test_email_resource_extraction_fetches_body_needed_to_find_cited_resources() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        item
+        for item in payload.get("workflows") or []
+        if item.get("workflow_id") == mod.EMAIL_RESOURCE_LINK_EXTRACTION_WORKFLOW_ID
+    )
+    fetch_payload = next(
+        step
+        for step in workflow["publication_spec"]["steps"]
+        if step["state_id"] == "fetch_payload"
+    )
+    bindings = dict(fetch_payload["static_input_bindings"])
+
+    assert bindings["tool_name"] == "gmail_get_message"
+    assert bindings["tool_arguments"]["format"] == "full"
+    assert bindings["tool_arguments"]["include_body"] is True
 
 
 def test_email_source_seed_excludes_mail_profile_status_questions() -> None:
@@ -186,6 +341,338 @@ def test_email_source_seed_uses_represented_markers_instead_of_gmail_writes() ->
         "record_source_processing_marker",
     ]
     assert "message_processing_marker" in mark_done["writes_context_keys"]
+    assert mark_done["next_state"] == "verify_done_marker"
+    assert mark_done["on_failure_state"] == "failed_unmarked"
+
+    verify_done_marker = steps["verify_done_marker"]
+    assert verify_done_marker["static_input_bindings"][1] == [
+        "tool_name",
+        "get_source_processing_marker",
+    ]
+    assert verify_done_marker["on_failure_state"] == "failed_unmarked"
+    assert verify_done_marker["next_state"] == "failed_unmarked"
+    assert verify_done_marker["conditional_transitions"] == [
+        {
+            "condition_spec": {
+                "expected": True,
+                "key": "source_processing_marker_exists",
+                "kind": "context_flag",
+            },
+            "reason": "source_processing_marker_canonically_verified",
+            "to_state": "done",
+        }
+    ]
+
+
+def test_email_source_seed_routes_exact_message_unit_and_explicit_batch() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    workflows = {
+        item["workflow_id"]: item
+        for item in payload.get("workflows") or []
+        if isinstance(item, dict)
+    }
+    parent = workflows[mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID]
+    child = workflows[mod.EMAIL_ARXIV_INGESTION_FROM_MESSAGE_WORKFLOW_ID]
+
+    def relations(workflow: dict) -> dict[str, dict]:
+        return {
+            item["predicate"]: json.loads(item["text"])
+            for item in workflow.get("text_relations") or []
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        }
+
+    parent_relations = relations(parent)
+    child_relations = relations(child)
+    parent_lifecycle = parent_relations["#V#hasWorkflowLifecycleJson"]
+    parent_routing = parent_relations["#V#hasWorkflowRoutingProfileJson"]
+    child_lifecycle = child_relations["#V#hasWorkflowLifecycleJson"]
+    child_routing = child_relations["#V#hasWorkflowRoutingProfileJson"]
+    child_discovery = child_relations["#V#hasWorkflowDiscoveryExemplarsJson"]
+
+    assert parent_lifecycle["routing_eligible"] is True
+    assert parent_routing["routing_eligible"] is True
+    assert parent_routing["explicit_workflow_context_required"] is True
+    assert parent_routing["prefer_existing_capability"] is False
+
+    assert child_lifecycle["routing_eligible"] is True
+    assert child_lifecycle["postconditions_verified"] is True
+    assert child_routing["routing_eligible"] is True
+    assert child_routing["prefer_existing_capability"] is True
+    assert any("exact Gmail" in example for example in child_discovery["examples"])
+    assert any(
+        "does not choose a message" in note
+        for note in child_discovery["routing_notes"]
+    )
+    assert any(
+        "include_body=true" in note and "older message" in note
+        for note in child_discovery["routing_notes"]
+    )
+
+
+def test_email_message_launch_contract_accepts_exact_selected_message() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    workflow = next(
+        item
+        for item in payload.get("workflows") or []
+        if item.get("workflow_id")
+        == mod.EMAIL_ARXIV_INGESTION_FROM_MESSAGE_WORKFLOW_ID
+    )
+
+    current_message = {
+        "id": "gmail-message-1",
+        "message_id": "gmail-message-1",
+        "subject": "A paper https://arxiv.org/abs/2606.12345",
+    }
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=mod.EMAIL_ARXIV_INGESTION_FROM_MESSAGE_WORKFLOW_ID,
+        contract=workflow["launch_input_contract"],
+        inputs={
+            "gmail_profile": "#V#gmail_profile_vonwitbrock_gmail",
+            "current_message": current_message,
+        },
+        contract_source="repo_seed_test",
+    )
+
+    assert resolution.diagnostics["status"] == "resolved"
+    assert resolution.resolved_inputs == {
+        "gmail_profile": "#V#gmail_profile_vonwitbrock_gmail",
+        "current_message": current_message,
+    }
+
+
+def _exact_message_definition(*state_ids: str, initial_state: str):
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+    from src.backend.workflows.workflow_concept_authority_service import (
+        build_repo_seed_workflow_definitions,
+    )
+
+    definition = build_repo_seed_workflow_definitions(
+        bundle_paths=[mod._REPO_SEED_ASSET_PATH],
+        target_workflow_ids=[mod.EMAIL_ARXIV_INGESTION_FROM_MESSAGE_WORKFLOW_ID],
+    )[mod.EMAIL_ARXIV_INGESTION_FROM_MESSAGE_WORKFLOW_ID]
+    return replace(
+        definition,
+        initial_state=initial_state,
+        states={state_id: definition.states[state_id] for state_id in state_ids},
+        termination_states=(),
+    )
+
+
+def _run_exact_message_slice(definition, handler):
+    registry = ActionRegistry()
+    registry.register(ActionSpec(action_id="workflow_mcp.invoke_tool", handler=handler))
+    return WorkflowExecutor(registry=registry, max_transitions=8).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "message_id": "gmail-message-1",
+            "gmail_profile": "#V#gmail_profile_vonwitbrock_gmail",
+            "arxiv_iteration_results": [
+                {"paper_concept_id": "#V#paper_2606_12345", "arxiv_id": "2606.12345"}
+            ],
+        },
+    )
+
+
+def test_exact_message_workflow_records_then_reads_back_marker_before_success() -> None:
+    calls: list[str] = []
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        tool_name = str(request.inputs.get("tool_name") or "")
+        calls.append(tool_name)
+        if tool_name == "record_source_processing_marker":
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "message_processing_marker": "#V#marker_1",
+                        "processed_message_id": "gmail-message-1",
+                        "paper_concept_id": "#V#paper_2606_12345",
+                        "file_copy_concept_id": "#V#file_2606_12345",
+                        "arxiv_id": "2606.12345",
+                    }
+                },
+            )
+        assert tool_name == "get_source_processing_marker"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "source_processing_marker_exists": True,
+                    "message_processing_marker": "#V#marker_1",
+                    "processed_message_id": "gmail-message-1",
+                    "paper_concept_id": "#V#paper_2606_12345",
+                    "file_copy_concept_id": "#V#file_2606_12345",
+                    "arxiv_id": "2606.12345",
+                }
+            },
+        )
+
+    definition = _exact_message_definition(
+        "mark_done",
+        "verify_done_marker",
+        "done",
+        "failed_unmarked",
+        initial_state="mark_done",
+    )
+    result = _run_exact_message_slice(definition, handler)
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert calls == [
+        "record_source_processing_marker",
+        "get_source_processing_marker",
+    ]
+    assert result.data["source_processing_marker_exists"] is True
+    assert result.data["message_processing_marker"] == "#V#marker_1"
+
+
+@pytest.mark.parametrize("failure_mode", ["write_failed", "readback_missing"])
+def test_exact_message_workflow_never_claims_success_without_verified_marker(
+    failure_mode: str,
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        tool_name = str(request.inputs.get("tool_name") or "")
+        calls.append(tool_name)
+        if tool_name == "record_source_processing_marker":
+            if failure_mode == "write_failed":
+                return WorkflowActionResult(status="failure", error="write failed")
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "message_processing_marker": "#V#marker_1",
+                        "processed_message_id": "gmail-message-1",
+                        "paper_concept_id": "#V#paper_2606_12345",
+                        "file_copy_concept_id": "#V#file_2606_12345",
+                        "arxiv_id": "2606.12345",
+                    }
+                },
+            )
+        assert tool_name == "get_source_processing_marker"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "source_processing_marker_exists": False,
+                    "message_processing_marker": None,
+                    "processed_message_id": None,
+                    "paper_concept_id": None,
+                    "file_copy_concept_id": None,
+                    "arxiv_id": None,
+                }
+            },
+        )
+
+    definition = _exact_message_definition(
+        "mark_done",
+        "verify_done_marker",
+        "done",
+        "failed_unmarked",
+        initial_state="mark_done",
+    )
+    result = _run_exact_message_slice(definition, handler)
+
+    assert result.completed is True
+    assert result.final_state == "failed_unmarked"
+    assert calls == (
+        ["record_source_processing_marker", "record_source_processing_marker"]
+        if failure_mode == "write_failed"
+        else ["record_source_processing_marker", "get_source_processing_marker"]
+    )
+
+
+def test_exact_message_workflow_reuses_existing_marker_without_representing_again() -> None:
+    calls: list[str] = []
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        tool_name = str(request.inputs.get("tool_name") or "")
+        calls.append(tool_name)
+        assert tool_name == "get_source_processing_marker"
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "source_processing_marker_exists": True,
+                    "message_processing_marker": "#V#marker_existing",
+                    "processed_message_id": "gmail-message-1",
+                    "paper_concept_id": "#V#paper_2606_12345",
+                    "file_copy_concept_id": "#V#file_2606_12345",
+                    "arxiv_id": "2606.12345",
+                }
+            },
+        )
+
+    definition = _exact_message_definition(
+        "check_processed_marker",
+        "done_already_processed",
+        "failed",
+        initial_state="check_processed_marker",
+    )
+    result = _run_exact_message_slice(definition, handler)
+
+    assert result.completed is True
+    assert result.final_state == "done_already_processed"
+    assert calls == ["get_source_processing_marker"]
+
+
+def test_exact_message_workflow_does_not_mark_after_arxiv_ingestion_failure() -> None:
+    from src.backend.workflows.action_registry import ActionRegistry
+
+    calls: list[str] = []
+
+    def failed_ingestion(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls.append("workflow_control.for_each")
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "for_each_error_count": 1,
+                "for_each_item_count": 1,
+                "for_each_partial_success": False,
+                "for_each_success_count": 0,
+                "iteration_results": [{"status": "failed"}],
+            },
+        )
+
+    def marker_must_not_run(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        raise AssertionError("marker action ran after failed arXiv ingestion")
+
+    definition = _exact_message_definition(
+        "ingest_arxiv_resources",
+        "mark_done",
+        "verify_done_marker",
+        "done",
+        "failed_unmarked",
+        initial_state="ingest_arxiv_resources",
+    )
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(action_id="workflow_control.for_each", handler=failed_ingestion)
+    )
+    registry.register(
+        ActionSpec(action_id="workflow_mcp.invoke_tool", handler=marker_must_not_run)
+    )
+    result = WorkflowExecutor(registry=registry, max_transitions=8).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={"arxiv_resource_references": [{"identifier": "2606.12345"}]},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "failed_unmarked"
+    assert calls == ["workflow_control.for_each"]
 
 
 def test_zhan_seed_launch_contract_can_narrow_from_prior_arxiv_evidence() -> None:

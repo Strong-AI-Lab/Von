@@ -28,6 +28,7 @@ from ..db.repositories.concepts_repository import ConceptsRepository
 logger = logging.getLogger(__name__)
 
 WORKFLOW_USE_EPISODES_COLLECTION = "workflow_use_episodes"
+WORKFLOW_USE_AGGREGATE_SCHEMA_VERSION = "workflow_use_aggregate.v2"
 
 _indexes_ensured = False
 
@@ -175,6 +176,39 @@ def _iso_or_none(value: Any) -> str | None:
         cleaned = value.strip()
         return cleaned or None
     return None
+
+
+def _usage_count_fields(
+    *,
+    attempts: int,
+    completions: int,
+    failures: int,
+) -> dict[str, Any]:
+    """Return internally consistent execution-health counts.
+
+    ``completions`` remains the compatibility name for terminal workflow
+    successes.  A terminal non-success is counted separately from an episode
+    that is still open, so an interrupted or long-running execution is not
+    prematurely labelled a failure.
+    """
+
+    safe_completions = max(0, int(completions))
+    safe_failures = max(0, int(failures))
+    safe_attempts = max(0, int(attempts), safe_completions + safe_failures)
+    terminal_count = safe_completions + safe_failures
+    return {
+        "schema_version": WORKFLOW_USE_AGGREGATE_SCHEMA_VERSION,
+        "attempts": safe_attempts,
+        "completions": safe_completions,
+        "failures": safe_failures,
+        "in_progress": max(0, safe_attempts - terminal_count),
+        "completion_rate": (
+            safe_completions / safe_attempts if safe_attempts > 0 else None
+        ),
+        "terminal_success_rate": (
+            safe_completions / terminal_count if terminal_count > 0 else None
+        ),
+    }
 
 
 def build_workflow_episode_stable_key(
@@ -342,9 +376,7 @@ def _compute_episode_aggregate(workflow_id: str) -> dict[str, Any]:
     if coll is None:
         return {
             "workflow_id": workflow_id,
-            "attempts": 0,
-            "completions": 0,
-            "completion_rate": None,
+            **_usage_count_fields(attempts=0, completions=0, failures=0),
             "last_episode_at": None,
             "updated_at": _utcnow().isoformat(),
         }
@@ -358,6 +390,9 @@ def _compute_episode_aggregate(workflow_id: str) -> dict[str, Any]:
                 "completions": {
                     "$sum": {"$cond": [{"$eq": ["$completed", True]}, 1, 0]}
                 },
+                "failures": {
+                    "$sum": {"$cond": [{"$eq": ["$status", "terminated"]}, 1, 0]}
+                },
                 "last_episode_at": {"$max": "$attempt_started_at"},
             }
         },
@@ -366,21 +401,21 @@ def _compute_episode_aggregate(workflow_id: str) -> dict[str, Any]:
     if not grouped:
         return {
             "workflow_id": workflow_id,
-            "attempts": 0,
-            "completions": 0,
-            "completion_rate": None,
+            **_usage_count_fields(attempts=0, completions=0, failures=0),
             "last_episode_at": None,
             "updated_at": _utcnow().isoformat(),
         }
 
     attempts = int(grouped[0].get("attempts", 0))
     completions = int(grouped[0].get("completions", 0))
-    completion_rate = (completions / attempts) if attempts > 0 else None
+    failures = int(grouped[0].get("failures", 0))
     return {
         "workflow_id": workflow_id,
-        "attempts": attempts,
-        "completions": completions,
-        "completion_rate": completion_rate,
+        **_usage_count_fields(
+            attempts=attempts,
+            completions=completions,
+            failures=failures,
+        ),
         "last_episode_at": _iso_or_none(grouped[0].get("last_episode_at")),
         "updated_at": _utcnow().isoformat(),
     }
@@ -409,9 +444,7 @@ def _max_iso_datetime(left: Any, right: Any) -> str | None:
 def _existing_workflow_use_aggregate(workflow_id: str) -> dict[str, Any]:
     return {
         "workflow_id": workflow_id,
-        "attempts": 0,
-        "completions": 0,
-        "completion_rate": None,
+        **_usage_count_fields(attempts=0, completions=0, failures=0),
         "last_episode_at": None,
         "updated_at": _utcnow().isoformat(),
         "concept_found": False,
@@ -423,6 +456,7 @@ def _apply_workflow_concept_aggregate_delta(
     *,
     attempts_delta: int = 0,
     completions_delta: int = 0,
+    failures_delta: int = 0,
     last_episode_at: Any = None,
 ) -> dict[str, Any]:
     """Persist an idempotent aggregate delta without scanning the episode log."""
@@ -437,26 +471,67 @@ def _apply_workflow_concept_aggregate_delta(
 
     aggregate["concept_found"] = True
     usage = (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
+    if usage and usage.get("schema_version") != WORKFLOW_USE_AGGREGATE_SCHEMA_VERSION:
+        recomputed = _compute_episode_aggregate(workflow_id)
+        recomputed["concept_found"] = True
+        persisted_recomputed = {
+            key: recomputed.get(key)
+            for key in (
+                "schema_version",
+                "attempts",
+                "completions",
+                "failures",
+                "in_progress",
+                "completion_rate",
+                "terminal_success_rate",
+                "last_episode_at",
+                "updated_at",
+            )
+        }
+        try:
+            ConceptsRepository.update_one(
+                {"concept_id": workflow_id},
+                {
+                    "$set": {
+                        "concept_data.workflow_use_aggregates": persisted_recomputed
+                    }
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "[workflow_episode] Failed to migrate concept aggregate for %s: %s",
+                workflow_id,
+                exc,
+            )
+        return recomputed
+
     attempts = max(0, _coerce_int(usage.get("attempts")) + int(attempts_delta or 0))
     completions = max(
         0, _coerce_int(usage.get("completions")) + int(completions_delta or 0)
     )
-    attempts = max(attempts, completions)
-    completion_rate = (completions / attempts) if attempts > 0 else None
+    failures = max(0, _coerce_int(usage.get("failures")) + int(failures_delta or 0))
+    counts = _usage_count_fields(
+        attempts=attempts,
+        completions=completions,
+        failures=failures,
+    )
     last_episode_iso = _max_iso_datetime(usage.get("last_episode_at"), last_episode_at)
     updated_at = _utcnow().isoformat()
 
     aggregate.update(
         {
-            "attempts": attempts,
-            "completions": completions,
-            "completion_rate": completion_rate,
+            **counts,
             "last_episode_at": last_episode_iso,
             "updated_at": updated_at,
         }
     )
 
-    if not attempts_delta and not completions_delta and last_episode_at is None:
+    if (
+        not attempts_delta
+        and not completions_delta
+        and not failures_delta
+        and last_episode_at is None
+    ):
         return aggregate
 
     try:
@@ -464,9 +539,23 @@ def _apply_workflow_concept_aggregate_delta(
             {"concept_id": workflow_id},
             {
                 "$set": {
-                    "concept_data.workflow_use_aggregates.attempts": attempts,
-                    "concept_data.workflow_use_aggregates.completions": completions,
-                    "concept_data.workflow_use_aggregates.completion_rate": completion_rate,
+                    "concept_data.workflow_use_aggregates.schema_version": counts[
+                        "schema_version"
+                    ],
+                    "concept_data.workflow_use_aggregates.attempts": counts["attempts"],
+                    "concept_data.workflow_use_aggregates.completions": counts[
+                        "completions"
+                    ],
+                    "concept_data.workflow_use_aggregates.failures": counts["failures"],
+                    "concept_data.workflow_use_aggregates.in_progress": counts[
+                        "in_progress"
+                    ],
+                    "concept_data.workflow_use_aggregates.completion_rate": counts[
+                        "completion_rate"
+                    ],
+                    "concept_data.workflow_use_aggregates.terminal_success_rate": counts[
+                        "terminal_success_rate"
+                    ],
                     "concept_data.workflow_use_aggregates.last_episode_at": last_episode_iso,
                     "concept_data.workflow_use_aggregates.updated_at": updated_at,
                 }
@@ -488,9 +577,7 @@ def sync_workflow_concept_aggregates(workflow_id: str) -> dict[str, Any]:
     if not cleaned_workflow_id:
         return {
             "workflow_id": workflow_id,
-            "attempts": 0,
-            "completions": 0,
-            "completion_rate": None,
+            **_usage_count_fields(attempts=0, completions=0, failures=0),
             "last_episode_at": None,
             "updated_at": _utcnow().isoformat(),
             "concept_found": False,
@@ -511,14 +598,26 @@ def sync_workflow_concept_aggregates(workflow_id: str) -> dict[str, Any]:
             {"concept_id": cleaned_workflow_id},
             {
                 "$set": {
+                    "concept_data.workflow_use_aggregates.schema_version": aggregate[
+                        "schema_version"
+                    ],
                     "concept_data.workflow_use_aggregates.attempts": aggregate[
                         "attempts"
                     ],
                     "concept_data.workflow_use_aggregates.completions": aggregate[
                         "completions"
                     ],
+                    "concept_data.workflow_use_aggregates.failures": aggregate[
+                        "failures"
+                    ],
+                    "concept_data.workflow_use_aggregates.in_progress": aggregate[
+                        "in_progress"
+                    ],
                     "concept_data.workflow_use_aggregates.completion_rate": aggregate[
                         "completion_rate"
+                    ],
+                    "concept_data.workflow_use_aggregates.terminal_success_rate": aggregate[
+                        "terminal_success_rate"
                     ],
                     "concept_data.workflow_use_aggregates.last_episode_at": aggregate[
                         "last_episode_at"
@@ -694,6 +793,10 @@ def finalise_workflow_use_episode(
         else False
     )
     completions_delta = int(bool(completed)) - int(previous_completed)
+    previous_failed = bool(
+        isinstance(previous_doc, Mapping) and previous_doc.get("status") == "terminated"
+    )
+    failures_delta = int(not completed) - int(previous_failed)
     last_episode_at = (
         previous_doc.get("attempt_started_at")
         if isinstance(previous_doc, Mapping)
@@ -705,6 +808,7 @@ def finalise_workflow_use_episode(
             cleaned_workflow_id,
             attempts_delta=attempts_delta,
             completions_delta=completions_delta,
+            failures_delta=failures_delta,
             last_episode_at=last_episode_at,
         )
     return {
@@ -846,7 +950,7 @@ def get_workflow_usage_aggregates_for_workflows(
     turn_id: str | None = None,
     strict_namespace_scope: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Return attempts/completions aggregates keyed by workflow_id.
+    """Return use, terminal-success, failure and open aggregates by workflow.
 
     When an actor/session filter is supplied, derive the result from episode
     rows under that exact scope. Process-global concept aggregates are useful
@@ -863,9 +967,7 @@ def get_workflow_usage_aggregates_for_workflows(
     unique_ids = sorted(set(ids))
     aggregate_map: dict[str, dict[str, Any]] = {
         workflow_id: {
-            "attempts": 0,
-            "completions": 0,
-            "completion_rate": None,
+            **_usage_count_fields(attempts=0, completions=0, failures=0),
             "last_episode_at": None,
             "updated_at": None,
         }
@@ -895,6 +997,9 @@ def get_workflow_usage_aggregates_for_workflows(
                     "completions": {
                         "$sum": {"$cond": [{"$eq": ["$completed", True]}, 1, 0]}
                     },
+                    "failures": {
+                        "$sum": {"$cond": [{"$eq": ["$status", "terminated"]}, 1, 0]}
+                    },
                     "last_episode_at": {"$max": "$attempt_started_at"},
                 }
             },
@@ -905,11 +1010,12 @@ def get_workflow_usage_aggregates_for_workflows(
                 continue
             attempts = int(row.get("attempts", 0))
             completions = int(row.get("completions", 0))
+            failures = int(row.get("failures", 0))
             aggregate_map[workflow_id] = {
-                "attempts": attempts,
-                "completions": completions,
-                "completion_rate": (
-                    completions / attempts if attempts > 0 else None
+                **_usage_count_fields(
+                    attempts=attempts,
+                    completions=completions,
+                    failures=failures,
                 ),
                 "last_episode_at": _iso_or_none(row.get("last_episode_at")),
                 "updated_at": None,
@@ -936,23 +1042,28 @@ def get_workflow_usage_aggregates_for_workflows(
             if isinstance(usage_raw, Mapping):
                 usage = usage_raw
 
-        if not usage:
+        if (
+            not usage
+            or usage.get("schema_version") != WORKFLOW_USE_AGGREGATE_SCHEMA_VERSION
+        ):
             continue
 
         attempts = usage.get("attempts")
         completions = usage.get("completions")
-        completion_rate = usage.get("completion_rate")
+        failures = usage.get("failures")
+        if not all(
+            isinstance(value, (int, float))
+            for value in (attempts, completions, failures)
+        ):
+            continue
+        counts = _usage_count_fields(
+            attempts=int(attempts),
+            completions=int(completions),
+            failures=int(failures),
+        )
         concept_aggregate_ids.add(concept_id)
         aggregate_map[concept_id] = {
-            "attempts": int(attempts) if isinstance(attempts, (int, float)) else 0,
-            "completions": (
-                int(completions) if isinstance(completions, (int, float)) else 0
-            ),
-            "completion_rate": (
-                float(completion_rate)
-                if isinstance(completion_rate, (int, float))
-                else None
-            ),
+            **counts,
             "last_episode_at": _iso_or_none(usage.get("last_episode_at")),
             "updated_at": _iso_or_none(usage.get("updated_at")),
         }
@@ -974,6 +1085,9 @@ def get_workflow_usage_aggregates_for_workflows(
                     "completions": {
                         "$sum": {"$cond": [{"$eq": ["$completed", True]}, 1, 0]}
                     },
+                    "failures": {
+                        "$sum": {"$cond": [{"$eq": ["$status", "terminated"]}, 1, 0]}
+                    },
                     "last_episode_at": {"$max": "$attempt_started_at"},
                 }
             },
@@ -985,11 +1099,13 @@ def get_workflow_usage_aggregates_for_workflows(
                 continue
             attempts = int(row.get("attempts", 0))
             completions = int(row.get("completions", 0))
-            completion_rate = (completions / attempts) if attempts > 0 else None
+            failures = int(row.get("failures", 0))
             aggregate_map[workflow_id] = {
-                "attempts": attempts,
-                "completions": completions,
-                "completion_rate": completion_rate,
+                **_usage_count_fields(
+                    attempts=attempts,
+                    completions=completions,
+                    failures=failures,
+                ),
                 "last_episode_at": _iso_or_none(row.get("last_episode_at")),
                 "updated_at": aggregate_map[workflow_id].get("updated_at"),
             }

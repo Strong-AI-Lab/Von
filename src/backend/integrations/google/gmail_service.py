@@ -9,17 +9,23 @@ the default posture; mutations require explicit opt-in flags and OAuth scopes.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
-import os
 import logging
+import os
+import socket
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr, getaddresses
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+import google_auth_httplib2
+import httplib2
+from googleapiclient.discovery import build
+from googleapiclient.http import DEFAULT_HTTP_TIMEOUT_SEC
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 
 try:  # Optional dependency: agent Gmail OAuth token store.
     from ...services.agent_gmail_token_store import (
@@ -59,6 +65,100 @@ MESSAGE_LIST_VISIBILITY_VALUES: set[str] = {
 }
 
 PROFILES_ENV_VAR = "VON_GMAIL_PROFILES"
+
+
+def _create_connection_prefer_ipv4(
+    address,
+    timeout=None,
+    source_address=None,
+    *,
+    all_errors: bool = False,
+):
+    """Create a connection with IPv4-first, IPv6-fallback address ordering.
+
+    Python's standard HTTP transports try ``getaddrinfo`` results serially.
+    On dual-stack hosts with a non-functional IPv6 route, an IPv6-first DNS
+    answer can therefore consume the entire socket timeout before a reachable
+    IPv4 address is attempted. Keep this policy local to Google API transport;
+    do not mutate process-wide resolver or socket defaults.
+    """
+
+    host, port = address
+    address_info = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    address_info.sort(key=lambda row: 0 if row[0] == socket.AF_INET else 1)
+    exceptions: list[OSError] = []
+
+    for family, socktype, proto, _canonname, sockaddr in address_info:
+        sock = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            if timeout is not None:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            exceptions.clear()
+            return sock
+        except OSError as exc:
+            if not all_errors:
+                exceptions.clear()
+            exceptions.append(exc)
+            if sock is not None:
+                sock.close()
+
+    if exceptions:
+        try:
+            if not all_errors:
+                raise exceptions[0]
+            raise ExceptionGroup("create_connection failed", exceptions)
+        finally:
+            exceptions.clear()
+    raise OSError("getaddrinfo returned no addresses")
+
+
+class _GoogleApiHTTPSConnection(httplib2.HTTPSConnectionWithTimeout):
+    """HTTPS connection with bounded, local dual-stack fallback semantics."""
+
+    def connect(self):
+        proxy_info = self.proxy_info
+        if proxy_info and proxy_info.isgood() and proxy_info.applies_to(self.host):
+            return super().connect()
+
+        original_create_connection = self._create_connection
+        self._create_connection = _create_connection_prefer_ipv4
+        try:
+            return http.client.HTTPSConnection.connect(self)
+        finally:
+            self._create_connection = original_create_connection
+
+
+class _GoogleApiHttp(httplib2.Http):
+    """Google API HTTP transport using the local dual-stack connection."""
+
+    def request(
+        self,
+        uri,
+        method="GET",
+        body=None,
+        headers=None,
+        redirections=httplib2.DEFAULT_MAX_REDIRECTS,
+        connection_type=None,
+    ):
+        if connection_type is None and str(uri).lower().startswith("https://"):
+            connection_type = _GoogleApiHTTPSConnection
+        return super().request(
+            uri,
+            method=method,
+            body=body,
+            headers=headers,
+            redirections=redirections,
+            connection_type=connection_type,
+        )
+
+
+def _build_authorized_google_http(creds: Credentials):
+    http_transport = _GoogleApiHttp(timeout=DEFAULT_HTTP_TIMEOUT_SEC)
+    return google_auth_httplib2.AuthorizedHttp(creds, http=http_transport)
 
 
 @dataclass
@@ -431,7 +531,12 @@ def get_profile(
 def get_service(profile_id: str, profiles: Optional[Dict[str, GmailProfile]] = None):
     profile = get_profile(profile_id, profiles)
     creds = profile.ensure_credentials()
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return build(
+        "gmail",
+        "v1",
+        http=_build_authorized_google_http(creds),
+        cache_discovery=False,
+    )
 
 
 def _compose_query(profile: GmailProfile, query: Optional[str]) -> Optional[str]:

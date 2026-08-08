@@ -216,3 +216,58 @@ def test_db_info_snapshots_route_after_ping_recovery(monkeypatch) -> None:
     assert payload["classification"] == "atlas"
     assert payload["connection_location"]["upstream_sanitized_uri"] == SAFE_URI
     _assert_no_secret_fragments(payload)
+
+
+def test_db_info_public_ip_probe_does_not_change_global_socket_timeout(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    socket_timeout_calls: list[float | None] = []
+    urlopen_timeouts: list[float | None] = []
+
+    class _FakeIpResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return b"203.0.113.42"
+
+    def _urlopen(_url: str, *, timeout: float | None = None):
+        urlopen_timeouts.append(timeout)
+        return _FakeIpResponse()
+
+    monkeypatch.setattr(settings_routes, "_read_cached_db_info", lambda **_kwargs: None)
+    monkeypatch.setattr(settings_routes, "_write_cached_db_info", lambda _payload: None)
+    monkeypatch.setattr(settings_routes, "get_db", lambda: _FakeDb())
+    monkeypatch.setattr(
+        settings_routes, "get_effective_mongo_uri", lambda: FAKE_SECRET_URI
+    )
+    monkeypatch.setattr(settings_routes, "is_using_fallback_uri", lambda: True)
+    monkeypatch.setattr(
+        settings_routes,
+        "get_mongo_fallback_policy_state",
+        lambda: {"active_fallback_kind": "local"},
+    )
+    monkeypatch.setattr(settings_routes, "MONGO_URI", FAKE_SECRET_URI)
+    monkeypatch.setattr(settings_routes, "DATABASE_NAME", "test_database")
+
+    import socket
+    import urllib.request
+
+    monkeypatch.setattr(
+        socket,
+        "setdefaulttimeout",
+        lambda value: socket_timeout_calls.append(value),
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+
+    with app.test_request_context("/api/settings/db/info?nocache=1"):
+        response, status = settings_routes.get_db_location_info()
+
+    assert status == 200
+    assert response.get_json()["server_public_ip"] == "203.0.113.42"
+    assert urlopen_timeouts == [1.5]
+    assert socket_timeout_calls == []
