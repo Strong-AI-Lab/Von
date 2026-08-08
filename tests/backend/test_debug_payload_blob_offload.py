@@ -151,6 +151,53 @@ def test_hydrate_debug_payload_blob_refs_restores_nested_payload(monkeypatch) ->
     assert hydrated.payload == payload
 
 
+def test_hydration_recurses_through_nested_offload_layers(monkeypatch) -> None:
+    store = _FakeBlobStore()
+    monkeypatch.setenv("VON_BLOB_SPILLWAY_ENABLED", "0")
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+
+    inner_payload = {"stage_diagnostics": [{"detail": "x" * 2000}]}
+    compacted_inner = compact_debug_payload_for_storage(
+        inner_payload,
+        root_kind="turn_execution_diagnostics",
+        namespace="#V#michael@org",
+        request_id="req-nested-inner",
+        threshold_bytes=512,
+    )
+    payload = {
+        "turn_execution_diagnostics": {
+            "nested": compacted_inner.payload,
+            "padding": "y" * 2000,
+        }
+    }
+    compacted_outer = compact_debug_payload_for_storage(
+        payload,
+        root_kind="chat_history.llm_debug_data",
+        namespace="#V#michael@org",
+        request_id="req-nested-outer",
+        threshold_bytes=512,
+    )
+
+    hydrated = hydrate_debug_payload_blob_refs(
+        compacted_outer.payload,
+        fail_soft=False,
+    )
+
+    assert compacted_inner.offloaded_count == 1
+    assert compacted_outer.offloaded_count == 1
+    assert hydrated.hydrated_count == 2
+    assert hydrated.error_count == 0
+    assert hydrated.payload == {
+        "turn_execution_diagnostics": {
+            "nested": inner_payload,
+            "padding": "y" * 2000,
+        }
+    }
+
+
 def test_resolve_debug_payload_blob_ref_reports_typed_cache_states(
     monkeypatch,
     tmp_path,

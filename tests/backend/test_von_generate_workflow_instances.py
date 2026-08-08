@@ -457,6 +457,37 @@ def test_effect_finality_fallback_is_presented_literally_without_model_backfill(
     )
 
 
+def test_pending_effect_answer_reaches_presenter_channels(app: Flask) -> None:
+    instance_id = "workflow-instance-pending-route-1"
+    adaptive_state = app.config["_ADAPTIVE_TURN_STATE"]
+    adaptive_state["response_text"] = (
+        "<spoken>The work is still running.</spoken>\n"
+        "<screen>The work is still running. Exact workflow instance: "
+        f"{instance_id}.</screen>"
+    )
+    adaptive_state["terminal_status"] = "effect_partially_completed"
+    adaptive_state["effect_finality_fallback"] = False
+
+    response = app.test_client().post(
+        "/von/generate",
+        json={"prompt": "Present the result.", "presenter_mode": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert payload["response"] == (
+        f"The work is still running. Exact workflow instance: {instance_id}."
+    )
+    assert payload["response_channels"] == {
+        "spoken": "The work is still running.",
+        "screen": (
+            f"The work is still running. Exact workflow instance: {instance_id}."
+        ),
+        "format": "tagged_blocks_v1",
+    }
+
+
 def test_presenter_channel_parser_ignores_tags_inside_fenced_blocks() -> None:
     from src.backend.server.routes.von_routes import _extract_presenter_channels
 

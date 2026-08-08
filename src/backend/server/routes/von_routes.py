@@ -5175,13 +5175,17 @@ def delete_file_copy(file_copy_concept_id: str):
     return jsonify(result), 500
 
 
-def _prune_tool_progress() -> None:
+def _prune_tool_progress(
+    *,
+    preserve_key: tuple[str, str] | None = None,
+) -> None:
     cutoff = time.time() - _TOOL_PROGRESS_TTL_SEC
     with _TOOL_PROGRESS_LOCK:
         stale_keys = [
             key
             for key, value in _TOOL_PROGRESS.items()
-            if isinstance(value, dict)
+            if key != preserve_key
+            and isinstance(value, dict)
             and isinstance(value.get("updated_at_epoch"), (int, float))
             and float(value["updated_at_epoch"]) < cutoff
         ]
@@ -5199,7 +5203,7 @@ def _cache_tool_progress_state(
 
 
 def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) -> None:
-    _prune_tool_progress()
+    _prune_tool_progress(preserve_key=(scope_key, request_id))
     now_epoch = time.time()
     now_utc = _now_utc_iso()
     merged: dict[str, Any]
@@ -5781,7 +5785,7 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
 
 
 def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None:
-    _prune_tool_progress()
+    _prune_tool_progress(preserve_key=(scope_key, request_id))
     with _TOOL_PROGRESS_LOCK:
         value = _TOOL_PROGRESS.get((scope_key, request_id))
         if isinstance(value, dict):
@@ -5800,7 +5804,7 @@ def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None
 def _get_live_memory_tool_progress(
     scope_key: str, request_id: str
 ) -> dict[str, Any] | None:
-    _prune_tool_progress()
+    _prune_tool_progress(preserve_key=(scope_key, request_id))
     with _TOOL_PROGRESS_LOCK:
         value = _TOOL_PROGRESS.get((scope_key, request_id))
         if isinstance(value, dict):

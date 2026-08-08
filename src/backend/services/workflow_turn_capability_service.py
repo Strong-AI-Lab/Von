@@ -865,11 +865,6 @@ def normalise_workflow_effect_receipt(
         recovery_affordances = list(receipt.get("recovery_affordances") or [])
         if instance_id is not None:
             workflow_execution = receipt.get("workflow_execution")
-            prior_wait_seconds = (
-                workflow_execution.get("timeout_seconds")
-                if isinstance(workflow_execution, Mapping)
-                else None
-            )
             prior_poll_interval = (
                 workflow_execution.get("poll_interval_seconds")
                 if isinstance(workflow_execution, Mapping)
@@ -877,18 +872,10 @@ def normalise_workflow_effect_receipt(
             )
             wait_arguments: dict[str, Any] = {"instance_id": instance_id}
             if effect_status == "partial":
-                wait_arguments["await_terminal"] = True
-                if isinstance(prior_wait_seconds, (int, float)) and not isinstance(
-                    prior_wait_seconds,
-                    bool,
-                ) and math.isfinite(float(prior_wait_seconds)):
-                    wait_arguments["timeout_seconds"] = max(
-                        0.1,
-                        min(
-                            float(prior_wait_seconds),
-                            WORKFLOW_OBSERVATION_MAX_SECONDS,
-                        ),
-                    )
+                # The durable handle is already established. Inspecting once is
+                # the least burdensome recovery; another long wait remains an
+                # adaptive choice only when the user's outcome requires it.
+                wait_arguments["await_terminal"] = False
                 if isinstance(prior_poll_interval, (int, float)) and not isinstance(
                     prior_poll_interval,
                     bool,
@@ -900,7 +887,7 @@ def normalise_workflow_effect_receipt(
             recovery_affordances.append(
                 {
                     "action_type": (
-                        "await_or_inspect_workflow_instance"
+                        "inspect_pending_workflow_instance"
                         if effect_status == "partial"
                         else "inspect_workflow_instance"
                     ),
@@ -908,8 +895,8 @@ def normalise_workflow_effect_receipt(
                     "arguments": wait_arguments,
                     "semantic_effect": (
                         (
-                            "observe the already-submitted instance until it is "
-                            "terminal or the chosen wait elapses"
+                            "inspect the already-submitted instance without "
+                            "spending another observation interval waiting"
                             if effect_status == "partial"
                             else "inspect the terminal workflow instance"
                         )

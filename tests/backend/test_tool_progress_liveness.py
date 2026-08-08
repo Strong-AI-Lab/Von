@@ -116,6 +116,44 @@ def test_heartbeat_updates_sequence_and_keeps_current_activity(monkeypatch) -> N
     )
 
 
+def test_long_quiet_live_request_keeps_original_clock_and_history(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch)
+    scope_key = "scope-long-live-request"
+    request_id = "req-long-live-request"
+
+    von_routes._set_tool_progress(
+        scope_key,
+        request_id,
+        {
+            "status": "thinking",
+            "phase": "workflow_execute",
+            "request_id": request_id,
+        },
+    )
+    initial = von_routes._get_tool_progress(scope_key, request_id)
+    assert initial is not None
+
+    clock["now"] += float(von_routes._TOOL_PROGRESS_TTL_SEC) + 1.0
+    polled = von_routes._get_live_memory_tool_progress(scope_key, request_id)
+    assert polled is not None
+    assert polled["request_started_epoch"] == initial["request_started_epoch"]
+    von_routes._set_tool_progress(
+        scope_key,
+        request_id,
+        {
+            "status": "heartbeat",
+            "phase": "workflow_execute",
+            "request_id": request_id,
+        },
+    )
+
+    current = von_routes._get_tool_progress(scope_key, request_id)
+    assert current is not None
+    assert current["request_started_epoch"] == initial["request_started_epoch"]
+    assert current["sequence_no"] == 2
+    assert len(current["_phase_history"]) == 1
+
+
 def test_observational_progress_does_not_synthesise_a_workflow_stage_path(
     monkeypatch,
 ) -> None:

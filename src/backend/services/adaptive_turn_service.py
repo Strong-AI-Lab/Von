@@ -1640,6 +1640,12 @@ def _scope_message(
         "- An effect receipt reports the bounded handler outcome; use returned "
         "identifiers and delegated reads to inspect canonical state before "
         "claiming that a representation persisted.\n"
+        "- A pending or partial represented-workflow receipt with a durable "
+        "instance identifier means submission is complete for this turn. Prefer "
+        "one immediate non-waiting inspection, then return the useful result, "
+        "current state, and exact handle. Do not spend repeated long observation "
+        "intervals unless the user needs synchronous completion or recent "
+        "progress justifies one bounded wait.\n"
         "- Preserve the requested outcome and effect cardinality through "
         "capability choice, retries, and fallback. Discovery and evidence reads "
         "may inspect the smallest bounded candidate set needed to identify the "
@@ -3306,6 +3312,44 @@ def _usage_add(
             totals[str(key)] = totals.get(str(key), 0.0) + float(value)
 
 
+def _can_preserve_pending_durable_response(
+    text: str,
+    effects: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Return whether a useful, honest pending-workflow answer can be shown."""
+
+    cleaned = text.strip()
+    if not cleaned or not effects:
+        return False
+    lowered = cleaned.lower()
+    if not any(
+        marker in lowered
+        for marker in (
+            "pending",
+            "queued",
+            "running",
+            "paused",
+            "partial",
+            "not yet",
+            "not complete",
+            "not finished",
+            "still processing",
+            "in progress",
+        )
+    ):
+        return False
+
+    for effect in effects:
+        if effect.get("capability_kind") != "represented_workflow":
+            return False
+        if effect.get("effect_status") != "partial":
+            return False
+        instance_id = str(effect.get("instance_id") or "").strip()
+        if not instance_id or instance_id not in cleaned:
+            return False
+    return True
+
+
 def execute_adaptive_turn(
     *,
     gateway: InternalMCPGateway | None,
@@ -3924,6 +3968,7 @@ def execute_adaptive_turn(
                     "The model returned a conversation-situation update but no "
                     "user-visible answer."
                 )
+        model_answer_completed = status == "completed"
         with effect_state_lock:
             effect_snapshot = {
                 effect_id: dict(state) for effect_id, state in effect_states.items()
@@ -4000,7 +4045,30 @@ def execute_adaptive_turn(
                 )
             )
         ]
-        effect_finality_fallback = status != "completed" and bool(relevant_effects)
+        preserve_pending_durable_response = (
+            model_answer_completed
+            and status == "effect_partially_completed"
+            and _can_preserve_pending_durable_response(text, relevant_effects)
+        )
+        effect_finality_fallback = (
+            status != "completed"
+            and bool(relevant_effects)
+            and not preserve_pending_durable_response
+        )
+        if preserve_pending_durable_response:
+            aux_calls.append(
+                {
+                    "type": "adaptive_turn_pending_effect_response_preserved",
+                    "schema_version": (
+                        "adaptive_turn_pending_effect_response_preserved.v1"
+                    ),
+                    "terminal_status": status,
+                    "effect_count": len(relevant_effects),
+                    "instance_ids": [
+                        state.get("instance_id") for state in relevant_effects
+                    ],
+                }
+            )
         if effect_finality_fallback:
             status_counts = {
                 effect_status: sum(

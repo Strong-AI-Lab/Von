@@ -437,27 +437,53 @@ def hydrate_debug_payload_blob_refs(
 
     hydrated_count = 0
     error_count = 0
+    active_blob_keys: set[str] = set()
 
     def _walk(value: Any) -> Any:
         nonlocal hydrated_count, error_count
 
         if _is_blob_ref_payload(value):
-            result = resolve_debug_payload_blob_ref(value)
-            if result.payload is None:
+            blob_ref = value.get("blob_ref")
+            blob_key = (
+                str(blob_ref.get("key") or "").strip()
+                if isinstance(blob_ref, Mapping)
+                else ""
+            )
+            if blob_key and blob_key in active_blob_keys:
                 error_count += 1
                 if not fail_soft:
-                    raise ValueError(result.error or result.status)
+                    raise ValueError("Cyclic debug payload blob reference")
                 replacement = dict(value)
                 replacement["hydration_error"] = {
                     "schema_version": "debug_payload_blob_hydration_error.v1",
-                    "status": result.status,
-                    "error": result.error,
-                    "error_class": result.error_class,
+                    "status": "cyclic_ref",
+                    "error": "Cyclic debug payload blob reference",
+                    "error_class": "ValueError",
                     "created_at_utc": _utcnow_iso(),
                 }
                 return replacement
-            hydrated_count += 1
-            return result.payload
+            if blob_key:
+                active_blob_keys.add(blob_key)
+            try:
+                result = resolve_debug_payload_blob_ref(value)
+                if result.payload is None:
+                    error_count += 1
+                    if not fail_soft:
+                        raise ValueError(result.error or result.status)
+                    replacement = dict(value)
+                    replacement["hydration_error"] = {
+                        "schema_version": "debug_payload_blob_hydration_error.v1",
+                        "status": result.status,
+                        "error": result.error,
+                        "error_class": result.error_class,
+                        "created_at_utc": _utcnow_iso(),
+                    }
+                    return replacement
+                hydrated_count += 1
+                return _walk(result.payload)
+            finally:
+                if blob_key:
+                    active_blob_keys.discard(blob_key)
 
         if isinstance(value, Mapping):
             return {str(key): _walk(item) for key, item in value.items()}

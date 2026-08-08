@@ -7319,6 +7319,143 @@ def test_workflow_instance_readback_reconciles_only_exact_terminal_effect(
         assert result.response_text == "The durable work product was verified."
 
 
+def test_pending_durable_response_with_exact_handle_is_preserved(monkeypatch) -> None:
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    workflow_capability = WorkflowTurnCapability(
+        name="represented_workflow_pending_test",
+        workflow_id="#V#represented_pending_workflow",
+        display_name="Represented pending workflow",
+        description="Produce a durable work product that may continue in background.",
+        relevance_score=0.95,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "inputs": {"type": "object", "additionalProperties": True},
+                "timeout_seconds": {"type": "number"},
+            },
+            "additionalProperties": False,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service."
+        "discover_turn_workflow_capabilities",
+        lambda *_args, **_kwargs: (
+            [workflow_capability],
+            {
+                "schema_version": "workflow_turn_capability_discovery.v1",
+                "status": "completed",
+                "match_count": 1,
+            },
+        ),
+    )
+    instance_id = "workflow-instance-pending-1"
+    instance_reads: list[dict[str, Any]] = []
+
+    def _execute_workflow(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "workflow_id": workflow_capability.workflow_id,
+            "created_new": True,
+            "final_status": "running",
+            "timed_out": True,
+            "workflow_execution": {
+                "timeout_seconds": 90.0,
+                "poll_interval_seconds": 0.5,
+            },
+        }
+
+    def _read_instance(**kwargs: Any) -> dict[str, Any]:
+        instance_reads.append(dict(kwargs))
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "workflow_id": workflow_capability.workflow_id,
+            "status": "running",
+            "timed_out": False,
+        }
+
+    final_text = (
+        "The durable work is still running. Its exact workflow instance is "
+        f"{instance_id}."
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover-pending-workflow",
+                    payload={"query": "produce the durable work product"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke-pending-workflow",
+                    payload={
+                        "name": workflow_capability.name,
+                        "arguments": {"timeout_seconds": 90.0},
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="inspect-pending-workflow",
+                    payload={
+                        "name": "workflow_get_instance",
+                        "arguments": {
+                            "instance_id": instance_id,
+                            "await_terminal": False,
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response=final_text),
+    )
+
+    result = execute_adaptive_turn(
+        gateway=_workflow_gateway(
+            _execute_workflow,
+            hard_timeout_enabled=False,
+            instance_handler=_read_instance,
+        ),
+        prompt="Produce the durable work product.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#real_user@real_org",
+        user_concept_id="#V#real_user",
+        org_concept_id="#V#real_org",
+        turn_id="turn-represented-workflow-pending",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+
+    assert instance_reads == [
+        {"instance_id": instance_id, "await_terminal": False}
+    ]
+    assert result.terminal_status == "effect_partially_completed"
+    assert result.effect_finality_fallback is False
+    assert result.response_text == final_text
+    assert any(
+        call.get("schema_version")
+        == "adaptive_turn_pending_effect_response_preserved.v1"
+        for call in result.aux_llm_calls
+    )
+
+
 def test_workflow_instance_readback_does_not_reconcile_unrelated_effect() -> None:
     instance_id = "shared-looking-instance-id"
     workflow_id = "#V#shared-looking-workflow-id"
