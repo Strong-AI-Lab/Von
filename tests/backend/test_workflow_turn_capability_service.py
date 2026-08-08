@@ -409,12 +409,11 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
     assert partial["effect_status"] == "partial"
     assert partial["recovery_affordances"][0]["arguments"] == {
         "instance_id": "instance-2",
-        "await_terminal": True,
-        "timeout_seconds": 90.0,
+        "await_terminal": False,
         "poll_interval_seconds": 0.5,
     }
     assert partial["recovery_affordances"][0]["action_type"] == (
-        "await_or_inspect_workflow_instance"
+        "inspect_pending_workflow_instance"
     )
     assert terminal_failure["effect_status"] == "failed"
     assert terminal_failure["changed"] is True
@@ -436,5 +435,8 @@ def test_workflow_receipt_distinguishes_completion_partial_failure_and_no_start(
     assert durable_timeout["mutation_outcome"] == "partial"
     assert durable_timeout["recovery_affordances"][0]["arguments"] == {
         "instance_id": "instance-4",
-        "await_terminal": True,
+        "await_terminal": False,
     }
+    assert durable_timeout["recovery_affordances"][0]["action_type"] == (
+        "inspect_pending_workflow_instance"
+    )
