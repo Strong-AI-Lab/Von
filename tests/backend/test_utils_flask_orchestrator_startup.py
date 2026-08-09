@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import types
 
@@ -135,9 +136,15 @@ def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
 
     _install_internal_mcp_gateway_stubs(monkeypatch, internal_mcp)
 
-    def _slow_durable_startup(_app_logger):
+    maintenance_finished = threading.Event()
+
+    def _slow_durable_startup(_app_logger, *, queue_ready_callback=None):
+        components = {"worker_running": True, "scheduler_running": True}
+        assert queue_ready_callback is not None
+        queue_ready_callback(components)
         time.sleep(1.0)
-        return {"worker_running": True, "scheduler_running": True}
+        maintenance_finished.set()
+        return components
 
     monkeypatch.setattr(
         utils_flask, "_start_durable_workflow_system", _slow_durable_startup
@@ -165,9 +172,65 @@ def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
         time.sleep(0.02)
 
     assert app.config.get("DURABLE_WORKFLOW_COMPONENTS") is not None
+    core_ready_status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS") or {}
+    assert core_ready_status.get("state") == "ready"
+    assert core_ready_status.get("ready") is True
+    assert core_ready_status.get("startup_phase") == "canonical_maintenance"
+    assert core_ready_status.get("maintenance_in_progress") is True
+    assert maintenance_finished.wait(3.0)
+
     final_status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS") or {}
     assert final_status.get("state") == "ready"
     assert final_status.get("ready") is True
+    assert final_status.get("startup_phase") == "complete"
+    assert final_status.get("maintenance_in_progress") is False
+
+
+def test_durable_workflow_startup_keeps_core_ready_when_maintenance_fails(
+    monkeypatch,
+):
+    from flask import Flask
+
+    import src.backend.server.utils_flask as utils_flask
+
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0")
+    monkeypatch.setattr(utils_flask, "_is_running_under_pytest", lambda: False)
+    monkeypatch.setattr(utils_flask, "_is_agent_test_instance", lambda: False)
+    monkeypatch.setattr(utils_flask, "_stop_durable_workflow_system", lambda: None)
+
+    def _maintenance_failure(_app_logger, *, queue_ready_callback=None):
+        assert queue_ready_callback is not None
+        queue_ready_callback(
+            {"worker_running": True, "scheduler_running": True}
+        )
+        return None
+
+    monkeypatch.setattr(
+        utils_flask,
+        "_start_durable_workflow_system",
+        _maintenance_failure,
+    )
+
+    app = Flask(__name__)
+    utils_flask._configure_durable_workflow_startup(app)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS") or {}
+        if status.get("startup_phase") == "canonical_maintenance_failed":
+            break
+        time.sleep(0.01)
+
+    status = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS") or {}
+    assert status.get("state") == "ready"
+    assert status.get("ready") is True
+    assert status.get("startup_phase") == "canonical_maintenance_failed"
+    assert status.get("maintenance_in_progress") is False
+    assert status.get("maintenance_error") == "startup_maintenance_failed"
+    assert app.config.get("DURABLE_WORKFLOW_COMPONENTS") == {
+        "worker_running": True,
+        "scheduler_running": True,
+    }
 
 
 def test_build_durable_workflow_registry_uses_shared_deferred_read_only_builder(

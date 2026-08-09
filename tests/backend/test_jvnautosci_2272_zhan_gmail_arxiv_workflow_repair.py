@@ -9,6 +9,7 @@ from scripts.repair_jvnautosci_2272_zhan_gmail_arxiv_ingestion_workflow import (
     PARENT_PROCESS_MESSAGES_STEP_ID,
     build_email_message_launch_input_contract,
     build_zhan_launch_input_contract,
+    publish_jvnautosci_2272_repair,
     rewrite_email_message_workflow_spec,
     rewrite_gmail_completion_hint_payload,
     rewrite_zhan_parent_workflow_spec,
@@ -228,6 +229,17 @@ def test_launch_contracts_are_valid_and_mapping_backed() -> None:
         assert error is None
         assert normalised is not None
         assert normalised["input_mappings"]
+
+
+def test_legacy_repair_entry_point_delegates_to_current_canonical_seed() -> None:
+    report = publish_jvnautosci_2272_repair(dry_run=True)
+
+    assert report["success"] is True
+    assert report["deprecated_entry_point"] is True
+    assert report["seed_version"] == "11"
+    assert report["delegates_to"] == (
+        "bootstrap_canonical_email_source_representation_convergence_workflows"
+    )
 
 
 def test_zhan_launch_contract_uses_prior_arxiv_evidence_as_narrow_query() -> None:

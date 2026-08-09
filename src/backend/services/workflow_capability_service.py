@@ -2911,8 +2911,12 @@ def run_workflow_capability_index_startup_check(
     started_at = time.perf_counter()
     checked_at_utc = _utc_now_iso()
 
+    # Startup readiness must stay bounded even when an invalidated, older
+    # generation still owns the rebuild lock. Start or join the background
+    # build and wait only for the declared startup interval; routed request
+    # paths can continue to use their existing explicit blocking policy.
     ensure_workflow_capability_index_populated(
-        block=True,
+        block=False,
         max_wait_seconds=effective_timeout,
         workflow_registry=workflow_registry,
     )

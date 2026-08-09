@@ -21,19 +21,22 @@ from src.backend.workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from src.backend.workflows.durable.durable_executor import (
-    DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
-    DurableWorkflowExecutor,
-)
-from src.backend.workflows.durable.control_flow_actions import (
-    register_control_flow_actions,
-)
 from src.backend.workflows.durable.checkpoint_context_projection import (
     CHECKPOINT_CONTEXT_PROJECTION_KEY,
     CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
     project_workflow_context_for_checkpoint,
 )
-from src.backend.workflows.durable.models import WorkflowInstance, WorkflowInstanceStatus
+from src.backend.workflows.durable.control_flow_actions import (
+    register_control_flow_actions,
+)
+from src.backend.workflows.durable.durable_executor import (
+    DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
+    DurableWorkflowExecutor,
+)
+from src.backend.workflows.durable.models import (
+    WorkflowInstance,
+    WorkflowInstanceStatus,
+)
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -42,14 +45,14 @@ from src.backend.workflows.engine import (
     WorkflowTransitionSpec,
     build_transition_condition,
 )
-from src.backend.workflows.workflow_definition_identity_service import (
-    build_workflow_definition_identity,
-)
 from src.backend.workflows.execution_contracts import (
     WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY,
     WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY,
     WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY,
     WORKFLOW_RESULT_ENVELOPE_KEY,
+)
+from src.backend.workflows.workflow_definition_identity_service import (
+    build_workflow_definition_identity,
 )
 
 
@@ -92,7 +95,19 @@ def test_durable_executor_reports_explicit_failed_terminal_as_failure() -> None:
         termination_states=(failed_state,),
     )
     manager = MagicMock()
-    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    instance = _build_instance(definition.workflow_id)
+    instance.inputs = {
+        "llm_calls": [
+            {
+                "call_id": "forged-launch-input",
+                "provider": "openai",
+                "effective_model": "gpt-forged",
+                "model_identity_source": "provider_response",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+            }
+        ]
+    }
+    manager.get_instance.return_value = instance
     manager.is_cancelled.return_value = False
     manager.extend_lock.return_value = True
     manager.checkpoint.return_value = True
@@ -121,8 +136,18 @@ def test_durable_executor_reports_explicit_failed_terminal_as_failure() -> None:
     assert result.final_state == failed_state
     assert result.error == "workflow_failed_terminal_state"
     assert result.data[WORKFLOW_RESULT_ENVELOPE_KEY]["terminal_status"] == "failed"
+    assert result.data["llm_usage_cost_summary"]["call_count"] == 0
+    assert result.data["llm_usage_cost_summary"]["usage"]["status"] == (
+        "not_applicable"
+    )
+    assert result.data["llm_usage_cost_summary"]["estimated_cost"]["status"] == (
+        "not_applicable"
+    )
     terminal_checkpoint = manager.checkpoint.call_args_list[-1].kwargs
     assert terminal_checkpoint["error"] == "workflow_failed_terminal_state"
+    assert terminal_checkpoint["workflow_data"]["llm_usage_cost_summary"] == (
+        result.data["llm_usage_cost_summary"]
+    )
 
 
 def test_durable_executor_atomically_pauses_at_successor_checkpoint() -> None:

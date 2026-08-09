@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .instance_manager import WorkflowInstanceManager
-from .models import WorkflowSchedule, ScheduleType
+from .models import ScheduleType, WorkflowInstanceStatus, WorkflowSchedule
 from .workflow_instance_submission_service import submit_verified_workflow_instance
 
 logger = logging.getLogger(__name__)
@@ -216,8 +216,9 @@ class WorkflowScheduler:
 
         for schedule in due_schedules:
             try:
-                self._trigger_schedule(schedule, now)
-                triggered_count += 1
+                instance_id = self._trigger_schedule(schedule, now)
+                if instance_id is not None:
+                    triggered_count += 1
             except Exception as e:
                 logger.exception(
                     "[scheduler] Failed to trigger schedule %s: %s",
@@ -247,22 +248,126 @@ class WorkflowScheduler:
                 total_ms,
             )
 
-    def _trigger_schedule(self, schedule: WorkflowSchedule, now: datetime) -> None:
+    def _active_instance_for_schedule(
+        self,
+        schedule: WorkflowSchedule,
+    ) -> Any | None:
+        """Return one active instance for this schedule, if present."""
+
+        instances = self._instance_manager.list_instances(
+            user_id=schedule.user_id,
+            namespace=schedule.namespace,
+            status=WorkflowInstanceStatus.active_values(),
+            workflow_id=schedule.workflow_id,
+            limit=100,
+        )
+        for instance in instances:
+            if getattr(instance, "schedule_id", None) == schedule.schedule_id:
+                return instance
+        return None
+
+    @staticmethod
+    def _occurrence_identity(
+        schedule: WorkflowSchedule,
+        now: datetime,
+        *,
+        manual: bool,
+    ) -> tuple[str, str, str]:
+        scheduled_for = now if manual else (schedule.next_run_at or now)
+        if scheduled_for.tzinfo is None:
+            scheduled_for = scheduled_for.replace(tzinfo=timezone.utc)
+        scheduled_for_utc = scheduled_for.astimezone(timezone.utc).isoformat()
+        occurrence_kind = "manual" if manual else "scheduled"
+        occurrence_id = (
+            f"{schedule.schedule_id}:{occurrence_kind}:{scheduled_for_utc}"
+        )
+        return (
+            scheduled_for_utc,
+            occurrence_id,
+            f"workflow_schedule_occurrence:{occurrence_id}",
+        )
+
+    def _advance_schedule_or_raise(
+        self,
+        schedule: WorkflowSchedule,
+        now: datetime,
+        *,
+        mark_run: bool = True,
+    ) -> None:
+        next_run = self._calculate_next_run(schedule, now)
+        update = (
+            self._instance_manager.update_schedule_after_run
+            if mark_run
+            else self._instance_manager.update_schedule_next_run
+        )
+        if not update(schedule.schedule_id, next_run_at=next_run):
+            raise RuntimeError(
+                f"schedule_next_run_update_failed:{schedule.schedule_id}"
+            )
+
+    def _trigger_schedule(
+        self,
+        schedule: WorkflowSchedule,
+        now: datetime,
+        *,
+        manual: bool = False,
+    ) -> str | None:
         """Trigger a single schedule.
 
         Args:
             schedule: The schedule to trigger.
             now: Current timestamp.
         """
-        # Create workflow instance via canonical verification pipeline.
+        scheduled_for_utc, occurrence_id, event_idempotency_key = (
+            self._occurrence_identity(schedule, now, manual=manual)
+        )
+        active_instance = self._active_instance_for_schedule(schedule)
+        if active_instance is not None:
+            active_instance_id = str(
+                getattr(active_instance, "instance_id", "") or ""
+            ).strip()
+            active_event_key = str(
+                getattr(active_instance, "event_idempotency_key", "") or ""
+            ).strip()
+            self._advance_schedule_or_raise(schedule, now, mark_run=False)
+            if active_event_key == event_idempotency_key and active_instance_id:
+                logger.info(
+                    "[scheduler] Reconciled schedule occurrence %s to active instance %s",
+                    occurrence_id,
+                    active_instance_id,
+                )
+                return active_instance_id
+            logger.info(
+                "[scheduler] Skipped overlapping occurrence %s; active instance=%s",
+                occurrence_id,
+                active_instance_id or "unknown",
+            )
+            return None
+
+        occurrence_inputs = dict(schedule.default_inputs)
+        occurrence_inputs.update(
+            {
+                "schedule_occurrence_id": occurrence_id,
+                "scheduled_for_utc": scheduled_for_utc,
+                "schedule_overlap_policy": "forbid",
+                "schedule_misfire_policy": "coalesce",
+            }
+        )
+
+        # Create workflow instance via canonical verification pipeline. The
+        # occurrence key is stable across scheduler retries and competing
+        # pollers, so the instance store provides the atomic deduplication point.
         submission = submit_verified_workflow_instance(
             manager=self._instance_manager,
             workflow_id=schedule.workflow_id,
             user_id=schedule.user_id,
             org_id=schedule.org_id,
             namespace=schedule.namespace,
-            inputs=schedule.default_inputs,
+            inputs=occurrence_inputs,
             schedule_id=schedule.schedule_id,
+            source_event_type="workflow.schedule.occurrence",
+            source_event_id=occurrence_id,
+            event_idempotency_key=event_idempotency_key,
         )
         if not submission.success or not submission.instance_id:
             raise RuntimeError(
@@ -277,21 +382,15 @@ class WorkflowScheduler:
             instance_id,
         )
 
-        # Calculate next run time
-        next_run = self._calculate_next_run(schedule, now)
-
-        # Update schedule
-        self._instance_manager.update_schedule_after_run(
-            schedule.schedule_id,
-            next_run_at=next_run,
-        )
+        self._advance_schedule_or_raise(schedule, now)
 
         # Notify callback
-        if self._on_schedule_triggered:
+        if self._on_schedule_triggered and submission.created_new is not False:
             try:
                 self._on_schedule_triggered(schedule, instance_id)
             except Exception:
                 pass
+        return instance_id
 
     def _calculate_next_run(
         self,
@@ -349,15 +448,7 @@ class WorkflowScheduler:
             return None
 
         now = datetime.now(timezone.utc)
-        self._trigger_schedule(schedule, now)
-
-        # Return the instance ID (we need to look it up)
-        instances = self._instance_manager.list_instances(
-            user_id=schedule.user_id,
-            workflow_id=schedule.workflow_id,
-            limit=1,
-        )
-        return instances[0].instance_id if instances else None
+        return self._trigger_schedule(schedule, now, manual=True)
 
 
 class AsyncWorkflowScheduler:

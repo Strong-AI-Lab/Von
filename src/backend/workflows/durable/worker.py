@@ -18,7 +18,6 @@ from typing import Any, Callable, Mapping
 from ...db.transient_errors import run_with_transient_mongo_retry
 from ...security.access_control import override_current_actor
 from ..action_registry import ActionRegistry
-from .instance_manager import WorkflowInstanceManager
 from .durable_executor import (
     DurableWorkflowExecutor,
     DurableWorkflowResult,
@@ -27,6 +26,11 @@ from .durable_executor import (
 from .failed_output_diagnostics import (
     build_completed_workflow_outputs,
     build_failed_workflow_outputs,
+)
+from .instance_manager import WorkflowInstanceManager
+from .llm_cost_tracking import (
+    LLM_USAGE_COST_SUMMARY_KEY,
+    build_durable_llm_usage_cost_summary,
 )
 from .models import WorkflowInstance
 from .worker_identity import build_worker_build_identity
@@ -535,6 +539,7 @@ class DurableWorkflowWorker:
             increment_retry: bool = True,
             outputs: dict[str, Any] | None = None,
             execution_trace_id: str | None = None,
+            llm_usage_cost_summary: Mapping[str, Any] | None = None,
         ) -> bool:
             try:
                 return bool(
@@ -545,6 +550,7 @@ class DurableWorkflowWorker:
                         increment_retry=increment_retry,
                         outputs=outputs,
                         execution_trace_id=execution_trace_id,
+                        llm_usage_cost_summary=llm_usage_cost_summary,
                         worker_id=self._worker_id,
                         claim_token=claim_token,
                     )
@@ -626,6 +632,7 @@ class DurableWorkflowWorker:
                 failure_saved = _best_effort_mark_failed(
                     error=error,
                     increment_retry=False,
+                    llm_usage_cost_summary=build_durable_llm_usage_cost_summary({}),
                 )
                 if failure_saved and self._on_instance_failed:
                     try:
@@ -641,6 +648,9 @@ class DurableWorkflowWorker:
 
             # Update status based on result
             if result.completed:
+                llm_usage_cost_summary = result.data.get(
+                    LLM_USAGE_COST_SUMMARY_KEY
+                )
                 completed_outputs = build_completed_workflow_outputs(
                     result.data,
                     result_envelope=result.result_envelope,
@@ -654,6 +664,11 @@ class DurableWorkflowWorker:
                         outputs=completed_outputs,
                         final_state=result.final_state,
                         execution_trace_id=result.execution_trace_id,
+                        llm_usage_cost_summary=(
+                            llm_usage_cost_summary
+                            if isinstance(llm_usage_cost_summary, Mapping)
+                            else None
+                        ),
                         worker_id=self._worker_id,
                         claim_token=claim_token,
                     ),
@@ -692,6 +707,9 @@ class DurableWorkflowWorker:
                 )
 
             else:
+                llm_usage_cost_summary = result.data.get(
+                    LLM_USAGE_COST_SUMMARY_KEY
+                )
                 failed_outputs = build_failed_workflow_outputs(
                     result.data,
                     error=result.error or "unknown_error",
@@ -702,6 +720,11 @@ class DurableWorkflowWorker:
                     error_step=result.final_state,
                     outputs=failed_outputs,
                     execution_trace_id=result.execution_trace_id,
+                    llm_usage_cost_summary=(
+                        llm_usage_cost_summary
+                        if isinstance(llm_usage_cost_summary, Mapping)
+                        else None
+                    ),
                 )
                 if failure_saved and self._on_instance_failed:
                     try:

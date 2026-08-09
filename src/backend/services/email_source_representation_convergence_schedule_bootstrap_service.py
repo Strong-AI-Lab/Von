@@ -15,8 +15,9 @@ from ..workflows.durable.models import ScheduleType, WorkflowSchedule
 from ..workflows.durable.startup import get_instance_manager
 
 EMAIL_ARXIV_REPRESENTATION_CONVERGENCE_SCHEDULE_MANAGED_KEY = (
-    "email_arxiv_representation_convergence_v1"
+    "email_arxiv_representation_convergence_v2"
 )
+_LEGACY_MANAGED_KEYS = frozenset({"email_arxiv_representation_convergence_v1"})
 
 _bootstrap_lock = threading.Lock()
 _bootstrap_completed = False
@@ -83,11 +84,11 @@ def _desired_schedule_config() -> dict[str, Any]:
     )
     gmail_profile = _clean_env(
         "VON_EMAIL_ARXIV_CONVERGENCE_GMAIL_PROFILE",
-        "#V#gmail_profile_zhan_gmail",
+        "#V#gmail_profile_vonwitbrock_gmail",
     )
     base_gmail_query = _clean_env(
         "VON_EMAIL_ARXIV_CONVERGENCE_BASE_QUERY",
-        "arxiv.org newer_than:365d",
+        "arxiv.org",
     )
     return {
         **identity,
@@ -99,8 +100,10 @@ def _desired_schedule_config() -> dict[str, Any]:
             ),
             "trigger_source": "email_arxiv_representation_convergence_schedule",
             "prompt": (
-                "Look for recent email messages about arxiv papers and represent "
-                "them if they are not already represented."
+                "Process the newest Inbox messages containing arXiv paper "
+                "references that do not have VON/PAPER/REPRESENTED. Represent "
+                "each paper, verify current processing evidence, then apply the "
+                "represented label and remove INBOX."
             ),
             "gmail_profile": gmail_profile,
             "base_gmail_query": base_gmail_query,
@@ -119,11 +122,14 @@ def _is_managed_schedule(schedule: WorkflowSchedule, desired: dict[str, Any]) ->
         schedule.default_inputs if isinstance(schedule.default_inputs, dict) else {}
     )
     marker = str(inputs.get("managed_schedule_key") or "").strip()
-    if marker == EMAIL_ARXIV_REPRESENTATION_CONVERGENCE_SCHEDULE_MANAGED_KEY:
+    known_keys = {
+        EMAIL_ARXIV_REPRESENTATION_CONVERGENCE_SCHEDULE_MANAGED_KEY,
+        *_LEGACY_MANAGED_KEYS,
+    }
+    if marker in known_keys:
         return True
-    return EMAIL_ARXIV_REPRESENTATION_CONVERGENCE_SCHEDULE_MANAGED_KEY in str(
-        schedule.description or ""
-    )
+    description = str(schedule.description or "")
+    return any(key in description for key in known_keys)
 
 
 def _matches_desired(schedule: WorkflowSchedule, desired: dict[str, Any]) -> bool:
@@ -138,15 +144,22 @@ def _matches_desired(schedule: WorkflowSchedule, desired: dict[str, Any]) -> boo
         and str(schedule.org_id or "") == str(desired["org_id"])
         and str(schedule.namespace or "") == str(desired["namespace"])
         and inputs == desired["default_inputs"]
+        and schedule.next_run_at is not None
     )
 
 
-def ensure_email_arxiv_representation_convergence_schedule() -> dict[str, Any]:
+def ensure_email_arxiv_representation_convergence_schedule(
+    *,
+    activate: bool | None = None,
+) -> dict[str, Any]:
     """Ensure a managed interval schedule exists for recurring arXiv email runs."""
 
     global _bootstrap_completed
 
-    if not _env_flag("VON_EMAIL_ARXIV_CONVERGENCE_SCHEDULE_ENABLE", default=True):
+    if (
+        not _env_flag("VON_EMAIL_ARXIV_CONVERGENCE_SCHEDULE_ENABLE", default=True)
+        and activate is not True
+    ):
         _bootstrap_completed = True
         return {
             "success": True,
@@ -158,7 +171,7 @@ def ensure_email_arxiv_representation_convergence_schedule() -> dict[str, Any]:
         }
 
     with _bootstrap_lock:
-        if _bootstrap_completed:
+        if _bootstrap_completed and activate is None:
             return {
                 "success": True,
                 "ensured": True,
@@ -169,6 +182,14 @@ def ensure_email_arxiv_representation_convergence_schedule() -> dict[str, Any]:
             }
 
         desired = _desired_schedule_config()
+        should_activate = (
+            bool(activate)
+            if activate is not None
+            else _env_flag(
+                "VON_EMAIL_ARXIV_CONVERGENCE_SCHEDULE_AUTO_ACTIVATE",
+                default=False,
+            )
+        )
         manager = get_instance_manager()
         schedules = manager.list_schedules(limit=500)
         managed = [item for item in schedules if _is_managed_schedule(item, desired)]
@@ -182,7 +203,7 @@ def ensure_email_arxiv_representation_convergence_schedule() -> dict[str, Any]:
         if matching:
             primary = sorted(matching, key=lambda item: item.schedule_id)[0]
             active_schedule_id = primary.schedule_id
-            if not primary.enabled and manager.set_schedule_enabled(
+            if should_activate and not primary.enabled and manager.set_schedule_enabled(
                 primary.schedule_id, True
             ):
                 updated_count += 1
@@ -218,6 +239,7 @@ def ensure_email_arxiv_representation_convergence_schedule() -> dict[str, Any]:
                 ),
                 start_at=datetime.now(timezone.utc),
             )
+            schedule.enabled = should_activate
             active_schedule_id = manager.create_schedule(schedule)
             created_count += 1
 
@@ -237,6 +259,19 @@ def ensure_email_arxiv_representation_convergence_schedule() -> dict[str, Any]:
             "namespace": str(desired["namespace"]),
             "gmail_profile": desired["default_inputs"]["gmail_profile"],
             "gmail_max_results": int(desired["default_inputs"]["gmail_max_results"]),
+            "schedule_enabled": bool(
+                should_activate
+                or (
+                    matching
+                    and bool(
+                        next(
+                            item.enabled
+                            for item in matching
+                            if item.schedule_id == active_schedule_id
+                        )
+                    )
+                )
+            ),
         }
 
 

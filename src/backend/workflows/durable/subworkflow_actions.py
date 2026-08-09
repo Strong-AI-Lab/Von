@@ -18,7 +18,6 @@ from ..action_registry import (
     WorkflowActionRequest,
     WorkflowActionResult,
 )
-from ..engine import WorkflowDefinition, WorkflowExecutor
 from ..engine import (
     LAST_WORKFLOW_APPROVAL_GATE_KEY,
     LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
@@ -31,11 +30,8 @@ from ..engine import (
     WORKFLOW_RETRY_EVENTS_KEY,
     WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY,
     WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY,
-)
-from ..subworkflow_contracts import (
-    WORKFLOW_SUBWORKFLOW_ACTION_ID,
-    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
-    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
+    WorkflowDefinition,
+    WorkflowExecutor,
 )
 from ..execution_contracts import (
     LAST_CONTROL_SIGNAL_BREAK_KEY,
@@ -55,20 +51,21 @@ from ..execution_contracts import (
     increment_runtime_metric,
     normalise_control_signal,
 )
-from ..tool_invocation_evidence import (
-    derive_tool_invocation_records_from_step_envelopes,
-)
 from ..metadata_validation import LAST_METADATA_EVENT_KEY, WORKFLOW_METADATA_EVENTS_KEY
-from .nested_workflow_authority import (
-    NESTED_WORKFLOW_DEFINITION_NOT_FOUND,
-    resolve_nested_workflow_definition,
-)
 from ..plan_state_runtime import (
     LAST_WORKFLOW_COMPLETION_GATE_KEY,
     LAST_WORKFLOW_PLAN_STATE_EVENT_KEY,
     WORKFLOW_COMPLETION_GATE_KEY,
     WORKFLOW_PLAN_STATE_EVENTS_KEY,
     WORKFLOW_PLAN_STATE_KEY,
+)
+from ..subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
+)
+from ..tool_invocation_evidence import (
+    derive_tool_invocation_records_from_step_envelopes,
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..vontology_loader import load_workflow_definition_from_vontology
@@ -77,6 +74,12 @@ from ..workflow_launch_input_contracts import (
     normalise_workflow_launch_input_contract,
     resolve_workflow_launch_inputs,
 )
+from .llm_cost_tracking import merge_nested_llm_calls_for_cost
+from .nested_workflow_authority import (
+    NESTED_WORKFLOW_DEFINITION_NOT_FOUND,
+    resolve_nested_workflow_definition,
+)
+
 _FAILURE_MODE_INPUT_KEYS: tuple[str, ...] = ("failure_mode", "__failure_mode")
 _RESERVED_SUBWORKFLOW_INPUT_KEYS: set[str] = {
     "workflow_id",
@@ -697,6 +700,7 @@ def _build_subworkflow_handler(
             trace=child_trace,
             _execution_scope=request.execution_scope,
         )
+        merge_nested_llm_calls_for_cost(request.data, child_result.data)
 
         invocation_event: Dict[str, Any] = {
             "parent_workflow_id": parent_workflow_id or None,

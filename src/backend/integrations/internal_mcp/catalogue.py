@@ -9903,6 +9903,7 @@ def _source_processing_marker_input_schema(*, read_only: bool = False) -> Schema
         "organisation_concept_id": (str, type(None)),
         "source_fingerprint": (str, type(None)),
         "processing_authority_fingerprint": (str, type(None)),
+        "require_represented_artifacts": bool,
     }
     if read_only:
         # Historical markers predate profile-scoped identity. Keep their exact
@@ -9988,12 +9989,15 @@ def _source_processing_marker_output_schema() -> Schema:
             "stored_processing_authority_fingerprint": (str, type(None)),
             "expected_processing_authority_fingerprint": (str, type(None)),
             "processing_authority_matches": (bool, type(None)),
+            "represented_artifacts_required": (bool, type(None)),
             "represented_artifacts_exist": (bool, type(None)),
         },
         allow_unknown=True,
         description=(
             "source processing marker output: compact represented evidence that a "
-            "source item has or has not been processed."
+            "source item has or has not been processed. When "
+            "require_represented_artifacts=true, currentness also requires at "
+            "least one represented artefact whose concept still exists."
         ),
     )
 
@@ -26582,6 +26586,8 @@ def _gmail_list_labels(**kwargs):
     try:
         return gs.list_labels(
             profile_id=profile,
+            exact_name=kwargs.get("exact_name"),
+            require_exact_match=kwargs.get("require_exact_match") is True,
             audit_context={
                 "namespace": kwargs.get("namespace"),
                 "source": "internal_mcp_gateway",
@@ -26715,6 +26721,7 @@ def _gmail_modify_labels(**kwargs):
             add_labels=kwargs.get("add_labels"),
             remove_labels=kwargs.get("remove_labels"),
             allow_mutation=allow_mutation,
+            verify_after=kwargs.get("verify_after") is True,
             audit_context={
                 "namespace": kwargs.get("namespace"),
                 "source": "internal_mcp_gateway",
@@ -35873,9 +35880,17 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     )
     gmail_list_labels_input_schema = Schema(
         required={"profile": str},
-        optional={},
+        optional={
+            "exact_name": str,
+            "require_exact_match": bool,
+        },
         allow_unknown=False,
-        description="List Gmail labels for a profile (read-only).",
+        description=(
+            "List Gmail labels for a profile (read-only). exact_name performs "
+            "case-sensitive exact-name resolution and returns label_id plus "
+            "exact_match_count. require_exact_match=true fails unless exactly one "
+            "label matches."
+        ),
     )
     gmail_create_label_input_schema = Schema(
         required={"profile": str, "name": str, "allow_mutation": bool},
@@ -35912,9 +35927,15 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         optional={
             "add_labels": list,
             "remove_labels": list,
+            "verify_after": bool,
         },
         allow_unknown=False,
-        description="Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope.",
+        description=(
+            "Atomically add/remove labels on a Gmail message. Requires "
+            "allow_mutation=true and gmail.modify scope. verify_after=true performs "
+            "an independent minimal message read-back and reconciles an "
+            "indeterminate modify response when the requested label state holds."
+        ),
     )
     definitions: List[MethodDefinition] = [
         MethodDefinition(
@@ -36469,7 +36490,10 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             },
             advisory_timeout_sec=15.0,
             hard_timeout_enabled=False,
-            description="List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
+            description=(
+                "List Gmail labels for a profile. Read-only; exact_name can resolve "
+                "one case-sensitive label name to its mailbox-specific ID."
+            ),
         ),
         MethodDefinition(
             name="gmail_create_label",
@@ -36501,7 +36525,12 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ),
             category="write",
             timeout_sec=20.0,
-            description="Add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope.",
+            description=(
+                "Atomically add/remove labels on a Gmail message. Requires "
+                "allow_mutation=true and profile with gmail.modify scope. Use "
+                "verify_after=true for independent canonical state read-back and "
+                "lost-response reconciliation."
+            ),
         ),
         MethodDefinition(
             name="search_knowledge_base",

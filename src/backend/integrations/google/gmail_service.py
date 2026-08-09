@@ -711,6 +711,8 @@ def find_attachment_part_metadata(
 
 def list_labels(
     profile_id: str,
+    exact_name: str | None = None,
+    require_exact_match: bool = False,
     profiles: Optional[Dict[str, GmailProfile]] = None,
     audit_context: Optional[Mapping[str, object]] = None,
 ) -> Dict:
@@ -723,7 +725,45 @@ def list_labels(
     service = get_service(profile_id, profiles)
 
     request = service.users().labels().list(userId=profile.user_id)
-    return request.execute() or {}
+    result = request.execute() or {}
+    if exact_name is None:
+        return result
+    if not isinstance(exact_name, str) or not exact_name.strip():
+        raise ValueError("exact_name must be a non-empty string when provided")
+
+    label_name = exact_name.strip()
+    raw_labels = result.get("labels")
+    labels = raw_labels if isinstance(raw_labels, list) else []
+    matches = [
+        dict(label)
+        for label in labels
+        if isinstance(label, Mapping) and label.get("name") == label_name
+    ]
+    if require_exact_match and len(matches) != 1:
+        raise ValueError(
+            "Gmail label exact-name resolution requires exactly one match: "
+            f"{label_name!r} matched {len(matches)} labels"
+        )
+
+    payload = dict(result)
+    matched_label = matches[0] if len(matches) == 1 else None
+    payload.update(
+        {
+            "profile": profile.profile_id,
+            "exact_name": label_name,
+            "exact_match_count": len(matches),
+            "matched_label": matched_label,
+            "label_id": (
+                matched_label.get("id") if isinstance(matched_label, Mapping) else None
+            ),
+            "label_name": (
+                matched_label.get("name")
+                if isinstance(matched_label, Mapping)
+                else None
+            ),
+        }
+    )
+    return payload
 
 
 def _normalise_optional_visibility(
@@ -956,6 +996,7 @@ def modify_labels(
     add_labels: Optional[List[str]] = None,
     remove_labels: Optional[List[str]] = None,
     allow_mutation: bool = False,
+    verify_after: bool = False,
     profiles: Optional[Dict[str, GmailProfile]] = None,
     audit_context: Optional[Mapping[str, object]] = None,
 ) -> Dict:
@@ -983,6 +1024,16 @@ def modify_labels(
         raise PermissionError("Profile scopes do not include gmail.modify")
 
     service = get_service(profile_id, profiles)
+    requested_add = list(dict.fromkeys(add_labels or []))
+    requested_remove = list(dict.fromkeys(remove_labels or []))
+    if any(
+        not isinstance(label_id, str) or not label_id.strip()
+        for label_id in [*requested_add, *requested_remove]
+    ):
+        raise ValueError("Gmail label IDs must be non-empty strings")
+    if set(requested_add).intersection(requested_remove):
+        raise ValueError("The same Gmail label cannot be both added and removed")
+
     request = (
         service.users()
         .messages()
@@ -990,9 +1041,57 @@ def modify_labels(
             userId=profile.user_id,
             id=message_id,
             body={
-                "addLabelIds": add_labels or [],
-                "removeLabelIds": remove_labels or [],
+                "addLabelIds": requested_add,
+                "removeLabelIds": requested_remove,
             },
         )
     )
-    return request.execute() or {}
+    modify_error: Exception | None = None
+    modify_result: Dict[str, object] = {}
+    try:
+        raw_result = request.execute() or {}
+        modify_result = dict(raw_result) if isinstance(raw_result, Mapping) else {}
+    except Exception as exc:  # noqa: BLE001
+        if not verify_after:
+            raise
+        modify_error = exc
+
+    if not verify_after:
+        return modify_result
+
+    try:
+        readback = (
+            service.users()
+            .messages()
+            .get(userId=profile.user_id, id=message_id, format="minimal")
+            .execute()
+            or {}
+        )
+    except Exception:
+        if modify_error is not None:
+            raise modify_error
+        raise
+
+    readback_label_ids = [
+        label_id
+        for label_id in (readback.get("labelIds") or [])
+        if isinstance(label_id, str) and label_id.strip()
+    ]
+    readback_set = set(readback_label_ids)
+    state_verified = set(requested_add).issubset(readback_set) and not set(
+        requested_remove
+    ).intersection(readback_set)
+    if not state_verified and modify_error is not None:
+        raise modify_error
+
+    return {
+        "success": state_verified,
+        "profile": profile.profile_id,
+        "message_id": message_id,
+        "requested_add_label_ids": requested_add,
+        "requested_remove_label_ids": requested_remove,
+        "modify_result": modify_result,
+        "readback_label_ids": readback_label_ids,
+        "gmail_label_state_verified": state_verified,
+        "modify_reconciled_after_error": modify_error is not None and state_verified,
+    }

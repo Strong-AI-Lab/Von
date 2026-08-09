@@ -37,12 +37,14 @@ from .authority_snapshot_attestation import (
     EXACT_AUTHORITY_SNAPSHOT_WORKER_CAPABILITY,
     validate_authority_checkpoint_attestation,
 )
+from .llm_cost_tracking import LLM_USAGE_COST_SUMMARY_KEY
 from .models import (
     EventWorkflowBinding,
     WorkflowInstance,
     WorkflowInstanceStatus,
     WorkflowSchedule,
 )
+from .vontology_schedule_repository import VontologyScheduleRepository
 from .worker_identity import (
     build_claim_provenance,
     get_configured_min_worker_build,
@@ -50,7 +52,6 @@ from .worker_identity import (
     worker_build_match_tokens,
     worker_satisfies_required_build,
 )
-from .vontology_schedule_repository import VontologyScheduleRepository
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "source_event_id": 1,
     "event_idempotency_key": 1,
     "execution_trace_id": 1,
+    LLM_USAGE_COST_SUMMARY_KEY: 1,
     "has_outputs": {"$ne": [{"$ifNull": ["$outputs", None]}, None]},
 }
 
@@ -1914,6 +1916,13 @@ class WorkflowInstanceManager:
             },
             "$unset": {DURABLE_AUTHORITY_CHECKPOINT_ATTESTATION_FIELD: ""},
         }
+        llm_usage_cost_summary = compacted_workflow_data.get(
+            LLM_USAGE_COST_SUMMARY_KEY
+        )
+        if isinstance(llm_usage_cost_summary, Mapping):
+            update["$set"][LLM_USAGE_COST_SUMMARY_KEY] = dict(
+                llm_usage_cost_summary
+            )
         if step_index is not None:
             update["$set"]["step_index"] = step_index
         if error is not None:
@@ -2114,6 +2123,7 @@ class WorkflowInstanceManager:
         outputs: dict[str, Any] | None = None,
         final_state: str | None = None,
         execution_trace_id: str | None = None,
+        llm_usage_cost_summary: Mapping[str, Any] | None = None,
         worker_id: str | None = None,
         claim_token: str | None = None,
     ) -> bool:
@@ -2152,6 +2162,10 @@ class WorkflowInstanceManager:
             update["$set"]["current_state"] = final_state
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id
+        if isinstance(llm_usage_cost_summary, Mapping):
+            update["$set"][LLM_USAGE_COST_SUMMARY_KEY] = dict(
+                llm_usage_cost_summary
+            )
 
         completion_query = self._claim_fence_query(
             instance_id=instance_id,
@@ -2190,6 +2204,11 @@ class WorkflowInstanceManager:
                     if execution_trace_id is not None
                     else instance_before.execution_trace_id
                 ),
+                llm_usage_cost_summary=(
+                    dict(llm_usage_cost_summary)
+                    if isinstance(llm_usage_cost_summary, Mapping)
+                    else instance_before.llm_usage_cost_summary
+                ),
             )
             self._broadcast_instance(completed_instance)
             self._reconcile_conversation_turn_terminal_effect(completed_instance)
@@ -2212,6 +2231,7 @@ class WorkflowInstanceManager:
         increment_retry: bool = True,
         outputs: dict[str, Any] | None = None,
         execution_trace_id: str | None = None,
+        llm_usage_cost_summary: Mapping[str, Any] | None = None,
         worker_id: str | None = None,
         claim_token: str | None = None,
     ) -> bool:
@@ -2271,6 +2291,10 @@ class WorkflowInstanceManager:
             )
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id
+        if isinstance(llm_usage_cost_summary, Mapping):
+            update["$set"][LLM_USAGE_COST_SUMMARY_KEY] = dict(
+                llm_usage_cost_summary
+            )
         if increment_retry:
             update["$inc"] = {"retry_count": 1}
 
@@ -2323,6 +2347,11 @@ class WorkflowInstanceManager:
                     execution_trace_id
                     if execution_trace_id is not None
                     else instance_before.execution_trace_id
+                ),
+                llm_usage_cost_summary=(
+                    dict(llm_usage_cost_summary)
+                    if isinstance(llm_usage_cost_summary, Mapping)
+                    else instance_before.llm_usage_cost_summary
                 ),
             )
             self._broadcast_instance(failed_instance)
@@ -2582,6 +2611,11 @@ class WorkflowInstanceManager:
             "progress_updated_at": now,
             "execution_trace_id": execution_trace_id,
         }
+        llm_usage_cost_summary = compacted_workflow_data.get(
+            LLM_USAGE_COST_SUMMARY_KEY
+        )
+        if isinstance(llm_usage_cost_summary, Mapping):
+            set_fields[LLM_USAGE_COST_SUMMARY_KEY] = dict(llm_usage_cost_summary)
         if progress_current is not None:
             set_fields["progress_current"] = progress_current
         if progress_total is not None:
@@ -3170,6 +3204,19 @@ class WorkflowInstanceManager:
             True if updated.
         """
         return self._schedule_repo.update_schedule_after_run(
+            schedule_id=schedule_id,
+            next_run_at=next_run_at,
+        )
+
+    def update_schedule_next_run(
+        self,
+        schedule_id: str,
+        *,
+        next_run_at: datetime | None,
+    ) -> bool:
+        """Advance a schedule without recording a completed trigger."""
+
+        return self._schedule_repo.update_schedule_next_run(
             schedule_id=schedule_id,
             next_run_at=next_run_at,
         )

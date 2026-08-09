@@ -2820,16 +2820,24 @@ class TestWorkflowScheduler:
         due_schedule.next_run_at = now
 
         manager.find_due_schedules.return_value = [due_schedule]
+        manager.list_instances.return_value = []
         manager.update_schedule_after_run.return_value = True
-        monkeypatch.setattr(
-            "src.backend.workflows.durable.scheduler.submit_verified_workflow_instance",
-            lambda **_kwargs: WorkflowInstanceSubmissionResult(
+        submitted: dict[str, Any] = {}
+
+        def fake_submit(**kwargs):
+            submitted.update(kwargs)
+            return WorkflowInstanceSubmissionResult(
                 success=True,
                 workflow_id="#V#enrichment_workflow",
                 status="accepted",
                 instance_id="instance-1",
                 verification={},
-            ),
+                created_new=True,
+            )
+
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.scheduler.submit_verified_workflow_instance",
+            fake_submit,
         )
 
         scheduler = WorkflowScheduler(manager)
@@ -2846,6 +2854,94 @@ class TestWorkflowScheduler:
 
         manager.find_due_schedules.assert_called_once_with(limit=50)
         manager.update_schedule_after_run.assert_called_once()
+        assert submitted["source_event_type"] == "workflow.schedule.occurrence"
+        assert submitted["source_event_id"].startswith(
+            "#V#schedule_test_due_1:scheduled:"
+        )
+        assert submitted["event_idempotency_key"].startswith(
+            "workflow_schedule_occurrence:#V#schedule_test_due_1:scheduled:"
+        )
+        assert submitted["inputs"]["schedule_overlap_policy"] == "forbid"
+        assert submitted["inputs"]["schedule_misfire_policy"] == "coalesce"
+
+    def test_schedule_occurrence_key_is_stable_across_retry(self, monkeypatch) -> None:
+        from src.backend.workflows.durable.workflow_instance_submission_service import (
+            WorkflowInstanceSubmissionResult,
+        )
+
+        manager = MagicMock(spec=WorkflowInstanceManager)
+        manager.list_instances.return_value = []
+        manager.update_schedule_after_run.return_value = True
+        scheduled_for = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+        schedule = WorkflowSchedule.create_interval(
+            "#V#enrichment_workflow",
+            interval_seconds=3600,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            start_at=scheduled_for,
+        )
+        schedule.schedule_id = "#V#schedule_stable_occurrence"
+        schedule.next_run_at = scheduled_for
+        observed_keys: list[str] = []
+
+        def fake_submit(**kwargs):
+            observed_keys.append(kwargs["event_idempotency_key"])
+            return WorkflowInstanceSubmissionResult(
+                success=True,
+                workflow_id=schedule.workflow_id,
+                status="accepted",
+                instance_id="instance-stable",
+                verification={},
+                created_new=len(observed_keys) == 1,
+            )
+
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.scheduler.submit_verified_workflow_instance",
+            fake_submit,
+        )
+        scheduler = WorkflowScheduler(manager)
+
+        first = scheduler._trigger_schedule(schedule, scheduled_for)
+        second = scheduler._trigger_schedule(schedule, scheduled_for)
+
+        assert first == second == "instance-stable"
+        assert len(set(observed_keys)) == 1
+
+    def test_overlapping_schedule_occurrence_is_coalesced(self, monkeypatch) -> None:
+        manager = MagicMock(spec=WorkflowInstanceManager)
+        now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+        schedule = WorkflowSchedule.create_interval(
+            "#V#enrichment_workflow",
+            interval_seconds=3600,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            start_at=now,
+        )
+        schedule.schedule_id = "#V#schedule_overlap"
+        schedule.next_run_at = now
+        active = MagicMock()
+        active.schedule_id = schedule.schedule_id
+        active.instance_id = "instance-running"
+        active.event_idempotency_key = "different-occurrence"
+        manager.list_instances.return_value = [active]
+        manager.update_schedule_next_run.return_value = True
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.scheduler.submit_verified_workflow_instance",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("overlapping schedule submitted a second instance")
+            ),
+        )
+
+        result = WorkflowScheduler(manager)._trigger_schedule(schedule, now)
+
+        assert result is None
+        manager.update_schedule_next_run.assert_called_once_with(
+            schedule.schedule_id,
+            next_run_at=now + timedelta(seconds=3600),
+        )
+        manager.update_schedule_after_run.assert_not_called()
 
     def test_process_due_schedules_records_empty_poll(self) -> None:
         manager = MagicMock(spec=WorkflowInstanceManager)

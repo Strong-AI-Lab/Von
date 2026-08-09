@@ -3146,6 +3146,8 @@ async def _handle_gmail_list_labels(arguments: dict[str, Any]) -> list[TextConte
     try:
         result = gmail_service.list_labels(
             profile_id=profile,
+            exact_name=arguments.get("exact_name"),
+            require_exact_match=arguments.get("require_exact_match") is True,
             audit_context=_gmail_audit_context("gmail_list_labels"),
         )
         return [_json_text(result)]
@@ -3239,6 +3241,7 @@ async def _handle_gmail_modify_labels(arguments: dict[str, Any]) -> list[TextCon
             add_labels=arguments.get("add_labels"),
             remove_labels=arguments.get("remove_labels"),
             allow_mutation=allow_mutation,
+            verify_after=arguments.get("verify_after") is True,
             audit_context=_gmail_audit_context("gmail_modify_labels"),
         )
         return [_json_text(result)]

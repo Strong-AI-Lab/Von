@@ -23,6 +23,7 @@ from ..terminal_outcome_receipts import (
     terminal_outcome_receipt_projection_from_record,
 )
 from ..trace_store import get_workflow_execution_trace
+from .llm_cost_tracking import LLM_USAGE_COST_SUMMARY_KEY
 from .workflow_instance_submission_service import (
     WorkflowInstanceSubmissionResult,
     build_verified_instance_launch_payload,
@@ -393,6 +394,10 @@ def build_workflow_execution_telemetry(
         },
         "progress": dict(instance_payload.get("progress") or {}),
         "execution_trace_id": instance_payload.get("execution_trace_id"),
+        LLM_USAGE_COST_SUMMARY_KEY: _mapping_or_none(
+            instance_payload.get(LLM_USAGE_COST_SUMMARY_KEY)
+            or workflow_context.get(LLM_USAGE_COST_SUMMARY_KEY)
+        ),
     }
     if include_step_result_envelopes:
         telemetry["step_result_envelopes"] = step_result_envelopes

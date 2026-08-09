@@ -233,6 +233,54 @@ def test_list_and_get_message(mock_get_profile, mock_get_service):
     assert labels_result == {"labels": []}
 
 
+@patch("src.backend.integrations.google.gmail_service.get_service")
+@patch("src.backend.integrations.google.gmail_service.get_profile")
+def test_list_labels_resolves_one_exact_name(mock_get_profile, mock_get_service):
+    mock_get_profile.return_value = SimpleNamespace(
+        profile_id="test",
+        user_id="me",
+    )
+    labels_mock = MagicMock()
+    mock_get_service.return_value.users.return_value.labels.return_value = labels_mock
+    labels_mock.list.return_value.execute.return_value = {
+        "labels": [
+            {"id": "Label_2", "name": "VON/PAPER/ARXIV"},
+            {"id": "Label_3", "name": "VON/PAPER/REPRESENTED"},
+        ]
+    }
+
+    result = gs.list_labels(
+        "test",
+        exact_name="VON/PAPER/REPRESENTED",
+        require_exact_match=True,
+    )
+
+    assert result["exact_match_count"] == 1
+    assert result["label_id"] == "Label_3"
+    assert result["label_name"] == "VON/PAPER/REPRESENTED"
+
+
+@patch("src.backend.integrations.google.gmail_service.get_service")
+@patch("src.backend.integrations.google.gmail_service.get_profile")
+def test_list_labels_required_exact_name_fails_closed(
+    mock_get_profile, mock_get_service
+):
+    mock_get_profile.return_value = SimpleNamespace(
+        profile_id="test",
+        user_id="me",
+    )
+    labels_mock = MagicMock()
+    mock_get_service.return_value.users.return_value.labels.return_value = labels_mock
+    labels_mock.list.return_value.execute.return_value = {"labels": []}
+
+    with pytest.raises(ValueError, match="matched 0 labels"):
+        gs.list_labels(
+            "test",
+            exact_name="VON/PAPER/REPRESENTED",
+            require_exact_match=True,
+        )
+
+
 def test_decode_attachment_bytes_accepts_gmail_base64url_without_padding():
     source = b"%PDF-1.7\nresearch description"
     encoded = base64.urlsafe_b64encode(source).decode("ascii").rstrip("=")
@@ -301,6 +349,79 @@ def test_modify_labels_guard(monkeypatch):
 
         assert result == {"id": "mid"}
         svc.users.return_value.messages.return_value.modify.assert_called_once()
+
+
+def test_modify_labels_verifies_canonical_state(monkeypatch):
+    profiles = {
+        "p": gs.GmailProfile(
+            profile_id="p",
+            token_path="/tmp/token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    with patch(
+        "src.backend.integrations.google.gmail_service.get_service"
+    ) as mock_service:
+        svc = MagicMock()
+        messages = svc.users.return_value.messages.return_value
+        messages.modify.return_value.execute.return_value = {"id": "mid"}
+        messages.get.return_value.execute.return_value = {
+            "id": "mid",
+            "labelIds": ["Label_3", "UNREAD"],
+        }
+        mock_service.return_value = svc
+
+        result = gs.modify_labels(
+            "p",
+            "mid",
+            add_labels=["Label_3"],
+            remove_labels=["INBOX"],
+            allow_mutation=True,
+            verify_after=True,
+            profiles=profiles,
+        )
+
+    assert result["success"] is True
+    assert result["gmail_label_state_verified"] is True
+    assert result["readback_label_ids"] == ["Label_3", "UNREAD"]
+    assert result["modify_reconciled_after_error"] is False
+    messages.get.assert_called_once_with(userId="me", id="mid", format="minimal")
+
+
+def test_modify_labels_reconciles_lost_modify_response(monkeypatch):
+    profiles = {
+        "p": gs.GmailProfile(
+            profile_id="p",
+            token_path="/tmp/token.json",
+            scopes=[gs.MUTATION_SCOPE],
+        )
+    }
+    with patch(
+        "src.backend.integrations.google.gmail_service.get_service"
+    ) as mock_service:
+        svc = MagicMock()
+        messages = svc.users.return_value.messages.return_value
+        messages.modify.return_value.execute.side_effect = TimeoutError(
+            "response lost"
+        )
+        messages.get.return_value.execute.return_value = {
+            "id": "mid",
+            "labelIds": ["Label_3"],
+        }
+        mock_service.return_value = svc
+
+        result = gs.modify_labels(
+            "p",
+            "mid",
+            add_labels=["Label_3"],
+            remove_labels=["INBOX"],
+            allow_mutation=True,
+            verify_after=True,
+            profiles=profiles,
+        )
+
+    assert result["gmail_label_state_verified"] is True
+    assert result["modify_reconciled_after_error"] is True
 
 
 def test_create_label_guard_and_calls_gmail_api(monkeypatch):
