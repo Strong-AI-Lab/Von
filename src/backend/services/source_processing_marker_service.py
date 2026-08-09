@@ -319,6 +319,7 @@ def _marker_response_from_payload(
     text_relation_result: Mapping[str, Any] | None = None,
     expected_source_fingerprint: str | None = None,
     expected_processing_authority_fingerprint: str | None = None,
+    require_represented_artifacts: bool = False,
 ) -> dict[str, Any]:
     payload = dict(evidence_payload or {})
     represented_ids = _ordered_unique(
@@ -343,11 +344,14 @@ def _marker_response_from_payload(
         and stored_source_fingerprint == expected_fingerprint
     )
     source_system = _clean_text(payload.get("source_system")).lower()
-    represented_outputs_required = source_system in {
-        "spreadsheet_dataset",
-        "spreadsheet_record",
-    }
-    represented_ids_exist = True
+    represented_outputs_required = bool(require_represented_artifacts) or (
+        source_system
+        in {
+            "spreadsheet_dataset",
+            "spreadsheet_record",
+        }
+    )
+    represented_ids_exist = not represented_outputs_required or bool(represented_ids)
     if represented_outputs_required and represented_ids:
         represented_ids_exist = set(represented_ids).issubset(
             _find_existing_concept_ids(represented_ids)
@@ -397,6 +401,7 @@ def _marker_response_from_payload(
             expected_authority_fingerprint or None
         ),
         "processing_authority_matches": processing_authority_matches,
+        "represented_artifacts_required": represented_outputs_required,
         "represented_artifacts_exist": represented_ids_exist,
         "source_processing_current": source_processing_current,
         # Keep the output contract stable when the marker has not been written
@@ -440,6 +445,7 @@ def get_source_processing_marker(
     source_profile: str | None = None,
     source_fingerprint: str | None = None,
     processing_authority_fingerprint: str | None = None,
+    require_represented_artifacts: bool = False,
     **_: Any,
 ) -> dict[str, Any]:
     source_system_clean = _clean_text(source_system)
@@ -466,6 +472,7 @@ def get_source_processing_marker(
         expected_processing_authority_fingerprint=(
             processing_authority_fingerprint
         ),
+        require_represented_artifacts=require_represented_artifacts,
     )
 
 
@@ -487,6 +494,7 @@ def record_source_processing_marker(
     organisation_concept_id: str | None = None,
     source_fingerprint: str | None = None,
     processing_authority_fingerprint: str | None = None,
+    require_represented_artifacts: bool = False,
     processing_evidence: Mapping[str, Any] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
@@ -632,6 +640,7 @@ def record_source_processing_marker(
         expected_processing_authority_fingerprint=(
             processing_authority_fingerprint
         ),
+        require_represented_artifacts=require_represented_artifacts,
     )
 
 

@@ -15,28 +15,24 @@ from ...db.transient_errors import run_with_transient_mongo_retry
 from ...services.relationship_extent_index_service import (
     defer_relationship_extent_index_sync,
 )
-from ..engine import (
-    WorkflowDefinition,
-    materialise_terminal_effect_context,
-    WorkflowExecutor,
-)
-from ..metadata_validation import (
-    format_metadata_validation_error,
-)
 from ..action_registry import (
     ActionRegistry,
     WorkflowEnvironment,
     WorkflowExecutionScope,
 )
-from ..trace_model import WorkflowExecutionTrace
+from ..engine import (
+    WorkflowDefinition,
+    WorkflowExecutor,
+    materialise_terminal_effect_context,
+)
 from ..execution_contracts import (
     LAST_WORKFLOW_CHECKPOINT_PAUSE_EVENT_KEY,
-    WORKFLOW_CONTROL_SIGNAL_RETURN,
     WORKFLOW_CHECKPOINT_PAUSE_EVENTS_KEY,
     WORKFLOW_CHECKPOINT_PAUSE_RECEIPT_KEY,
     WORKFLOW_CHECKPOINT_PAUSE_REQUEST_KEY,
     WORKFLOW_CHECKPOINT_PAUSE_REQUEST_SCHEMA_VERSION,
     WORKFLOW_CHECKPOINT_RESUME_RECEIPT_KEY,
+    WORKFLOW_CONTROL_SIGNAL_RETURN,
     WORKFLOW_RETURN_PAYLOAD_KEY,
     build_workflow_result_envelope,
     clear_control_signal_context,
@@ -44,18 +40,17 @@ from ..execution_contracts import (
     set_workflow_result_envelope,
     workflow_final_state_is_failure_like,
 )
+from ..metadata_validation import (
+    format_metadata_validation_error,
+)
 from ..plan_state_runtime import (
     apply_workflow_step_checkpoint,
     compute_plan_state_progress,
     evaluate_workflow_completion_gate,
     mark_workflow_plan_state_resume,
 )
+from ..trace_model import WorkflowExecutionTrace
 from ..trace_store import insert_workflow_execution_trace
-from .checkpoint_context_projection import (
-    CHECKPOINT_CONTEXT_PROJECTION_KEY,
-    CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
-    project_workflow_context_for_checkpoint,
-)
 from .authority_snapshot_attestation import (
     DURABLE_EXECUTED_WORKFLOW_DEFINITION_IDENTITY_KEY,
     PROMPT_CONTEXT_DIAGNOSTICS_KEY,
@@ -65,7 +60,17 @@ from .authority_snapshot_attestation import (
     validate_authority_checkpoint_attestation,
     worker_claim_supports_exact_authority_snapshot,
 )
+from .checkpoint_context_projection import (
+    CHECKPOINT_CONTEXT_PROJECTION_KEY,
+    CHECKPOINT_CONTEXT_PROJECTION_SCHEMA_VERSION,
+    project_workflow_context_for_checkpoint,
+)
 from .instance_manager import WorkflowInstanceManager
+from .llm_cost_tracking import (
+    LLM_USAGE_COST_SUMMARY_KEY,
+    build_durable_llm_usage_cost_summary,
+    project_llm_calls_for_cost,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -556,6 +561,16 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             context = dict(instance.inputs)
             current_state = definition.initial_state
             step_index = 0
+            # Launch inputs are not execution telemetry authority. A client,
+            # scheduler input, or represented workflow parameter must not be
+            # able to invent provider calls or monetary usage before the
+            # executor observes them.
+            for telemetry_key in (
+                "llm_calls",
+                "aux_llm_calls",
+                LLM_USAGE_COST_SUMMARY_KEY,
+            ):
+                context.pop(telemetry_key, None)
         persisted_checkpoint_state = instance.current_state
         persisted_checkpoint_step_index = instance.step_index
         lifecycle_context_keys = (
@@ -690,8 +705,8 @@ class DurableWorkflowExecutor(WorkflowExecutor):
 
         # Create execution environment
         from ...languagemodels.llm_interface import (
-            get_active_model_parameters,
             get_active_model_name,
+            get_active_model_parameters,
             get_llm_client,
             resolve_provider_from_model_concept,
         )
@@ -808,6 +823,39 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             if resolved_provider:
                 trace.metadata["default_provider"] = resolved_provider
         persisted_execution_trace_id: str | None = None
+        cost_model_registry_snapshot: Any = None
+        cost_model_registry_loaded = False
+
+        def _refresh_llm_usage_cost_summary() -> dict[str, Any]:
+            """Persist actual usage and an honest registry-priced estimate."""
+
+            nonlocal cost_model_registry_loaded
+            nonlocal cost_model_registry_snapshot
+            recorded_calls = project_llm_calls_for_cost(context.get("llm_calls"))
+            if recorded_calls and not cost_model_registry_loaded:
+                cost_model_registry_loaded = True
+                try:
+                    from ...services.model_registry_service import (
+                        get_model_registry_snapshot,
+                    )
+
+                    cost_model_registry_snapshot = get_model_registry_snapshot()
+                except Exception:
+                    # Usage remains canonical even when the price authority is
+                    # unavailable. The summary will report an unavailable or
+                    # partial estimate instead of inventing zero cost.
+                    logger.warning(
+                        "[durable_workflow] Model pricing unavailable for %s",
+                        instance_id,
+                        exc_info=True,
+                    )
+                    cost_model_registry_snapshot = None
+            summary = build_durable_llm_usage_cost_summary(
+                {"llm_calls": recorded_calls},
+                model_registry=cost_model_registry_snapshot,
+            )
+            context[LLM_USAGE_COST_SUMMARY_KEY] = summary
+            return summary
 
         total_steps = max(1, len(definition.states))
         run_support = self._resolve_run_support(definition=definition)
@@ -820,6 +868,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
             checkpoint_step_index: int,
         ) -> tuple[dict[str, Any], dict[str, Any] | None]:
             _reassert_executed_definition_identity()
+            _refresh_llm_usage_cost_summary()
             if any(
                 context.get(key) is not None
                 for key in (
@@ -931,6 +980,7 @@ class DurableWorkflowExecutor(WorkflowExecutor):
         ) -> DurableWorkflowResult:
             nonlocal persisted_execution_trace_id
             _reassert_executed_definition_identity()
+            _refresh_llm_usage_cost_summary()
             result_envelope = build_workflow_result_envelope(
                 workflow_id=definition.workflow_id,
                 completed=completed,

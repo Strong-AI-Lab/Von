@@ -7,7 +7,9 @@ from src.backend.workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from src.backend.workflows.durable.subworkflow_actions import register_subworkflow_actions
+from src.backend.workflows.durable.subworkflow_actions import (
+    register_subworkflow_actions,
+)
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,

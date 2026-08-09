@@ -3,29 +3,34 @@
   "entries": [
     {
       "action_kind": "terminal_completion",
-      "description": "After a message's arXiv resources have been successfully ingested, record durable represented source-processing evidence for the source Gmail message.",
+      "description": "After a message's arXiv resources have been successfully represented and its current marker and artefacts have been read back, apply VON/PAPER/REPRESENTED and remove INBOX with canonical Gmail label-state verification.",
       "action": {
         "type": "workflow_mcp.invoke_tool",
-        "tool_name": "record_source_processing_marker",
-        "tool_concept_id": "#V#record_source_processing_marker_tool"
+        "tool_name": "gmail_modify_labels",
+        "tool_concept_id": "#V#gmail_modify_labels_tool"
       },
       "tool_arguments": {
-        "source_system": "gmail",
-        "source_profile_context_key": "gmail_profile",
-        "source_item_id_context_key": "message_id",
-        "represented_outputs_context_key": "arxiv_iteration_results",
-        "processing_status": "processed"
+        "profile_context_key": "gmail_profile",
+        "message_id_context_key": "message_id",
+        "add_label_id_context_key": "represented_label_id",
+        "remove_label_ids": [
+          "INBOX"
+        ],
+        "allow_mutation": true,
+        "verify_after": true
       },
       "represented_effects": [
         {
-          "effect_kind": "record_source_processing_marker",
-          "marker_type_concept_id": "#V#source_processing_marker",
-          "evidence_predicate_concept_id": "#V#hasSourceProcessingEvidenceJson"
+          "effect_kind": "verified_gmail_label_convergence",
+          "add_label_name": "VON/PAPER/REPRESENTED",
+          "remove_label_id": "INBOX",
+          "requires_current_source_processing_marker": true,
+          "requires_represented_artifact_readback": true
         }
       ],
       "upstream_filter": {
-        "query_fragment": "",
-        "rationale": "Gmail listing remains read-only; child workflows check represented source-processing markers before repeating source-message work."
+        "query_fragment": "-label:\"VON/PAPER/REPRESENTED\"",
+        "rationale": "Repeated bounded runs select newest Inbox messages that have not yet converged to the represented Gmail label state, so the backlog advances without a date cap."
       }
     }
   ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 
@@ -539,9 +540,22 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
 
     app_logger = MagicMock()
-    result = utils_flask._start_durable_workflow_system(app_logger)
+    queue_ready_components: list[dict[str, Any]] = []
+    result = utils_flask._start_durable_workflow_system(
+        app_logger,
+        queue_ready_callback=lambda components: queue_ready_components.append(
+            dict(components)
+        ),
+    )
 
     assert isinstance(result, dict)
+    assert len(queue_ready_components) == 1
+    assert queue_ready_components[0].get("startup_queue_ready") == {
+        "stage": "before_canonical_bootstraps",
+        "recovered_orphaned_instances": 0,
+        "released_ineligible_worker_claims": 0,
+    }
+    assert "entity_workflow_bootstrap" not in queue_ready_components[0]
     assert startup_events[:2] == ["worker_started", "entity_bootstrap"]
     assert result.get("startup_queue_ready") == {
         "stage": "before_canonical_bootstraps",

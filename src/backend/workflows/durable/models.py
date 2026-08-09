@@ -251,6 +251,10 @@ class WorkflowInstance:
     # Tracing
     execution_trace_id: str | None = None
 
+    # Content-free provider usage and registry-priced cost estimate. The
+    # schedule/occurrence attribution remains on this instance record.
+    llm_usage_cost_summary: dict[str, Any] | None = None
+
     @classmethod
     def create(
         cls,
@@ -326,6 +330,7 @@ class WorkflowInstance:
             "max_retries": self.max_retries,
             "schedule_id": self.schedule_id,
             "execution_trace_id": self.execution_trace_id,
+            "llm_usage_cost_summary": self.llm_usage_cost_summary,
         }
 
         # Persist event linkage fields only when present so sparse/partial indexes
@@ -402,6 +407,11 @@ class WorkflowInstance:
             source_event_id=doc.get("source_event_id"),
             event_idempotency_key=doc.get("event_idempotency_key"),
             execution_trace_id=doc.get("execution_trace_id"),
+            llm_usage_cost_summary=(
+                dict(doc["llm_usage_cost_summary"])
+                if isinstance(doc.get("llm_usage_cost_summary"), dict)
+                else None
+            ),
         )
 
     @staticmethod
@@ -476,6 +486,11 @@ class WorkflowInstance:
             "source_event_id": doc.get("source_event_id"),
             "event_idempotency_key": doc.get("event_idempotency_key"),
             "execution_trace_id": doc.get("execution_trace_id"),
+            "llm_usage_cost_summary": (
+                dict(doc["llm_usage_cost_summary"])
+                if isinstance(doc.get("llm_usage_cost_summary"), dict)
+                else None
+            ),
         }
 
     def to_status_dict(self) -> dict[str, Any]:
@@ -513,6 +528,7 @@ class WorkflowInstance:
                 "source_event_id": self.source_event_id,
                 "event_idempotency_key": self.event_idempotency_key,
                 "execution_trace_id": self.execution_trace_id,
+                "llm_usage_cost_summary": self.llm_usage_cost_summary,
             }
         )
 

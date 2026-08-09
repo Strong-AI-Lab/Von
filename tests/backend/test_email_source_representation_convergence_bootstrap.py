@@ -82,12 +82,14 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
     payload = json.loads(str(captured_hint["text"]))
     entry = payload["entries"][0]
     assert entry["action_kind"] == "terminal_completion"
-    assert entry["action"]["tool_name"] == "record_source_processing_marker"
-    assert entry["tool_arguments"]["source_system"] == "gmail"
-    assert entry["tool_arguments"]["source_item_id_context_key"] == "message_id"
-    assert entry["upstream_filter"]["query_fragment"] == ""
+    assert entry["action"]["tool_name"] == "gmail_modify_labels"
+    assert entry["tool_arguments"]["message_id_context_key"] == "message_id"
+    assert entry["tool_arguments"]["verify_after"] is True
+    assert entry["upstream_filter"]["query_fragment"] == (
+        '-label:"VON/PAPER/REPRESENTED"'
+    )
     assert entry["represented_effects"][0]["effect_kind"] == (
-        "record_source_processing_marker"
+        "verified_gmail_label_convergence"
     )
 
 
@@ -308,14 +310,14 @@ def test_email_source_seed_keeps_batch_effects_out_of_singular_routing() -> None
     assert any("Do not route a singular" in note for note in routing_notes)
 
 
-def test_email_source_seed_uses_represented_markers_instead_of_gmail_writes() -> None:
+def test_email_source_seed_requires_current_markers_before_verified_gmail_writes() -> None:
     from src.backend.services import (
         email_source_representation_convergence_workflow_vontology_service as mod,
     )
 
     payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
     seed_text = json.dumps(payload)
-    assert "gmail_modify_labels" not in seed_text
+    assert "gmail_modify_labels" in seed_text
     assert "vontology/ingested" not in seed_text
 
     workflows = {
@@ -334,6 +336,12 @@ def test_email_source_seed_uses_represented_markers_instead_of_gmail_writes() ->
         "tool_name",
         "get_source_processing_marker",
     ]
+    marker_arguments = steps["check_processed_marker"]["static_input_bindings"][0][
+        1
+    ]
+    assert marker_arguments["require_represented_artifacts"] is True
+    assert "source_fingerprint" in marker_arguments
+    assert "processing_authority_fingerprint" in marker_arguments
     mark_done = steps["mark_done"]
     assert mark_done["mutation_authority"]["maximum_level"] == "additive_vontology"
     assert mark_done["static_input_bindings"][1] == [
@@ -351,17 +359,29 @@ def test_email_source_seed_uses_represented_markers_instead_of_gmail_writes() ->
     ]
     assert verify_done_marker["on_failure_state"] == "failed_unmarked"
     assert verify_done_marker["next_state"] == "failed_unmarked"
-    assert verify_done_marker["conditional_transitions"] == [
-        {
-            "condition_spec": {
-                "expected": True,
-                "key": "source_processing_marker_exists",
-                "kind": "context_flag",
-            },
-            "reason": "source_processing_marker_canonically_verified",
-            "to_state": "done",
-        }
+    assert verify_done_marker["conditional_transitions"][0]["condition_spec"] == {
+        "expected": True,
+        "key": "source_processing_current",
+        "kind": "context_flag",
+    }
+    assert verify_done_marker["conditional_transitions"][0]["to_state"] == (
+        "converge_gmail_labels"
+    )
+
+    converge = steps["converge_gmail_labels"]
+    assert converge["mutation_authority"]["maximum_level"] == (
+        "external_system_guarded"
+    )
+    assert converge["static_input_bindings"][1] == [
+        "tool_name",
+        "gmail_modify_labels",
     ]
+    gmail_arguments = converge["static_input_bindings"][0][1]
+    assert gmail_arguments["add_labels"] == [
+        {"$context_key": "represented_label_id"}
+    ]
+    assert gmail_arguments["remove_labels"] == ["INBOX"]
+    assert gmail_arguments["verify_after"] is True
 
 
 def test_email_source_seed_routes_exact_message_unit_and_explicit_batch() -> None:
@@ -476,7 +496,12 @@ def _run_exact_message_slice(definition, handler):
         environment=WorkflowEnvironment(llm_client=None),
         data={
             "message_id": "gmail-message-1",
-            "gmail_profile": "#V#gmail_profile_vonwitbrock_gmail",
+            "gmail_profile": "vonwitbrock-gmail",
+            "represented_label_id": "Label_3",
+            "source_fingerprint": (
+                "gmail-message-id:v1:vonwitbrock-gmail:gmail-message-1"
+            ),
+            "processing_authority_fingerprint": "email-arxiv-ingestion:v2",
             "arxiv_iteration_results": [
                 {"paper_concept_id": "#V#paper_2606_12345", "arxiv_id": "2606.12345"}
             ],
@@ -503,6 +528,17 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
                     }
                 },
             )
+        if tool_name == "gmail_modify_labels":
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "gmail_label_state_verified": True,
+                        "readback_label_ids": ["Label_3"],
+                        "modify_reconciled_after_error": False,
+                    }
+                },
+            )
         assert tool_name == "get_source_processing_marker"
         return WorkflowActionResult(
             status="success",
@@ -514,6 +550,8 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
                     "paper_concept_id": "#V#paper_2606_12345",
                     "file_copy_concept_id": "#V#file_2606_12345",
                     "arxiv_id": "2606.12345",
+                    "source_processing_current": True,
+                    "represented_artifacts_exist": True,
                 }
             },
         )
@@ -521,8 +559,10 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
     definition = _exact_message_definition(
         "mark_done",
         "verify_done_marker",
+        "converge_gmail_labels",
         "done",
         "failed_unmarked",
+        "failed_gmail_state",
         initial_state="mark_done",
     )
     result = _run_exact_message_slice(definition, handler)
@@ -532,6 +572,7 @@ def test_exact_message_workflow_records_then_reads_back_marker_before_success() 
     assert calls == [
         "record_source_processing_marker",
         "get_source_processing_marker",
+        "gmail_modify_labels",
     ]
     assert result.data["source_processing_marker_exists"] is True
     assert result.data["message_processing_marker"] == "#V#marker_1"
@@ -572,6 +613,8 @@ def test_exact_message_workflow_never_claims_success_without_verified_marker(
                     "paper_concept_id": None,
                     "file_copy_concept_id": None,
                     "arxiv_id": None,
+                    "source_processing_current": False,
+                    "represented_artifacts_exist": False,
                 }
             },
         )
@@ -594,12 +637,23 @@ def test_exact_message_workflow_never_claims_success_without_verified_marker(
     )
 
 
-def test_exact_message_workflow_reuses_existing_marker_without_representing_again() -> None:
+def test_exact_message_workflow_reuses_current_marker_then_converges_gmail() -> None:
     calls: list[str] = []
 
     def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
         tool_name = str(request.inputs.get("tool_name") or "")
         calls.append(tool_name)
+        if tool_name == "gmail_modify_labels":
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "gmail_label_state_verified": True,
+                        "readback_label_ids": ["Label_3"],
+                        "modify_reconciled_after_error": False,
+                    }
+                },
+            )
         assert tool_name == "get_source_processing_marker"
         return WorkflowActionResult(
             status="success",
@@ -611,21 +665,116 @@ def test_exact_message_workflow_reuses_existing_marker_without_representing_agai
                     "paper_concept_id": "#V#paper_2606_12345",
                     "file_copy_concept_id": "#V#file_2606_12345",
                     "arxiv_id": "2606.12345",
+                    "source_processing_current": True,
+                    "represented_artifacts_exist": True,
+                    "paper_concept_ids": ["#V#paper_2606_12345"],
+                    "file_copy_concept_ids": ["#V#file_2606_12345"],
+                    "arxiv_ids": ["2606.12345"],
                 }
             },
         )
 
     definition = _exact_message_definition(
         "check_processed_marker",
-        "done_already_processed",
+        "converge_gmail_labels",
+        "done",
+        "failed_gmail_state",
         "failed",
         initial_state="check_processed_marker",
     )
     result = _run_exact_message_slice(definition, handler)
 
     assert result.completed is True
-    assert result.final_state == "done_already_processed"
-    assert calls == ["get_source_processing_marker"]
+    assert result.final_state == "done"
+    assert calls == ["get_source_processing_marker", "gmail_modify_labels"]
+
+
+def test_exact_message_workflow_upgrades_legacy_marker_before_gmail() -> None:
+    calls: list[str] = []
+    marker_reads = 0
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        nonlocal marker_reads
+        tool_name = str(request.inputs.get("tool_name") or "")
+        calls.append(tool_name)
+        if tool_name == "record_source_processing_marker":
+            assert request.inputs["tool_arguments"]["source_fingerprint"] == (
+                "gmail-message-id:v1:vonwitbrock-gmail:gmail-message-1"
+            )
+            return WorkflowActionResult(status="success", outputs={"result": {}})
+        if tool_name == "gmail_modify_labels":
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "gmail_label_state_verified": True,
+                        "readback_label_ids": ["Label_3"],
+                        "modify_reconciled_after_error": False,
+                    }
+                },
+            )
+        assert tool_name == "get_source_processing_marker"
+        marker_reads += 1
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "source_processing_marker_exists": True,
+                    "message_processing_marker": "#V#marker_existing",
+                    "processed_message_id": "gmail-message-1",
+                    "paper_concept_id": "#V#paper_2606_12345",
+                    "file_copy_concept_id": "#V#file_2606_12345",
+                    "arxiv_id": "2606.12345",
+                    "paper_concept_ids": ["#V#paper_2606_12345"],
+                    "file_copy_concept_ids": ["#V#file_2606_12345"],
+                    "arxiv_ids": ["2606.12345"],
+                    "represented_artifacts_exist": True,
+                    "source_processing_current": marker_reads > 1,
+                }
+            },
+        )
+
+    definition = _exact_message_definition(
+        "check_processed_marker",
+        "upgrade_legacy_marker",
+        "verify_done_marker",
+        "converge_gmail_labels",
+        "done",
+        "failed",
+        "failed_unmarked",
+        "failed_gmail_state",
+        initial_state="check_processed_marker",
+    )
+    result = _run_exact_message_slice(definition, handler)
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert calls == [
+        "get_source_processing_marker",
+        "record_source_processing_marker",
+        "get_source_processing_marker",
+        "gmail_modify_labels",
+    ]
+
+
+def test_exact_message_workflow_does_not_succeed_when_gmail_readback_fails() -> None:
+    calls: list[str] = []
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls.append(str(request.inputs.get("tool_name") or ""))
+        return WorkflowActionResult(status="failure", error="gmail state unverified")
+
+    definition = _exact_message_definition(
+        "converge_gmail_labels",
+        "done",
+        "failed_gmail_state",
+        initial_state="converge_gmail_labels",
+    )
+    result = _run_exact_message_slice(definition, handler)
+
+    assert result.completed is True
+    assert result.final_state == "failed_gmail_state"
+    assert calls == ["gmail_modify_labels", "gmail_modify_labels"]
 
 
 def test_exact_message_workflow_does_not_mark_after_arxiv_ingestion_failure() -> None:
@@ -726,9 +875,14 @@ def test_email_arxiv_schedule_bootstrap_creates_managed_interval_schedule(
     assert schedule.default_inputs["managed_schedule_key"] == (
         mod.EMAIL_ARXIV_REPRESENTATION_CONVERGENCE_SCHEDULE_MANAGED_KEY
     )
-    assert schedule.default_inputs["gmail_profile"] == "#V#gmail_profile_zhan_gmail"
+    assert schedule.default_inputs["gmail_profile"] == (
+        "#V#gmail_profile_vonwitbrock_gmail"
+    )
+    assert schedule.default_inputs["base_gmail_query"] == "arxiv.org"
     assert schedule.default_inputs["gmail_max_results"] == 2
-    assert "arxiv papers" in schedule.default_inputs["prompt"]
+    assert "arxiv" in schedule.default_inputs["prompt"].lower()
+    assert schedule.enabled is False
+    assert report["schedule_enabled"] is False
 
 
 def test_email_arxiv_schedule_bootstrap_reuses_existing_matching_schedule(
@@ -754,7 +908,9 @@ def test_email_arxiv_schedule_bootstrap_reuses_existing_matching_schedule(
     monkeypatch.setattr(mod, "get_instance_manager", lambda: fake)
     monkeypatch.setenv("VON_EMAIL_ARXIV_CONVERGENCE_SCHEDULE_ENABLE", "1")
 
-    report = mod.ensure_email_arxiv_representation_convergence_schedule()
+    report = mod.ensure_email_arxiv_representation_convergence_schedule(
+        activate=True
+    )
 
     assert report["success"] is True
     assert report["created_count"] == 0
@@ -796,3 +952,41 @@ def test_email_arxiv_schedule_bootstrap_disables_mismatched_schedule(
     assert report["created_count"] == 1
     assert report["disabled_count"] == 1
     assert (mismatched.schedule_id, False) in fake.enabled_updates
+
+
+def test_email_arxiv_schedule_bootstrap_replaces_inert_legacy_schedule(
+    monkeypatch,
+) -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_schedule_bootstrap_service as mod,
+    )
+
+    _reset_schedule_bootstrap_state(mod)
+    desired = mod._desired_schedule_config()
+    legacy = WorkflowSchedule.create_interval(
+        desired["workflow_id"],
+        interval_seconds=desired["interval_seconds"],
+        user_id=desired["user_id"],
+        org_id=desired["org_id"],
+        namespace=desired["namespace"],
+        default_inputs={
+            **dict(desired["default_inputs"]),
+            "managed_schedule_key": "email_arxiv_representation_convergence_v1",
+            "gmail_profile": "#V#gmail_profile_zhan_gmail",
+            "base_gmail_query": "arxiv.org newer_than:365d",
+        },
+        description="email_arxiv_representation_convergence_v1",
+    )
+    legacy.enabled = True
+    legacy.next_run_at = None
+    fake = _FakeManager([legacy])
+    monkeypatch.setattr(mod, "get_instance_manager", lambda: fake)
+
+    report = mod.ensure_email_arxiv_representation_convergence_schedule()
+
+    assert report["success"] is True
+    assert report["created_count"] == 1
+    assert report["disabled_count"] == 1
+    assert (legacy.schedule_id, False) in fake.enabled_updates
+    assert fake.created[0].enabled is False
+    assert fake.created[0].next_run_at is not None

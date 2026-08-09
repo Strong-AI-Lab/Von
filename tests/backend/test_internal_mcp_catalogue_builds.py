@@ -1128,12 +1128,43 @@ def test_gmail_modify_labels_resolves_represented_profile_resource_alias(monkeyp
         message_id="msg-1",
         add_labels=["Label_7"],
         allow_mutation=True,
+        verify_after=True,
     )
 
     assert payload["profile"] == "zhan-gmail"
     assert captured_kwargs["profile_id"] == "zhan-gmail"
     assert captured_kwargs["message_id"] == "msg-1"
     assert captured_kwargs["add_labels"] == ["Label_7"]
+    assert captured_kwargs["verify_after"] is True
+
+
+def test_gmail_list_labels_supports_required_exact_name_resolution(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    captured_kwargs: dict = {}
+
+    def fake_list_labels(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "label_id": "Label_3",
+            "label_name": "VON/PAPER/REPRESENTED",
+            "exact_match_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.list_labels",
+        fake_list_labels,
+    )
+
+    payload = catalogue_module._gmail_list_labels(
+        profile="vonwitbrock-gmail",
+        exact_name="VON/PAPER/REPRESENTED",
+        require_exact_match=True,
+    )
+
+    assert payload["label_id"] == "Label_3"
+    assert captured_kwargs["exact_name"] == "VON/PAPER/REPRESENTED"
+    assert captured_kwargs["require_exact_match"] is True
 
 
 def test_source_processing_marker_tools_registered_as_vontology_surfaces():

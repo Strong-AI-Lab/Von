@@ -589,6 +589,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "gmail",
         "display_template": "{count} labels",
+        "planner_hint": (
+            "Use exact_name with require_exact_match=true when a workflow needs "
+            "one existing mailbox-specific label ID before mutation."
+        ),
     },
     "gmail_create_label": {
         "salience": "medium",
@@ -605,6 +609,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "gmail",
         "display_template": "Labels modified",
+        "planner_hint": (
+            "Use one message-level call for atomic add/remove. Set verify_after=true "
+            "when the outcome requires independent canonical label read-back and "
+            "lost-response reconciliation."
+        ),
     },
     "upsert_text_relation": {
         "salience": "medium",

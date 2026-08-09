@@ -1675,14 +1675,27 @@ def test_startup_check_records_not_ready_report(
 
     reset_workflow_capability_index()
 
+    populate_calls: list[dict[str, Any]] = []
+
+    def _record_non_blocking_startup_check(**kwargs: Any) -> WorkflowCapabilityIndex:
+        populate_calls.append(dict(kwargs))
+        return capability_service.get_workflow_capability_index()
+
     monkeypatch.setattr(
         capability_service,
         "ensure_workflow_capability_index_populated",
-        lambda **_kwargs: capability_service.get_workflow_capability_index(),
+        _record_non_blocking_startup_check,
     )
 
     report = run_workflow_capability_index_startup_check(timeout_seconds=0.01)
 
+    assert populate_calls == [
+        {
+            "block": False,
+            "max_wait_seconds": 0.01,
+            "workflow_registry": None,
+        }
+    ]
     assert report["success"] is False
     assert report["ready"] is False
     assert report["status"] == "not_ready"

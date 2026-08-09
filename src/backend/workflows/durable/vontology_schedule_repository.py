@@ -145,10 +145,20 @@ class VontologyScheduleRepository:
                 )
 
         except Exception as e:
-            # Cleanup if partial failure? For now just log.
             logger.error(
                 f"Failed to set properties for schedule concept {concept_id}: {e}"
             )
+            try:
+                concept_service.delete_concept(concept_id)
+            except Exception as cleanup_error:
+                logger.error(
+                    "Failed to clean up partial schedule concept %s: %s",
+                    concept_id,
+                    cleanup_error,
+                )
+            raise RuntimeError(
+                f"Vontology schedule property creation failed: {e}"
+            ) from e
 
         return concept_id
 
@@ -407,6 +417,30 @@ class VontologyScheduleRepository:
             return True
         except Exception as e:
             logger.error(f"Failed to update schedule {schedule_id} after run: {e}")
+            return False
+
+    def update_schedule_next_run(
+        self,
+        schedule_id: str,
+        *,
+        next_run_at: datetime | None,
+    ) -> bool:
+        """Advance a schedule without claiming that a workflow run occurred."""
+
+        try:
+            if next_run_at:
+                self._set_next_run_timestamp(
+                    schedule_id,
+                    next_run_at,
+                    schedule_type_id=self._resolve_schedule_type_concept_id(
+                        schedule_id
+                    ),
+                )
+            else:
+                self._set_enabled_state(schedule_id, False)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to advance schedule {schedule_id}: {e}")
             return False
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> bool:

@@ -8,11 +8,12 @@ from typing import Any
 
 from ..execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
-    WORKFLOW_RETURN_PAYLOAD_KEY,
     WORKFLOW_RESULT_ENVELOPE_KEY,
+    WORKFLOW_RETURN_PAYLOAD_KEY,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
 )
 from ..metadata_validation import LAST_METADATA_EVENT_KEY, WORKFLOW_METADATA_EVENTS_KEY
+from .llm_cost_tracking import LLM_USAGE_COST_SUMMARY_KEY
 
 COMPLETED_WORKFLOW_OUTPUTS_SCHEMA_VERSION = "workflow_completed_outputs.v1"
 FAILED_WORKFLOW_OUTPUTS_SCHEMA_VERSION = "workflow_failed_outputs.v1"
@@ -287,6 +288,9 @@ def build_completed_workflow_outputs(
         },
         "context_summary": _context_key_summary(context),
     }
+    llm_usage_cost_summary = _mapping(context.get(LLM_USAGE_COST_SUMMARY_KEY))
+    if llm_usage_cost_summary is not None:
+        outputs[LLM_USAGE_COST_SUMMARY_KEY] = llm_usage_cost_summary
 
     if isinstance(latest_step, Mapping):
         outputs["latest_step_result_summary"] = {
@@ -426,6 +430,9 @@ def build_failed_workflow_outputs(
             max_text_chars=max_text_chars,
         ),
     }
+    llm_usage_cost_summary = _mapping(context.get(LLM_USAGE_COST_SUMMARY_KEY))
+    if llm_usage_cost_summary is not None:
+        outputs[LLM_USAGE_COST_SUMMARY_KEY] = llm_usage_cost_summary
 
     if isinstance(latest_step, Mapping):
         outputs["failed_action_diagnostics"] = {

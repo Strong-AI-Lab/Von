@@ -1,10 +1,8 @@
-"""Repair JVNAUTOSCI-2272 Zhan Gmail arXiv ingestion workflow authority.
+"""Legacy JVNAUTOSCI-2272 repair entry point.
 
-This is a Vontology-authoring maintenance script. It keeps request-path policy
-out of Python and materialises the repair as VWL/Vontology state: partial batch
-semantics, represented retry metadata, valid launch contracts, and represented
-source-processing markers used to avoid repeating completed work without
-mutating Gmail.
+The old marker-only rewrite helpers remain for historical unit coverage, but the
+executable entry point delegates to the current canonical repo-seed publisher.
+It must not overwrite the newer verified Gmail label/archive convergence policy.
 """
 
 from __future__ import annotations
@@ -541,77 +539,37 @@ def _load_gmail_completion_hint() -> dict[str, Any]:
 
 
 def publish_jvnautosci_2272_repair(*, dry_run: bool = False) -> dict[str, Any]:
-    parent_spec, parent_changes = rewrite_zhan_parent_workflow_spec(
-        _load_authoring_spec(ZHAN_GMAIL_ARXIV_WORKFLOW_ID)
-    )
-    child_spec, child_changes = rewrite_email_message_workflow_spec(
-        _load_authoring_spec(EMAIL_ARXIV_MESSAGE_WORKFLOW_ID)
-    )
-    parent_definition = build_workflow_definition_from_authoring_spec(parent_spec)
-    child_definition = build_workflow_definition_from_authoring_spec(child_spec)
-
-    zhan_contract = _validate_launch_contract(build_zhan_launch_input_contract())
-    child_contract = _validate_launch_contract(
-        build_email_message_launch_input_contract()
-    )
-    hint_payload, hint_changed = rewrite_gmail_completion_hint_payload(
-        _load_gmail_completion_hint()
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as service,
     )
 
-    result: dict[str, Any] = {
-        "success": True,
-        "dry_run": dry_run,
-        "parent_changes": parent_changes,
-        "child_changes": child_changes,
-        "gmail_completion_hint_changed": hint_changed,
-        "launch_contracts": {
-            ZHAN_GMAIL_ARXIV_WORKFLOW_ID: zhan_contract,
-            EMAIL_ARXIV_MESSAGE_WORKFLOW_ID: child_contract,
-        },
-    }
     if dry_run:
-        return result
+        payload = json.loads(service._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+        return {
+            "success": True,
+            "dry_run": True,
+            "deprecated_entry_point": True,
+            "delegates_to": (
+                "bootstrap_canonical_email_source_representation_convergence_workflows"
+            ),
+            "seed_version": payload.get("seed_version"),
+            "workflow_ids": [
+                item.get("workflow_id")
+                for item in payload.get("workflows") or []
+                if isinstance(item, Mapping)
+            ],
+        }
 
-    result["parent_publication"] = _publish_definition(parent_definition)
-    result["child_publication"] = _publish_definition(child_definition)
-    result["zhan_launch_input_contract"] = (
-        workflow_concept_authority_service.upsert_workflow_json_policy_text(
-            workflow_id=ZHAN_GMAIL_ARXIV_WORKFLOW_ID,
-            predicate=workflow_concept_authority_service.WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE,
-            payload=zhan_contract,
-            context={"source": "jvnautosci_2272_repair"},
-        )
+    result = service.bootstrap_canonical_email_source_representation_convergence_workflows(
+        force_republish=True
     )
-    result["child_launch_input_contract"] = (
-        workflow_concept_authority_service.upsert_workflow_json_policy_text(
-            workflow_id=EMAIL_ARXIV_MESSAGE_WORKFLOW_ID,
-            predicate=workflow_concept_authority_service.WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE,
-            payload=child_contract,
-            context={"source": "jvnautosci_2272_repair"},
-        )
-    )
-    result["gmail_completion_hint"] = upsert_singleton_text_relation(
-        subject_concept_id=GMAIL_GET_MESSAGE_TOOL_CONCEPT_ID,
-        predicate=GMAIL_OUTPUT_FOLLOWUP_HINT_PREDICATE,
-        text=json.dumps(hint_payload, ensure_ascii=True, sort_keys=True),
-        lang="en-NZ",
-        context={"source": "jvnautosci_2272_repair"},
-        garbage_collect=True,
-    )
-    result["resolved_launch_contract_sources"] = {
-        workflow_id: resolve_workflow_launch_input_contract(workflow_id)[1]
-        for workflow_id in (
-            ZHAN_GMAIL_ARXIV_WORKFLOW_ID,
-            EMAIL_ARXIV_MESSAGE_WORKFLOW_ID,
-        )
+    return {
+        **dict(result),
+        "deprecated_entry_point": True,
+        "delegates_to": (
+            "bootstrap_canonical_email_source_representation_convergence_workflows"
+        ),
     }
-    try:
-        from src.backend.workflows.durable import registry_factory
-
-        registry_factory._resolve_subworkflow_definition.cache_clear()
-    except Exception:
-        pass
-    return result
 
 
 def main() -> None:

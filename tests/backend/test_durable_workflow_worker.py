@@ -20,10 +20,10 @@ from src.backend.workflows.durable.models import (
     WorkflowInstance,
     WorkflowInstanceStatus,
 )
-from src.backend.workflows.durable.worker import DurableWorkflowWorker
 from src.backend.workflows.durable.registry_factory import (
     WorkflowDefinitionAuthorityTransientError,
 )
+from src.backend.workflows.durable.worker import DurableWorkflowWorker
 from src.backend.workflows.engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -554,6 +554,48 @@ def test_worker_rejects_stale_loaded_definition_identity() -> None:
     assert observed_identity == [None]
     assert manager.mark_completed_calls
     assert manager.mark_failed_calls == []
+
+
+def test_worker_persists_scheduled_instance_llm_usage_cost_summary() -> None:
+    manager = _WorkerManagerStub()
+    instance = _build_instance("worker-scheduled-cost")
+    instance.schedule_id = "#V#paper_ingestion_schedule"
+    definition = WorkflowDefinition(
+        workflow_id=instance.workflow_id,
+        initial_state="done",
+        states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+        termination_states=("done",),
+    )
+    summary = {
+        "schema_version": "llm_usage_cost_summary.v1",
+        "call_count": 0,
+        "usage": {"status": "not_applicable"},
+        "estimated_cost": {"status": "not_applicable", "amount": None},
+    }
+    worker = DurableWorkflowWorker(
+        worker_id="worker-scheduled-cost",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=lambda _workflow_id, **_actor: definition,
+    )
+    worker._executor = cast(
+        Any,
+        SimpleNamespace(
+            run_durable=lambda *_args, **_kwargs: DurableWorkflowResult(
+                instance_id=instance.instance_id,
+                data={"llm_usage_cost_summary": summary},
+                completed=True,
+                final_state="done",
+            )
+        ),
+    )
+
+    worker._process_instance(instance)
+
+    assert manager.mark_completed_calls[0]["llm_usage_cost_summary"] == summary
+    assert manager.mark_completed_calls[0]["outputs"][
+        "llm_usage_cost_summary"
+    ] == summary
 
 
 @pytest.mark.parametrize("completed", [True, False])

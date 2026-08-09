@@ -2782,19 +2782,25 @@
         },
         {
             "name": "gmail_list_labels",
-            "description": "List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
+            "description": "List Gmail labels for a profile. Read-only; exact_name can resolve one case-sensitive label name to its mailbox-specific ID.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "profile": {
                         "type": "string"
+                    },
+                    "exact_name": {
+                        "type": "string"
+                    },
+                    "require_exact_match": {
+                        "type": "boolean"
                     }
                 },
                 "required": [
                     "profile"
                 ],
                 "additionalProperties": false,
-                "description": "List Gmail labels for a profile (read-only)."
+                "description": "List Gmail labels for a profile (read-only). exact_name performs case-sensitive exact-name resolution and returns label_id plus exact_match_count. require_exact_match=true fails unless exactly one label matches."
             }
         },
         {
@@ -2864,7 +2870,7 @@
         },
         {
             "name": "gmail_modify_labels",
-            "description": "Add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope.",
+            "description": "Atomically add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope. Use verify_after=true for independent canonical state read-back and lost-response reconciliation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2884,6 +2890,9 @@
                     "remove_labels": {
                         "type": "array",
                         "items": {}
+                    },
+                    "verify_after": {
+                        "type": "boolean"
                     }
                 },
                 "required": [
@@ -2892,7 +2901,7 @@
                     "allow_mutation"
                 ],
                 "additionalProperties": false,
-                "description": "Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope."
+                "description": "Atomically add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope. verify_after=true performs an independent minimal message read-back and reconciles an indeterminate modify response when the requested label state holds."
             }
         },
         {

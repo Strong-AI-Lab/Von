@@ -42,3 +42,19 @@ def test_completed_outputs_use_final_response_when_no_selected_workflow_answer()
     assert outputs["terminal_output_source"] == "workflow_result_envelope"
     assert outputs["final_response"] == "Final generated answer."
     assert outputs["response"] == "Final generated answer."
+
+
+def test_completed_outputs_expose_content_free_llm_usage_cost_summary() -> None:
+    summary = {
+        "schema_version": "llm_usage_cost_summary.v1",
+        "call_count": 0,
+        "usage": {"status": "not_applicable"},
+        "estimated_cost": {"status": "not_applicable", "amount": None},
+    }
+
+    outputs = build_completed_workflow_outputs(
+        {"llm_usage_cost_summary": summary},
+        final_state="done",
+    )
+
+    assert outputs["llm_usage_cost_summary"] == summary

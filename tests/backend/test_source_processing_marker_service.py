@@ -445,3 +445,47 @@ def test_spreadsheet_marker_requires_represented_outputs(monkeypatch) -> None:
 
     assert written["source_fingerprint_matches"] is True
     assert written["source_processing_current"] is False
+
+
+def test_gmail_marker_can_require_current_represented_artifacts(monkeypatch) -> None:
+    from src.backend.services import source_processing_marker_service as service
+
+    existing = {"#V#paper_2608_00038"}
+    monkeypatch.setattr(
+        service,
+        "_find_existing_concept_ids",
+        lambda concept_ids: set(concept_ids).intersection(existing),
+    )
+    payload = {
+        "source_system": "gmail",
+        "processing_status": "processed",
+        "source_fingerprint": "gmail-message-id:v1:profile:message-1",
+        "processing_authority_fingerprint": "email-arxiv-ingestion:v2",
+        "represented_artifact_concept_ids": ["#V#paper_2608_00038"],
+    }
+
+    current = service._marker_response_from_payload(
+        marker_concept_id="#V#marker",
+        source_item_id="message-1",
+        marker_exists=True,
+        evidence_payload=payload,
+        expected_source_fingerprint="gmail-message-id:v1:profile:message-1",
+        expected_processing_authority_fingerprint="email-arxiv-ingestion:v2",
+        require_represented_artifacts=True,
+    )
+    existing.clear()
+    missing_artifact = service._marker_response_from_payload(
+        marker_concept_id="#V#marker",
+        source_item_id="message-1",
+        marker_exists=True,
+        evidence_payload=payload,
+        expected_source_fingerprint="gmail-message-id:v1:profile:message-1",
+        expected_processing_authority_fingerprint="email-arxiv-ingestion:v2",
+        require_represented_artifacts=True,
+    )
+
+    assert current["represented_artifacts_required"] is True
+    assert current["represented_artifacts_exist"] is True
+    assert current["source_processing_current"] is True
+    assert missing_artifact["represented_artifacts_exist"] is False
+    assert missing_artifact["source_processing_current"] is False

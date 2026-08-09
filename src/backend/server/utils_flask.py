@@ -430,7 +430,11 @@ def _get_durable_definition_loader():
     return loader
 
 
-def _start_durable_workflow_system(app_logger) -> dict | None:
+def _start_durable_workflow_system(
+    app_logger,
+    *,
+    queue_ready_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict | None:
     """Start the durable workflow worker and scheduler.
 
     Returns the system components dict or None if disabled/failed.
@@ -600,6 +604,14 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             "recovered_orphaned_instances": recovered,
             "released_ineligible_worker_claims": released_ineligible_claims,
         }
+        if queue_ready_callback is not None:
+            try:
+                queue_ready_callback(dict(result))
+            except Exception as callback_exc:
+                app_logger.warning(
+                    "[durable_workflows] Queue-ready callback failed: %s",
+                    callback_exc,
+                )
 
         entity_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="entity workflow",
@@ -2599,17 +2611,58 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
     ).strip().lower() in {"1", "true", "yes", "on"}
 
     def _bootstrap_durable_workflow_system() -> None:
+        core_components: dict[str, Any] | None = None
+        shutdown_registered = False
+        bootstrap_started_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
         _set_durable_workflow_startup_status_snapshot(
             app,
             {
                 "state": "initialising",
                 "ready": False,
-                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "started_at": bootstrap_started_at,
             },
         )
         startup_perf = time.perf_counter()
+
+        def _mark_queue_ready(components: dict[str, Any]) -> None:
+            nonlocal core_components
+            nonlocal shutdown_registered
+            core_components = dict(components)
+            duration_ms = int((time.perf_counter() - startup_perf) * 1000)
+            _set_durable_workflow_components_snapshot(app, core_components)
+            _set_durable_workflow_startup_status_snapshot(
+                app,
+                {
+                    "state": "ready",
+                    "ready": True,
+                    "started_at": bootstrap_started_at,
+                    "duration_ms": duration_ms,
+                    "startup_phase": "canonical_maintenance",
+                    "maintenance_in_progress": True,
+                    "workflow_bootstrap_summary": (
+                        _build_durable_workflow_bootstrap_summary(core_components)
+                    ),
+                },
+            )
+            if not shutdown_registered:
+                import atexit
+
+                atexit.register(_stop_durable_workflow_system)
+                shutdown_registered = True
+            try:
+                app.logger.info(
+                    "[durable_workflows] Core ready in %dms; "
+                    "canonical startup maintenance continues in background.",
+                    duration_ms,
+                )
+            except Exception:
+                pass
+
         try:
-            components = _start_durable_workflow_system(app.logger)
+            components = _start_durable_workflow_system(
+                app.logger,
+                queue_ready_callback=_mark_queue_ready,
+            )
             duration_ms = int((time.perf_counter() - startup_perf) * 1000)
             if components is not None:
                 _set_durable_workflow_components_snapshot(app, components)
@@ -2618,8 +2671,10 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
                     {
                         "state": "ready",
                         "ready": True,
-                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                        "started_at": bootstrap_started_at,
                         "duration_ms": duration_ms,
+                        "startup_phase": "complete",
+                        "maintenance_in_progress": False,
                         "workflow_bootstrap_summary": _build_durable_workflow_bootstrap_summary(
                             components
                         ),
@@ -2634,29 +2689,69 @@ def _configure_durable_workflow_startup(app: Flask) -> None:
                 except Exception:
                     pass
 
-                import atexit
+                if not shutdown_registered:
+                    import atexit
 
-                atexit.register(_stop_durable_workflow_system)
+                    atexit.register(_stop_durable_workflow_system)
+                    shutdown_registered = True
+            else:
+                if core_components is None:
+                    _set_durable_workflow_startup_status_snapshot(
+                        app,
+                        {
+                            "state": "not_started",
+                            "ready": False,
+                            "started_at": bootstrap_started_at,
+                            "duration_ms": duration_ms,
+                        },
+                    )
+                else:
+                    _set_durable_workflow_startup_status_snapshot(
+                        app,
+                        {
+                            "state": "ready",
+                            "ready": True,
+                            "started_at": bootstrap_started_at,
+                            "duration_ms": duration_ms,
+                            "startup_phase": "canonical_maintenance_failed",
+                            "maintenance_in_progress": False,
+                            "maintenance_error": "startup_maintenance_failed",
+                            "workflow_bootstrap_summary": (
+                                _build_durable_workflow_bootstrap_summary(
+                                    core_components
+                                )
+                            ),
+                        },
+                    )
+        except Exception as exc:  # pragma: no cover
+            if core_components is None:
+                _set_durable_workflow_startup_status_snapshot(
+                    app,
+                    {
+                        "state": "failed",
+                        "ready": False,
+                        "started_at": bootstrap_started_at,
+                        "error": str(exc),
+                    },
+                )
             else:
                 _set_durable_workflow_startup_status_snapshot(
                     app,
                     {
-                        "state": "not_started",
-                        "ready": False,
-                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                        "duration_ms": duration_ms,
+                        "state": "ready",
+                        "ready": True,
+                        "started_at": bootstrap_started_at,
+                        "duration_ms": int(
+                            (time.perf_counter() - startup_perf) * 1000
+                        ),
+                        "startup_phase": "canonical_maintenance_failed",
+                        "maintenance_in_progress": False,
+                        "maintenance_error": str(exc),
+                        "workflow_bootstrap_summary": (
+                            _build_durable_workflow_bootstrap_summary(core_components)
+                        ),
                     },
                 )
-        except Exception as exc:  # pragma: no cover
-            _set_durable_workflow_startup_status_snapshot(
-                app,
-                {
-                    "state": "failed",
-                    "ready": False,
-                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                    "error": str(exc),
-                },
-            )
             try:
                 app.logger.warning(
                     "[startup] Durable workflow system startup failed: %s", exc
