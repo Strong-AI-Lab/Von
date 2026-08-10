@@ -2,12 +2,13 @@
   "family_id": "email_source_representation_convergence_workflow_seed_bundle",
   "managed_by": "email_source_representation_convergence_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "11",
+  "seed_version": "13",
   "source_tag": "JVNAUTOSCI-2335",
   "supported_action_ids": [
     "arxiv.inspect_existing_state",
     "extract_signals_from_tool_result",
     "resolve_tool_output_followup_hint",
+    "workflow_control.context_project",
     "workflow_control.context_set",
     "workflow_control.context_template",
     "workflow_control.for_each",
@@ -18,7 +19,7 @@
     {
       "workflow_id": "#V#zhan_gmail_arxiv_ingestion_workflow",
       "display_name": "Zhan Gmail Arxiv Ingestion Workflow",
-      "description": "Explicit batch workflow for recurring Gmail-to-arXiv paper representation convergence. It selects newest Inbox messages that do not have VON/PAPER/REPRESENTED, represents each supported arXiv reference, records current source-processing evidence, then atomically applies the represented label and removes INBOX with canonical Gmail read-back.",
+      "description": "Explicit batch workflow for recurring Gmail-to-arXiv paper representation convergence. It selects newest Inbox messages that are neither represented nor dispositioned, represents each supported arXiv reference, records current source-processing evidence, then atomically applies the represented label and removes INBOX with canonical Gmail read-back. Messages with no supported reference instead receive one actor-scoped review task and VON/PAPER/NEEDS_REVIEW while remaining in Inbox.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
@@ -341,6 +342,27 @@
                 "condition_spec": {
                   "conditions": [
                     {
+                      "key": "message_final_state_counts.#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done_needs_review",
+                      "kind": "context_compare",
+                      "operator": "gt",
+                      "value": 0
+                    },
+                    {
+                      "key": "message_error_count",
+                      "kind": "context_compare",
+                      "operator": "eq",
+                      "value": 0
+                    }
+                  ],
+                  "kind": "all"
+                },
+                "reason": "batch_completed_with_human_review_dispositions",
+                "to_state": "done_with_review_required"
+              },
+              {
+                "condition_spec": {
+                  "conditions": [
+                    {
                       "key": "message_success_count",
                       "kind": "context_compare",
                       "operator": "gt",
@@ -437,10 +459,16 @@
                 "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_process_messages_iteration_results_to_message_iteration_results",
                 "context_key": "message_iteration_results",
                 "tool_output_field": "iteration_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_zhan_gmail_arxiv_ingestion_workflow_process_messages_for_each_final_state_counts_to_message_final_state_counts",
+                "context_key": "message_final_state_counts",
+                "tool_output_field": "for_each_final_state_counts"
               }
             ],
             "writes_context_keys": [
               "message_iteration_results",
+              "message_final_state_counts",
               "message_success_count",
               "message_error_count",
               "message_partial_success",
@@ -449,6 +477,9 @@
           },
           {
             "state_id": "done"
+          },
+          {
+            "state_id": "done_with_review_required"
           },
           {
             "state_id": "done_no_messages"
@@ -466,11 +497,11 @@
     {
       "workflow_id": "#V#email_arxiv_ingestion_from_message_workflow",
       "display_name": "Email Arxiv Ingestion From Message Workflow",
-      "description": "Processes one exact Gmail message selected by the caller: establish versioned source and processing-authority identity, reuse or upgrade current represented source-processing evidence when possible, ingest each arXiv reference when needed, canonically verify represented artefacts, then atomically apply VON/PAPER/REPRESENTED and remove INBOX with independent Gmail read-back.",
+      "description": "Processes one exact Gmail message selected by the caller: establish versioned source and processing-authority identity, reuse or upgrade current represented source-processing evidence when possible, ingest each arXiv reference when needed, canonically verify represented artefacts, then atomically apply VON/PAPER/REPRESENTED and remove INBOX with independent Gmail read-back. If no supported arXiv reference is found, create or reuse one actor-scoped review task, apply VON/PAPER/NEEDS_REVIEW, and preserve INBOX.",
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
-          "text": "{\"examples\": [\"Represent the arXiv paper linked from this exact Gmail message, verify its current represented processing marker, label it VON/PAPER/REPRESENTED, and remove it from Inbox.\", \"Converge this selected Gmail message through the durable arXiv representation and mailbox-cleanup path.\"], \"keywords\": [\"exact gmail message arxiv representation\", \"selected email arxiv paper ingestion\", \"represent paper from this message\", \"gmail message processing marker\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\"], \"routing_notes\": [\"Use only after read-only discovery or explicit user context identifies one exact Gmail source message.\", \"Pass include_body explicitly on every gmail_get_message discovery read. When a Gmail search result matched the paper query but its subject or snippet does not expose the arXiv reference, use include_body=true and inspect the bounded message body before rejecting it or moving to an older message.\", \"The caller must supply the exact Gmail profile and current_message object; this workflow does not choose a message or scan a mailbox.\", \"Prefer this durable unit over a paper-only representation workflow when the user outcome also requires source-message and Gmail convergence evidence.\", \"Do not label or archive messages with no supported resource or without current marker and represented-artefact read-back.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
+          "text": "{\"examples\": [\"Represent the arXiv paper linked from this exact Gmail message, verify its current represented processing marker, label it VON/PAPER/REPRESENTED, and remove it from Inbox.\", \"Converge this selected Gmail message through the durable arXiv representation and mailbox-cleanup path.\"], \"keywords\": [\"exact gmail message arxiv representation\", \"selected email arxiv paper ingestion\", \"represent paper from this message\", \"gmail message processing marker\"], \"required_query_cues\": [\"gmail\", \"email\", \"mail\", \"message\"], \"routing_notes\": [\"Use only after read-only discovery or explicit user context identifies one exact Gmail source message.\", \"Pass include_body explicitly on every gmail_get_message discovery read. When a Gmail search result matched the paper query but its subject or snippet does not expose the arXiv reference, use include_body=true and inspect the bounded message body before rejecting it or moving to an older message.\", \"The caller must supply the exact Gmail profile and current_message object; this workflow does not choose a message or scan a mailbox.\", \"Prefer this durable unit over a paper-only representation workflow when the user outcome also requires source-message and Gmail convergence evidence.\", \"Do not apply VON/PAPER/REPRESENTED or remove INBOX for messages with no supported resource or without current marker and represented-artefact read-back; no-resource messages instead require a review task and VON/PAPER/NEEDS_REVIEW.\"], \"schema_version\": \"workflow_discovery_exemplars.v1\"}",
           "lang": "en-NZ"
         },
         {
@@ -506,6 +537,27 @@
             "required": false,
             "source_expression": "inputs.represented_label_id",
             "target_context_key": "represented_label_id"
+          },
+          {
+            "description": "Optional trusted workflow actor used for a self-assigned review task when the source does not converge.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.user_concept_id",
+            "target_context_key": "user_concept_id"
+          },
+          {
+            "description": "Optional trusted workflow organisation used to scope a review task when the source does not converge.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.org_concept_id",
+            "target_context_key": "org_concept_id"
+          },
+          {
+            "description": "Optional mailbox-specific VON/PAPER/NEEDS_REVIEW label ID inherited by a parent batch.",
+            "extractor": "identity",
+            "required": false,
+            "source_expression": "inputs.needs_review_label_id",
+            "target_context_key": "needs_review_label_id"
           }
         ],
         "required_inputs": [
@@ -942,7 +994,7 @@
               }
             ],
             "execution_mode": "deterministic",
-            "next_state": "done_no_resources",
+            "next_state": "build_review_task",
             "on_failure_state": "failed",
             "state_id": "decide_arxiv_resources",
             "static_input_bindings": [
@@ -955,6 +1007,342 @@
                   }
                 ]
               ]
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_template",
+            "execution_mode": "deterministic",
+            "next_state": "create_review_task",
+            "on_failure_state": "failed",
+            "state_id": "build_review_task",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "review_task_title",
+                    "template": "Review unrecognised paper-ingestion mail {message_id}",
+                    "variables": {
+                      "message_id": {
+                        "value_from_context": "message_id"
+                      }
+                    }
+                  },
+                  {
+                    "key": "review_task_description",
+                    "template": "Von found no supported arXiv paper reference in Gmail message {message_id} from profile {profile}. Review the source message and decide whether its paper reference needs representation or the message should be skipped.",
+                    "variables": {
+                      "message_id": {
+                        "value_from_context": "message_id"
+                      },
+                      "profile": {
+                        "value_from_context": "gmail_profile"
+                      }
+                    }
+                  },
+                  {
+                    "key": "review_task_idempotency_key",
+                    "template": "paper-ingestion-review:v1:gmail:{profile}:{message_id}",
+                    "variables": {
+                      "message_id": {
+                        "value_from_context": "message_id"
+                      },
+                      "profile": {
+                        "value_from_context": "gmail_profile"
+                      }
+                    }
+                  },
+                  {
+                    "key": "review_task_evidence",
+                    "template": "source_system=gmail; source_profile={profile}; source_item_id={message_id}; reason_code=no_supported_arxiv_resource",
+                    "variables": {
+                      "message_id": {
+                        "value_from_context": "message_id"
+                      },
+                      "profile": {
+                        "value_from_context": "gmail_profile"
+                      }
+                    }
+                  }
+                ]
+              ]
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "additive_vontology",
+              "reason_code": "create_actor_scoped_paper_ingestion_review_task",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "ensure_needs_review_label",
+            "on_failure_state": "failed",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 5000,
+              "retry_on_outcomes": [
+                "failure",
+                "unknown"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
+            "state_id": "create_review_task",
+            "static_input_bindings": [
+              [
+                "tool_arguments",
+                {
+                  "assignee_id": {
+                    "$context_key": "user_concept_id"
+                  },
+                  "created_by_concept_id": {
+                    "$context_key": "user_concept_id"
+                  },
+                  "description": {
+                    "$context_key": "review_task_description"
+                  },
+                  "evidence": {
+                    "$context_key": "review_task_evidence"
+                  },
+                  "idempotency_key": {
+                    "$context_key": "review_task_idempotency_key"
+                  },
+                  "next_checkpoint": "Review the Gmail source and either repair its paper representation or apply VON/PAPER/SKIP.",
+                  "notes": "The source message remains in Inbox. VON/PAPER/NEEDS_REVIEW removes it from automatic ingestion selection without claiming that it was represented.",
+                  "organisation_concept_id": {
+                    "$context_key": "org_concept_id"
+                  },
+                  "priority": "medium",
+                  "progress_signal": "awaiting_human_review",
+                  "reference_code": {
+                    "$context_key": "message_id"
+                  },
+                  "task_role": "human_review",
+                  "title": {
+                    "$context_key": "review_task_title"
+                  }
+                }
+              ],
+              [
+                "tool_name",
+                "task_create"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_create_review_task_result_task_concept_id_to_review_task_concept_id",
+                "context_key": "review_task_concept_id",
+                "tool_output_field": "result.task_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_create_review_task_result_idempotent_replay_to_review_task_idempotent_replay",
+                "context_key": "review_task_idempotent_replay",
+                "tool_output_field": "result.idempotent_replay"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_create_review_task_result_canonical_read_back_to_review_task_canonical_read_back",
+                "context_key": "review_task_canonical_read_back",
+                "tool_output_field": "result.canonical_read_back"
+              }
+            ],
+            "writes_context_keys": [
+              "review_task_concept_id",
+              "review_task_idempotent_replay",
+              "review_task_canonical_read_back"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_set",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "expected": true,
+                  "key": "needs_review_label_id",
+                  "kind": "context_exists"
+                },
+                "reason": "needs_review_label_inherited_from_parent",
+                "to_state": "mark_needs_review"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "resolve_needs_review_label",
+            "on_failure_state": "failed",
+            "state_id": "ensure_needs_review_label",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "needs_review_label_resolution_checked",
+                    "value": true
+                  }
+                ]
+              ]
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "next_state": "mark_needs_review",
+            "on_failure_state": "failed",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 5000,
+              "retry_on_outcomes": [
+                "failure",
+                "unknown"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
+            "state_id": "resolve_needs_review_label",
+            "static_input_bindings": [
+              [
+                "tool_arguments",
+                {
+                  "exact_name": "VON/PAPER/NEEDS_REVIEW",
+                  "profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "require_exact_match": true
+                }
+              ],
+              [
+                "tool_name",
+                "gmail_list_labels"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_resolve_needs_review_label_result_label_id_to_needs_review_label_id",
+                "context_key": "needs_review_label_id",
+                "tool_output_field": "result.label_id"
+              }
+            ],
+            "writes_context_keys": [
+              "needs_review_label_id"
+            ]
+          },
+          {
+            "action_id": "workflow_mcp.invoke_tool",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "expected": true,
+                  "key": "needs_review_gmail_label_state_verified",
+                  "kind": "context_flag"
+                },
+                "reason": "needs_review_label_present_and_inbox_preserved",
+                "to_state": "project_needs_review_result"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "mutation_authority": {
+              "maximum_level": "external_system_guarded",
+              "reason_code": "verified_needs_review_message_label_without_archive",
+              "schema_version": "workflow_step_mutation_authority.v1"
+            },
+            "next_state": "failed",
+            "on_failure_state": "failed",
+            "retry_policy": {
+              "backoff_policy": "fixed",
+              "initial_delay_ms": 1000,
+              "max_attempts": 2,
+              "max_delay_ms": 5000,
+              "retry_on_outcomes": [
+                "failure",
+                "unknown"
+              ],
+              "schema_version": "workflow_step_retry_policy.v1"
+            },
+            "state_id": "mark_needs_review",
+            "static_input_bindings": [
+              [
+                "tool_arguments",
+                {
+                  "add_labels": [
+                    {
+                      "$context_key": "needs_review_label_id"
+                    }
+                  ],
+                  "allow_mutation": true,
+                  "message_id": {
+                    "$context_key": "message_id"
+                  },
+                  "profile": {
+                    "$context_key": "gmail_profile"
+                  },
+                  "remove_labels": [],
+                  "verify_after": true
+                }
+              ],
+              [
+                "tool_name",
+                "gmail_modify_labels"
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_needs_review_result_gmail_label_state_verified_to_needs_review_gmail_label_state_verified",
+                "context_key": "needs_review_gmail_label_state_verified",
+                "tool_output_field": "result.gmail_label_state_verified"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_email_arxiv_ingestion_from_message_workflow_mark_needs_review_result_readback_label_ids_to_needs_review_gmail_readback_label_ids",
+                "context_key": "needs_review_gmail_readback_label_ids",
+                "tool_output_field": "result.readback_label_ids"
+              }
+            ],
+            "writes_context_keys": [
+              "needs_review_gmail_label_state_verified",
+              "needs_review_gmail_readback_label_ids"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_project",
+            "execution_mode": "deterministic",
+            "next_state": "done_needs_review",
+            "on_failure_state": "failed",
+            "state_id": "project_needs_review_result",
+            "static_input_bindings": [
+              [
+                "field_sources",
+                {
+                  "disposition": "needs_review",
+                  "gmail_readback_label_ids": {
+                    "$context_key": "needs_review_gmail_readback_label_ids"
+                  },
+                  "review_task_concept_id": {
+                    "$context_key": "review_task_concept_id"
+                  },
+                  "source_item_id": {
+                    "$context_key": "message_id"
+                  },
+                  "source_profile": {
+                    "$context_key": "gmail_profile"
+                  }
+                }
+              ],
+              [
+                "required_fields",
+                [
+                  "source_item_id",
+                  "source_profile",
+                  "disposition",
+                  "review_task_concept_id",
+                  "gmail_readback_label_ids"
+                ]
+              ],
+              [
+                "target_key",
+                "result"
+              ]
+            ],
+            "writes_context_keys": [
+              "result"
             ]
           },
           {
@@ -1341,7 +1729,7 @@
             "state_id": "done"
           },
           {
-            "state_id": "done_no_resources"
+            "state_id": "done_needs_review"
           },
           {
             "state_id": "failed_unmarked"

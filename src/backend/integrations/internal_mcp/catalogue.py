@@ -30642,6 +30642,7 @@ def _task_create(**kwargs):
     notes = kwargs.get("notes")
     reference_code = kwargs.get("reference_code")
     request_id = str(kwargs.get("request_id") or "").strip()
+    idempotency_key = str(kwargs.get("idempotency_key") or "").strip()
 
     actor_id = str(actor_scope.user_concept_id)
     actor_org_id = str(actor_scope.organisation_concept_id)
@@ -30657,10 +30658,18 @@ def _task_create(**kwargs):
                 "authenticated actor in the authenticated organisation."
             ),
         )
-    if not request_id:
+    if len(idempotency_key) > 512:
+        return make_error_response(
+            "INVALID_PARAM",
+            "idempotency_key must be at most 512 characters.",
+        )
+    if not request_id and not idempotency_key:
         return make_error_response(
             "authenticated_request_context_required",
-            "Task creation requires the trusted conversation-turn request identity.",
+            (
+                "Task creation requires either the trusted conversation-turn "
+                "request identity or an actor-scoped idempotency_key."
+            ),
         )
 
     start_date, start_error = _parse_optional_iso_datetime_param(
@@ -30676,30 +30685,43 @@ def _task_create(**kwargs):
     if due_error:
         return due_error
 
-    creation_fingerprint_payload = {
-        "request_id": request_id,
-        "actor_id": actor_id,
-        "organisation_concept_id": actor_org_id,
-        "title": title.strip(),
-        "description": description.strip(),
-        "originating_session_id": session_id,
-        "priority": priority,
-        "start_date": start_date.isoformat() if start_date else None,
-        "due_date": due_date.isoformat() if due_date else None,
-        "epic_task_concept_id": epic_task_concept_id,
-        "components": components,
-        "fix_versions": fix_versions,
-        "sprint_values": sprint_values,
-        "backlog_rank": backlog_rank,
-        "task_type_ids": task_type_ids,
-        "task_source_id": task_source_id,
-        "task_role": task_role,
-        "next_checkpoint": next_checkpoint,
-        "progress_signal": progress_signal,
-        "evidence": evidence,
-        "notes": notes,
-        "reference_code": reference_code,
-    }
+    if idempotency_key:
+        # A durable workflow does not necessarily originate in a conversation
+        # turn.  Let it ensure one actor-owned task for a stable source item
+        # without making the task identity depend on mutable presentation text.
+        # Actor and organisation remain part of the server-issued fingerprint,
+        # so a represented key cannot cross either authority boundary.
+        creation_fingerprint_payload = {
+            "schema_version": "actor_scoped_task_idempotency.v1",
+            "actor_id": actor_id,
+            "organisation_concept_id": actor_org_id,
+            "idempotency_key": idempotency_key,
+        }
+    else:
+        creation_fingerprint_payload = {
+            "request_id": request_id,
+            "actor_id": actor_id,
+            "organisation_concept_id": actor_org_id,
+            "title": title.strip(),
+            "description": description.strip(),
+            "originating_session_id": session_id,
+            "priority": priority,
+            "start_date": start_date.isoformat() if start_date else None,
+            "due_date": due_date.isoformat() if due_date else None,
+            "epic_task_concept_id": epic_task_concept_id,
+            "components": components,
+            "fix_versions": fix_versions,
+            "sprint_values": sprint_values,
+            "backlog_rank": backlog_rank,
+            "task_type_ids": task_type_ids,
+            "task_source_id": task_source_id,
+            "task_role": task_role,
+            "next_checkpoint": next_checkpoint,
+            "progress_signal": progress_signal,
+            "evidence": evidence,
+            "notes": notes,
+            "reference_code": reference_code,
+        }
     creation_fingerprint = hashlib.sha256(
         json.dumps(
             creation_fingerprint_payload,
@@ -30816,7 +30838,11 @@ def _task_create(**kwargs):
                 notes=notes,
                 reference_code=reference_code,
                 agent_creation_fingerprint=creation_fingerprint,
-                agent_creation_request_id=request_id,
+                agent_creation_request_id=(
+                    request_id
+                    or "idempotency:"
+                    + hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+                ),
             )
         except InvalidTaskDataError:
             raise
@@ -38733,6 +38759,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "evidence": (str, type(None)),
                     "notes": (str, type(None)),
                     "reference_code": (str, type(None)),
+                    "idempotency_key": (str, type(None)),
                     "acting_user_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
                     "request_id": (str, type(None)),
@@ -38766,7 +38793,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "Create a self-assigned Von task (stored as a Vontology concept) for "
                 "the authenticated actor and organisation, linked to the current "
                 "conversation. Identical retries in the same turn reuse the canonical "
-                "task. Use this to track work items, action items, or to-dos. "
+                "task. A durable workflow may instead provide a stable idempotency_key "
+                "to ensure one task within the authenticated actor and organisation. "
+                "Use this to track work items, action items, or to-dos. "
                 "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
                 "planning metadata (components, fix versions, sprint values, backlog rank), canonical "
                 "task categories, source semantics, and richer task-detail fields."
