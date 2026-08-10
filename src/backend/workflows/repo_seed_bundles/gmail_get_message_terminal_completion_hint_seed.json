@@ -29,8 +29,8 @@
         }
       ],
       "upstream_filter": {
-        "query_fragment": "-label:\"VON/PAPER/REPRESENTED\"",
-        "rationale": "Repeated bounded runs select newest Inbox messages that have not yet converged to the represented Gmail label state, so the backlog advances without a date cap."
+        "query_fragment": "-label:\"VON/PAPER/REPRESENTED\" -label:\"VON/PAPER/NEEDS_REVIEW\" -label:\"VON/PAPER/FAILED\" -label:\"VON/PAPER/SKIP\"",
+        "rationale": "Repeated bounded runs select newest Inbox messages that are neither represented nor already dispositioned for human review, failure handling, or skip, so the backlog advances without a date cap."
       }
     }
   ]

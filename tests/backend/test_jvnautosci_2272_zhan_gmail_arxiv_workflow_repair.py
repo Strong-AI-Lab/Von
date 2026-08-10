@@ -236,7 +236,7 @@ def test_legacy_repair_entry_point_delegates_to_current_canonical_seed() -> None
 
     assert report["success"] is True
     assert report["deprecated_entry_point"] is True
-    assert report["seed_version"] == "11"
+    assert report["seed_version"] == "13"
     assert report["delegates_to"] == (
         "bootstrap_canonical_email_source_representation_convergence_workflows"
     )

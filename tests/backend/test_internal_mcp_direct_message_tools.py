@@ -471,6 +471,126 @@ def test_task_create_retry_reuses_canonical_task(monkeypatch):
     assert create_calls["count"] == 1
 
 
+def test_task_create_actor_scoped_idempotency_key_reuses_task_without_turn(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import task_management_service
+
+    persisted: dict[str, Any] = {}
+    create_calls = {"count": 0}
+
+    def fake_find(**kwargs):
+        if persisted.get("fingerprint") == kwargs["creation_fingerprint"]:
+            return persisted.get("task")
+        return None
+
+    def fake_create(**kwargs):
+        create_calls["count"] += 1
+        task = {
+            **_owned_task(),
+            "title": kwargs["title"],
+            "description": kwargs["description"],
+        }
+        persisted.update(
+            {
+                "task": task,
+                "fingerprint": kwargs["agent_creation_fingerprint"],
+                "request_id": kwargs["agent_creation_request_id"],
+            }
+        )
+        return task
+
+    monkeypatch.setattr(
+        task_management_service,
+        "find_task_by_agent_creation_fingerprint",
+        fake_find,
+    )
+    monkeypatch.setattr(task_management_service, "create_task", fake_create)
+    monkeypatch.setattr(
+        task_management_service,
+        "get_task",
+        lambda _task_id: persisted.get("task"),
+    )
+    base_arguments = {
+        "title": "Review source item",
+        "description": "Initial task text",
+        "assignee_id": "#V#user_alice",
+        "created_by_concept_id": "#V#user_alice",
+        "idempotency_key": "paper-review:gmail:profile-a:message-1",
+        **_task_actor_arguments(),
+    }
+    with override_current_actor("#V#user_alice", "#V#org_test"):
+        first = catalogue_module._task_create(**base_arguments)
+        second = catalogue_module._task_create(
+            **{
+                **base_arguments,
+                "title": "Changed presentation text",
+                "description": "A later workflow release may phrase this differently.",
+            }
+        )
+
+    assert first["success"] is True
+    assert first["changed"] is True
+    assert second["success"] is True
+    assert second["changed"] is False
+    assert second["idempotent_replay"] is True
+    assert create_calls["count"] == 1
+    assert str(persisted["request_id"]).startswith("idempotency:")
+
+
+def test_task_create_actor_scoped_idempotency_key_does_not_cross_actor(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import task_management_service
+
+    fingerprints: list[str] = []
+    tasks: dict[str, dict[str, Any]] = {}
+
+    monkeypatch.setattr(
+        task_management_service,
+        "find_task_by_agent_creation_fingerprint",
+        lambda **_kwargs: None,
+    )
+
+    def fake_create(**kwargs):
+        fingerprints.append(kwargs["agent_creation_fingerprint"])
+        task = {
+            **_owned_task(),
+            "task_concept_id": f"#V#task_{len(fingerprints)}",
+            "title": kwargs["title"],
+            "description": kwargs["description"],
+            "assignee_concept_id": kwargs["assignee_concept_id"],
+            "created_by_concept_id": kwargs["created_by_concept_id"],
+        }
+        tasks[task["task_concept_id"]] = task
+        return task
+
+    monkeypatch.setattr(task_management_service, "create_task", fake_create)
+    monkeypatch.setattr(
+        task_management_service,
+        "get_task",
+        lambda task_id: tasks[task_id],
+    )
+
+    for actor in ("#V#user_alice", "#V#user_bob"):
+        with override_current_actor(actor, "#V#org_test"):
+            result = catalogue_module._task_create(
+                title="Review source item",
+                description="Review it",
+                assignee_id=actor,
+                created_by_concept_id=actor,
+                acting_user_concept_id=actor,
+                organisation_concept_id="#V#org_test",
+                idempotency_key="paper-review:gmail:profile-a:message-1",
+            )
+        assert result["success"] is True
+
+    assert len(fingerprints) == 2
+    assert fingerprints[0] != fingerprints[1]
+
+
 def test_task_create_reconciles_late_first_write_after_create_failure(monkeypatch):
     """A retry must read back a task committed after its first lookup."""
     from src.backend.integrations.internal_mcp import catalogue as catalogue_module

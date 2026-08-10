@@ -826,6 +826,10 @@ def _build_for_each_handler(
             for item in iteration_results
             if not item["completed"]
         ]
+        final_state_counts: dict[str, int] = {}
+        for item in iteration_results:
+            final_state = _normalise_text(item.get("final_state")) or "unknown"
+            final_state_counts[final_state] = final_state_counts.get(final_state, 0) + 1
         outputs: Dict[str, Any] = {
             "items_source": items_source or None,
             "for_each_item_count": len(iteration_results),
@@ -843,6 +847,7 @@ def _build_for_each_handler(
             "for_each_success_count": success_count,
             "for_each_error_count": error_count,
             "for_each_partial_success": success_count > 0 and error_count > 0,
+            "for_each_final_state_counts": final_state_counts,
             "for_each_authority_resolution": authority_resolution.to_projection(),
             "iteration_results": iteration_results,
             "iteration_errors": iteration_errors,

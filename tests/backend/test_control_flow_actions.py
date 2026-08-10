@@ -232,6 +232,7 @@ def test_for_each_action_executes_child_workflow_per_item() -> None:
     assert result.outputs.get("for_each_max_concurrency") == 2
     assert result.outputs.get("for_each_success_count") == 2
     assert result.outputs.get("for_each_error_count") == 0
+    assert result.outputs.get("for_each_final_state_counts") == {"start": 2}
     results = result.outputs.get("iteration_results")
     assert isinstance(results, list)
     assert results[0]["result"] == {"item_value": "A", "item_index": 0}
@@ -311,6 +312,7 @@ def test_for_each_action_respects_partial_success_policy() -> None:
     assert result.outputs.get("for_each_success_count") == 1
     assert result.outputs.get("for_each_error_count") == 1
     assert result.outputs.get("for_each_partial_success") is True
+    assert result.outputs.get("for_each_final_state_counts") == {"start": 2}
     assert result.outputs.get("successful_results") == [{"item_value": "good"}]
     assert result.outputs.get("iteration_errors") == [
         {

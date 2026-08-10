@@ -86,7 +86,10 @@ def test_email_source_workflow_bootstrap_materialises_bundle_and_hint(
     assert entry["tool_arguments"]["message_id_context_key"] == "message_id"
     assert entry["tool_arguments"]["verify_after"] is True
     assert entry["upstream_filter"]["query_fragment"] == (
-        '-label:"VON/PAPER/REPRESENTED"'
+        '-label:"VON/PAPER/REPRESENTED" '
+        '-label:"VON/PAPER/NEEDS_REVIEW" '
+        '-label:"VON/PAPER/FAILED" '
+        '-label:"VON/PAPER/SKIP"'
     )
     assert entry["represented_effects"][0]["effect_kind"] == (
         "verified_gmail_label_convergence"
@@ -382,6 +385,212 @@ def test_email_source_seed_requires_current_markers_before_verified_gmail_writes
     ]
     assert gmail_arguments["remove_labels"] == ["INBOX"]
     assert gmail_arguments["verify_after"] is True
+
+
+def test_email_source_seed_dispositions_non_converging_mail_for_human_review() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    workflows = {
+        item["workflow_id"]: item
+        for item in payload.get("workflows") or []
+        if isinstance(item, dict)
+    }
+    child = workflows[mod.EMAIL_ARXIV_INGESTION_FROM_MESSAGE_WORKFLOW_ID]
+    steps = {
+        step["state_id"]: step
+        for step in child["publication_spec"]["steps"]
+        if isinstance(step, dict)
+    }
+
+    assert steps["decide_arxiv_resources"]["next_state"] == "build_review_task"
+    create_review = steps["create_review_task"]
+    assert create_review["mutation_authority"]["maximum_level"] == (
+        "additive_vontology"
+    )
+    assert create_review["static_input_bindings"][1] == [
+        "tool_name",
+        "task_create",
+    ]
+    task_arguments = create_review["static_input_bindings"][0][1]
+    assert task_arguments["idempotency_key"] == {
+        "$context_key": "review_task_idempotency_key"
+    }
+    assert task_arguments["assignee_id"] == {"$context_key": "user_concept_id"}
+    assert task_arguments["created_by_concept_id"] == {
+        "$context_key": "user_concept_id"
+    }
+
+    mark_review = steps["mark_needs_review"]
+    assert mark_review["mutation_authority"]["maximum_level"] == (
+        "external_system_guarded"
+    )
+    assert mark_review["static_input_bindings"][1] == [
+        "tool_name",
+        "gmail_modify_labels",
+    ]
+    gmail_arguments = mark_review["static_input_bindings"][0][1]
+    assert gmail_arguments["add_labels"] == [
+        {"$context_key": "needs_review_label_id"}
+    ]
+    assert gmail_arguments["remove_labels"] == []
+    assert gmail_arguments["verify_after"] is True
+    assert mark_review["conditional_transitions"][0]["to_state"] == (
+        "project_needs_review_result"
+    )
+    assert steps["project_needs_review_result"]["next_state"] == (
+        "done_needs_review"
+    )
+    assert "done_needs_review" in steps
+    assert "done_no_resources" not in steps
+
+
+def test_non_converging_message_creates_one_review_task_and_preserves_inbox() -> None:
+    calls: list[str] = []
+    observed_task_arguments: dict[str, object] = {}
+    observed_gmail_arguments: dict[str, object] = {}
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        tool_name = str(request.inputs.get("tool_name") or "")
+        calls.append(tool_name)
+        arguments = dict(request.inputs.get("tool_arguments") or {})
+        if tool_name == "task_create":
+            observed_task_arguments.update(arguments)
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "success": True,
+                        "task_concept_id": "#V#task_review_message_1",
+                        "changed": True,
+                        "idempotent_replay": False,
+                        "canonical_read_back": {
+                            "task_concept_id": "#V#task_review_message_1",
+                            "status": "pending",
+                        },
+                    }
+                },
+            )
+        if tool_name == "gmail_list_labels":
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "result": {
+                        "label_id": "Label_NEEDS_REVIEW",
+                        "label_name": "VON/PAPER/NEEDS_REVIEW",
+                    }
+                },
+            )
+        assert tool_name == "gmail_modify_labels"
+        observed_gmail_arguments.update(arguments)
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "result": {
+                    "gmail_label_state_verified": True,
+                    "readback_label_ids": [
+                        "INBOX",
+                        "UNREAD",
+                        "Label_NEEDS_REVIEW",
+                    ],
+                }
+            },
+        )
+
+    definition = _exact_message_definition(
+        "decide_arxiv_resources",
+        "build_review_task",
+        "create_review_task",
+        "ensure_needs_review_label",
+        "resolve_needs_review_label",
+        "mark_needs_review",
+        "project_needs_review_result",
+        "done_needs_review",
+        "failed",
+        initial_state="decide_arxiv_resources",
+    )
+    registry = ActionRegistry()
+    register_control_flow_actions(registry)
+    registry.register(ActionSpec(action_id="workflow_mcp.invoke_tool", handler=handler))
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "arxiv_resource_references": [],
+            "message_id": "gmail-message-1",
+            "gmail_profile": "vonwitbrock-gmail",
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#university_of_auckland_strong_ai_lab",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done_needs_review"
+    assert calls == ["task_create", "gmail_list_labels", "gmail_modify_labels"]
+    assert observed_task_arguments["idempotency_key"] == (
+        "paper-ingestion-review:v1:gmail:vonwitbrock-gmail:gmail-message-1"
+    )
+    assert observed_task_arguments["assignee_id"] == "#V#michael_witbrock"
+    assert observed_task_arguments["organisation_concept_id"] == (
+        "#V#university_of_auckland_strong_ai_lab"
+    )
+    assert observed_gmail_arguments["add_labels"] == ["Label_NEEDS_REVIEW"]
+    assert observed_gmail_arguments["remove_labels"] == []
+    assert "INBOX" in result.data["needs_review_gmail_readback_label_ids"]
+    assert result.data["review_task_concept_id"] == "#V#task_review_message_1"
+    assert result.data["result"] == {
+        "source_item_id": "gmail-message-1",
+        "source_profile": "vonwitbrock-gmail",
+        "disposition": "needs_review",
+        "review_task_concept_id": "#V#task_review_message_1",
+        "gmail_readback_label_ids": [
+            "INBOX",
+            "UNREAD",
+            "Label_NEEDS_REVIEW",
+        ],
+    }
+
+
+def test_parent_batch_surfaces_human_review_disposition_count() -> None:
+    from src.backend.services import (
+        email_source_representation_convergence_workflow_vontology_service as mod,
+    )
+    from src.backend.workflows.engine import evaluate_transition_condition_spec
+
+    payload = json.loads(mod._REPO_SEED_ASSET_PATH.read_text(encoding="utf-8"))
+    parent = next(
+        item
+        for item in payload.get("workflows") or []
+        if item.get("workflow_id") == mod.ZHAN_GMAIL_ARXIV_INGESTION_WORKFLOW_ID
+    )
+    process = next(
+        step
+        for step in parent["publication_spec"]["steps"]
+        if step.get("state_id") == "process_messages"
+    )
+
+    mappings = {
+        item["context_key"]: item["tool_output_field"]
+        for item in process["tool_output_mapping_specs"]
+    }
+    assert mappings["message_final_state_counts"] == "for_each_final_state_counts"
+    review_transition = process["conditional_transitions"][0]
+    assert review_transition["to_state"] == "done_with_review_required"
+    assert review_transition["condition_spec"]["conditions"][0]["key"] == (
+        "message_final_state_counts.#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done_needs_review"
+    )
+    assert evaluate_transition_condition_spec(
+        context={
+            "message_final_state_counts": {
+                "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done": 2,
+                "#V#workflow_step_email_arxiv_ingestion_from_message_workflow_done_needs_review": 1,
+            },
+            "message_error_count": 0,
+        },
+        condition_spec=review_transition["condition_spec"],
+    )
 
 
 def test_email_source_seed_routes_exact_message_unit_and_explicit_batch() -> None:
