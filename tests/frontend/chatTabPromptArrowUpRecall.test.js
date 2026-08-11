@@ -99,16 +99,30 @@ describe('JVNAUTOSCI-2128: ArrowUp recall in Talk-with-Von composer', () => {
         expect(promptInput.value).toBe('');
     });
 
-    test('Modifier-held ArrowUp is a no-op', () => {
+    test('Ctrl, Alt, and Meta-held ArrowUp are no-ops', () => {
         __testOnly_rememberLastSubmittedUserPrompt('prior');
         const promptInput = buildPromptInput('');
 
-        for (const modifier of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey']) {
+        for (const modifier of ['ctrlKey', 'altKey', 'metaKey']) {
             const event = makeArrowUpEvent(promptInput, { [modifier]: true });
             __testOnly_handlePromptInputArrowUpRecall(event);
             expect(event.preventDefault).not.toHaveBeenCalled();
             expect(promptInput.value).toBe('');
         }
+    });
+
+    test('Shift+ArrowUp jumps to the oldest submitted prompt', () => {
+        __testOnly_rememberLastSubmittedUserPrompt('oldest prompt');
+        __testOnly_rememberLastSubmittedUserPrompt('newest prompt');
+        const promptInput = buildPromptInput('');
+
+        const event = makeArrowUpEvent(promptInput, { shiftKey: true });
+        __testOnly_handlePromptInputArrowUpRecall(event);
+
+        expect(event.preventDefault).toHaveBeenCalledTimes(1);
+        expect(promptInput.value).toBe('oldest prompt');
+        expect(promptInput.selectionStart).toBe(promptInput.value.length);
+        expect(promptInput.selectionEnd).toBe(promptInput.value.length);
     });
 
     test('Recall is per conversation: switching session hides the other session\'s buffer', () => {

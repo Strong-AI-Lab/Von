@@ -122,14 +122,11 @@ export function evaluateServerHealthState({
   const meetsFailureWindowThreshold =
     failureWindowMs >= downFailureWindowThresholdMs;
 
-  let state = "healthy";
-  if (safeFailureCount <= 0) {
-    state = safeSeenSuccess ? "healthy" : "waiting";
-  } else if (meetsFailureThreshold && meetsFailureWindowThreshold) {
-    state = "down";
-  } else {
-    state = safeSeenSuccess ? "degraded" : "waiting";
-  }
+  const state = safeFailureCount <= 0
+    ? (safeSeenSuccess ? "healthy" : "waiting")
+    : meetsFailureThreshold && meetsFailureWindowThreshold
+      ? "down"
+      : (safeSeenSuccess ? "degraded" : "waiting");
 
   return {
     state,
