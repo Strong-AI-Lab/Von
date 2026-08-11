@@ -53,6 +53,7 @@ module.exports = [
         // Ignore patterns
         ignores: [
             "node_modules/**",
+            ".venv/**",
             "coverage/**",
             "**/*.min.js",
             "src/frontend/web/von_interface/static/js/lib/**",

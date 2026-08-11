@@ -1,5 +1,10 @@
 import { annotateTurn, postJson } from './apiService.js';
-import { addMessageToChat, elements, renderSpanSuggestions } from './domUtils.js';
+import {
+  addMessageToChat,
+  elements,
+  getCurrentUser,
+  renderSpanSuggestions,
+} from './domUtils.js';
 
 /**
  * Show/hide the thinking card wrapper (or legacy loadingIndicator).

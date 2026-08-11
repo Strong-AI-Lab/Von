@@ -33,7 +33,8 @@ describe('chat.js presenter mode request', () => {
         expect(postJson).toHaveBeenCalledTimes(1);
         expect(postJson).toHaveBeenCalledWith('/von/generate', {
             prompt: 'Hello',
-            presenter_mode: true
+            presenter_mode: true,
+            thinking_card_mode: 'default'
         });
     });
 });

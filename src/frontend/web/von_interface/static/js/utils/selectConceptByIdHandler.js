@@ -62,9 +62,9 @@ async function conceptExists(conceptId, fetchFn) {
     let res;
     try {
         res = await fetchFn(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
-    } catch (_) {
+    } catch (error) {
         // Network failures should not be treated as "missing".
-        throw new Error('Failed to check concept existence');
+        throw new Error('Failed to check concept existence', { cause: error });
     }
     if (res.ok) return true;
     if (res.status === 404) return false;
@@ -375,7 +375,7 @@ async function createConceptForId(conceptId, options, fetchFn) {
         const json = JSON.parse(text);
         resolvedId = json?.concept_id || json?.concept?.concept_id || id;
     } catch (_) {
-        resolvedId = id;
+        // Keep the requested identifier when the response is not JSON.
     }
     await updateConceptDescription(resolvedId, description, fetchFn);
     return resolvedId;
@@ -1137,7 +1137,7 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
         // Best-effort; keep going.
     }
 
-    let exists = false;
+    let exists;
     try {
         exists = await conceptExists(id, fetchFn);
     } catch (err) {

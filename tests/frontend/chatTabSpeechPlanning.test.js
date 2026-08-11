@@ -14,7 +14,13 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
     getCurrentUserConceptId: jest.fn(() => null)
 }));
 
-const { sendMessage, showLlmDebugPopup, __test_only__rehydrateHistory, __testOnly_resetChatTtsState } = require(chatTabModulePath);
+const {
+    sendMessage,
+    showLlmDebugPopup,
+    __test_only__rehydrateHistory,
+    __testOnly_resetChatTtsState,
+    __testOnly_setActiveChatSession
+} = require(chatTabModulePath);
 
 function advanceTimers(ms) {
     if (jest.isMockFunction(setTimeout)) {
@@ -139,6 +145,8 @@ describe('chat speech planning (presenter channels)', () => {
             <pre id="chatLlmDebugAux"></pre>
         `;
 
+        __testOnly_setActiveChatSession('speech-planning-test-session', 'Speech planning test');
+
         // Enable TTS in the environment.
         global.SpeechSynthesisUtterance = function (text) {
             this.text = text;
@@ -239,7 +247,7 @@ describe('chat speech planning (presenter channels)', () => {
         const assistantTurnId = assistantContainer?.dataset?.turnId;
         expect(assistantTurnId).toBeTruthy();
 
-        showLlmDebugPopup(assistantTurnId);
+        await showLlmDebugPopup(assistantTurnId);
         const popup = document.getElementById('chatLlmDebugPopup');
         const jsonText = popup.dataset.currentDebugData;
         expect(jsonText).toContain('speech_planning');
@@ -330,7 +338,7 @@ describe('chat speech planning (presenter channels)', () => {
         promptInput.value = 'show me task table';
 
         const displayElements = buildDisplayElementsContract({
-            screenText: 'Task summary',
+            screenText: '**Task summary**',
             spokenText: 'Here is the task summary table.',
             tablePayload: {
                 title: 'Predicate status matrix',
@@ -431,7 +439,7 @@ describe('chat speech planning (presenter channels)', () => {
         promptInput.value = 'show relation extent table';
 
         const displayElements = buildDisplayElementsContract({
-            screenText: 'Relation extent summary',
+            screenText: '**Relation extent summary**',
             spokenText: 'Here is the relation extent summary.',
             tablePayload: {
                 title: 'Relation extent',
@@ -546,7 +554,7 @@ describe('chat speech planning (presenter channels)', () => {
         promptInput.value = 'show sorted task table';
 
         const displayElements = buildDisplayElementsContract({
-            screenText: 'Sorted task summary',
+            screenText: '**Sorted task summary**',
             spokenText: 'Here is the sorted task summary table.',
             tablePayload: {
                 columns: [
@@ -662,7 +670,7 @@ describe('chat speech planning (presenter channels)', () => {
         promptInput.value = 'show workflow status';
 
         const displayElements = buildDisplayElementsContract({
-            screenText: 'Workflow summary',
+            screenText: '**Workflow summary**',
             spokenText: 'Here is the workflow summary.',
             workflowPayload: {
                 title: 'Workflow execution overview',
@@ -774,7 +782,7 @@ describe('chat speech planning (presenter channels)', () => {
         promptInput.value = 'show task timeline';
 
         const displayElements = buildDisplayElementsContract({
-            screenText: 'Timeline summary',
+            screenText: '**Timeline summary**',
             spokenText: 'Here is the task timeline.',
             timelinePayload: {
                 title: 'Task lifecycle timeline',
@@ -883,7 +891,7 @@ describe('chat speech planning (presenter channels)', () => {
         promptInput.value = 'show task cards';
 
         const displayElements = buildDisplayElementsContract({
-            screenText: 'Task summary',
+            screenText: '**Task summary**',
             spokenText: 'Here are the task cards.',
             taskViewPayload: {
                 title: 'Current action items',

@@ -43,8 +43,20 @@ describe('handleSelectConceptByIdDetail', () => {
             { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn }
         );
 
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Loading…', false);
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Person', false);
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            1,
+            '#V#person',
+            'Loading…',
+            false,
+            { kind: 'type' }
+        );
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            2,
+            '#V#person',
+            'Person',
+            false,
+            { kind: 'type', forceKindUpdate: true }
+        );
         // Should not try to create.
         expect(fetchFn).toHaveBeenCalledTimes(2);
 
@@ -84,17 +96,19 @@ describe('handleSelectConceptByIdDetail', () => {
             { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn }
         );
 
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith(
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            1,
             '#V#person',
             'Loading…',
             false,
-            { promoteExistingTab: true }
+            { kind: 'type', promoteExistingTab: true }
         );
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith(
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            2,
             '#V#person',
             'Person',
             false,
-            { promoteExistingTab: true }
+            { kind: 'type', forceKindUpdate: true, promoteExistingTab: true }
         );
     });
 
@@ -129,8 +143,20 @@ describe('handleSelectConceptByIdDetail', () => {
             { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn }
         );
 
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Loading…', true);
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Person', true);
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            1,
+            '#V#person',
+            'Loading…',
+            true,
+            { kind: 'type' }
+        );
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            2,
+            '#V#person',
+            'Person',
+            true,
+            { kind: 'type', forceKindUpdate: true }
+        );
     });
 
     test('missing concept prompts and creates then opens', async () => {
@@ -178,8 +204,20 @@ describe('handleSelectConceptByIdDetail', () => {
         );
 
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Loading…', false);
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Disambiguation result', false);
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            1,
+            '#V#disambiguation_result',
+            'Loading…',
+            false,
+            { kind: 'type' }
+        );
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            3,
+            '#V#disambiguation_result',
+            'Disambiguation result',
+            false,
+            { kind: 'type', forceKindUpdate: true }
+        );
         // Includes existence checks/create/metadata and proposal hydration fetches.
         expect(fetchFn.mock.calls.length).toBeGreaterThanOrEqual(4);
 
@@ -246,7 +284,13 @@ describe('handleSelectConceptByIdDetail', () => {
 
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
         // Canonical tab id.
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#foo_bar', 'Loading…', false);
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            1,
+            '#V#foo_bar',
+            'Loading…',
+            false,
+            { kind: 'type' }
+        );
     });
 
     test('canonicalises accented IDs for lookup and create', async () => {
@@ -288,7 +332,13 @@ describe('handleSelectConceptByIdDetail', () => {
         );
 
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#cafe', 'Loading…', false);
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            1,
+            '#V#cafe',
+            'Loading…',
+            false,
+            { kind: 'type' }
+        );
     });
 
     test('passes proposal payload to chooser and persists description when provided', async () => {
@@ -491,7 +541,13 @@ describe('handleSelectConceptByIdDetail', () => {
 
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
         expect(existenceChecks).toBe(2);
-        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#race_concept', 'Race concept', false);
+        expect(createOrActivateConceptTab).toHaveBeenNthCalledWith(
+            3,
+            '#V#race_concept',
+            'Race concept',
+            false,
+            { kind: 'type', forceKindUpdate: true }
+        );
     });
 
     test('hydrates implicit parent suggestions from annotation workflow when confidence passes threshold', async () => {

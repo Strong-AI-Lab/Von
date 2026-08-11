@@ -3004,7 +3004,6 @@ async function ensurePathVisibleById(targetId) {
       li = await createTreeElement({ id: node.id, name: node.name, mongo_id: node.mongo_id, children: [] }, null);
       li.classList.add('vontology-temp');
       parentUl.appendChild(li);
-      span = li.querySelector('.vontology-node-name');
     } else {
       li = span.closest('li');
     }
@@ -3301,7 +3300,6 @@ export async function chooseBestTypeForIndividual(candidateTypeIds = []) {
         status: 'error',
         error: e
       });
-      countFetchTask = null;
     }
     console.error('Error choosing best type for individual:', e);
     // Defensive: clear any partial cache entry that may have been set just before error
@@ -4413,7 +4411,6 @@ export function preloadVontologyData() {
           status: 'error',
           error: err
         });
-        preloadTask = null;
       }
       console.warn('[preloadVontologyData] Preload failed:', err);
     }
