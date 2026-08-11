@@ -92,6 +92,9 @@ from ...services.llm_usage_cost_service import (
     LLM_USAGE_COST_SUMMARY_SCHEMA_VERSION,
     build_llm_usage_cost_summary,
 )
+from ...services.conversation_runtime_cost_service import (
+    get_conversation_runtime_cost_snapshot,
+)
 from ...services.model_registry_service import get_model_registry_snapshot
 from ...services.feature_flags import (
     get_display_elements_screen_fence_compat_enabled,
@@ -13814,6 +13817,120 @@ def history():
             )
         print(f"Error retrieving history: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/cost_summary", methods=["GET"])
+def history_cost_summary():
+    """Return content-free conversation and actor-runtime cost estimates."""
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+    user_concept_id = _normalise_concept_id(user_concept_id)
+    if not user_concept_id:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    session_id = _clean_optional_text(
+        request.args.get("session_id") or session.get("session_id")
+    )
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+    exclude_request_id = _clean_optional_text(request.args.get("exclude_request_id"))
+    observe_request_id = _clean_optional_text(request.args.get("observe_request_id"))
+
+    try:
+        # Do not accept namespace or organisation query parameters here.  The
+        # runtime aggregate is private to the authenticated actor's effective
+        # server-side context, not an arbitrary client-selected scope.
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        actor_namespace = _clean_optional_text(effective.get("namespace"))
+        if not actor_namespace:
+            actor_namespace = chat_history_service.resolve_chat_history_namespace(
+                user_concept_id
+            )
+        if not actor_namespace:
+            return jsonify({"error": "Actor namespace unavailable"}), 503
+
+        owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+            user_concept_id=user_concept_id,
+            session_id=session_id,
+        )
+        if shared_invite:
+            if not owner_user_id:
+                return jsonify({"error": "Not authorised for conversation"}), 403
+        elif not chat_history_service.has_chat_history_session(
+            user_concept_id,
+            session_id,
+            namespace=actor_namespace,
+        ):
+            return jsonify({"error": "Not authorised for conversation"}), 403
+        if not owner_user_id:
+            return jsonify({"error": "Not authorised for conversation"}), 403
+
+        server_started_at_utc = _clean_optional_text(
+            current_app.config.get("SERVER_START_TIME")
+        )
+        if not server_started_at_utc:
+            return jsonify({"error": "Runtime start time unavailable"}), 503
+        raw_started_at = (
+            f"{server_started_at_utc[:-1]}+00:00"
+            if server_started_at_utc.endswith("Z")
+            else server_started_at_utc
+        )
+        try:
+            server_started_at = datetime.fromisoformat(raw_started_at)
+        except ValueError:
+            return jsonify({"error": "Runtime start time unavailable"}), 503
+        if server_started_at.tzinfo is None:
+            server_started_at = server_started_at.replace(tzinfo=timezone.utc)
+        server_started_at = server_started_at.astimezone(timezone.utc)
+
+        try:
+            model_registry = get_model_registry_snapshot()
+        except Exception:
+            # Cost availability must remain honest when pricing authority is
+            # temporarily unavailable; the standard builder reports it as such.
+            current_app.logger.warning(
+                "history_cost_summary: model pricing registry unavailable",
+                exc_info=True,
+            )
+            model_registry = None
+        snapshot = get_conversation_runtime_cost_snapshot(
+            conversation_session_id=session_id,
+            actor_concept_id=user_concept_id,
+            actor_namespace=actor_namespace,
+            server_started_at=server_started_at,
+            server_started_at_utc=server_started_at_utc,
+            pid=os.getpid(),
+            model_registry=model_registry,
+            exclude_request_id=exclude_request_id,
+            observe_request_id=observe_request_id,
+        )
+        return jsonify(snapshot)
+    except ValueError as exc:
+        if str(exc) == "exclude_request_id_not_owned_by_actor":
+            return jsonify({"error": "exclude_request_id not owned by actor"}), 403
+        return jsonify({"error": "Invalid conversation cost request"}), 400
+    except Exception as exc:
+        current_app.logger.warning(
+            "history_cost_summary unavailable: %s", exc, exc_info=True
+        )
+        return (
+            jsonify(
+                {
+                    "error": "Conversation cost summary temporarily unavailable",
+                    "retryable": True,
+                    "availability_status": "transient_storage_error",
+                }
+            ),
+            503,
+        )
 
 
 def _build_transient_chat_history_payload(

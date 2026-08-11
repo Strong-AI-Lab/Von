@@ -11628,6 +11628,24 @@ def _ensure_turn_execution_indexes(collection) -> None:
                     [("namespace", ASCENDING), ("created_at_utc", DESCENDING)],
                     name="namespace_created_desc",
                 )
+            if "user_namespace_created_desc" not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("user_id", ASCENDING),
+                        ("namespace", ASCENDING),
+                        ("created_at_utc", DESCENDING),
+                    ],
+                    name="user_namespace_created_desc",
+                )
+            if "user_namespace_updated_desc" not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("user_id", ASCENDING),
+                        ("namespace", ASCENDING),
+                        ("updated_at_utc", DESCENDING),
+                    ],
+                    name="user_namespace_updated_desc",
+                )
             if "session_created_desc" not in existing_indexes:
                 collection.create_index(
                     [("session_id", ASCENDING), ("created_at_utc", DESCENDING)],

@@ -84,6 +84,9 @@ import {
     __testOnly_copyConversationInfoToClipboard,
     __testOnly_clearLlmDebugData,
     __testOnly_resetChatRequestState,
+    __testOnly_refreshConversationRuntimeCostSnapshot,
+    __testOnly_setConversationRuntimeCostLiveSummary,
+    __testOnly_getConversationRuntimeCostSnapshot,
     __testOnly_setSessionTabsCache,
     __testOnly_setTranscriptTurns,
     setLlmDebugDataForTurn,
@@ -105,6 +108,95 @@ jest.mock('../apiService.js', () => {
         postJson: jest.fn(),
         WINDOW_SESSION_HEADER: 'X-Window-Session-ID'
     };
+});
+
+describe('conversation runtime cost persistence handover', () => {
+    const storedSummary = (amount) => ({
+        schema_version: 'llm_usage_cost_summary.v1',
+        unique_call_count: 1,
+        usage: { status: 'reported' },
+        estimated_cost: {
+            status: 'estimated',
+            amount,
+            known_amount: amount,
+            currency: 'USD'
+        }
+    });
+
+    const snapshotPayload = (amount, observed) => ({
+        schema_version: 'conversation_runtime_cost_snapshot.v1',
+        scope: { conversation_session_id: 'cost-session' },
+        runtime: { pid: 42, started_at_utc: '2026-08-11T10:00:00Z' },
+        conversation: storedSummary(amount),
+        since_restart: storedSummary(amount),
+        handover: { request_id: 'cost-request', observed }
+    });
+
+    const deferred = () => {
+        let resolve;
+        const promise = new Promise((settle) => { resolve = settle; });
+        return { promise, resolve };
+    };
+
+    test('ignores a late excluded baseline after the durable handover response', async () => {
+        const hadFetch = Object.prototype.hasOwnProperty.call(global, 'fetch');
+        const originalFetch = global.fetch;
+        global.fetch = undefined;
+        __testOnly_setActiveChatSession('cost-session', 'Cost session');
+        __testOnly_setConversationRuntimeCostLiveSummary(
+            { sessionId: 'cost-session', clientRequestId: 'cost-request' },
+            storedSummary(0.05),
+            { active: false, reason: 'test_terminal_summary' }
+        );
+
+        const excluded = deferred();
+        const handover = deferred();
+        global.fetch = jest.fn()
+            .mockImplementationOnce(() => excluded.promise)
+            .mockImplementationOnce(() => handover.promise);
+
+        const excludedRefresh = __testOnly_refreshConversationRuntimeCostSnapshot({
+            excludeRequestId: 'cost-request',
+            reason: 'test_active_baseline'
+        });
+        const handoverRefresh = __testOnly_refreshConversationRuntimeCostSnapshot({
+            observeRequestId: 'cost-request',
+            reason: 'test_terminal_handover'
+        });
+
+        handover.resolve({
+            ok: true,
+            json: async () => snapshotPayload(0.20, true)
+        });
+        await handoverRefresh;
+        expect(__testOnly_getConversationRuntimeCostSnapshot()).toEqual(
+            expect.objectContaining({
+                baseline: expect.objectContaining({
+                    conversation: expect.objectContaining({
+                        estimated_cost: expect.objectContaining({ amount: 0.20 })
+                    })
+                }),
+                live: null,
+                loading: false,
+                error: null
+            })
+        );
+
+        excluded.resolve({
+            ok: true,
+            json: async () => snapshotPayload(0.15, false)
+        });
+        await excludedRefresh;
+        const finalSnapshot = __testOnly_getConversationRuntimeCostSnapshot();
+        expect(finalSnapshot.baseline.conversation.estimated_cost.amount).toBe(0.20);
+        expect(finalSnapshot.live).toBeNull();
+        expect(global.fetch.mock.calls[0][0]).toContain('exclude_request_id=cost-request');
+        expect(global.fetch.mock.calls[1][0]).toContain('observe_request_id=cost-request');
+
+        __testOnly_resetChatRequestState();
+        if (hadFetch) global.fetch = originalFetch;
+        else delete global.fetch;
+    });
 });
 jest.mock('../domUtils.js', () => ({
     elements: {},

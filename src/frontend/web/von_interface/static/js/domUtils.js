@@ -2,6 +2,7 @@ import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
 import { applyLocalModelPreferenceOverlay, getEffectiveLocalModelPreference } from './utils/localModelPreferences.js';
 import { getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import { formatConversationRuntimeCostFooter } from './utils/conversationRuntimeCost.js';
 import {
   getLatestWorkflowCapabilityIndexStatus,
   refreshWorkflowCapabilityIndexStatus,
@@ -375,6 +376,112 @@ const FOOTER_DB_PROBE_STATS_KEY = 'von_footer_db_probe_stats_v1';
 const FOOTER_DB_PROBE_SAMPLE_LIMIT = 32;
 const FOOTER_DB_RETRY_MIN_MS = 1500;
 const FOOTER_DB_RETRY_MAX_MS = 20000;
+
+function getConversationRuntimeCostSnapshot() {
+  try {
+    return window.__vonConversationRuntimeCostSnapshot || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function applyConversationRuntimeCostFooterSnapshot(button, snapshot = getConversationRuntimeCostSnapshot()) {
+  if (!button) return;
+  const presentation = formatConversationRuntimeCostFooter(snapshot);
+  const segment = button.closest('.conversation-runtime-cost-segment');
+  if (segment) segment.hidden = presentation.visible !== true;
+  const desktop = button.querySelector('.conversation-runtime-cost-desktop');
+  const mobile = button.querySelector('.conversation-runtime-cost-mobile');
+  const details = button.parentElement?.querySelector('.conversation-runtime-cost-details');
+  if (desktop) desktop.textContent = presentation.desktopText;
+  if (mobile) mobile.textContent = presentation.mobileText;
+  if (details) {
+    details.replaceChildren(...presentation.details.map((detail) => {
+      const line = document.createElement('div');
+      line.textContent = detail;
+      return line;
+    }));
+  }
+  button.setAttribute('aria-label', presentation.ariaLabel);
+  setKeptNativeTitle(button, presentation.title);
+  button.dataset.costState = presentation.state;
+  button.dataset.costDetails = presentation.details.join('\n');
+  if (presentation.visible !== true) {
+    button.setAttribute('aria-expanded', 'false');
+    if (details) details.hidden = true;
+  }
+}
+
+function makeConversationRuntimeCostFooterSegment() {
+  const segment = document.createElement('span');
+  segment.className = 'footer-segment conversation-runtime-cost-segment';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'conversation-runtime-cost-button';
+  button.setAttribute('aria-live', 'polite');
+  button.setAttribute('aria-expanded', 'false');
+  const desktop = document.createElement('span');
+  desktop.className = 'conversation-runtime-cost-desktop';
+  const mobile = document.createElement('span');
+  mobile.className = 'conversation-runtime-cost-mobile';
+  mobile.setAttribute('aria-hidden', 'true');
+  button.append(desktop, mobile);
+  const details = document.createElement('div');
+  details.className = 'conversation-runtime-cost-details';
+  details.id = 'conversationRuntimeCostDetails';
+  details.setAttribute('role', 'region');
+  details.setAttribute('aria-label', 'Conversation cost estimate details');
+  details.hidden = true;
+  button.setAttribute('aria-controls', details.id);
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (segment.hidden) return;
+    const nextOpen = details.hidden;
+    document.querySelectorAll('.conversation-runtime-cost-details').forEach((panel) => {
+      panel.hidden = true;
+      const control = panel.parentElement?.querySelector('.conversation-runtime-cost-button');
+      if (control) control.setAttribute('aria-expanded', 'false');
+    });
+    details.hidden = !nextOpen;
+    button.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+  });
+  segment.append(button, details);
+  applyConversationRuntimeCostFooterSnapshot(button);
+  return segment;
+}
+
+function refreshConversationRuntimeCostFooter(snapshot = getConversationRuntimeCostSnapshot()) {
+  try {
+    document.querySelectorAll('.conversation-runtime-cost-button').forEach((button) => {
+      applyConversationRuntimeCostFooterSnapshot(button, snapshot);
+    });
+  } catch (_) {
+    // A telemetry repaint must not interfere with the ordinary footer lifecycle.
+  }
+}
+
+if (typeof document !== 'undefined' && !document.__vonConversationRuntimeCostFooterListenerBound) {
+  document.__vonConversationRuntimeCostFooterListenerBound = true;
+  document.addEventListener('von:conversationRuntimeCostUpdated', (event) => {
+    refreshConversationRuntimeCostFooter(event?.detail || null);
+  });
+  document.addEventListener('click', (event) => {
+    if (event.target?.closest?.('.conversation-runtime-cost-segment')) return;
+    document.querySelectorAll('.conversation-runtime-cost-details').forEach((panel) => {
+      panel.hidden = true;
+      const control = panel.parentElement?.querySelector('.conversation-runtime-cost-button');
+      if (control) control.setAttribute('aria-expanded', 'false');
+    });
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    document.querySelectorAll('.conversation-runtime-cost-details').forEach((panel) => {
+      panel.hidden = true;
+      const control = panel.parentElement?.querySelector('.conversation-runtime-cost-button');
+      if (control) control.setAttribute('aria-expanded', 'false');
+    });
+  });
+}
 const FOOTER_WORKFLOW_CAPABILITY_RETRY_MS = 60000;
 
 function normaliseFooterServerReachability(value) {
@@ -1466,6 +1573,9 @@ export async function setModelInfoFooterText() {
     );
     if (llmClass) modelSettingsSegment.classList.add('llm-status-badge', llmClass);
     segments.push(modelSettingsSegment);
+    // This is deliberately a lightweight, independently repaintable telemetry
+    // segment: cost updates must not retrigger settings, DB, or auth footer loads.
+    segments.push(makeConversationRuntimeCostFooterSegment());
   }
 
   // User segment

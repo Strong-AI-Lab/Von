@@ -111,6 +111,7 @@ const CONVERSATION_INFO_EXPORT_SCHEMA_VERSION = 'conversation_info_export.v1';
 const CONVERSATION_TELEMETRY_ACCESS_SCHEMA_VERSION = 'conversation_telemetry_access.v1';
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
+const CONVERSATION_RUNTIME_COST_SNAPSHOT_SCHEMA_VERSION = 'conversation_runtime_cost_snapshot.v1';
 const CONVERSATION_SITUATION_EXPORT_SCHEMA_VERSION = 'conversation_situation_export.v1';
 const CONVERSATION_TELEMETRY_LOCATOR_FETCH_TIMEOUT_MS = 4000;
 const TURN_TELEMETRY_MCP_ACCESS_SCHEMA_VERSION = 'turn_telemetry_mcp_access.v1';
@@ -279,6 +280,20 @@ const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_ATTEMPTS = 2;
 let workflowStatusPanelInitialised = false;
 let workflowCapabilityIndexStatusUnsubscribe = null;
 let chatTabInitialised = false;
+const conversationRuntimeCostState = {
+    generation: 0,
+    fetchSequence: 0,
+    contextSignature: null,
+    context: null,
+    runtime: null,
+    runtimeIdentitySignature: null,
+    baseline: null,
+    live: null,
+    loading: false,
+    error: null,
+    inFlight: null,
+    handoverRetryTimerId: null
+};
 const REALTIME_CONNECTION_TELEMETRY_SCHEMA_VERSION = 1;
 const workflowEpisodesState = {
     open: false,
@@ -380,6 +395,7 @@ function synchroniseLlmExecutionContext({ force = false, reason = 'context_refre
         ...current,
     };
     publishCurrentLlmExecutionContextBinding(bound);
+    synchroniseConversationRuntimeCostContext({ force, reason });
     return bound;
 }
 
@@ -4019,6 +4035,14 @@ function applyThinkingProgressUpdate(request, nextProgress) {
     }
 
     request.latestProgress = cloneThinkingLatestProgress(nextProgress) || nextProgress;
+    const liveCostSummary = (
+        nextProgress?.llm_usage_cost_summary
+        && typeof nextProgress.llm_usage_cost_summary === 'object'
+    ) ? nextProgress.llm_usage_cost_summary : null;
+    setConversationRuntimeCostLiveSummary(request, liveCostSummary, {
+        active: !isTerminalThinkingProgress(nextProgress),
+        reason: 'live_progress'
+    });
     const workflowSelection = buildThinkingWorkflowSelectionSnapshot(nextProgress);
     if (workflowSelection) {
         request.workflowSelection = workflowSelection;
@@ -30803,6 +30827,13 @@ export function initializeChatTab() {
     chatTabInitialised = true;
     console.log("Initializing chat tab...");
 
+    if (!document.__vonConversationRuntimeCostRuntimeListenerBound) {
+        document.__vonConversationRuntimeCostRuntimeListenerBound = true;
+        document.addEventListener('von:runtimeIdentityUpdated', (event) => {
+            handleConversationRuntimeIdentityUpdate(event?.detail);
+        });
+    }
+
     // JVNAUTOSCI-1014: Load hidden session IDs from localStorage (user-scoped)
     loadHiddenChatSessionIds();
     loadPinnedChatSessionIds();
@@ -31474,6 +31505,19 @@ function abortActiveChatRequest(options = {}) {
 
     setLiveChatRequestForSession(request.sessionId, null);
     setFinishedThinkingCardForSession(request.sessionId, null);
+    const latestKnownCostSummary = request.llmUsageCostSummary
+        || request.latestProgress?.llm_usage_cost_summary
+        || null;
+    setConversationRuntimeCostLiveSummary(request, latestKnownCostSummary, {
+        active: false,
+        reason: 'request_aborted'
+    });
+    if (request.sessionId === activeChatSessionId) {
+        void refreshConversationRuntimeCostSnapshot({
+            observeRequestId: request.clientRequestId,
+            reason: 'request_aborted'
+        });
+    }
     syncActiveChatSessionThinkingState();
     restorePromptEditingState(request, options);
 }
@@ -33062,6 +33106,16 @@ async function handleSendPrompt(options = {}) {
             });
     setFinishedThinkingCardForSession(targetSessionId, null);
     setLiveChatRequestForSession(targetSessionId, request);
+    setConversationRuntimeCostLiveSummary(request, null, {
+        active: true,
+        reason: 'request_started'
+    });
+    if (request.sessionId === activeChatSessionId) {
+        void refreshConversationRuntimeCostSnapshot({
+            excludeRequestId: request.clientRequestId,
+            reason: 'request_started'
+        });
+    }
     if (selectedQueueEntry) {
         hideChatPromptQueueEntryLocally(selectedQueueEntry);
     }
@@ -33177,6 +33231,10 @@ async function handleSendPrompt(options = {}) {
                 enriched.llm_usage_cost_summary
                 && typeof enriched.llm_usage_cost_summary === 'object'
             ) ? { ...enriched.llm_usage_cost_summary } : null;
+            setConversationRuntimeCostLiveSummary(request, request.llmUsageCostSummary, {
+                active: false,
+                reason: 'terminal_summary'
+            });
             syncThinkingCriticOutputFromSource(request, enriched);
             setLlmDebugDataEntry(assistantTurnId, enriched, request.executionContextBinding);
             if (isRequestVisible()) {
@@ -33250,6 +33308,10 @@ async function handleSendPrompt(options = {}) {
                 data.llm_debug.llm_usage_cost_summary
                 && typeof data.llm_debug.llm_usage_cost_summary === 'object'
             ) ? { ...data.llm_debug.llm_usage_cost_summary } : null;
+            setConversationRuntimeCostLiveSummary(request, request.llmUsageCostSummary, {
+                active: false,
+                reason: 'terminal_summary'
+            });
             syncThinkingCriticOutputFromSource(request, data.llm_debug);
             setLlmDebugDataEntry(errorTurnId, data.llm_debug, request.executionContextBinding);
             if (isRequestVisible()) {
@@ -33472,6 +33534,12 @@ async function handleSendPrompt(options = {}) {
                 setFinishedThinkingCardForSession(request.sessionId, null);
             }
             setLiveChatRequestForSession(request.sessionId, null);
+            if (request.sessionId === activeChatSessionId) {
+                void refreshConversationRuntimeCostSnapshot({
+                    observeRequestId: request.clientRequestId,
+                    reason: 'terminal_baseline_refresh'
+                });
+            }
         }
         syncActiveChatSessionThinkingState();
         updateHistoryLength();
@@ -35047,6 +35115,256 @@ function buildConversationTelemetryNamespaceContext() {
     };
 }
 
+function normaliseConversationRuntimeCostString(value) {
+    return (typeof value === 'string' && value.trim()) ? value.trim() : null;
+}
+
+function cloneConversationRuntimeCostValue(value) {
+    if (!value || typeof value !== 'object') return null;
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+        return null;
+    }
+}
+
+function buildConversationRuntimeCostContext() {
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    return {
+        conversation_session_id: normaliseHistorySessionId(activeChatSessionId),
+        window_session_id: normaliseConversationRuntimeCostString(getWindowSessionId()),
+        user_concept_id: normaliseConversationRuntimeCostString(namespaceContext.user_id),
+        organisation_concept_id: normaliseConversationRuntimeCostString(namespaceContext.org_id),
+        namespace: normaliseConversationRuntimeCostString(namespaceContext.namespace)
+    };
+}
+
+function runtimeIdentitySignature(runtime) {
+    if (!runtime || typeof runtime !== 'object') return null;
+    const pid = Number.isFinite(Number(runtime.pid)) ? String(Number(runtime.pid)) : '';
+    const startedAt = normaliseConversationRuntimeCostString(runtime.started_at_utc || runtime.start_time);
+    return (pid || startedAt) ? `${pid}|${startedAt || ''}` : null;
+}
+
+function publishConversationRuntimeCostSnapshot(reason = 'update') {
+    const snapshot = {
+        schema_version: CONVERSATION_RUNTIME_COST_SNAPSHOT_SCHEMA_VERSION,
+        reason,
+        context: cloneConversationRuntimeCostValue(conversationRuntimeCostState.context),
+        runtime: cloneConversationRuntimeCostValue(conversationRuntimeCostState.runtime),
+        baseline: cloneConversationRuntimeCostValue(conversationRuntimeCostState.baseline),
+        live: cloneConversationRuntimeCostValue(conversationRuntimeCostState.live),
+        loading: conversationRuntimeCostState.loading === true,
+        error: conversationRuntimeCostState.error || null,
+        as_of_utc: new Date().toISOString()
+    };
+    try {
+        window.__vonConversationRuntimeCostSnapshot = snapshot;
+    } catch (_) {
+        // Publishing is best effort; rendering remains non-critical.
+    }
+    try {
+        document.dispatchEvent(new CustomEvent('von:conversationRuntimeCostUpdated', {
+            detail: snapshot
+        }));
+    } catch (_) {
+        // Footer telemetry cannot interrupt chat execution.
+    }
+    return snapshot;
+}
+
+function clearConversationRuntimeCostSnapshot(reason = 'context_changed', context = buildConversationRuntimeCostContext()) {
+    if (conversationRuntimeCostState.handoverRetryTimerId) {
+        clearTimeout(conversationRuntimeCostState.handoverRetryTimerId);
+        conversationRuntimeCostState.handoverRetryTimerId = null;
+    }
+    conversationRuntimeCostState.generation += 1;
+    conversationRuntimeCostState.fetchSequence += 1;
+    conversationRuntimeCostState.context = context;
+    conversationRuntimeCostState.contextSignature = JSON.stringify(context);
+    conversationRuntimeCostState.baseline = null;
+    conversationRuntimeCostState.live = null;
+    conversationRuntimeCostState.loading = false;
+    conversationRuntimeCostState.error = null;
+    conversationRuntimeCostState.inFlight = null;
+    publishConversationRuntimeCostSnapshot(reason);
+}
+
+function scheduleConversationRuntimeCostHandoverRetry({ observeRequestId, retryAttempt, reason }) {
+    if (retryAttempt >= 3 || conversationRuntimeCostState.handoverRetryTimerId) return;
+    const contextSignature = conversationRuntimeCostState.contextSignature;
+    const delayMs = 600 * (2 ** retryAttempt);
+    conversationRuntimeCostState.handoverRetryTimerId = setTimeout(() => {
+        conversationRuntimeCostState.handoverRetryTimerId = null;
+        if (conversationRuntimeCostState.contextSignature !== contextSignature) return;
+        void refreshConversationRuntimeCostSnapshot({
+            observeRequestId,
+            retryAttempt: retryAttempt + 1,
+            reason
+        });
+    }, delayMs);
+}
+
+function refreshConversationRuntimeCostSnapshot({
+    excludeRequestId = null,
+    observeRequestId = null,
+    retryAttempt = 0,
+    reason = 'baseline_refresh'
+} = {}) {
+    const context = buildConversationRuntimeCostContext();
+    const sessionId = context.conversation_session_id;
+    if (!sessionId) {
+        clearConversationRuntimeCostSnapshot('no_conversation_context', context);
+        return Promise.resolve(null);
+    }
+    // Some narrowly isolated unit tests intentionally omit the browser fetch
+    // surface. Do not turn a support-only footer refresh into a chat failure.
+    if (typeof fetch !== 'function') {
+        return Promise.resolve(null);
+    }
+    const signature = JSON.stringify(context);
+    if (conversationRuntimeCostState.contextSignature !== signature) {
+        clearConversationRuntimeCostSnapshot('context_changed', context);
+    }
+    const requestGeneration = conversationRuntimeCostState.generation;
+    const cleanExcludedRequestId = normaliseConversationRuntimeCostString(excludeRequestId);
+    const cleanObservedRequestId = normaliseConversationRuntimeCostString(observeRequestId);
+    const inFlight = conversationRuntimeCostState.inFlight;
+    if (inFlight && inFlight.generation === requestGeneration
+        && inFlight.excludeRequestId === cleanExcludedRequestId
+        && inFlight.observeRequestId === cleanObservedRequestId) {
+        return inFlight.promise;
+    }
+    const requestFetchSequence = conversationRuntimeCostState.fetchSequence + 1;
+    conversationRuntimeCostState.fetchSequence = requestFetchSequence;
+    conversationRuntimeCostState.loading = true;
+    conversationRuntimeCostState.error = null;
+    publishConversationRuntimeCostSnapshot(reason);
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (cleanExcludedRequestId) params.set('exclude_request_id', cleanExcludedRequestId);
+    if (cleanObservedRequestId) params.set('observe_request_id', cleanObservedRequestId);
+    const promise = fetch(`/von/history/cost_summary?${params.toString()}`, {
+        method: 'GET',
+        headers: buildChatFetchHeaders(),
+        cache: 'no-store'
+    })
+        .then(async (response) => {
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (payload?.schema_version !== CONVERSATION_RUNTIME_COST_SNAPSHOT_SCHEMA_VERSION) {
+                throw new Error('Unexpected conversation cost summary schema');
+            }
+            if (normaliseConversationRuntimeCostString(payload?.scope?.conversation_session_id) !== sessionId) {
+                throw new Error('Conversation cost summary scope did not match the selected conversation');
+            }
+            return payload;
+        })
+        .then((payload) => {
+            if (conversationRuntimeCostState.generation !== requestGeneration
+                || conversationRuntimeCostState.fetchSequence !== requestFetchSequence
+                || conversationRuntimeCostState.contextSignature !== signature) return null;
+            conversationRuntimeCostState.baseline = payload;
+            conversationRuntimeCostState.runtime = payload.runtime && typeof payload.runtime === 'object'
+                ? cloneConversationRuntimeCostValue(payload.runtime)
+                : null;
+            conversationRuntimeCostState.runtimeIdentitySignature = runtimeIdentitySignature(conversationRuntimeCostState.runtime);
+            // Retire a completed live overlay only after the server proves that
+            // this exact request is present in the scoped persisted baseline.
+            // This avoids a transient undercount during durable-record lag.
+            const handoverObserved = payload?.handover?.observed === true;
+            if (cleanObservedRequestId
+                && handoverObserved
+                && conversationRuntimeCostState.live?.request_id === cleanObservedRequestId
+                && conversationRuntimeCostState.live?.active !== true) {
+                if (conversationRuntimeCostState.handoverRetryTimerId) {
+                    clearTimeout(conversationRuntimeCostState.handoverRetryTimerId);
+                    conversationRuntimeCostState.handoverRetryTimerId = null;
+                }
+                conversationRuntimeCostState.live = null;
+            } else if (cleanObservedRequestId && !handoverObserved) {
+                scheduleConversationRuntimeCostHandoverRetry({
+                    observeRequestId: cleanObservedRequestId,
+                    retryAttempt,
+                    reason: 'terminal_handover_retry'
+                });
+            }
+            return payload;
+        })
+        .catch((error) => {
+            if (conversationRuntimeCostState.generation === requestGeneration
+                && conversationRuntimeCostState.fetchSequence === requestFetchSequence
+                && conversationRuntimeCostState.contextSignature === signature) {
+                conversationRuntimeCostState.error = error?.message || 'Cost estimate unavailable';
+            }
+            return null;
+        })
+        .finally(() => {
+            if (conversationRuntimeCostState.generation === requestGeneration
+                && conversationRuntimeCostState.fetchSequence === requestFetchSequence
+                && conversationRuntimeCostState.contextSignature === signature) {
+                conversationRuntimeCostState.loading = false;
+                conversationRuntimeCostState.inFlight = null;
+                publishConversationRuntimeCostSnapshot(reason);
+            }
+        });
+    conversationRuntimeCostState.inFlight = {
+        generation: requestGeneration,
+        fetchSequence: requestFetchSequence,
+        excludeRequestId: cleanExcludedRequestId,
+        observeRequestId: cleanObservedRequestId,
+        promise
+    };
+    return promise;
+}
+
+function synchroniseConversationRuntimeCostContext({ force = false, reason = 'context_refresh' } = {}) {
+    const context = buildConversationRuntimeCostContext();
+    const signature = JSON.stringify(context);
+    if (!force && conversationRuntimeCostState.contextSignature === signature) return;
+    clearConversationRuntimeCostSnapshot(reason, context);
+    if (context.conversation_session_id) {
+        void refreshConversationRuntimeCostSnapshot({ reason });
+    }
+}
+
+function setConversationRuntimeCostLiveSummary(request, summary = null, { active = true, reason = 'live_progress' } = {}) {
+    const context = buildConversationRuntimeCostContext();
+    const requestSessionId = normaliseHistorySessionId(request?.sessionId);
+    const requestId = normaliseConversationRuntimeCostString(
+        request?.clientRequestId || request?.latestProgress?.request_id
+    );
+    if (!requestId || !requestSessionId || requestSessionId !== context.conversation_session_id) return;
+    if (conversationRuntimeCostState.contextSignature !== JSON.stringify(context)) {
+        clearConversationRuntimeCostSnapshot('context_changed', context);
+    }
+    conversationRuntimeCostState.live = {
+        request_id: requestId,
+        active: active === true,
+        summary: summary && typeof summary === 'object' ? cloneConversationRuntimeCostValue(summary) : null
+    };
+    publishConversationRuntimeCostSnapshot(reason);
+}
+
+function handleConversationRuntimeIdentityUpdate(detail) {
+    const incoming = detail && typeof detail === 'object' ? detail : null;
+    const nextSignature = runtimeIdentitySignature(incoming);
+    if (!nextSignature) return;
+    const currentSignature = conversationRuntimeCostState.runtimeIdentitySignature;
+    if (!currentSignature) {
+        conversationRuntimeCostState.runtimeIdentitySignature = nextSignature;
+        return;
+    }
+    if (currentSignature === nextSignature) return;
+    conversationRuntimeCostState.runtime = {
+        pid: Number.isFinite(Number(incoming.pid)) ? Number(incoming.pid) : null,
+        started_at_utc: normaliseConversationRuntimeCostString(incoming.start_time || incoming.started_at_utc)
+    };
+    clearConversationRuntimeCostSnapshot('runtime_identity_changed');
+    if (conversationRuntimeCostState.context?.conversation_session_id) {
+        void refreshConversationRuntimeCostSnapshot({ reason: 'runtime_identity_changed' });
+    }
+}
+
 function buildMcpToolAccess(toolName, args = {}, purpose = null) {
     const cleanArgs = {};
     if (args && typeof args === 'object') {
@@ -36248,6 +36566,26 @@ export async function __testOnly_refreshChatPromptQueueFromServer() {
     return refreshChatPromptQueueFromServer({ silent: false });
 }
 export function __testOnly_resetChatRequestState() {
+    if (conversationRuntimeCostState.handoverRetryTimerId) {
+        clearTimeout(conversationRuntimeCostState.handoverRetryTimerId);
+    }
+    conversationRuntimeCostState.generation += 1;
+    conversationRuntimeCostState.fetchSequence += 1;
+    conversationRuntimeCostState.contextSignature = null;
+    conversationRuntimeCostState.context = null;
+    conversationRuntimeCostState.runtime = null;
+    conversationRuntimeCostState.runtimeIdentitySignature = null;
+    conversationRuntimeCostState.baseline = null;
+    conversationRuntimeCostState.live = null;
+    conversationRuntimeCostState.loading = false;
+    conversationRuntimeCostState.error = null;
+    conversationRuntimeCostState.inFlight = null;
+    conversationRuntimeCostState.handoverRetryTimerId = null;
+    try {
+        window.__vonConversationRuntimeCostSnapshot = null;
+    } catch (_) {
+        // Ignore constrained test globals.
+    }
     liveChatRequestsBySession.clear();
     finishedThinkingCardsBySession.clear();
     pendingFileCopyConceptIdsBySession.clear();
@@ -36281,6 +36619,21 @@ export function __testOnly_resetChatRequestState() {
     _clearConversationSituationState({ closePanel: true });
     renderChatTaskQueuePanel();
     updateSendButtonForCurrentChatState();
+}
+export function __testOnly_refreshConversationRuntimeCostSnapshot(options = {}) {
+    return refreshConversationRuntimeCostSnapshot(options);
+}
+export function __testOnly_setConversationRuntimeCostLiveSummary(request, summary = null, options = {}) {
+    setConversationRuntimeCostLiveSummary(request, summary, options);
+}
+export function __testOnly_getConversationRuntimeCostSnapshot() {
+    return {
+        context: cloneConversationRuntimeCostValue(conversationRuntimeCostState.context),
+        baseline: cloneConversationRuntimeCostValue(conversationRuntimeCostState.baseline),
+        live: cloneConversationRuntimeCostValue(conversationRuntimeCostState.live),
+        loading: conversationRuntimeCostState.loading === true,
+        error: conversationRuntimeCostState.error || null,
+    };
 }
 export function __testOnly_shouldMaintainSharedConversationStreamForInputs(inputs = {}) {
     return shouldMaintainSharedConversationStreamForInputs(inputs);

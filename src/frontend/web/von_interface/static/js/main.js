@@ -1164,6 +1164,16 @@ function startHealthPolling() {
       const newPid = (typeof data.pid !== 'undefined') ? data.pid : null;
       lastHealthSuccessPid = Number.isFinite(Number(newPid)) ? Number(newPid) : null;
       const newStart = data.start_time || null;
+      try {
+        document.dispatchEvent(new CustomEvent('von:runtimeIdentityUpdated', {
+          detail: {
+            pid: lastHealthSuccessPid,
+            start_time: typeof newStart === 'string' && newStart.trim() ? newStart.trim() : null
+          }
+        }));
+      } catch (_) {
+        // Runtime identity is a support signal; health polling remains authoritative.
+      }
       const newLocalIp = data.local_ip || null;
       const newPublicIp = data.public_ip || null;
       const ragPending = (typeof data.rag_pending_count !== 'undefined') ? data.rag_pending_count : null;
